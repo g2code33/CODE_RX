@@ -6,254 +6,100 @@ All API integration code is now in place. Follow these steps to make your websit
 
 ---
 
-## 📋 Prerequisites
+## 🚀 CURRENT ARCHITECTURE (Cloudflare-native)
 
-You need accounts with:
-1. **Supabase** (Database & Backend) - Free tier available
-2. **EmailJS** (Email Notifications) - Free tier: 200 emails/month
+The site runs 100% on Cloudflare (free tier):
+
+| Piece | Where |
+|---|---|
+| Website (React SPA) | Cloudflare Pages → `coderxsociety.pages.dev` |
+| Backend API ("workers") | Pages Functions — `functions/[[path]].ts` (Hono) |
+| Database | Cloudflare D1 (`code-rx-db`, binding `DB`) |
+| File storage | Cloudflare R2 (`code-rx-storage`, binding `BUCKET`) |
+| Auth | PBKDF2-hashed passwords + signed JWT tokens (7-day sessions) |
+| Anti-spam | Per-IP rate limiting on all public POST endpoints |
+
+### ✅ What works now
+- **Real login** — email + password verified against the database (no more "any password")
+- **Admin panel protected** — all `/api/applications`, `/api/members`, `/api/contacts`, `/api/subscribers`, `/api/stats`, CMS saves require an admin JWT
+- **Members** — anyone can register an account (name/email/password) and sign in to the member portal
+- **Join flow** — application form saves to D1 + auto-adds the applicant as a subscriber
+- **Approve application → member created automatically**
+- **CMS** — site content edits save to D1 and are served to all visitors (no more per-browser localStorage)
+- **Change password** — Admin panel → Security → change your password (current password verified; session re-login required after)
+- **Forgot password / reset** — "Forgot Password?" on the sign-in form emails a one-time reset link (`/#reset?token=...&email=...`); tokens expire after 1 hour and can't be reused
+- **Members manager** — Admin panel → Members: add members, edit level/points inline, activate/deactivate, remove
+- **Email notifications** — new applications, contact messages, application approvals/rejections, and password-reset links can be emailed (via EmailJS — see below)
+- **Uploads** — admin-only file uploads to R2, served back via `/api/files/...` (10 MB max, type-checked)
+- **Rate limiting** — 5/min on forms, 10/min on login, 429 responses when exceeded
+- **Deep links** — every section has its own URL: `/#home`, `/#about`, `/#learn`, `/#projects`, `/#challenges`, `/#community`, `/#resources`, `/#terms`
+- **PWA** — installable app: manifest, app icons (CODE Rx logo), service worker for offline launch
 
 ---
 
-## 🚀 Step-by-Step Setup
+## 📧 Email notifications (EmailJS)
 
-### Step 1: Set Up Supabase Database
+The API sends emails via the EmailJS REST API when configured. Until then it logs
+and skips (never breaks the API).
 
-1. **Create Account**
-   - Go to https://supabase.com/
-   - Sign up with your email (coderxsociety@gmail.com)
-   - Create a new project
-
-2. **Get Your Credentials**
-   - Go to **Settings** → **API**
-   - Copy:
-     - **Project URL** (e.g., `https://xxxxx.supabase.co`)
-     - **anon/public key** (long string starting with `eyJ...`)
-
-3. **Create Database Tables**
-   - Go to **SQL Editor** in Supabase dashboard
-   - Copy the contents of `supabase-schema.sql`
-   - Paste and click **Run**
-   - ✅ All tables will be created automatically
-
-4. **Update config.ts**
-   ```typescript
-   SUPABASE: {
-     URL: 'https://YOUR_PROJECT_ID.supabase.co',
-     ANON_KEY: 'YOUR_ANON_KEY_HERE'
-   }
+1. Create a free account at https://www.emailjs.com (connect your Gmail — see `EMAILJS_SETUP.md`)
+2. Create 4 templates with these variables:
+   - **Join notification** (to admin): `{{to_email}}`, `{{applicant_name}}`, `{{applicant_email}}`, `{{applicant_phone}}`, `{{date}}`
+   - **Contact notification** (to admin): `{{to_email}}`, `{{sender_name}}`, `{{sender_email}}`, `{{subject}}`, `{{message}}`, `{{date}}`
+   - **Approval/rejection** (to applicant): `{{to_email}}`, `{{member_name}}`, `{{status}}`, `{{date}}`
+   - **Password reset** (to user): `{{to_email}}`, `{{name}}`, `{{reset_link}}`
+3. Copy the **Public Key**, **Service ID**, and the 4 **Template IDs** into `wrangler.toml` (and the Pages project environment variables):
+   ```toml
+   EMAILJS_PUBLIC_KEY = "..."
+   EMAILJS_SERVICE_ID = "..."
+   EMAILJS_TEMPLATE_ID_JOIN = "..."
+   EMAILJS_TEMPLATE_ID_CONTACT = "..."
+   EMAILJS_TEMPLATE_ID_APPROVAL = "..."
+   EMAILJS_TEMPLATE_ID_RESET = "..."
    ```
+4. Redeploy. New applications, contact messages, approvals, and password-reset links now email automatically.
+   > No EmailJS keys? Everything still works — emails are skipped and logged, and the
+   > reset flow returns a dev-only link so you can test it locally.
 
----
+### 🔑 Default admin account (auto-created on first request)
+- **Email:** `coderxsociety@gmail.com`
+- **Password:** `Admin@12345` ← **CHANGE THIS before going live!**
 
-### Step 2: Set Up EmailJS
+The admin password is set by the `ADMIN_PASSWORD` variable in `wrangler.toml`. To change it:
+1. Set `ADMIN_PASSWORD` to a strong value in `wrangler.toml` (and in the Pages project's environment variables).
+2. Delete the `users` table rows **or** register a new admin via the DB — simplest is to keep the seeded admin, sign in, and (coming soon) change it from the admin panel. Until then, treat the seed password as a deployment secret you replace before launch.
 
-1. **Create Account**
-   - Go to https://www.emailjs.com/
-   - Sign up for free account
+### 🧪 Run everything locally and test (before deploying!)
+```bash
+npm ci
+npm run build
+npx wrangler pages dev dist --d1 DB=code-rx-db --r2 BUCKET=code-rx-storage
+```
+Open **http://localhost:8788** — the site AND the API run together (fresh local D1/R2 are created automatically).
 
-2. **Add Email Service**
-   - Go to **Email Services** → **Add New Service**
-   - Choose **Gmail**
-   - Connect coderxsociety@gmail.com
-   - Copy **Service ID**
+Test checklist:
+1. Visit `/` — homepage loads; `http://localhost:8788/api/health` returns `{"status":"ok",...}`
+2. "Member Portal" → Sign In → admin email + `Admin@12345` → **Admin Core** panel opens
+3. Admin → Applications → Approve a test application → it appears under Members
+4. Join form → submit → appears in Admin → Applications (pending)
+5. Contact form → submit → appears in Admin → Applications → Contact Messages
+6. Home editor → change hero title → Save → hard-refresh homepage → change is live
+7. Wrong password → clean error, no access; logged-out visitors get 401/403 on admin data
+8. Admin → Security → change your password → sign in again with the new one
+9. Admin → Members → add a member, edit points/level, deactivate, remove
+10. Sign in → "Forgot Password?" → enter the admin email → (without EmailJS keys the dev reset link is shown right on the screen) → open it → set a new password → sign in
+11. Visit `/#learn` directly → Academy section opens (same for every section)
+12. Chrome/phone → the site is installable (Add to Home Screen shows the CODE Rx logo); open it from the home screen — it launches fullscreen
 
-3. **Create Email Templates**
-   - Follow the guide in `EMAILJS_SETUP.md`
-   - Create 4 templates:
-     - Join Application Notification
-     - Contact Message Notification
-     - Subscription Confirmation
-     - Application Approval
+### 🌐 Deploy to production
+Option A — **Git-connected Pages** (you set this up): push to `main`, Cloudflare builds (`npm run build`, output `dist`) and deploys the site + functions. Make sure the Pages project has the D1 binding `DB → code-rx-db` and R2 binding `BUCKET → code-rx-storage` attached (Settings → Functions → bindings), plus the environment variables from `wrangler.toml`.
 
-4. **Get Public Key**
-   - Go to **Account** (click your name)
-   - Copy **Public Key**
-
-5. **Update config.ts**
-   ```typescript
-   EMAILJS: {
-     PUBLIC_KEY: 'YOUR_PUBLIC_KEY',
-     SERVICE_ID: 'YOUR_SERVICE_ID',
-     TEMPLATE_ID_JOIN: 'template_join',
-     TEMPLATE_ID_CONTACT: 'template_contact',
-     TEMPLATE_ID_SUBSCRIBE: 'template_subscribe'
-   }
-   ```
-
----
-
-### Step 3: Update Admin Email
-
-In `src/config.ts`, verify:
-```typescript
-ADMIN_EMAIL: 'coderxsociety@gmail.com'
+Option B — CLI:
+```bash
+npm run build
+npx wrangler pages deploy dist --project-name coderxsociety --branch main
 ```
 
----
-
-### Step 4: Test Everything
-
-#### Test 1: Join Application
-1. Click "Member Portal" → "Join Code Rx"
-2. Fill the form
-3. Submit
-4. Check coderxsociety@gmail.com for notification email
-5. Go to Admin Panel → Applications
-6. See your application in the list!
-
-#### Test 2: Contact Form
-1. Click "CONTACT US" on homepage
-2. Fill and send message
-3. Check email for notification
-4. Go to Admin Panel → Applications → Contact Messages
-5. See your message!
-
-#### Test 3: Admin Login
-1. Click "Member Portal"
-2. Click "Admin Access" (bottom left)
-3. Email: `coderxsociety@gmail.com`
-4. Any password (for now)
-5. Access full admin panel!
-
-#### Test 4: Content Editing
-1. In Admin Panel, click "Home"
-2. Change hero title or community count
-3. Click "Save Changes"
-4. Go to homepage
-5. See your changes live!
+> ⚠️ Never change `public/_redirects` back to a catch-all (`/* /index.html 200`) — it intercepts `/api/*` before the Functions run and kills the whole backend. SPA fallback is handled inside the Function.
 
 ---
-
-## 📊 What's Now Functional
-
-### ✅ Working Features:
-- [x] Join applications save to database
-- [x] Email notifications to admin
-- [x] Contact form saves to database
-- [x] Email notifications for contacts
-- [x] Subscriber list management
-- [x] Admin panel with real data
-- [x] Content editing with persistence
-- [x] Application approval/rejection
-- [x] Approval emails to members
-
-### 🔄 Data Flow:
-```
-User submits form → Supabase Database → EmailJS → Admin Email
-                                              ↓
-                                      Admin Panel (Real-time)
-```
-
----
-
-## ️ Security Recommendations
-
-### For Production:
-
-1. **Update Row Level Security (RLS) Policies**
-   - The default policies in `supabase-schema.sql` are permissive
-   - Restrict access to authenticated admins only
-
-2. **Add Admin Authentication**
-   - Implement proper login system
-   - Use Supabase Auth for secure authentication
-
-3. **Environment Variables**
-   - Never commit `config.ts` with real keys to Git
-   - Use `.env` file:
-   ```
-   VITE_SUPABASE_URL=your_url
-   VITE_SUPABASE_KEY=your_key
-   VITE_EMAILJS_PUBLIC_KEY=your_key
-   ```
-
-4. **Rate Limiting**
-   - Add rate limiting to forms to prevent spam
-
----
-
-## 📧 Email Templates Reference
-
-| Template | Purpose | Variables |
-|----------|---------|-----------|
-| `template_join` | New member application | applicant_name, applicant_email, applicant_phone, date |
-| `template_contact` | Contact form submission | sender_name, sender_email, subject, message, date |
-| `template_subscribe` | Welcome new subscriber | subscriber_name, date |
-| `template_approval` | Approve member application | member_name, date |
-
----
-
-## 🔧 Troubleshooting
-
-### Emails Not Sending?
-1. Check browser console for errors
-2. Verify EmailJS service is active
-3. Check template IDs match config.ts
-4. Ensure Gmail account is verified
-
-### Database Not Saving?
-1. Check Supabase project is active
-2. Verify URL and key in config.ts
-3. Check SQL tables were created
-4. Look for errors in browser console
-
-### Admin Panel Not Loading Data?
-1. Clear browser cache
-2. Check Supabase connection
-3. Verify table permissions
-4. Check browser console for errors
-
----
-
-## 📈 Next Steps
-
-### Immediate:
-- [ ] Set up Supabase project
-- [ ] Create EmailJS account
-- [ ] Update config.ts with real keys
-- [ ] Test all forms
-- [ ] Deploy to production
-
-### Soon:
-- [ ] Add proper admin authentication
-- [ ] Set up custom domain
-- [ ] Add SSL certificate
-- [ ] Configure analytics
-- [ ] Set up backups
-
-### Future:
-- [ ] Add member dashboard
-- [ ] Implement payment system
-- [ ] Add event management
-- [ ] Create mobile app
-- [ ] Add push notifications
-
----
-
-## 📞 Support
-
-If you need help:
-1. Check browser console for errors
-2. Review Supabase logs
-3. Check EmailJS delivery logs
-4. Contact support teams
-
----
-
-## 🎊 You're All Set!
-
-Your CODE Rx SOCIETY website is now a fully functional platform with:
-- ✅ Real database storage
-- ✅ Email notifications
-- ✅ Admin content management
-- ✅ Member application system
-- ✅ Contact form
-- ✅ Subscriber management
-
-**Start accepting members and managing your society professionally!** 💻🚀
-
----
-
-**Version:** 1.0  
-**Last Updated:** 2026  
-**Contact:** coderxsociety@gmail.com

@@ -1,17 +1,18 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert } from 'lucide-react';
-import { db } from '../lib/cloudflare';
+import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle } from 'lucide-react';
+import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
 
-export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoToTerms, defaultMode = 'join' }: { 
-  isOpen: boolean, 
+type Mode = 'join' | 'login' | 'register' | 'forgot';
+
+export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaultMode = 'join' }: {
+  isOpen: boolean,
   onClose: () => void,
-  onLoginSuccess: () => void,
-  onAdminLogin: () => void,
+  onLoginSuccess: (user: AuthUser) => void,
   onGoToTerms: () => void,
   defaultMode?: 'join' | 'login'
 }) => {
-  const [isLogin, setIsLogin] = useState(defaultMode === 'login');
+  const [mode, setMode] = useState<Mode>(defaultMode === 'login' ? 'login' : 'join');
   const [isApplied, setIsApplied] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
@@ -19,44 +20,54 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoT
     phone: '',
     password: ''
   });
-
+  const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [forgotResult, setForgotResult] = useState<{ message: string; devResetLink?: string } | null>(null);
+
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setError('');
+    setForgotResult(null);
+    setFormData({ name: '', email: '', phone: '', password: '' });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
     setIsSubmitting(true);
-    
-    if (isLogin) {
-      // Check for admin login
-      if (formData.email === 'admin@coderx.org' || formData.email === 'coderxsociety@gmail.com') {
-        onAdminLogin();
+
+    try {
+      if (mode === 'forgot') {
+        const res = await auth.forgotPassword(formData.email);
+        setForgotResult({ message: res.message, devResetLink: res.devResetLink });
+      } else if (mode === 'login') {
+        const user = await auth.login(formData.email, formData.password);
+        onLoginSuccess(user);
+      } else if (mode === 'register') {
+        const user = await auth.register(formData.name, formData.email, formData.password);
+        onLoginSuccess(user);
       } else {
-        onLoginSuccess();
-      }
-      setIsSubmitting(false);
-    } else {
-      try {
-        // Save to Cloudflare D1 database
+        // Join: submit membership application + subscribe
         await db.applications.create({
           name: formData.name,
           email: formData.email,
           phone: formData.phone
         });
-        
-        // Also add to subscribers
-        await db.subscribers.create({
-          email: formData.email,
-          name: formData.name,
-          phone: formData.phone
-        });
-        
+        try {
+          await db.subscribers.create({
+            email: formData.email,
+            name: formData.name,
+            phone: formData.phone
+          });
+        } catch {
+          /* subscriber capture is best-effort */
+        }
         setIsApplied(true);
-      } catch (error) {
-        console.error('Failed to submit application:', error);
-        alert('Failed to submit application. Please try again.');
-      } finally {
-        setIsSubmitting(false);
       }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -84,21 +95,21 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoT
     <AnimatePresence>
       {isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
             className="absolute inset-0 bg-emerald-950/60 backdrop-blur-sm"
           />
-          
-          <motion.div 
+
+          <motion.div
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.9, opacity: 0, y: 20 }}
             className="relative w-full max-w-md bg-white rounded-[2.5rem] shadow-2xl overflow-hidden max-h-[90vh] overflow-y-auto"
           >
-            <button 
+            <button
               onClick={onClose}
               className="absolute top-6 right-6 p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-all"
             >
@@ -111,69 +122,77 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoT
                   <img src="/logo.png" alt="Logo" className="w-10 h-10 object-contain" />
                 </div>
                 <h2 className="text-3xl font-black text-slate-900 leading-none tracking-tighter">
-                  {isLogin ? 'Welcome Back' : 'Join the Society'}
+                  {mode === 'join' ? 'Join the Society' : mode === 'register' ? 'Create Account' : mode === 'forgot' ? 'Forgot Password?' : 'Welcome Back'}
                 </h2>
                 <p className="text-slate-500 mt-2 text-sm font-medium">
-                  {isLogin ? 'Enter your credentials to access the portal' : 'Start your journey at the intersection of RX & Tech'}
+                  {mode === 'join'
+                    ? 'Start your journey at the intersection of RX & Tech'
+                    : mode === 'register'
+                      ? 'Register to access the member portal'
+                      : mode === 'forgot'
+                        ? 'Enter your email and we will send you a reset link'
+                        : 'Enter your credentials to access the portal'}
                 </p>
               </div>
 
-              <form 
-                className="space-y-4" 
-                onSubmit={handleSubmit}
-              >
-                {!isLogin && (
+              <form className="space-y-4" onSubmit={handleSubmit}>
+                {mode !== 'login' && (
                   <>
                     <div className="relative">
                       <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         placeholder="Full Name"
                         value={formData.name}
-                        onChange={(e) => setFormData({...formData, name: e.target.value})}
+                        onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                         className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                         required
+                        minLength={2}
                       />
                     </div>
-                    <div className="relative">
-                      <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                      <input 
-                        type="tel" 
-                        placeholder="Telephone Number"
-                        value={formData.phone}
-                        onChange={(e) => setFormData({...formData, phone: e.target.value})}
-                        className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
-                        required
-                      />
-                    </div>
+                    {mode === 'join' && (
+                      <div className="relative">
+                        <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                        <input
+                          type="tel"
+                          placeholder="Telephone Number"
+                          value={formData.phone}
+                          onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                          className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                        />
+                      </div>
+                    )}
                   </>
                 )}
+
                 <div className="relative">
                   <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                  <input 
-                    type="email" 
+                  <input
+                    type="email"
                     placeholder="Email Address"
                     value={formData.email}
-                    onChange={(e) => setFormData({...formData, email: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                     required
                   />
                 </div>
-                {isLogin && (
+
+                {(mode === 'login' || mode === 'register') && (
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                    <input 
-                      type="password" 
-                      placeholder="Password"
+                    <input
+                      type="password"
+                      placeholder={mode === 'register' ? 'Password (min 6 characters)' : 'Password'}
                       value={formData.password}
-                      onChange={(e) => setFormData({...formData, password: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                       className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                       required
+                      minLength={6}
                     />
                   </div>
                 )}
 
-                {!isLogin && (
+                {mode === 'join' && (
                   <div className="flex items-start gap-2 px-1">
                     <input type="checkbox" id="terms" className="mt-1 accent-emerald-600" required />
                     <label htmlFor="terms" className="text-xs text-slate-500 leading-relaxed text-left">
@@ -182,25 +201,60 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoT
                   </div>
                 )}
 
-                {isLogin && (
+                {mode === 'login' && (
                   <div className="flex justify-between items-center px-1">
-                    <button type="button" onClick={onAdminLogin} className="text-xs font-bold text-slate-400 flex items-center gap-1 hover:text-emerald-600 transition-colors">
+                    <button
+                      type="button"
+                      onClick={() => setFormData((f) => ({ ...f, email: f.email || 'coderxsociety@gmail.com' }))}
+                      className="text-xs font-bold text-slate-400 flex items-center gap-1 hover:text-emerald-600 transition-colors"
+                      title="Sign in with your admin account"
+                    >
                       <ShieldAlert className="w-4 h-4" /> Admin Access
                     </button>
-                    <button type="button" className="text-xs font-bold text-emerald-600 hover:underline">Forgot Password?</button>
+                    <button
+                      type="button"
+                      onClick={() => switchMode('forgot')}
+                      className="text-xs font-bold text-emerald-600 hover:underline"
+                    >
+                      Forgot Password?
+                    </button>
                   </div>
                 )}
 
-                <button 
+                {forgotResult && (
+                  <div className="flex flex-col gap-2 bg-emerald-50 border border-emerald-100 text-emerald-700 px-4 py-3 rounded-2xl text-sm font-medium">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>{forgotResult.message}</span>
+                    </div>
+                    {forgotResult.devResetLink && (
+                      <a
+                        href={forgotResult.devResetLink}
+                        className="text-xs font-bold text-emerald-600 underline break-all"
+                      >
+                        {forgotResult.devResetLink}
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {error && (
+                  <div className="flex items-start gap-2 bg-red-50 border border-red-100 text-red-600 px-4 py-3 rounded-2xl text-sm font-medium">
+                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                )}
+
+                <button
                   type="submit"
                   disabled={isSubmitting}
                   className="w-full py-4 bg-emerald-600 text-white font-black rounded-2xl hover:bg-emerald-500 shadow-lg shadow-emerald-200 transition-all flex items-center justify-center gap-2 group disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSubmitting ? (
-                    'Submitting...'
+                    'Please wait...'
                   ) : (
                     <>
-                      {isLogin ? 'SIGN IN' : 'SEND APPLICATION'}
+                      {mode === 'join' ? 'SEND APPLICATION' : mode === 'register' ? 'CREATE ACCOUNT' : mode === 'forgot' ? 'SEND RESET LINK' : 'SIGN IN'}
                       <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                     </>
                   )}
@@ -209,9 +263,9 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoT
 
               <div className="mt-8 text-center">
                 <p className="text-xs font-bold text-slate-400 mb-4 uppercase tracking-widest">Connect with us</p>
-                <a 
-                  href="https://t.me/+EdRpfR1GTGNjM2Q0" 
-                  target="_blank" 
+                <a
+                  href="https://t.me/+EdRpfR1GTGNjM2Q0"
+                  target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-center gap-2 w-full py-3 bg-blue-500 text-white rounded-xl hover:bg-blue-600 transition-all text-sm font-bold shadow-md shadow-blue-100"
                 >
@@ -220,16 +274,32 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onAdminLogin, onGoT
               </div>
 
               <p className="text-center mt-8 text-sm font-medium text-slate-500">
-                {isLogin ? "Not a member yet?" : "Already have an account?"}{' '}
-                <button 
-                  onClick={() => {
-                    setIsLogin(!isLogin);
-                    setFormData({ name: '', email: '', phone: '', password: '' });
-                  }}
-                  className="text-emerald-600 font-black hover:underline"
-                >
-                  {isLogin ? 'Join Code Rx' : 'Sign In'}
-                </button>
+                {mode === 'login' ? (
+                  <>
+                    New here?{' '}
+                    <button onClick={() => switchMode('register')} className="text-emerald-600 font-black hover:underline">
+                      Create an account
+                    </button>{' '}
+                    or{' '}
+                    <button onClick={() => switchMode('join')} className="text-emerald-600 font-black hover:underline">
+                      apply to join
+                    </button>
+                  </>
+                ) : mode === 'forgot' ? (
+                  <>
+                    Remembered it?{' '}
+                    <button onClick={() => switchMode('login')} className="text-emerald-600 font-black hover:underline">
+                      Sign In
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {mode === 'join' ? 'Already have an account?' : 'Already registered?'}{' '}
+                    <button onClick={() => switchMode('login')} className="text-emerald-600 font-black hover:underline">
+                      Sign In
+                    </button>
+                  </>
+                )}
               </p>
             </div>
           </motion.div>

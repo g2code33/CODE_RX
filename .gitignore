@@ -30,9 +30,9 @@ dist-ssr
 .env.test.local
 .env.production.local
 
-# Supabase
-.supabase
-
 # Build files
 build
 .cache
+
+# Cloudflare / Wrangler local state
+.wrangler

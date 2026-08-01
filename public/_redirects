@@ -1,2 +1,7 @@
-# Cloudflare Pages SPA Routing
-/*    /index.html   200
+# Cloudflare Pages - Routing
+# NOTE: no catch-all rewrite here! A rule like "/* /index.html 200" would
+# swallow /api/* requests BEFORE the Pages Function runs, killing the API.
+#
+# SPA fallback is handled inside functions/[[path]].ts (non-/api HTML
+# requests that miss a static file get index.html). Client-side routing is
+# hash-based, so deep links always load "/" anyway.

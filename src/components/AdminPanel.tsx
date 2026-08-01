@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { 
+import {
   Users, 
   Trophy, 
   LayoutDashboard,
@@ -15,15 +15,21 @@ import {
   RotateCcw,
   Trash2,
   CheckCircle,
-  X
+  X,
+  KeyRound,
+  Lock,
+  ShieldAlert,
+  UserPlus,
+  UserCheck,
+  Power
 } from 'lucide-react';
 import { SiteContent, INITIAL_SITE_CONTENT } from '../data/siteState';
-import { db } from '../lib/cloudflare';
+import { db, auth } from '../lib/cloudflare';
 
 const STORAGE_KEY = 'codeRx_siteContent';
 
 // Applications Section Component
-const ApplicationsSection = () => {
+const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) => void }) => {
   const [applications, setApplications] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -31,18 +37,18 @@ const ApplicationsSection = () => {
     loadApplications();
   }, []);
 
+  // Report pending count to the sidebar badge
+  useEffect(() => {
+    onPendingCount?.(applications.filter((a) => a.status === 'pending').length);
+  }, [applications, onPendingCount]);
+
   const loadApplications = async () => {
     try {
-      // Try to load from Supabase first
       const data = await db.applications.getAll();
       setApplications(data || []);
     } catch (error) {
-      console.error('Failed to load applications from Supabase:', error);
-      // Fallback to localStorage
-      const saved = localStorage.getItem('codeRx_applications');
-      if (saved) {
-        setApplications(JSON.parse(saved));
-      }
+      console.error('Failed to load applications:', error);
+      setApplications([]);
     } finally {
       setIsLoading(false);
     }
@@ -163,11 +169,8 @@ const SubscribersList = () => {
       const data = await db.subscribers.getAll();
       setSubscribers(data || []);
     } catch (error) {
-      console.error('Failed to load subscribers from Supabase:', error);
-      const saved = localStorage.getItem('codeRx_subscribers');
-      if (saved) {
-        setSubscribers(JSON.parse(saved));
-      }
+      console.error('Failed to load subscribers:', error);
+      setSubscribers([]);
     } finally {
       setIsLoading(false);
     }
@@ -221,11 +224,8 @@ const ContactMessagesList = () => {
       const data = await db.contacts.getAll();
       setContacts(data || []);
     } catch (error) {
-      console.error('Failed to load contacts from Supabase:', error);
-      const saved = localStorage.getItem('codeRx_contacts');
-      if (saved) {
-        setContacts(JSON.parse(saved));
-      }
+      console.error('Failed to load contacts:', error);
+      setContacts([]);
     } finally {
       setIsLoading(false);
     }
@@ -258,6 +258,446 @@ const ContactMessagesList = () => {
   );
 };
 
+interface AdminStats {
+  applications: number;
+  pendingApplications: number;
+  members: number;
+  subscribers: number;
+  contacts: number;
+  unreadContacts: number;
+}
+
+// Members Section — manage members (add, edit points/level, activate/deactivate, remove)
+const MembersSection = () => {
+  const [members, setMembers] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [newMember, setNewMember] = useState({ name: '', email: '', phone: '', role: 'member' });
+
+  const loadMembers = async () => {
+    try {
+      const data = await db.members.getAll();
+      setMembers(data || []);
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'Failed to load members.' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadMembers();
+  }, []);
+
+  const flash = (type: 'success' | 'error', text: string) => {
+    setMessage({ type, text });
+    setTimeout(() => setMessage(null), 4000);
+  };
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMember.name.trim() || !newMember.email.trim()) {
+      flash('error', 'Name and email are required.');
+      return;
+    }
+    try {
+      await db.members.create({ ...newMember, phone: newMember.phone, role: newMember.role });
+      flash('success', `${newMember.name} added as a member.`);
+      setNewMember({ name: '', email: '', phone: '', role: 'member' });
+      loadMembers();
+    } catch (err: any) {
+      flash('error', err?.message || 'Failed to add member.');
+    }
+  };
+
+  const handleSave = async (id: number, updates: { points?: number; level?: string }) => {
+    try {
+      await db.members.update(id, updates);
+      flash('success', 'Member updated.');
+      loadMembers();
+    } catch (err: any) {
+      flash('error', err?.message || 'Failed to update member.');
+    }
+  };
+
+  const handleToggleActive = async (member: any) => {
+    try {
+      await db.members.update(member.id, { is_active: member.is_active === 1 ? false : true });
+      flash('success', member.is_active === 1 ? `${member.name} deactivated.` : `${member.name} activated.`);
+      loadMembers();
+    } catch (err: any) {
+      flash('error', err?.message || 'Failed to update member.');
+    }
+  };
+
+  const handleRemove = async (member: any) => {
+    if (!window.confirm(`Remove ${member.name} from the members list?`)) return;
+    try {
+      await db.members.remove(member.id);
+      flash('success', `${member.name} removed.`);
+      loadMembers();
+    } catch (err: any) {
+      flash('error', err?.message || 'Failed to remove member.');
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h3 className="text-2xl font-black text-slate-900 tracking-tight">Members</h3>
+        <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full">
+          {members.length} Members
+        </span>
+      </div>
+
+      {message && (
+        <div className={`px-4 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 ${
+          message.type === 'success'
+            ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+            : 'bg-red-50 text-red-600 border border-red-100'
+        }`}>
+          {message.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <X className="w-4 h-4" />}
+          {message.text}
+        </div>
+      )}
+
+      {/* Add member form */}
+      <form onSubmit={handleAdd} className="bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-4">
+        <h4 className="font-black text-slate-900 flex items-center gap-2">
+          <UserPlus className="w-5 h-5 text-emerald-600" /> Add New Member
+        </h4>
+        <div className="grid md:grid-cols-4 gap-3">
+          <input
+            type="text"
+            placeholder="Full name *"
+            value={newMember.name}
+            onChange={(e) => setNewMember({ ...newMember, name: e.target.value })}
+            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+            required
+          />
+          <input
+            type="email"
+            placeholder="Email *"
+            value={newMember.email}
+            onChange={(e) => setNewMember({ ...newMember, email: e.target.value })}
+            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+            required
+          />
+          <input
+            type="tel"
+            placeholder="Phone"
+            value={newMember.phone}
+            onChange={(e) => setNewMember({ ...newMember, phone: e.target.value })}
+            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+          />
+          <select
+            value={newMember.role}
+            onChange={(e) => setNewMember({ ...newMember, role: e.target.value })}
+            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+          >
+            <option value="member">Member</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <button
+          type="submit"
+          className="px-6 py-2.5 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-xs uppercase tracking-wide"
+        >
+          Add Member
+        </button>
+      </form>
+
+      {isLoading ? (
+        <div className="text-center py-16">
+          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-emerald-500 mx-auto"></div>
+          <p className="text-slate-500 mt-4">Loading members...</p>
+        </div>
+      ) : members.length === 0 ? (
+        <div className="text-center py-16">
+          <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <Users className="w-10 h-10 text-slate-400" />
+          </div>
+          <p className="text-slate-500 font-medium">No members yet</p>
+          <p className="text-slate-400 text-sm mt-2">Members appear here when applications are approved</p>
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-100 overflow-x-auto">
+          <table className="w-full min-w-[800px]">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Member</th>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Level</th>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Points</th>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50">
+              {members.map((member) => (
+                <MemberRow
+                  key={member.id}
+                  member={member}
+                  onSave={(updates) => handleSave(member.id, updates)}
+                  onToggleActive={() => handleToggleActive(member)}
+                  onRemove={() => handleRemove(member)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Single member row with inline level/points editing
+const MemberRow = ({
+  member,
+  onSave,
+  onToggleActive,
+  onRemove,
+}: {
+  member: any;
+  onSave: (updates: { points?: number; level?: string }) => void;
+  onToggleActive: () => void;
+  onRemove: () => void;
+}) => {
+  const [level, setLevel] = useState(member.level || '');
+  const [points, setPoints] = useState(String(member.points ?? 0));
+  const [editing, setEditing] = useState(false);
+
+  return (
+    <tr className={member.is_active === 1 ? '' : 'opacity-50'}>
+      <td className="px-6 py-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-emerald-500 text-white rounded-xl flex items-center justify-center font-black text-sm flex-shrink-0">
+            {(member.name || '?')[0]}
+          </div>
+          <div>
+            <p className="font-bold text-slate-900">{member.name}</p>
+            <p className="text-xs text-slate-500">{member.email}</p>
+            {member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}
+          </div>
+        </div>
+      </td>
+      <td className="px-6 py-4">
+        {editing ? (
+          <input
+            type="text"
+            value={level}
+            onChange={(e) => setLevel(e.target.value)}
+            className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-40"
+          />
+        ) : (
+          <span className="text-sm font-bold text-slate-700">{member.level || '—'}</span>
+        )}
+      </td>
+      <td className="px-6 py-4">
+        {editing ? (
+          <input
+            type="number"
+            value={points}
+            onChange={(e) => setPoints(e.target.value)}
+            className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-24"
+          />
+        ) : (
+          <span className="text-sm font-black text-emerald-600">{member.points ?? 0}</span>
+        )}
+      </td>
+      <td className="px-6 py-4">
+        <span className={`text-[10px] font-black uppercase px-2 py-1 rounded-full ${
+          member.role === 'admin' ? 'bg-purple-50 text-purple-600' : 'bg-emerald-50 text-emerald-600'
+        }`}>
+          {member.role || 'member'}
+        </span>
+      </td>
+      <td className="px-6 py-4">
+        <span className={`text-[10px] font-black uppercase px-2 py-1 rounded-full ${
+          member.is_active === 1 ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
+        }`}>
+          {member.is_active === 1 ? 'Active' : 'Inactive'}
+        </span>
+      </td>
+      <td className="px-6 py-4">
+        <div className="flex items-center gap-2">
+          {editing ? (
+            <>
+              <button
+                onClick={() => { onSave({ level, points: parseInt(points) || 0 }); setEditing(false); }}
+                className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
+                title="Save"
+              >
+                <CheckCircle className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setEditing(false)}
+                className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition-all"
+                title="Cancel"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setEditing(true)}
+              className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg transition-all"
+              title="Edit level & points"
+            >
+              <Edit3 className="w-4 h-4" />
+            </button>
+          )}
+          <button
+            onClick={onToggleActive}
+            className="p-2 text-amber-500 hover:bg-amber-50 rounded-lg transition-all"
+            title={member.is_active === 1 ? 'Deactivate' : 'Activate'}
+          >
+            <Power className="w-4 h-4" />
+          </button>
+          <button
+            onClick={onRemove}
+            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-all"
+            title="Remove member"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+};
+
+// Security Section — change the signed-in admin's password
+const SecuritySection = () => {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMessage(null);
+
+    if (newPassword.length < 6) {
+      setMessage({ type: 'error', text: 'New password must be at least 6 characters.' });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setMessage({ type: 'error', text: 'New passwords do not match.' });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await auth.changePassword(currentPassword, newPassword);
+      setMessage({ type: 'success', text: 'Password updated successfully!' });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'Failed to change password.' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h3 className="text-2xl font-black text-slate-900 tracking-tight">Security Settings</h3>
+        <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full">Account</span>
+      </div>
+
+      <div className="bg-slate-50 p-8 rounded-2xl border border-slate-100 max-w-xl space-y-4">
+        <div className="flex items-center gap-4 mb-6">
+          <div className="w-14 h-14 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center">
+            <KeyRound className="w-7 h-7" />
+          </div>
+          <div>
+            <h4 className="font-black text-slate-900">Change Password</h4>
+            <p className="text-sm text-slate-500">You will need to sign in again with the new password.</p>
+          </div>
+        </div>
+
+        {message && (
+          <div className={`px-4 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 ${
+            message.type === 'success'
+              ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+              : 'bg-red-50 text-red-600 border border-red-100'
+          }`}>
+            {message.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <X className="w-4 h-4" />}
+            {message.text}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-2 mb-2 block">
+              Current Password
+            </label>
+            <div className="relative">
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                type="password"
+                required
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder="Enter your current password"
+                className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-2 mb-2 block">
+              New Password
+            </label>
+            <div className="relative">
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                type="password"
+                required
+                minLength={6}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Min 6 characters"
+                className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-2 mb-2 block">
+              Confirm New Password
+            </label>
+            <div className="relative">
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                type="password"
+                required
+                minLength={6}
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Repeat the new password"
+                className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
+              />
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSubmitting ? 'Updating...' : 'Update Password'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 export const AdminPanel = ({ 
   siteContent, 
   setSiteContent 
@@ -265,28 +705,30 @@ export const AdminPanel = ({
   siteContent: SiteContent, 
   setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>> 
 }) => {
-  const [activeView, setActiveView] = useState<'overview' | 'applications' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
+  const [activeView, setActiveView] = useState<'overview' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [contentHistory, setContentHistory] = useState<SiteContent[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [showSuccess, setShowSuccess] = useState(false);
   const [savedToStorage, setSavedToStorage] = useState(false);
+  const [stats, setStats] = useState<AdminStats | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
 
-  // Load from Supabase on mount (with localStorage fallback)
+  // Load from Cloudflare D1 on mount (with localStorage fallback)
   useEffect(() => {
     const loadContent = async () => {
       try {
-        // Try to load from Supabase first
-        const result = await db.siteContent.get();
-        if (result && result.data) {
-          setSiteContent(result.data);
-          setContentHistory([result.data]);
+        // Try to load from the API first
+        const content = await db.siteContent.get();
+        if (content) {
+          setSiteContent(content);
+          setContentHistory([content]);
           setHistoryIndex(0);
           setSavedToStorage(true);
           return;
         }
       } catch (error) {
-        console.error('Failed to load from Supabase, using localStorage:', error);
+        console.error('Failed to load from API, using localStorage:', error);
       }
       
       // Fallback to localStorage
@@ -310,6 +752,13 @@ export const AdminPanel = ({
     };
     
     loadContent();
+  }, []);
+
+  // Load live stats for the dashboard overview
+  useEffect(() => {
+    db.getStats()
+      .then((s) => setStats(s))
+      .catch((e) => console.error('Failed to load stats:', e));
   }, []);
 
   // Save to history when content changes
@@ -356,11 +805,7 @@ export const AdminPanel = ({
       window.dispatchEvent(new CustomEvent('siteContentUpdated', { detail: siteContent }));
     } catch (error) {
       console.error('Failed to save to Cloudflare:', error);
-      // Fallback to localStorage
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(siteContent));
-      setShowSuccess(true);
-      setTimeout(() => setShowSuccess(false), 3000);
-      setHasUnsavedChanges(false);
+      alert('Could not save to the database. Check that the API and D1 binding are working.');
     }
   };
 
@@ -404,7 +849,7 @@ export const AdminPanel = ({
           <CheckCircle className="w-6 h-6" />
           <div>
             <p className="font-bold">Changes saved successfully!</p>
-            <p className="text-xs opacity-80">Stored in browser localStorage</p>
+            <p className="text-xs opacity-80">Saved to the Cloudflare D1 database</p>
           </div>
         </div>
       )}
@@ -470,7 +915,9 @@ export const AdminPanel = ({
                <p className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">System</p>
                {[
                  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
-                 { id: 'applications', label: 'Applications', icon: Users, badge: 2 },
+                 { id: 'applications', label: 'Applications', icon: Users, badge: pendingCount },
+                 { id: 'members', label: 'Members', icon: UserCheck },
+                 { id: 'security', label: 'Security', icon: ShieldAlert },
                ].map((item) => (
                  <button
                    key={item.id}
@@ -526,9 +973,12 @@ export const AdminPanel = ({
                 </div>
                 <div className="grid md:grid-cols-3 gap-6">
                   {[
-                    { label: 'Total Members', value: '524', color: 'text-emerald-600' },
-                    { label: 'Active Projects', value: siteContent.projects.length, color: 'text-slate-900' },
-                    { label: 'Pending Applications', value: '2', color: 'text-yellow-600' },
+                    { label: 'Total Members', value: stats ? String(stats.members) : '—', color: 'text-emerald-600' },
+                    { label: 'Active Projects', value: String(siteContent.projects.length), color: 'text-slate-900' },
+                    { label: 'Pending Applications', value: stats ? String(stats.pendingApplications) : '—', color: 'text-yellow-600' },
+                    { label: 'Subscribers', value: stats ? String(stats.subscribers) : '—', color: 'text-blue-600' },
+                    { label: 'Total Applications', value: stats ? String(stats.applications) : '—', color: 'text-slate-900' },
+                    { label: 'Unread Messages', value: stats ? String(stats.unreadContacts) : '—', color: 'text-red-600' },
                   ].map((stat, i) => (
                     <div key={i} className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
                       <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{stat.label}</p>
@@ -538,12 +988,12 @@ export const AdminPanel = ({
                 </div>
                 
                 <div className="bg-emerald-50 p-6 rounded-2xl border border-emerald-100">
-                  <h4 className="font-black text-emerald-800 mb-2">Storage Status</h4>
+                  <h4 className="font-black text-emerald-800 mb-2">Database Status</h4>
                   <p className="text-sm text-emerald-600">
-                    {savedToStorage ? '✅ Content is saved to browser storage' : '️ No saved content found. Using defaults.'}
+                    {stats ? '✅ Connected to Cloudflare D1 — data is live and shared across all visitors.' : '⏳ Checking database connection...'}
                   </p>
                   <p className="text-xs text-emerald-500 mt-2">
-                    Note: For production, connect to Supabase for cloud storage and multi-user access.
+                    Applications, subscribers, contacts, members, and site content are stored in Cloudflare D1.
                   </p>
                 </div>
               </div>
@@ -1065,7 +1515,15 @@ export const AdminPanel = ({
             )}
 
             {activeView === 'applications' && (
-              <ApplicationsSection />
+              <ApplicationsSection onPendingCount={setPendingCount} />
+            )}
+
+            {activeView === 'members' && (
+              <MembersSection />
+            )}
+
+            {activeView === 'security' && (
+              <SecuritySection />
             )}
           </main>
         </div>

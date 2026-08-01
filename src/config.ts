@@ -2,9 +2,12 @@
 // API keys and settings loaded from environment variables
 
 export const CONFIG = {
-  // Cloudflare Workers API
+  // Cloudflare Workers API.
+  // Production: same-origin (empty string) — the API is served from
+  // /api/* on the same domain as the site.
+  // Local dev with Vite: set VITE_API_URL to your API server, e.g. http://localhost:8788
   API: {
-    URL: import.meta.env.VITE_API_URL || 'http://localhost:8787',
+    URL: import.meta.env.VITE_API_URL || '',
   },
 
   // Cloudflare R2 Storage
@@ -26,7 +29,7 @@ export const CONFIG = {
   FEATURES: {
     ENABLE_EMAIL_NOTIFICATIONS: import.meta.env.VITE_ENABLE_EMAIL === 'true',
     ENABLE_FILE_UPLOADS: import.meta.env.VITE_ENABLE_UPLOADS === 'true',
-    ENABLE_AUTHENTICATION: import.meta.env.VITE_ENABLE_AUTH === 'true',
+    ENABLE_AUTHENTICATION: import.meta.env.VITE_ENABLE_AUTH !== 'false',
   }
 };
 

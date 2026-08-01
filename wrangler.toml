@@ -21,8 +21,23 @@ bucket_name = "code-rx-storage"
 # Environment Variables
 [vars]
 ADMIN_EMAIL = "coderxsociety@gmail.com"
+# Password used ONLY to seed the first admin account (when the users table
+# is empty). CHANGE THIS before going live, then log in with the new password
+# and update ADMIN_PASSWORD here for future deploys.
+ADMIN_PASSWORD = "Admin@12345"
 TELEGRAM_LINK = "https://t.me/+EdRpfR1GTGNjM2Q0"
-JWT_SECRET = "your-secret-key-change-this"
+# Secret used to sign login tokens. CHANGE THIS to a long random string.
+JWT_SECRET = "change-this-to-a-long-random-secret-string"
+
+# EmailJS (optional) — enables email notifications for new applications,
+# contact messages, and application approvals. Leave empty to disable.
+# Create templates and credentials at https://www.emailjs.com
+EMAILJS_PUBLIC_KEY = ""
+EMAILJS_SERVICE_ID = ""
+EMAILJS_TEMPLATE_ID_JOIN = ""
+EMAILJS_TEMPLATE_ID_CONTACT = ""
+EMAILJS_TEMPLATE_ID_APPROVAL = ""
+EMAILJS_TEMPLATE_ID_RESET = ""
 
 # Development environment
 [env.dev]

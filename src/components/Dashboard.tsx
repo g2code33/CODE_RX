@@ -11,8 +11,13 @@ import {
   Search
 } from 'lucide-react';
 import { LEADERBOARD } from '../data/mockData';
+import type { AuthUser } from '../lib/cloudflare';
 
-export const Dashboard = () => {
+export const Dashboard = ({ user }: { user: AuthUser | null }) => {
+  const firstName = user?.name?.split(' ')[0] || 'Member';
+  const initial = (user?.name || user?.email || 'C').charAt(0).toUpperCase();
+  const email = user?.email || '';
+
   return (
     <div className="min-h-screen bg-slate-50 pt-20">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -21,10 +26,10 @@ export const Dashboard = () => {
           <aside className="lg:w-64 space-y-2">
              <div className="p-4 bg-white rounded-2xl shadow-sm border border-gray-100 mb-6">
                 <div className="flex items-center gap-3">
-                   <div className="w-12 h-12 rounded-full bg-yellow-400 flex items-center justify-center text-xl font-bold">C</div>
+                   <div className="w-12 h-12 rounded-full bg-yellow-400 flex items-center justify-center text-xl font-bold">{initial}</div>
                    <div>
-                      <h4 className="font-bold text-gray-900">Calcitonin</h4>
-                      <p className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">PharmD Tech</p>
+                      <h4 className="font-bold text-gray-900">{user?.name || 'Member'}</h4>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">{email || 'Code Rx Member'}</p>
                    </div>
                 </div>
              </div>
@@ -51,7 +56,7 @@ export const Dashboard = () => {
           <main className="flex-grow space-y-8">
             <header className="flex flex-wrap items-center justify-between gap-4">
                <div>
-                  <h2 className="text-3xl font-black text-gray-900">Welcome, Calcitonin 👋</h2>
+                  <h2 className="text-3xl font-black text-gray-900">Welcome, {firstName} 👋</h2>
                   <p className="text-gray-500">You're in the top 5% of pharmacy technologists this week!</p>
                </div>
                <div className="relative">

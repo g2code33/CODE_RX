@@ -180,7 +180,7 @@ export const INITIAL_PROJECTS: Project[] = [
     description: 'High-performance football live-score technology platform.',
     problem: 'Existing sports platforms are often cluttered and lack real-time synchronization optimized for low bandwidth.',
     solution: 'A streamlined live-score platform featuring automatic league tables, match events, and admin control for custom tournaments.',
-    technology: ['PostgreSQL', 'Supabase', 'GraphQL', 'WebSockets'],
+    technology: ['PostgreSQL', 'Cloudflare D1', 'GraphQL', 'WebSockets'],
     team: ['Software Engineering Group'],
     status: '🚧 Development',
     progress: 75,

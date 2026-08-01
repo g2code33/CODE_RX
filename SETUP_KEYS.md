@@ -1,171 +1,66 @@
-# 🔑 CODE Rx SOCIETY - API Keys Setup Guide
+# 🔑 CODE Rx SOCIETY - Keys & Secrets Setup Guide
 
-## 📁 Environment Variables (.env file)
-
-Your API keys are now stored securely in the `.env` file (not committed to Git).
-
-### Location:
-```
-/
-├── .env              ← Your actual keys (DO NOT COMMIT TO GIT)
-├── .env.example      ← Template file (safe to commit)
-└── src/
-    └── config.ts     ← Loads keys from .env
-```
+The site runs on **Cloudflare Pages + Functions + D1 + R2** — no third-party
+database. These are the only keys/secrets you need:
 
 ---
 
-## ️ Step 1: Get Your Supabase Keys
+## 1. Cloudflare (required)
 
-1. **Go to Supabase Dashboard**
-   - URL: https://app.supabase.com/
-   - Login with coderxsociety@gmail.com
+| Where | What |
+|---|---|
+| **D1 database binding** | Pages project → Settings → Functions → D1 → binding `DB` → `code-rx-db` |
+| **R2 bucket binding** | Pages project → Settings → Functions → R2 → binding `BUCKET` → `code-rx-storage` |
+| **JWT_SECRET** | Pages project → Settings → Environment variables → a long random string (used to sign login tokens) |
+| **ADMIN_EMAIL** | `coderxsociety@gmail.com` (seeds the first admin account) |
+| **ADMIN_PASSWORD** | Password used to seed the admin account — **change from `Admin@12345` before going live** |
 
-2. **Select Your Project**
-   - Click on your CODE Rx project
+> You can also keep these in `wrangler.toml` for local dev; the Pages project
+> environment variables override them in production.
 
-3. **Get API Keys**
-   - Go to **Settings** → **API**
-   - Copy these two values:
-     - **Project URL** (e.g., `https://xxxxx.supabase.co`)
-     - **anon/public key** (long string starting with `eyJ...`)
+---
 
-4. **Update .env file**
-   ```env
-   VITE_SUPABASE_URL=https://xxxxx.supabase.co
-   VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+## 2. EmailJS (optional — enables email notifications)
+
+1. Create a free account at https://www.emailjs.com with coderxsociety@gmail.com
+2. **Email Services → Add New Service** → connect Gmail → copy the **Service ID**
+3. **Email Templates** → create 4 templates:
+
+| Template | Purpose | Variables |
+|---|---|---|
+| `template_join` | New application → admin | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `date` |
+| `template_contact` | Contact form → admin | `to_email`, `sender_name`, `sender_email`, `subject`, `message`, `date` |
+| `template_approval` | Approval/rejection → applicant | `to_email`, `member_name`, `status`, `date` |
+| `template_reset` | Password reset → user | `to_email`, `reset_link`, `name` |
+
+4. Copy the **Public Key** (Account → General) and the template IDs.
+5. Set these variables on the Pages project (and in `wrangler.toml` for local):
+   ```
+   EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID,
+   EMAILJS_TEMPLATE_ID_JOIN, EMAILJS_TEMPLATE_ID_CONTACT,
+   EMAILJS_TEMPLATE_ID_APPROVAL, EMAILJS_TEMPLATE_ID_RESET
    ```
 
 ---
 
-## ⚙️ Step 2: Get Your EmailJS Keys
+## 3. Frontend `.env` (optional — local dev only)
 
-1. **Go to EmailJS Dashboard**
-   - URL: https://dashboard.emailjs.com/
-   - Login or create account
-
-2. **Get Public Key**
-   - Click your name (top right) → **Account**
-   - Copy **Public Key** (e.g., `user_abc123`)
-
-3. **Get Service ID**
-   - Go to **Email Services**
-   - Click on your Gmail service
-   - Copy **Service ID** (e.g., `service_xyz123`)
-
-4. **Get Template IDs**
-   - Go to **Email Templates**
-   - Copy each template ID:
-     - Join Application Template
-     - Contact Message Template
-     - Subscription Template
-
-5. **Update .env file**
-   ```env
-   VITE_EMAILJS_PUBLIC_KEY=user_abc123
-   VITE_EMAILJS_SERVICE_ID=service_xyz123
-   VITE_EMAILJS_TEMPLATE_ID_JOIN=template_join123
-   VITE_EMAILJS_TEMPLATE_ID_CONTACT=template_contact456
-   VITE_EMAILJS_TEMPLATE_ID_SUBSCRIBE=template_subscribe789
-   ```
-
----
-
-## ⚙️ Step 3: Verify Other Settings
-
-Check these are correct in `.env`:
-```env
-VITE_ADMIN_EMAIL=coderxsociety@gmail.com
-VITE_TELEGRAM_LINK=https://t.me/+EdRpfR1GTGNjM2Q0
-```
-
----
-
-## 🧪 Step 4: Test Your Configuration
-
-1. **Restart Development Server**
-   ```bash
-   # Stop current server (Ctrl+C)
-   npm run dev
-   ```
-
-2. **Check Console**
-   - Open browser DevTools (F12)
-   - Look for any warnings about missing keys
-   - If configured correctly, no warnings should appear
-
-3. **Test Forms**
-   - Try joining (should save to Supabase)
-   - Try contact form (should send email)
-   - Check admin panel (should load from database)
-
----
-
-## 🔒 Security Best Practices
-
-### ✅ DO:
-- Keep `.env` file in `.gitignore`
-- Use `.env.example` as template for team members
-- Rotate keys periodically
-- Use different keys for development and production
-
-###  DON'T:
-- Commit `.env` to Git
-- Share keys publicly
-- Use same keys across multiple projects
-- Store keys in code files
-
----
-
-## 📋 .env File Template
-
-Here's what your final `.env` should look like:
+Copy `.env.example` → `.env` if you need to override anything locally:
 
 ```env
-# Supabase
-VITE_SUPABASE_URL=https://yourproject.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-
-# EmailJS
-VITE_EMAILJS_PUBLIC_KEY=user_abc123
-VITE_EMAILJS_SERVICE_ID=service_xyz123
-VITE_EMAILJS_TEMPLATE_ID_JOIN=template_join123
-VITE_EMAILJS_TEMPLATE_ID_CONTACT=template_contact456
-VITE_EMAILJS_TEMPLATE_ID_SUBSCRIBE=template_subscribe789
-
-# Admin
+VITE_API_URL=            # empty = same-origin API (default; recommended)
 VITE_ADMIN_EMAIL=coderxsociety@gmail.com
 VITE_TELEGRAM_LINK=https://t.me/+EdRpfR1GTGNjM2Q0
+VITE_ENABLE_AUTH=true
 ```
 
 ---
 
-## 🚨 Troubleshooting
+## Troubleshooting
 
-### "Missing environment variables" warning?
-- Make sure `.env` file exists in project root
-- Restart dev server after editing `.env`
-- Check for typos in variable names
-
-### Keys not working?
-- Verify keys are copied correctly (no extra spaces)
-- Check Supabase project is active
-- Ensure EmailJS service is connected
-
-### Forms not saving?
-- Check browser console for errors
-- Verify Supabase tables exist (run SQL schema)
-- Check Row Level Security policies
-
----
-
-##  Need Help?
-
-1. Check `PRODUCTION_SETUP.md` for detailed setup
-2. Check `EMAILJS_SETUP.md` for email templates
-3. Review Supabase logs in dashboard
-4. Check EmailJS delivery logs
-
----
-
-**Your keys are now secure and loaded from `.env`!** 🔐
+- **Login fails?** Confirm the `users` table was seeded (first API request) and
+  that `ADMIN_EMAIL`/`ADMIN_PASSWORD` match what you used at seed time.
+- **Emails not sending?** Verify the 4 EmailJS template IDs and the service ID;
+  the API logs "Email skipped — EmailJS not configured" when keys are missing.
+- **Admin routes return 401?** You're not signed in as admin — use the admin
+  email + password, or re-login after a password change.

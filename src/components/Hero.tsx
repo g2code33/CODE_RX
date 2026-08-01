@@ -95,7 +95,7 @@ export const Hero = ({ content, onJoin }: {
               </div>
 
               <div className="relative flex flex-col items-center justify-center aspect-square">
-                <img src="/logo.png" alt="Code Rx" className="w-80 h-80 object-contain drop-shadow-[0_0_50px_rgba(16,185,129,0.4)] animate-pulse" />
+                <img src="/logo.png" alt="Code Rx" className="w-96 h-96 max-w-[90vw] object-contain drop-shadow-[0_0_50px_rgba(16,185,129,0.4)] animate-pulse" />
               </div>
             </div>
             

@@ -17,15 +17,15 @@ export const Navbar = ({
 
   return (
     <nav className="fixed w-full z-50 bg-white/95 backdrop-blur-md shadow-lg py-3 border-b border-emerald-100">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setActiveTab('home')}>
-            <div className="w-14 h-14 overflow-hidden rounded-xl border-2 border-emerald-500 bg-emerald-50 shadow-md shadow-emerald-100">
-              <img src="/logo-small.png" alt="Code Rx Logo" className="w-full h-full object-contain p-1" />
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+        <div className="flex justify-between items-center h-20">
+          <div className="flex items-center gap-2 sm:gap-3 cursor-pointer min-w-0" onClick={() => setActiveTab('home')}>
+            <div className="w-20 h-20 sm:w-20 sm:h-20 overflow-hidden rounded-2xl border-2 border-emerald-500 bg-emerald-50 shadow-md shadow-emerald-100 shrink-0">
+              <img src="/logo-small.png" alt="Code Rx Logo" className="w-full h-full object-cover" />
             </div>
-            <div className="flex flex-col text-left hidden md:flex">
-              <span className="font-black text-xl leading-none tracking-tight text-emerald-600">CODE Rx</span>
-              <span className="text-[9px] tracking-[0.25em] font-black text-emerald-400 uppercase">Society</span>
+            <div className="flex flex-col text-left">
+              <span className="font-black text-lg sm:text-2xl leading-none tracking-tight text-emerald-600 whitespace-nowrap">CODE Rx</span>
+              <span className="text-[9px] sm:text-[10px] tracking-[0.25em] font-black text-emerald-400 uppercase whitespace-nowrap">Society</span>
             </div>
           </div>
 

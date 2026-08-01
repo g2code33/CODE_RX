@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowRight } from 'lucide-react';
 import { Navbar } from './components/Navbar';
@@ -16,16 +16,20 @@ import { Terms } from './components/Terms';
 import { AdminPanel } from './components/AdminPanel';
 import { Footer } from './components/Footer';
 import { Dashboard } from './components/Dashboard';
+import { ResetPassword } from './components/ResetPassword';
 import { INITIAL_SITE_CONTENT, SiteContent } from './data/siteState';
+import { auth, AuthUser } from './lib/cloudflare';
 
 function App() {
   const [isDashboard, setIsDashboard] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(auth.getUser());
   const [activeTab, setActiveTab] = useState('home');
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isContactOpen, setIsContactOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
-  
+  const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
+
   // Load from localStorage on mount
   const [siteContent, setSiteContent] = useState<SiteContent>(() => {
     const saved = localStorage.getItem('codeRx_siteContent');
@@ -40,6 +44,53 @@ function App() {
     return INITIAL_SITE_CONTENT;
   });
 
+  // Restore a valid session on load (validates the stored token with the API)
+  useEffect(() => {
+    auth.me().then((u) => {
+      if (!u) return;
+      setUser(u);
+      if (u.role === 'admin') {
+        setIsAdmin(true);
+        setIsDashboard(false);
+      } else {
+        setIsDashboard(true);
+        setIsAdmin(false);
+      }
+    });
+  }, []);
+
+  // Keep a ref of activeTab for the hash handler (avoids re-binding)
+  const activeTabRef = { current: activeTab };
+  activeTabRef.current = activeTab;
+
+  // Deep-linkable sections: each section has its own URL hash
+  // (e.g. https://coderxsociety.pages.dev/#learn). The active tab stays in
+  // sync with location.hash so every section is directly visitable.
+  useEffect(() => {
+    const tabFromHash = () => {
+      const h = window.location.hash.replace(/^#\/?/, '').trim();
+      return h || 'home';
+    };
+    const applyHash = () => {
+      // Password-reset links look like #reset?token=...&email=... — show the
+      // reset screen instead of mapping the hash to a section.
+      if (window.location.hash.startsWith('#reset')) {
+        setIsResetView(true);
+        return;
+      }
+      setIsResetView(false);
+      const t = tabFromHash();
+      if (t !== activeTabRef.current) {
+        setActiveTab(t);
+        setIsDashboard(false);
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      }
+    };
+    applyHash(); // on first load, honor any incoming hash (deep link)
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
+  }, []);
+
   const handleOpenJoin = () => {
     setAuthMode('join');
     setIsAuthOpen(true);
@@ -47,35 +98,44 @@ function App() {
 
   const toggleDashboard = () => {
     if (!isDashboard && !isAdmin) {
-      handleOpenJoin();
+      setAuthMode('login');
+      setIsAuthOpen(true);
     } else {
+      // Exiting the portal / admin panel signs the session out
+      auth.logout();
+      setUser(null);
       setIsDashboard(false);
       setIsAdmin(false);
     }
   };
 
-  const handleLoginSuccess = () => {
+  const handleLoginSuccess = (u: AuthUser) => {
+    setUser(u);
     setIsAuthOpen(false);
-    setIsDashboard(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleAdminLogin = () => {
-    setIsAuthOpen(false);
-    setIsAdmin(true);
-    setIsDashboard(false);
+    if (u.role === 'admin') {
+      setIsAdmin(true);
+      setIsDashboard(false);
+    } else {
+      setIsDashboard(true);
+      setIsAdmin(false);
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleTabChange = (tabId: string) => {
     setActiveTab(tabId);
     setIsDashboard(false);
+    // Update the URL hash so the section is shareable / directly visitable.
+    // The hashchange listener keeps the state in sync (guarded, so no loop).
+    if (window.location.hash !== `#${tabId}`) {
+      window.location.hash = tabId;
+    }
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
 
   const renderContent = () => {
     if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={setSiteContent} />;
-    if (isDashboard) return <Dashboard />;
+    if (isDashboard) return <Dashboard user={user} />;
 
     switch (activeTab) {
       case 'home':
@@ -161,6 +221,20 @@ function App() {
     }
   };
 
+  // Password reset view (reached via the email's reset link) — full screen,
+  // no navbar/footer.
+  if (isResetView) {
+    return (
+      <ResetPassword
+        onDone={() => {
+          window.location.hash = '';
+          setIsResetView(false);
+          window.scrollTo({ top: 0, behavior: 'instant' });
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-white font-sans text-slate-900 selection:bg-emerald-200 selection:text-black">
       <Navbar 
@@ -170,11 +244,10 @@ function App() {
         setActiveTab={handleTabChange}
       />
 
-      <AuthModal 
-        isOpen={isAuthOpen} 
-        onClose={() => setIsAuthOpen(false)} 
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
         onLoginSuccess={handleLoginSuccess}
-        onAdminLogin={handleAdminLogin}
         onGoToTerms={() => {
           setIsAuthOpen(false);
           handleTabChange('terms');
