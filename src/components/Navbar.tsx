@@ -20,12 +20,12 @@ export const Navbar = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => setActiveTab('home')}>
-            <div className="w-10 h-10 overflow-hidden rounded-lg border-2 border-emerald-500 bg-emerald-50">
+            <div className="w-14 h-14 overflow-hidden rounded-xl border-2 border-emerald-500 bg-emerald-50 shadow-md shadow-emerald-100">
               <img src="/logo-small.png" alt="Code Rx Logo" className="w-full h-full object-contain p-1" />
             </div>
             <div className="flex flex-col text-left hidden md:flex">
-              <span className="font-black text-lg leading-none tracking-tight text-emerald-600">CODE Rx</span>
-              <span className="text-[8px] tracking-[0.25em] font-black text-emerald-400 uppercase">Society</span>
+              <span className="font-black text-xl leading-none tracking-tight text-emerald-600">CODE Rx</span>
+              <span className="text-[9px] tracking-[0.25em] font-black text-emerald-400 uppercase">Society</span>
             </div>
           </div>
 

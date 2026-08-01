@@ -34,7 +34,7 @@ export const Footer = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-12 mb-16">
             <div className="space-y-6">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 overflow-hidden rounded-lg border-2 border-emerald-400 bg-white">
+                <div className="w-14 h-14 overflow-hidden rounded-xl border-2 border-emerald-400 bg-white shadow-md shadow-black/20">
                   <img src="/logo-small.png" alt="Code Rx Logo" className="w-full h-full object-contain p-1" />
                 </div>
                 <div className="flex flex-col text-left">
