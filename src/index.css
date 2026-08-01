@@ -1,1 +1,17 @@
 @import "tailwindcss";
+
+/* Every section with an id is a direct-link target (#section-id). Keep the
+   fixed navbar from covering the top of a section when jumping to it. */
+section[id] {
+  scroll-margin-top: 5.5rem;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

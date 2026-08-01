@@ -1,9 +1,13 @@
 import { Handshake, GraduationCap, Briefcase, Rocket } from 'lucide-react';
+import { SectionLink } from './SectionLink';
 
 export const Extras = () => {
   return (
-    <section className="py-24 bg-slate-50">
+    <section id="extras" className="py-24 bg-slate-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-end mb-10">
+          <SectionLink id="extras" />
+        </div>
         <div className="grid lg:grid-cols-2 gap-16">
           {/* Partnerships */}
           <div>

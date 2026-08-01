@@ -1,4 +1,5 @@
 import { BookOpen, CheckCircle2 } from 'lucide-react';
+import { SectionLink } from './SectionLink';
 
 export const Academy = ({ steps }: { steps: string[] }) => {
   return (
@@ -6,9 +7,10 @@ export const Academy = ({ steps }: { steps: string[] }) => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid lg:grid-cols-2 gap-20 items-center">
           <div>
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 text-xs font-bold uppercase tracking-widest mb-8">
+            <div className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 text-xs font-bold uppercase tracking-widest mb-8">
               <BookOpen className="w-4 h-4" />
               <span>Code Rx Academy</span>
+              <SectionLink id="learn" />
             </div>
             <h2 className="text-5xl font-black text-slate-900 mb-8 leading-none tracking-tight">Your Path to <br/><span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">Pharmacy Tech</span></h2>
             <p className="text-slate-600 text-lg mb-10 font-medium leading-relaxed">

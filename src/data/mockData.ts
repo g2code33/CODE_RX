@@ -19,6 +19,27 @@ export const NAV_LINKS = [
   { label: 'Terms', id: 'terms' },
 ];
 
+// Every section on the site has its own direct URL (#section-id) that lands the
+// user exactly on that section. `tab` is the parent page that must be rendered
+// for the section to exist; if `tab === id` the section IS the page (scroll to
+// top), otherwise the page renders first and then smooth-scrolls to the section.
+export const SECTION_MAP: Record<string, { id: string; label: string; tab: string }> = {
+  home:        { id: 'home',        label: 'Home',                 tab: 'home' },
+  values:      { id: 'values',      label: 'Core Values',          tab: 'home' },
+  news:        { id: 'news',        label: 'Latest News',          tab: 'home' },
+  about:       { id: 'about',       label: 'About',                tab: 'about' },
+  'what-we-do':{ id: 'what-we-do',  label: 'What We Do',           tab: 'about' },
+  leadership:  { id: 'leadership',  label: 'Leadership',           tab: 'about' },
+  extras:      { id: 'extras',      label: 'Partnerships & Opportunities', tab: 'about' },
+  learn:       { id: 'learn',       label: 'Academy',              tab: 'learn' },
+  projects:    { id: 'projects',    label: 'Projects',             tab: 'projects' },
+  challenges:  { id: 'challenges',  label: 'Challenges',           tab: 'challenges' },
+  community:   { id: 'community',   label: 'Community',            tab: 'community' },
+  resources:   { id: 'resources',   label: 'Resources',            tab: 'resources' },
+  terms:       { id: 'terms',       label: 'Terms',                tab: 'terms' },
+  join:        { id: 'join',        label: 'Join Us',              tab: 'home' },
+};
+
 export const CORE_VALUES = [
   {
     title: 'Pharmacy',

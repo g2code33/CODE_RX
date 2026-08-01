@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ExternalLink, Code2, ArrowLeft, Globe, Users, Trophy, ArrowRight } from 'lucide-react';
 import { Project } from '../data/mockData';
+import { SectionLink } from './SectionLink';
 
 export const Projects = ({ projects }: { projects: Project[] }) => {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -22,6 +23,7 @@ export const Projects = ({ projects }: { projects: Project[] }) => {
                 <p className="text-slate-500 max-w-2xl mx-auto font-medium text-lg">
                   The central home for all Code Rx initiatives. From pharmacy management to advanced agentic AI.
                 </p>
+                <div className="mt-6 flex justify-center"><SectionLink id="projects" /></div>
               </div>
 
               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">

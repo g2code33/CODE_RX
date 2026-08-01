@@ -1,5 +1,6 @@
 import { Trophy, Timer, Users, Lock } from 'lucide-react';
 import { SiteContent } from '../data/siteState';
+import { SectionLink } from './SectionLink';
 
 export const Competitions = ({ active }: { active: SiteContent['challenges']['active'] }) => {
   return (
@@ -14,6 +15,7 @@ export const Competitions = ({ active }: { active: SiteContent['challenges']['ac
           </div>
           <h2 className="text-5xl lg:text-6xl font-black text-white mb-6 tracking-tight">Can you decode <br/><span className="text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-emerald-400">what others can't see?</span></h2>
           <p className="text-emerald-100 max-w-2xl mx-auto font-medium text-lg">Push your limits in our pharmacy-themed coding and cryptography challenges.</p>
+          <div className="mt-6 flex justify-center"><SectionLink id="challenges" light /></div>
         </div>
 
         <div className="max-w-4xl mx-auto">
