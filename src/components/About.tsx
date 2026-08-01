@@ -1,10 +1,12 @@
 import { Binary, Eye, Quote, Target } from 'lucide-react';
 import { CORE_VALUES } from '../data/mockData';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const ValueCards = () => {
   return (
     <section id="values" className="brand-section brand-section--alt py-24 sm:py-28">
+      <PharmacyBackground layout="clinic" />
       <div className="brand-glow right-[-15rem] top-[-12rem] opacity-40" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <div className="mb-12 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
@@ -36,6 +38,7 @@ export const ValueCards = () => {
 export const About = ({ mission, vision, motto }: { mission: string; vision: string; motto: string }) => {
   return (
     <section id="about" className="brand-section brand-grid brand-grid-fine py-28 sm:py-36">
+      <PharmacyBackground layout="lab" />
       <div className="brand-glow -left-56 top-40 opacity-50" />
       <div className="relative z-10 mx-auto grid max-w-[1440px] items-center gap-16 px-5 sm:px-8 lg:grid-cols-[0.9fr_1.1fr] lg:px-10">
         <div className="relative mx-auto w-full max-w-[520px]">

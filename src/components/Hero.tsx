@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { Activity, ArrowDown, ArrowRight, Code2, ShieldCheck, Sparkles, UserPlus, Zap } from 'lucide-react';
 import { SiteContent } from '../data/siteState';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Hero = ({
   content,
@@ -15,6 +16,7 @@ export const Hero = ({
 
   return (
     <section id="home" className="brand-section brand-grid min-h-[720px] pt-[4.5rem] lg:min-h-screen">
+      <PharmacyBackground layout="hero" />
       <div className="brand-grid-fade absolute inset-0 opacity-70" />
       <div className="brand-scanlines absolute inset-0" />
       <div className="brand-glow -left-40 top-20" />

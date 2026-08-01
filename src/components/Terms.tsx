@@ -2,10 +2,12 @@ import { motion } from 'framer-motion';
 import { FileText } from 'lucide-react';
 import { SiteContent } from '../data/siteState';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Terms = ({ content }: { content: SiteContent['terms'] }) => {
   return (
     <section id="terms" className="brand-section brand-grid-fine min-h-screen py-28 text-[#a9bf9f] sm:py-36">
+      <PharmacyBackground layout="clinic" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
           <div className="mb-16 flex flex-col justify-between gap-6 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5"><FileText className="h-3.5 w-3.5" /> Legal / society terms</div><h1 className="brand-title text-4xl sm:text-5xl lg:text-6xl">Terms <span className="brand-gradient-text">&</span><br />Conditions</h1><p className="mt-6 text-sm uppercase tracking-[0.14em] text-[#718675]">Coding the future of pharmacy</p></div><SectionLink id="terms" /></div>

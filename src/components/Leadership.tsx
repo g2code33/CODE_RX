@@ -1,9 +1,11 @@
 import { UsersRound } from 'lucide-react';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Leadership = ({ team }: { team: Array<{ name: string; role: string; image: string }> }) => {
   return (
     <section id="leadership" className="brand-section brand-section--alt py-28 sm:py-36">
+      <PharmacyBackground layout="clinic" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
           <div>

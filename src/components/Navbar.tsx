@@ -33,9 +33,9 @@ export const Navbar = ({
             <span className="absolute inset-1 rounded-full bg-lime-300/10 blur-lg transition-opacity group-hover:opacity-100" />
             <img src="/logo-small.png" alt="" className="brand-logo-glow relative h-full w-full object-contain" />
           </span>
-          <span className="header-wordmark hidden min-[420px]:flex flex-col">
+          <span className="header-wordmark flex flex-col">
             <span className="header-wordmark-title">CODE <span>Rx</span></span>
-            <span className="header-wordmark-subtitle">Society / Ghana</span>
+            <span className="header-wordmark-subtitle">Society</span>
           </span>
         </button>
 
@@ -64,7 +64,7 @@ export const Navbar = ({
         <button
           type="button"
           onClick={() => setIsOpen((open) => !open)}
-          className="grid h-10 w-10 place-items-center rounded-xl border border-lime-300/20 text-[#b8ff3d] transition-colors hover:bg-lime-300/10 lg:hidden"
+          className="grid h-10 w-10 place-items-center rounded-xl border border-[#06110a]/15 text-[#0f2a17] transition-colors hover:bg-[#0f2a17]/5 lg:hidden"
           aria-expanded={isOpen}
           aria-label={isOpen ? 'Close navigation' : 'Open navigation'}
         >
@@ -73,7 +73,7 @@ export const Navbar = ({
       </div>
 
       {isOpen && (
-        <div className="border-t border-lime-300/15 bg-[#030a06]/98 px-5 pb-5 pt-3 shadow-2xl backdrop-blur-xl lg:hidden">
+        <div className="brand-nav-dropdown px-5 pb-5 pt-3 shadow-2xl backdrop-blur-xl lg:hidden">
           <div className="mx-auto max-w-[1440px] space-y-1">
             {!isDashboard && NAV_LINKS.map((link) => (
               <a

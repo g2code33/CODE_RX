@@ -18,6 +18,7 @@ import { Footer } from './components/Footer';
 import { Dashboard } from './components/Dashboard';
 import { ResetPassword } from './components/ResetPassword';
 import { SectionLink } from './components/SectionLink';
+import { PharmacyBackground } from './components/PharmacyBackground';
 import { SECTION_MAP } from './data/mockData';
 import { INITIAL_SITE_CONTENT, SiteContent } from './data/siteState';
 import { auth, AuthUser } from './lib/cloudflare';
@@ -172,6 +173,7 @@ function App() {
             />
             <ValueCards />
             <section id="news" className="brand-section brand-section--panel border-y border-[#b8ff3d]/12 py-24 sm:py-28">
+              <PharmacyBackground layout="lab" />
               <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
                 <div className="mb-12 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
                   <div>
@@ -212,6 +214,7 @@ function App() {
       case 'community':
         return (
           <section id="community" className="brand-section brand-grid min-h-[70vh] py-28 sm:py-36">
+            <PharmacyBackground layout="clinic" />
             <div className="brand-glow right-[-12rem] top-20 opacity-50" />
             <div className="relative z-10 mx-auto flex min-h-[55vh] max-w-[1440px] items-center px-5 sm:px-8 lg:px-10">
               <div className="max-w-3xl">
@@ -226,6 +229,7 @@ function App() {
       case 'resources':
         return (
           <section id="resources" className="brand-section brand-section--alt min-h-[70vh] py-28 sm:py-36">
+            <PharmacyBackground layout="lab" />
             <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
               <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -295,6 +299,7 @@ function App() {
         {renderContent()}
         {!isDashboard && !isAdmin && (
           <section id="join" className="brand-section brand-grid relative overflow-hidden border-y border-[#b8ff3d]/20 py-28 sm:py-36">
+            <PharmacyBackground layout="hero" />
             <div className="brand-glow left-1/2 top-[-16rem] -translate-x-1/2 opacity-50" />
             <div className="brand-scanlines absolute inset-0" />
             <div className="relative z-10 mx-auto max-w-4xl px-5 text-center sm:px-8">
