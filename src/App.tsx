@@ -38,7 +38,20 @@ function App() {
     const saved = localStorage.getItem('codeRx_siteContent');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        // Defensive normalization to prevent "Cannot read properties of undefined (reading 'length')"
+        return {
+          ...INITIAL_SITE_CONTENT,
+          ...parsed,
+          home: { ...INITIAL_SITE_CONTENT.home, ...parsed.home },
+          about: { ...INITIAL_SITE_CONTENT.about, ...parsed.about },
+          learn: { ...INITIAL_SITE_CONTENT.learn, ...parsed.learn },
+          projects: Array.isArray(parsed.projects) ? parsed.projects : INITIAL_SITE_CONTENT.projects,
+          challenges: { ...INITIAL_SITE_CONTENT.challenges, ...parsed.challenges },
+          community: { ...INITIAL_SITE_CONTENT.community, ...parsed.community },
+          resources: { ...INITIAL_SITE_CONTENT.resources, ...parsed.resources },
+          terms: { ...INITIAL_SITE_CONTENT.terms, ...parsed.terms },
+        };
       } catch (e) {
         console.error('Failed to load saved content:', e);
         return INITIAL_SITE_CONTENT;
@@ -163,12 +176,35 @@ function App() {
     if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={setSiteContent} />;
     if (isDashboard) return <Dashboard user={user} />;
 
+    // Defensive fallbacks — prevents "Cannot read properties of undefined (reading 'length')"
+    const safeContent = {
+      ...siteContent,
+      home: {
+        ...siteContent.home,
+        latestNews: Array.isArray(siteContent.home?.latestNews) ? siteContent.home.latestNews : [],
+      },
+      about: {
+        ...siteContent.about,
+        tracks: Array.isArray(siteContent.about?.tracks) ? siteContent.about.tracks : [],
+        team: Array.isArray(siteContent.about?.team) ? siteContent.about.team : [],
+      },
+      learn: {
+        ...siteContent.learn,
+        steps: Array.isArray(siteContent.learn?.steps) ? siteContent.learn.steps : [],
+      },
+      projects: Array.isArray(siteContent.projects) ? siteContent.projects : [],
+      resources: {
+        ...siteContent.resources,
+        categories: Array.isArray(siteContent.resources?.categories) ? siteContent.resources.categories : [],
+      },
+    };
+
     switch (activeTab) {
       case 'home':
         return (
           <>
             <Hero 
-              content={siteContent.home} 
+              content={safeContent.home} 
               onJoin={handleOpenJoin}
             />
             <ValueCards />
@@ -183,7 +219,7 @@ function App() {
                   <SectionLink id="news" />
                 </div>
                 <div className="grid gap-4 md:grid-cols-3">
-                  {siteContent.home.latestNews.map((news, index) => (
+                  {(safeContent.home.latestNews || []).map((news, index) => (
                     <article key={news.id} className="brand-card brand-card-hover p-6 sm:p-7">
                       <div className="flex items-center justify-between"><span className="brand-number">0{index + 1} / {news.category}</span><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" /></div>
                       <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#f2f8ed]">{news.title}</h3>
@@ -199,16 +235,16 @@ function App() {
       case 'about':
         return (
           <>
-            <About mission={siteContent.about.mission} vision={siteContent.about.vision} motto={siteContent.about.motto} />
-            <WhatWeDo tracks={siteContent.about.tracks} />
-            <Leadership team={siteContent.about.team} />
+            <About mission={safeContent.about.mission} vision={safeContent.about.vision} motto={safeContent.about.motto} />
+            <WhatWeDo tracks={safeContent.about.tracks} />
+            <Leadership team={safeContent.about.team} />
             <Extras />
           </>
         );
       case 'learn':
-        return <Academy steps={siteContent.learn.steps} />;
+        return <Academy steps={safeContent.learn.steps} />;
       case 'projects':
-        return <Projects projects={siteContent.projects} />;
+        return <Projects projects={safeContent.projects} />;
       case 'challenges':
         return <Competitions active={siteContent.challenges.active} />;
       case 'community':
