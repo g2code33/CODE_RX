@@ -31,11 +31,11 @@ export const Navbar = ({
         >
           <span className="relative h-11 w-11 shrink-0 sm:h-12 sm:w-12">
             <span className="absolute inset-1 rounded-full bg-lime-300/10 blur-lg transition-opacity group-hover:opacity-100" />
-            <img src="/logo.png" alt="" className="brand-logo-glow relative h-full w-full object-contain" />
+            <img src="/logo-small.png" alt="" className="brand-logo-glow relative h-full w-full object-contain" />
           </span>
-          <span className="hidden min-[420px]:flex flex-col">
-            <span className="text-[0.92rem] font-black leading-none tracking-[0.12em] text-[#f2f8ed]">CODE <span className="text-[#b8ff3d]">Rx</span></span>
-            <span className="mt-1 text-[0.52rem] font-black uppercase tracking-[0.34em] text-[#8da18e]">Society / Ghana</span>
+          <span className="header-wordmark hidden min-[420px]:flex flex-col">
+            <span className="header-wordmark-title">CODE <span>Rx</span></span>
+            <span className="header-wordmark-subtitle">Society / Ghana</span>
           </span>
         </button>
 

@@ -543,3 +543,36 @@ section[id] {
     margin-top: 0.45rem !important;
   }
 }
+
+/* Header wordmark: larger and more distinctive than body copy, while still
+   staying legible beside the compact logo-small asset. */
+.header-wordmark {
+  gap: 0.28rem;
+  line-height: 1;
+}
+
+.header-wordmark-title {
+  color: var(--brand-white);
+  font-family: "Avenir Next", "Trebuchet MS", "Arial Rounded MT Bold", ui-sans-serif, sans-serif;
+  font-size: clamp(1.12rem, 1.8vw, 1.45rem);
+  font-weight: 950;
+  letter-spacing: 0.035em;
+  line-height: 0.95;
+  text-transform: uppercase;
+}
+
+.header-wordmark-title span {
+  color: var(--brand-lime);
+  font-style: italic;
+  letter-spacing: -0.02em;
+}
+
+.header-wordmark-subtitle {
+  color: var(--brand-lime);
+  font-family: "Avenir Next", "Trebuchet MS", ui-sans-serif, sans-serif;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.34em;
+  line-height: 1;
+  text-transform: uppercase;
+}
