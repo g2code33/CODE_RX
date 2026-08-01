@@ -240,6 +240,28 @@ npm run build
 4. Build output directory: `dist`
 5. Click **Deploy**
 
+### ⚠️ Deploy to Production (not Preview):
+
+Your site only stays on `https://coderxsociety.pages.dev` when the deployment is a
+**Production** deployment. Deployments made from any other branch (or without a
+branch) get a *Preview* URL like `ac197da5.coderxsociety.pages.dev`, and then
+`coderxsociety.pages.dev` stops working.
+
+Before deploying with the CLI, make sure the project's **Production branch** is set:
+
+1. Cloudflare dashboard → **Workers & Pages** → `coderxsociety` → **Settings**
+2. **Builds & deployments** → **Production branch** → set to `main` → **Save**
+
+Then always deploy with the branch flag matching it:
+
+```bash
+npm run build
+npx wrangler pages deploy dist --project-name coderxsociety --branch main
+```
+
+✅ The deployment will now show **Production** in the Deployments tab and your site
+will always be live at `https://coderxsociety.pages.dev`.
+
 ### Connect to D1 & R2:
 
 1. Go to your Pages project settings
@@ -404,12 +426,39 @@ git push origin main
 
 ```bash
 npm run build
+
+# Deploy backend Workers API
 wrangler deploy --env production
+
+# Deploy frontend to Cloudflare Pages PRODUCTION
+# (--branch main is required, otherwise it goes to a preview URL like
+#  ac197da5.coderxsociety.pages.dev and coderxsociety.pages.dev breaks)
+npx wrangler pages deploy dist --project-name coderxsociety --branch main
 ```
 
 ---
 
 ## ️ Troubleshooting
+
+### My site redirects to a weird URL like `ac197da5.coderxsociety.pages.dev`
+
+That hash URL is a **preview deployment** URL. It happens when your project has no
+**Production** deployment — usually because the deploy branch didn't match the
+project's **Production branch** (e.g. deployed without `--branch`, or the production
+branch is still the default `production` instead of `main`).
+
+**Fix (once):**
+1. Cloudflare dashboard → **Workers & Pages** → `coderxsociety` → **Deployments**
+   — if every deployment says **Preview**, there is no production deployment yet.
+2. Go to **Settings** → **Builds & deployments** → **Production branch** → set to `main` → **Save**.
+3. Redeploy to production:
+   ```bash
+   npm run build
+   npx wrangler pages deploy dist --project-name coderxsociety --branch main
+   ```
+4. The new deployment will show **Production**. `https://coderxsociety.pages.dev`
+   now serves the site — no more redirect to the hash URL. (Hard-refresh your
+   browser / clear cache once, since the old redirect may be cached.)
 
 ### API Not Responding?
 - Check Workers logs: `wrangler tail`
