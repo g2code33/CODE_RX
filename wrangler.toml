@@ -1,0 +1,36 @@
+# Cloudflare Workers Configuration for CODE Rx SOCIETY
+# This file configures your backend API, database, and storage
+
+name = "code-rx-api"
+main = "functions/[[path]].ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare Pages Integration
+[site]
+bucket = "./dist"
+
+# D1 Database (Structured Data)
+[[d1_databases]]
+binding = "DB"
+database_name = "code-rx-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# R2 Storage (Files & Images)
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "code-rx-storage"
+
+# Environment Variables
+[vars]
+ADMIN_EMAIL = "coderxsociety@gmail.com"
+TELEGRAM_LINK = "https://t.me/+EdRpfR1GTGNjM2Q0"
+JWT_SECRET = "your-secret-key-change-this"
+
+# Development environment
+[env.dev]
+name = "code-rx-api-dev"
+
+# Production environment
+[env.production]
+name = "code-rx-api-prod"
