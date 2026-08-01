@@ -1,4 +1,5 @@
 import { WHAT_WE_DO } from '../data/mockData';
+import { SectionLink } from './SectionLink';
 
 export const WhatWeDo = ({ tracks }: { tracks: typeof WHAT_WE_DO }) => {
   return (
@@ -7,6 +8,7 @@ export const WhatWeDo = ({ tracks }: { tracks: typeof WHAT_WE_DO }) => {
         <div className="text-center mb-20">
           <h2 className="text-5xl font-black text-slate-900 mb-4 tracking-tight">Society Tracks</h2>
           <p className="text-slate-500 max-w-2xl mx-auto font-medium text-lg">Exploring the intersection of pharmacy and technology through specialized tracks.</p>
+          <div className="mt-6 flex justify-center"><SectionLink id="what-we-do" /></div>
         </div>
 
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">

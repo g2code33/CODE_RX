@@ -1,9 +1,10 @@
 import { motion } from 'framer-motion';
 import { SiteContent } from '../data/siteState';
+import { SectionLink } from './SectionLink';
 
 export const Terms = ({ content }: { content: SiteContent['terms'] }) => {
   return (
-    <section className="py-32 bg-gradient-to-br from-emerald-50 to-teal-50 min-h-screen text-slate-700">
+    <section id="terms" className="py-32 bg-gradient-to-br from-emerald-50 to-teal-50 min-h-screen text-slate-700">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
@@ -12,6 +13,7 @@ export const Terms = ({ content }: { content: SiteContent['terms'] }) => {
         >
           <div className="text-center mb-24">
             <h1 className="text-6xl font-black text-slate-900 mb-4 tracking-tight">Terms <span className="text-emerald-500">&</span> Conditions</h1>
+            <div className="flex justify-center"><SectionLink id="terms" /></div>
             <p className="text-emerald-600 font-black tracking-[0.3em] text-xs uppercase mb-12">"Coding the Future of Pharmacy" 💊💻</p>
             
             <div className="inline-flex flex-wrap justify-center gap-12 p-8 bg-white rounded-3xl border border-emerald-100 shadow-lg">

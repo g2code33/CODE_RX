@@ -1,9 +1,13 @@
 import { CORE_VALUES } from '../data/mockData';
+import { SectionLink } from './SectionLink';
 
 export const ValueCards = () => {
   return (
-    <section className="py-24 bg-white">
+    <section id="values" className="py-24 bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-end mb-10">
+          <SectionLink id="values" />
+        </div>
         <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
           {CORE_VALUES.map((value, index) => (
             <div 
@@ -47,7 +51,10 @@ export const About = ({ mission, vision, motto }: { mission: string, vision: str
           <div className="lg:w-1/2">
             <div className="mb-12">
               <span className="text-emerald-600 font-bold tracking-[0.2em] uppercase text-xs">Who We Are</span>
-              <h2 className="text-5xl font-black text-slate-900 mt-2 mb-6 tracking-tight">Bridging Pharmacy & IT</h2>
+              <div className="flex items-center gap-4 mt-2 mb-6">
+                <h2 className="text-5xl font-black text-slate-900 tracking-tight">Bridging Pharmacy & IT</h2>
+                <SectionLink id="about" />
+              </div>
               <p className="text-lg text-slate-600 mb-8 leading-relaxed font-medium">
                 Code Rx Society is a Doctor of Pharmacy-focused technology and innovation society. We empower current and future pharmacy professionals with the skills to create technology-driven solutions.
               </p>

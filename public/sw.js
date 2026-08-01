@@ -2,7 +2,7 @@
 // Caches the app shell (the single-file index.html + logos) for offline
 // launch; API requests are never cached.
 
-const CACHE = 'code-rx-v1';
+const CACHE = 'code-rx-v2';
 const CORE = [
   '/',
   '/index.html',

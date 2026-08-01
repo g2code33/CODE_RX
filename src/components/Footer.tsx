@@ -34,8 +34,8 @@ export const Footer = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-12 mb-16">
             <div className="space-y-6">
               <div className="flex items-center gap-3">
-                <div className="w-20 h-20 overflow-hidden rounded-2xl border-2 border-emerald-400 shadow-md shadow-black/20">
-                  <img src="/logo-small.png" alt="Code Rx Logo" className="w-full h-full object-cover" />
+                <div className="w-12 h-12 shrink-0">
+                  <img src="/logo.png" alt="Code Rx Logo" className="w-full h-full object-contain" />
                 </div>
                 <div className="flex flex-col text-left">
                   <span className="font-black text-lg leading-none tracking-tight text-white">CODE Rx</span>
@@ -84,10 +84,12 @@ export const Footer = () => {
             <div>
               <h4 className="font-bold mb-6 text-lg">Quick Links</h4>
               <ul className="space-y-3 text-emerald-200 text-sm">
-                <li><button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="hover:text-white cursor-pointer transition-colors">About Us</button></li>
-                <li><button onClick={() => window.location.hash = 'learn'} className="hover:text-white cursor-pointer transition-colors">Academy</button></li>
-                <li><button onClick={() => window.location.hash = 'projects'} className="hover:text-white cursor-pointer transition-colors">Projects</button></li>
-                <li><button onClick={() => window.location.hash = 'challenges'} className="hover:text-white cursor-pointer transition-colors">Decoder Challenge</button></li>
+                <li><a href="#about" className="hover:text-white cursor-pointer transition-colors">About Us</a></li>
+                <li><a href="#learn" className="hover:text-white cursor-pointer transition-colors">Academy</a></li>
+                <li><a href="#projects" className="hover:text-white cursor-pointer transition-colors">Projects</a></li>
+                <li><a href="#challenges" className="hover:text-white cursor-pointer transition-colors">Decoder Challenge</a></li>
+                <li><a href="#community" className="hover:text-white cursor-pointer transition-colors">Community</a></li>
+                <li><a href="#resources" className="hover:text-white cursor-pointer transition-colors">Resources</a></li>
               </ul>
             </div>
 
@@ -137,7 +139,7 @@ export const Footer = () => {
             <div className="flex gap-6">
               <button onClick={() => setIsPrivacyOpen(true)} className="hover:text-white cursor-pointer transition-colors">Privacy Policy</button>
               <button onClick={() => setIsCodeOpen(true)} className="hover:text-white cursor-pointer transition-colors">Code of Conduct</button>
-              <button onClick={() => window.location.hash = 'terms'} className="hover:text-white cursor-pointer transition-colors">Terms of Service</button>
+              <a href="#terms" className="hover:text-white cursor-pointer transition-colors">Terms of Service</a>
             </div>
           </div>
         </div>
