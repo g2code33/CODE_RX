@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle } from 'lucide-react';
 import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
@@ -23,6 +23,18 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [forgotResult, setForgotResult] = useState<{ message: string; devResetLink?: string } | null>(null);
+
+  // Each time the modal opens, honour the mode requested by the caller.
+  // Without this, a previously opened Join form could remain active when the
+  // Member Portal asks for Login.
+  useEffect(() => {
+    if (!isOpen) return;
+    setMode(defaultMode === 'login' ? 'login' : 'join');
+    setIsApplied(false);
+    setError('');
+    setForgotResult(null);
+    setFormData({ name: '', email: '', phone: '', password: '' });
+  }, [isOpen, defaultMode]);
 
   const switchMode = (next: Mode) => {
     setMode(next);
@@ -65,7 +77,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
         setIsApplied(true);
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.');
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Something went wrong. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -75,7 +87,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
     return (
       <AnimatePresence>
         {isOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-emerald-950/60 backdrop-blur-sm" />
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="relative w-full max-w-md bg-white rounded-[2.5rem] p-12 text-center shadow-2xl">
               <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-6">
@@ -94,7 +106,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden p-4">
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -107,7 +119,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.9, opacity: 0, y: 20 }}
-            className="relative w-full max-w-md bg-white rounded-[2.5rem] shadow-2xl overflow-hidden max-h-[90vh] overflow-y-auto"
+            className="auth-dialog relative w-full max-w-md overflow-hidden rounded-[2.5rem] bg-white shadow-2xl"
           >
             <button
               onClick={onClose}
@@ -116,8 +128,8 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
               <X className="w-6 h-6" />
             </button>
 
-            <div className="p-8 md:p-12">
-              <div className="text-center mb-8">
+            <div className="auth-modal-content p-7 sm:p-8 md:p-10">
+              <div className="auth-modal-header mb-5 text-center">
                 <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
                   <img src="/logo.png" alt="Logo" className="w-10 h-10 object-contain" />
                 </div>
@@ -135,7 +147,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 </p>
               </div>
 
-              <form className="space-y-4" onSubmit={handleSubmit}>
+              <form className="auth-modal-form space-y-3" onSubmit={handleSubmit}>
                 {mode !== 'login' && (
                   <>
                     <div className="relative">
@@ -145,7 +157,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                         placeholder="Full Name"
                         value={formData.name}
                         onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                        className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                        className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                         required
                         minLength={2}
                       />
@@ -158,7 +170,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                           placeholder="Telephone Number"
                           value={formData.phone}
                           onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                          className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                          className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                         />
                       </div>
                     )}
@@ -172,7 +184,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                     placeholder="Email Address"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                    className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                     required
                   />
                 </div>
@@ -185,7 +197,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                       placeholder={mode === 'register' ? 'Password (min 6 characters)' : 'Password'}
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                      className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                      className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                       required
                       minLength={6}
                     />
@@ -248,7 +260,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="w-full py-4 bg-emerald-600 text-white font-black rounded-2xl hover:bg-emerald-500 shadow-lg shadow-emerald-200 transition-all flex items-center justify-center gap-2 group disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="auth-modal-submit w-full py-3 bg-emerald-600 text-white font-black rounded-2xl hover:bg-emerald-500 shadow-lg shadow-emerald-200 transition-all flex items-center justify-center gap-2 group disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSubmitting ? (
                     'Please wait...'
@@ -261,7 +273,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 </button>
               </form>
 
-              <div className="mt-8 text-center">
+              <div className="auth-modal-connect mt-5 text-center">
                 <p className="text-xs font-bold text-slate-400 mb-4 uppercase tracking-widest">Connect with us</p>
                 <a
                   href="https://t.me/+EdRpfR1GTGNjM2Q0"
@@ -273,7 +285,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 </a>
               </div>
 
-              <p className="text-center mt-8 text-sm font-medium text-slate-500">
+              <p className="auth-modal-footer text-center mt-5 text-sm font-medium text-slate-500">
                 {mode === 'login' ? (
                   <>
                     New here?{' '}

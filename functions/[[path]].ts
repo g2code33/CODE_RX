@@ -73,7 +73,16 @@ app.post('/api/auth/login', async (c) => {
       return c.json({ success: false, error: 'Invalid email or password' }, 401);
     }
 
-    const token = await signToken({ sub: String(user.id), email: user.email, role: user.role }, c.env.JWT_SECRET);
+    // Pages dashboard variables are separate from local wrangler variables.
+    // Fail clearly when the production JWT secret was not configured instead
+    // of returning the unhelpful generic login 500.
+    const jwtSecret = String(c.env.JWT_SECRET || '').trim();
+    if (!jwtSecret) {
+      console.error('[code-rx] login configuration error: JWT_SECRET is missing');
+      return c.json({ success: false, error: 'Authentication is not configured. Please contact the administrator.' }, 503);
+    }
+
+    const token = await signToken({ sub: String(user.id), email: user.email, role: user.role }, jwtSecret);
     return c.json({
       success: true,
       token,
@@ -99,13 +108,19 @@ app.post('/api/auth/register', async (c) => {
       return c.json({ success: false, error: 'Name, a valid email, and a password (min 6 characters) are required' }, 400);
     }
 
+    const jwtSecret = String(c.env.JWT_SECRET || '').trim();
+    if (!jwtSecret) {
+      console.error('[code-rx] registration configuration error: JWT_SECRET is missing');
+      return c.json({ success: false, error: 'Authentication is not configured. Please contact the administrator.' }, 503);
+    }
+
     const password_hash = await hashPassword(password);
     const result = await c.env.DB
       .prepare('INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, ?)')
       .bind(email, name, password_hash, 'member')
       .run();
 
-    const token = await signToken({ sub: String(result.meta.last_row_id), email, role: 'member' }, c.env.JWT_SECRET);
+    const token = await signToken({ sub: String(result.meta.last_row_id), email, role: 'member' }, jwtSecret);
     return c.json({
       success: true,
       token,
