@@ -1,57 +1,29 @@
-import { Handshake, GraduationCap, Briefcase, Rocket } from 'lucide-react';
+import { ArrowUpRight, Briefcase, GraduationCap, Handshake, Rocket } from 'lucide-react';
 import { SectionLink } from './SectionLink';
 
 export const Extras = () => {
   return (
-    <section id="extras" className="py-24 bg-slate-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-end mb-10">
-          <SectionLink id="extras" />
-        </div>
-        <div className="grid lg:grid-cols-2 gap-16">
-          {/* Partnerships */}
-          <div>
-            <div className="flex items-center gap-2 text-yellow-600 mb-6">
-               <Handshake className="w-6 h-6" />
-               <h3 className="text-2xl font-black uppercase tracking-tight">Partnerships</h3>
+    <section id="extras" className="brand-section brand-grid-fine py-24 sm:py-28">
+      <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
+        <div className="mb-12 flex items-end justify-between gap-4"><div><div className="brand-eyebrow">Connect & grow</div><h2 className="brand-title mt-5 text-3xl sm:text-4xl">More ways to<br /><span className="brand-gradient-text">plug in.</span></h2></div><SectionLink id="extras" /></div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="brand-card p-7 sm:p-9">
+            <div className="flex items-center gap-3 text-[#b8ff3d]"><Handshake className="h-5 w-5" /><span className="brand-number">PARTNERSHIPS</span></div>
+            <p className="mt-6 max-w-xl text-sm leading-7 text-[#8da18e]">We collaborate with universities, pharmacy organizations, and technology teams to bridge the gap between care and code.</p>
+            <div className="mt-7 grid grid-cols-2 gap-2">
+              {['UCC Pharmacy', 'PharmaLink', 'TechHealth', 'MediCode'].map((partner) => <div key={partner} className="rounded-lg border border-[#b8ff3d]/12 bg-[#b8ff3d]/5 px-3 py-4 text-center text-[0.62rem] font-bold uppercase tracking-wide text-[#a9bf9f]">{partner}</div>)}
             </div>
-            <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm">
-               <p className="text-gray-600 mb-8">We collaborate with top universities, pharmacy organizations, and tech giants to bridge the gap.</p>
-               <div className="grid grid-cols-2 gap-4">
-                  {['UCC Pharmacy', 'PharmaLink', 'TechHealth', 'MediCode'].map((partner, i) => (
-                    <div key={i} className="h-16 bg-slate-50 rounded-xl flex items-center justify-center font-bold text-gray-400 border border-slate-100 italic">
-                       {partner}
-                    </div>
-                  ))}
-               </div>
-               <button className="mt-8 w-full py-4 border-2 border-black font-black rounded-xl hover:bg-black hover:text-white transition-all">
-                  PARTNER WITH US
-               </button>
-            </div>
+            <button type="button" className="brand-button brand-button--ghost mt-7 w-full">Partner with us <ArrowUpRight className="h-4 w-4" /></button>
           </div>
 
-          {/* Opportunities */}
-          <div>
-            <div className="flex items-center gap-2 text-blue-600 mb-6">
-               <Briefcase className="w-6 h-6" />
-               <h3 className="text-2xl font-black uppercase tracking-tight">Opportunities</h3>
-            </div>
-            <div className="space-y-4">
-               {[
-                 { title: 'Clinical Tech Internship', org: 'PharmaLink AI', icon: Briefcase, color: 'text-blue-500' },
-                 { title: 'Tech Innovation Scholarship', org: 'Code Rx Foundation', icon: GraduationCap, color: 'text-purple-500' },
-                 { title: 'HealthTech Startup Grant', org: 'Health Launchpad', icon: Rocket, color: 'text-orange-500' },
-               ].map((opp, i) => (
-                 <div key={i} className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow flex items-center gap-6 group cursor-pointer">
-                    <div className={`w-12 h-12 rounded-xl bg-slate-50 flex items-center justify-center ${opp.color} group-hover:scale-110 transition-transform`}>
-                       <opp.icon className="w-6 h-6" />
-                    </div>
-                    <div>
-                       <h4 className="font-bold text-gray-900">{opp.title}</h4>
-                       <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">{opp.org}</p>
-                    </div>
-                 </div>
-               ))}
+          <div className="brand-card p-7 sm:p-9">
+            <div className="flex items-center gap-3 text-[#b8ff3d]"><Briefcase className="h-5 w-5" /><span className="brand-number">OPPORTUNITIES</span></div>
+            <div className="mt-6 space-y-3">
+              {[
+                { title: 'Clinical Tech Internship', org: 'PharmaLink AI', icon: Briefcase },
+                { title: 'Tech Innovation Scholarship', org: 'Code Rx Foundation', icon: GraduationCap },
+                { title: 'HealthTech Startup Grant', org: 'Health Launchpad', icon: Rocket }
+              ].map((opp) => <div key={opp.title} className="group flex items-center gap-4 rounded-xl border border-[#b8ff3d]/12 bg-[#b8ff3d]/5 p-4 transition-colors hover:border-[#b8ff3d]/40"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-[#b8ff3d]/20 text-[#b8ff3d]"><opp.icon className="h-4 w-4" /></span><span className="min-w-0"><span className="block truncate text-sm font-bold text-[#f2f8ed]">{opp.title}</span><span className="mt-1 block text-[0.58rem] font-black uppercase tracking-[0.15em] text-[#718675]">{opp.org}</span></span><ArrowUpRight className="ml-auto h-4 w-4 shrink-0 text-[#718675] transition-colors group-hover:text-[#b8ff3d]" /></div>)}
             </div>
           </div>
         </div>

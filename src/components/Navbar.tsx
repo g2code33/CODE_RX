@@ -1,97 +1,103 @@
 import { useState } from 'react';
-import { Menu, X } from 'lucide-react';
+import { Menu, X, ArrowUpRight } from 'lucide-react';
 import { NAV_LINKS } from '../data/mockData';
 
-export const Navbar = ({ 
-  onDashboardToggle, 
-  isDashboard, 
-  activeTab, 
-  setActiveTab 
-}: { 
-  onDashboardToggle: () => void, 
-  isDashboard: boolean,
-  activeTab: string,
-  setActiveTab: (id: string) => void
+export const Navbar = ({
+  onDashboardToggle,
+  isDashboard,
+  activeTab,
+  setActiveTab
+}: {
+  onDashboardToggle: () => void;
+  isDashboard: boolean;
+  activeTab: string;
+  setActiveTab: (id: string) => void;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
 
+  const goHome = () => {
+    setActiveTab('home');
+    setIsOpen(false);
+  };
+
   return (
-    <nav className="fixed w-full z-50 bg-white/95 backdrop-blur-md shadow-lg py-2 border-b border-emerald-100">
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-          <div className="flex items-center gap-2 sm:gap-3 cursor-pointer min-w-0" onClick={() => setActiveTab('home')}>
-            <div className="w-11 h-11 sm:w-11 sm:h-11 shrink-0">
-              <img src="/logo.png" alt="Code Rx Logo" className="w-full h-full object-contain" />
-            </div>
-            <div className="flex flex-col text-left">
-              <span className="font-black text-lg leading-none tracking-tight text-emerald-600 whitespace-nowrap">CODE Rx</span>
-              <span className="text-[9px] tracking-[0.25em] font-black text-emerald-400 uppercase whitespace-nowrap">Society</span>
-            </div>
-          </div>
+    <nav className="brand-nav fixed inset-x-0 top-0 z-50 backdrop-blur-xl">
+      <div className="mx-auto flex h-[4.5rem] max-w-[1440px] items-center justify-between px-5 sm:px-8 lg:px-10">
+        <button
+          type="button"
+          onClick={goHome}
+          className="group flex min-w-0 items-center gap-2.5 text-left"
+          aria-label="Go to CODE Rx Society home"
+        >
+          <span className="relative h-11 w-11 shrink-0 sm:h-12 sm:w-12">
+            <span className="absolute inset-1 rounded-full bg-lime-300/10 blur-lg transition-opacity group-hover:opacity-100" />
+            <img src="/logo.png" alt="" className="brand-logo-glow relative h-full w-full object-contain" />
+          </span>
+          <span className="hidden min-[420px]:flex flex-col">
+            <span className="text-[0.92rem] font-black leading-none tracking-[0.12em] text-[#f2f8ed]">CODE <span className="text-[#b8ff3d]">Rx</span></span>
+            <span className="mt-1 text-[0.52rem] font-black uppercase tracking-[0.34em] text-[#8da18e]">Society / Ghana</span>
+          </span>
+        </button>
 
-          {/* Desktop Nav */}
-          <div className="hidden md:flex items-center space-x-1">
-            {!isDashboard && NAV_LINKS.map((link) => (
-              <a
-                key={link.id}
-                href={`#${link.id}`}
-                onClick={() => setActiveTab(link.id)}
-                className={`px-3 py-2 text-sm font-bold transition-all uppercase tracking-wide rounded-lg ${
-                  activeTab === link.id 
-                    ? 'text-emerald-600 bg-emerald-50' 
-                    : 'text-slate-600 hover:text-emerald-600 hover:bg-emerald-50/50'
-                }`}
-              >
-                {link.label}
-              </a>
-            ))}
-            <button
-              onClick={onDashboardToggle}
-              className="bg-emerald-500 text-white px-6 py-2.5 rounded-full font-bold text-sm hover:bg-emerald-600 transition-all transform hover:scale-105 ml-4 shadow-lg shadow-emerald-200"
+        <div className="hidden items-center gap-0.5 lg:flex">
+          {!isDashboard && NAV_LINKS.map((link) => (
+            <a
+              key={link.id}
+              href={`#${link.id}`}
+              onClick={() => setActiveTab(link.id)}
+              aria-current={activeTab === link.id ? 'page' : undefined}
+              className={`brand-nav-link rounded-lg px-2.5 py-2.5 xl:px-3 ${activeTab === link.id ? 'is-active' : ''}`}
             >
-              {isDashboard ? 'Exit Portal' : 'Member Portal'}
-            </button>
-          </div>
-
-          {/* Mobile menu button */}
-          <div className="md:hidden flex items-center">
-            <button
-              onClick={() => setIsOpen(!isOpen)}
-              className="text-emerald-600 hover:text-emerald-700 transition-colors"
-            >
-              {isOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-            </button>
-          </div>
+              {link.label}
+            </a>
+          ))}
+          <button
+            type="button"
+            onClick={onDashboardToggle}
+            className="brand-button brand-button--small ml-3"
+          >
+            {isDashboard ? 'Exit Portal' : 'Member Portal'}
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </button>
         </div>
+
+        <button
+          type="button"
+          onClick={() => setIsOpen((open) => !open)}
+          className="grid h-10 w-10 place-items-center rounded-xl border border-lime-300/20 text-[#b8ff3d] transition-colors hover:bg-lime-300/10 lg:hidden"
+          aria-expanded={isOpen}
+          aria-label={isOpen ? 'Close navigation' : 'Open navigation'}
+        >
+          {isOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+        </button>
       </div>
 
-      {/* Mobile Nav */}
       {isOpen && (
-        <div className="md:hidden bg-emerald-700 border-t border-emerald-500 animate-in slide-in-from-top duration-300">
-          <div className="px-2 pt-2 pb-3 space-y-1 sm:px-3">
+        <div className="border-t border-lime-300/15 bg-[#030a06]/98 px-5 pb-5 pt-3 shadow-2xl backdrop-blur-xl lg:hidden">
+          <div className="mx-auto max-w-[1440px] space-y-1">
             {!isDashboard && NAV_LINKS.map((link) => (
               <a
                 key={link.id}
                 href={`#${link.id}`}
-                className={`block w-full text-left px-3 py-2 text-base font-black rounded-md ${
-                  activeTab === link.id ? 'text-white bg-emerald-800' : 'text-emerald-100 hover:text-white hover:bg-emerald-600'
-                }`}
                 onClick={() => {
                   setActiveTab(link.id);
                   setIsOpen(false);
                 }}
+                className={`brand-nav-link block rounded-xl px-4 py-3.5 ${activeTab === link.id ? 'is-active' : ''}`}
               >
                 {link.label}
               </a>
             ))}
             <button
+              type="button"
               onClick={() => {
                 onDashboardToggle();
                 setIsOpen(false);
               }}
-              className="w-full text-left px-3 py-2 text-base font-black text-white bg-emerald-900 mt-2 rounded-md"
+              className="brand-button mt-3 w-full"
             >
               {isDashboard ? 'Exit Portal' : 'Member Portal'}
+              <ArrowUpRight className="h-4 w-4" />
             </button>
           </div>
         </div>

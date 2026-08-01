@@ -70,6 +70,13 @@ async function apiCall<T = any>(endpoint: string, options: RequestInit = {}): Pr
   if (!response.ok) {
     throw new ApiError(data?.error || `Request failed (${response.status})`, response.status);
   }
+
+  // A Pages deployment that serves the SPA instead of the Functions route can
+  // return HTML with a 200 status. Fail with a useful message rather than a
+  // confusing `undefined token` error in the sign-in form.
+  if (data === null) {
+    throw new ApiError('The authentication service returned an invalid response.', response.status);
+  }
   return data as T;
 }
 
@@ -150,8 +157,11 @@ export const auth = {
   login: async (email: string, password: string): Promise<AuthUser> => {
     const data = await apiCall<{ token: string; user: AuthUser }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email: email.trim(), password }),
     });
+    if (!data?.token || !data?.user) {
+      throw new ApiError('The authentication service returned an invalid response.', 502);
+    }
     setToken(data.token);
     setStoredUser(data.user);
     return data.user;

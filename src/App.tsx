@@ -171,23 +171,27 @@ function App() {
               onJoin={handleOpenJoin}
             />
             <ValueCards />
-            <div id="news" className="py-20 bg-slate-50 border-y border-slate-100">
-               <div className="max-w-7xl mx-auto px-4">
-                  <div className="flex items-center justify-center gap-4 mb-8">
-                    <h3 className="text-3xl font-black uppercase tracking-tight">Latest News</h3>
-                    <SectionLink id="news" />
+            <section id="news" className="brand-section brand-section--panel border-y border-[#b8ff3d]/12 py-24 sm:py-28">
+              <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
+                <div className="mb-12 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+                  <div>
+                    <div className="brand-eyebrow mb-5">Latest signal</div>
+                    <h2 className="brand-title text-4xl sm:text-5xl">What’s moving<br /><span className="brand-gradient-text">the network.</span></h2>
                   </div>
-                  <div className="grid md:grid-cols-3 gap-8">
-                     {siteContent.home.latestNews.map(news => (
-                        <div key={news.id} className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 hover:shadow-xl transition-shadow">
-                           <span className="text-xs font-black text-emerald-600 uppercase tracking-widest">{news.category}</span>
-                           <h4 className="font-black text-xl mt-3 mb-3 text-slate-900">{news.title}</h4>
-                           <p className="text-sm text-slate-500 leading-relaxed">{news.text}</p>
-                        </div>
-                     ))}
-                  </div>
-               </div>
-            </div>
+                  <SectionLink id="news" />
+                </div>
+                <div className="grid gap-4 md:grid-cols-3">
+                  {siteContent.home.latestNews.map((news, index) => (
+                    <article key={news.id} className="brand-card brand-card-hover p-6 sm:p-7">
+                      <div className="flex items-center justify-between"><span className="brand-number">0{index + 1} / {news.category}</span><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" /></div>
+                      <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#f2f8ed]">{news.title}</h3>
+                      <p className="mt-4 text-sm leading-7 text-[#8da18e]">{news.text}</p>
+                      <div className="mt-7 h-px w-12 bg-[#b8ff3d]/60" />
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </section>
           </>
         );
       case 'about':
@@ -207,44 +211,28 @@ function App() {
         return <Competitions active={siteContent.challenges.active} />;
       case 'community':
         return (
-          <section id="community" className="py-40 bg-white min-h-[70vh] flex items-center justify-center">
-            <div className="text-center px-4">
-              <div className="flex items-center justify-center gap-4 mb-6">
-                <h2 className="text-5xl font-black tracking-tighter uppercase">{siteContent.community.hubTitle}</h2>
-                <SectionLink id="community" />
+          <section id="community" className="brand-section brand-grid min-h-[70vh] py-28 sm:py-36">
+            <div className="brand-glow right-[-12rem] top-20 opacity-50" />
+            <div className="relative z-10 mx-auto flex min-h-[55vh] max-w-[1440px] items-center px-5 sm:px-8 lg:px-10">
+              <div className="max-w-3xl">
+                <div className="mb-6 flex items-center gap-5"><div className="brand-eyebrow">Community hub</div><SectionLink id="community" /></div>
+                <h2 className="brand-title text-5xl sm:text-6xl lg:text-8xl">{siteContent.community.hubTitle}<span className="brand-gradient-text block text-[0.7em]">Find your people.</span></h2>
+                <p className="brand-copy mt-7 max-w-2xl text-base sm:text-lg">{siteContent.community.description}</p>
+                <a href={siteContent.community.telegramLink} target="_blank" rel="noopener noreferrer" className="brand-button mt-9">Join Telegram channel <ArrowRight className="h-4 w-4" /></a>
               </div>
-              <p className="text-xl text-slate-500 mb-8 max-w-2xl mx-auto">{siteContent.community.description}</p>
-              <a 
-                href={siteContent.community.telegramLink} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="inline-block px-10 py-4 bg-blue-500 text-white font-black rounded-2xl hover:bg-blue-600 transition-all shadow-xl shadow-blue-100"
-              >
-                JOIN TELEGRAM CHANNEL
-              </a>
             </div>
           </section>
         );
       case 'resources':
         return (
-          <section id="resources" className="py-40 bg-slate-50 min-h-[70vh]">
-            <div className="max-w-7xl mx-auto px-4">
-               <div className="flex items-center gap-4 mb-12">
-                  <h2 className="text-5xl font-black uppercase tracking-tighter">Resource Library</h2>
-                  <SectionLink id="resources" />
-               </div>
-               <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
-                  {siteContent.resources.categories.map(cat => (
-                    <div key={cat.name} className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
-                       <h3 className="text-xl font-bold mb-4">{cat.name}</h3>
-                       <ul className="space-y-3 text-sm text-slate-600">
-                          {cat.items.map((item, i) => (
-                            <li key={i}>• {item}</li>
-                          ))}
-                       </ul>
-                    </div>
-                  ))}
-               </div>
+          <section id="resources" className="brand-section brand-section--alt min-h-[70vh] py-28 sm:py-36">
+            <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
+              <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                {siteContent.resources.categories.map((cat, index) => (
+                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#8da18e]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
+                ))}
+              </div>
             </div>
           </section>
         );
@@ -270,7 +258,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-white font-sans text-slate-900 selection:bg-emerald-200 selection:text-black">
+    <div className="brand-app min-h-screen">
       <Navbar 
         onDashboardToggle={toggleDashboard} 
         isDashboard={isDashboard} 
@@ -295,7 +283,7 @@ function App() {
       {!isDashboard && !isAdmin && (
         <button 
           onClick={handleOpenJoin}
-          className="fixed bottom-8 right-8 w-16 h-16 bg-emerald-500 text-white rounded-full shadow-2xl flex items-center justify-center z-50 hover:scale-110 active:scale-90 transition-all group md:hidden border-2 border-white"
+          className="fixed bottom-6 right-5 z-50 grid h-14 w-14 place-items-center rounded-full border border-[#b8ff3d] bg-[#b8ff3d] text-[0.62rem] font-black uppercase tracking-wide text-[#020604] shadow-[0_0_24px_rgba(184,255,61,0.35)] transition-all hover:scale-110 active:scale-95 md:hidden"
         >
            <div className="flex flex-col items-center">
               <span className="text-xl font-black leading-none uppercase">Join</span>
@@ -306,42 +294,15 @@ function App() {
       <main>
         {renderContent()}
         {!isDashboard && !isAdmin && (
-          <section id="join" className="py-32 bg-gradient-to-br from-emerald-600 via-emerald-500 to-teal-600 relative overflow-hidden">
-             {/* Background Pattern */}
-             <div className="absolute inset-0 pointer-events-none opacity-10">
-                <motion.div animate={{ y: [0, -20, 0] }} transition={{ duration: 2, repeat: Infinity }} className="absolute left-[10%] top-[20%] text-6xl"></motion.div>
-                <motion.div animate={{ y: [0, -25, 0] }} transition={{ duration: 2.5, repeat: Infinity, delay: 0.5 }} className="absolute right-[15%] top-[10%] text-6xl"></motion.div>
-                <motion.div animate={{ y: [0, -15, 0] }} transition={{ duration: 3, repeat: Infinity, delay: 1 }} className="absolute left-[20%] bottom-[30%] text-5xl">🧪</motion.div>
-                <motion.div animate={{ y: [0, -18, 0] }} transition={{ duration: 2.8, repeat: Infinity, delay: 0.8 }} className="absolute right-[25%] bottom-[20%] text-5xl"></motion.div>
-             </div>
-
-             <div className="max-w-4xl mx-auto px-4 text-center relative z-10">
-                <div className="flex items-center justify-center gap-4 mb-8">
-                  <h2 className="text-5xl lg:text-7xl font-black leading-tight text-white tracking-tight">Ready to Code the Future?</h2>
-                  <SectionLink id="join" light />
-                </div>
-                <p className="text-2xl font-bold mb-12 text-emerald-100">Join the CODE Rx Society today and start building.</p>
-                <div className="flex flex-col sm:flex-row gap-6 justify-center">
-                   <motion.button 
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={handleOpenJoin}
-                    className="px-14 py-6 bg-white text-emerald-600 font-black rounded-full hover:bg-emerald-50 transition-all text-xl shadow-2xl shadow-white/20 flex items-center justify-center gap-3"
-                   >
-                      <span>JOIN THE SOCIETY</span>
-                      <ArrowRight className="w-6 h-6" />
-                   </motion.button>
-                   <motion.button 
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={() => window.scrollTo({ top: 800, behavior: 'smooth' })}
-                    className="px-14 py-6 bg-emerald-700/30 text-white font-black rounded-full border-2 border-white/30 hover:bg-emerald-700/50 backdrop-blur-sm transition-all text-xl flex items-center justify-center gap-2"
-                   >
-                      EXPLORE
-                      <ArrowRight className="w-5 h-5" />
-                   </motion.button>
-                </div>
-             </div>
+          <section id="join" className="brand-section brand-grid relative overflow-hidden border-y border-[#b8ff3d]/20 py-28 sm:py-36">
+            <div className="brand-glow left-1/2 top-[-16rem] -translate-x-1/2 opacity-50" />
+            <div className="brand-scanlines absolute inset-0" />
+            <div className="relative z-10 mx-auto max-w-4xl px-5 text-center sm:px-8">
+              <div className="mb-6 flex items-center justify-center gap-4"><div className="brand-eyebrow">Your next build starts here</div><SectionLink id="join" /></div>
+              <h2 className="brand-title text-5xl sm:text-6xl lg:text-8xl">Ready to code<br /><span className="brand-gradient-text">the future?</span></h2>
+              <p className="brand-copy mx-auto mt-7 max-w-2xl text-base sm:text-lg">Join the CODE Rx Society and turn your pharmacy perspective into something the world can use.</p>
+              <div className="mt-9 flex flex-col justify-center gap-3 sm:flex-row"><motion.button type="button" whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} onClick={handleOpenJoin} className="brand-button"><span>Join the society</span><ArrowRight className="h-4 w-4" /></motion.button><motion.button type="button" whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="brand-button brand-button--ghost">Back to top <ArrowRight className="h-4 w-4 -rotate-45" /></motion.button></div>
+            </div>
           </section>
         )}
       </main>

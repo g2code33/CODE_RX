@@ -1,17 +1,545 @@
 @import "tailwindcss";
 
+:root {
+  --brand-ink: #020604;
+  --brand-deep: #06110a;
+  --brand-panel: #0a170f;
+  --brand-panel-strong: #0e2115;
+  --brand-line: rgba(151, 255, 46, 0.18);
+  --brand-lime: #b8ff3d;
+  --brand-green: #55e51d;
+  --brand-mint: #caff85;
+  --brand-muted: #8da18e;
+  --brand-white: #f2f8ed;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  background: var(--brand-ink);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--brand-ink);
+  color: var(--brand-white);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+a,
+input,
+textarea {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: var(--brand-lime);
+  color: var(--brand-ink);
+}
+
 /* Every section with an id is a direct-link target (#section-id). Keep the
    fixed navbar from covering the top of a section when jumping to it. */
 section[id] {
   scroll-margin-top: 5.5rem;
 }
 
-html {
-  scroll-behavior: smooth;
-}
-
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Brand system ----------------------------------------------------------- */
+.brand-app {
+  background: var(--brand-ink);
+  color: var(--brand-white);
+  overflow-x: hidden;
+}
+
+.brand-section {
+  position: relative;
+  isolation: isolate;
+  background: var(--brand-ink);
+  overflow: hidden;
+}
+
+.brand-section--alt {
+  background: var(--brand-deep);
+}
+
+.brand-section--panel {
+  background: linear-gradient(180deg, var(--brand-deep), var(--brand-ink));
+}
+
+.brand-grid {
+  background-color: var(--brand-ink);
+  background-image:
+    linear-gradient(rgba(151, 255, 46, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(151, 255, 46, 0.045) 1px, transparent 1px);
+  background-size: 56px 56px;
+}
+
+.brand-grid-fine {
+  background-image:
+    linear-gradient(rgba(151, 255, 46, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(151, 255, 46, 0.035) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.brand-grid-fade {
+  mask-image: linear-gradient(to bottom, black, transparent 90%);
+  -webkit-mask-image: linear-gradient(to bottom, black, transparent 90%);
+}
+
+.brand-glow {
+  position: absolute;
+  width: 28rem;
+  height: 28rem;
+  border-radius: 999px;
+  background: rgba(117, 255, 26, 0.12);
+  filter: blur(90px);
+  pointer-events: none;
+}
+
+.brand-glow--small {
+  width: 12rem;
+  height: 12rem;
+  filter: blur(55px);
+  background: rgba(184, 255, 61, 0.18);
+}
+
+.brand-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--brand-lime);
+  font-size: 0.68rem;
+  line-height: 1;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.brand-eyebrow::before {
+  content: "";
+  width: 1.9rem;
+  height: 1px;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.brand-title {
+  color: var(--brand-white);
+  font-weight: 950;
+  letter-spacing: -0.065em;
+  line-height: 0.94;
+}
+
+.brand-copy {
+  color: var(--brand-muted);
+  line-height: 1.75;
+}
+
+.brand-gradient-text {
+  color: var(--brand-lime);
+  background: linear-gradient(100deg, var(--brand-white) 0%, var(--brand-lime) 55%, var(--brand-green) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.brand-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  border: 1px solid var(--brand-lime);
+  border-radius: 999px;
+  padding: 0.9rem 1.35rem;
+  color: var(--brand-ink);
+  background: var(--brand-lime);
+  box-shadow: 0 0 0 rgba(184, 255, 61, 0), 0 14px 34px rgba(113, 255, 31, 0.16);
+  font-size: 0.75rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+  transition: transform 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.brand-button:hover {
+  background: var(--brand-white);
+  box-shadow: 0 0 28px rgba(184, 255, 61, 0.32), 0 18px 40px rgba(113, 255, 31, 0.2);
+  transform: translateY(-2px);
+}
+
+.brand-button:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.brand-button--small {
+  padding: 0.72rem 1rem;
+  font-size: 0.65rem;
+}
+
+.brand-button--ghost {
+  border-color: rgba(202, 255, 133, 0.3);
+  color: var(--brand-white);
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+}
+
+.brand-button--ghost:hover {
+  border-color: var(--brand-lime);
+  color: var(--brand-lime);
+  background: rgba(184, 255, 61, 0.08);
+  box-shadow: 0 0 24px rgba(184, 255, 61, 0.12);
+}
+
+.brand-card {
+  border: 1px solid var(--brand-line);
+  border-radius: 1.35rem;
+  background: linear-gradient(145deg, rgba(14, 33, 21, 0.92), rgba(5, 15, 9, 0.92));
+  box-shadow: inset 0 1px 0 rgba(202, 255, 133, 0.04), 0 18px 60px rgba(0, 0, 0, 0.24);
+}
+
+.brand-card-hover {
+  transition: transform 220ms ease, border-color 220ms ease, box-shadow 220ms ease, background 220ms ease;
+}
+
+.brand-card-hover:hover {
+  border-color: rgba(184, 255, 61, 0.5);
+  background: linear-gradient(145deg, rgba(17, 43, 24, 0.98), rgba(5, 15, 9, 0.98));
+  box-shadow: 0 0 0 1px rgba(184, 255, 61, 0.08), 0 20px 70px rgba(0, 0, 0, 0.35), 0 0 32px rgba(113, 255, 31, 0.08);
+  transform: translateY(-5px);
+}
+
+.brand-icon {
+  display: grid;
+  place-items: center;
+  width: 3.25rem;
+  height: 3.25rem;
+  border: 1px solid rgba(184, 255, 61, 0.28);
+  border-radius: 0.9rem;
+  color: var(--brand-lime);
+  background: rgba(184, 255, 61, 0.08);
+  box-shadow: inset 0 0 22px rgba(184, 255, 61, 0.05), 0 0 20px rgba(184, 255, 61, 0.05);
+}
+
+.brand-rule {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--brand-lime), transparent);
+  opacity: 0.45;
+}
+
+.brand-number {
+  color: rgba(184, 255, 61, 0.62);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.brand-mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.brand-logo-glow {
+  filter: drop-shadow(0 0 18px rgba(139, 255, 42, 0.33)) drop-shadow(0 0 52px rgba(77, 255, 36, 0.16));
+}
+
+.brand-scanlines {
+  background-image: linear-gradient(to bottom, rgba(184, 255, 61, 0.05) 1px, transparent 1px);
+  background-size: 100% 5px;
+  mix-blend-mode: screen;
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.brand-nav {
+  background: rgba(2, 6, 4, 0.78);
+  border-bottom: 1px solid rgba(184, 255, 61, 0.14);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.2);
+}
+
+.brand-nav-link {
+  color: rgba(242, 248, 237, 0.62);
+  font-size: 0.67rem;
+  font-weight: 850;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.brand-nav-link:hover,
+.brand-nav-link.is-active {
+  color: var(--brand-lime);
+  background: rgba(184, 255, 61, 0.08);
+}
+
+.brand-input {
+  width: 100%;
+  border: 1px solid rgba(184, 255, 61, 0.18);
+  border-radius: 0.75rem;
+  background: #07120b;
+  color: var(--brand-white);
+  outline: none;
+}
+
+.brand-input:focus {
+  border-color: var(--brand-lime);
+  box-shadow: 0 0 0 3px rgba(184, 255, 61, 0.1);
+}
+
+@keyframes brand-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.98); }
+  50% { opacity: 1; transform: scale(1.02); }
+}
+
+@keyframes brand-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes brand-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.animate-brand-pulse {
+  animation: brand-pulse 4s ease-in-out infinite;
+}
+
+.animate-brand-float {
+  animation: brand-float 5s ease-in-out infinite;
+}
+
+/* Keep the existing portal/admin flows readable while the public site uses
+   the selected dark Code Rx identity. */
+.brand-app .bg-white {
+  background-color: var(--brand-panel) !important;
+}
+
+.brand-app .bg-slate-50 {
+  background-color: var(--brand-deep) !important;
+}
+
+.brand-app .bg-slate-100 {
+  background-color: var(--brand-panel-strong) !important;
+}
+
+.brand-app .text-slate-900,
+.brand-app .text-slate-800,
+.brand-app .text-slate-700 {
+  color: var(--brand-white) !important;
+}
+
+.brand-app .text-slate-600,
+.brand-app .text-slate-500 {
+  color: var(--brand-muted) !important;
+}
+
+.brand-app .text-slate-400 {
+  color: #718675 !important;
+}
+
+.brand-app .border-slate-100,
+.brand-app .border-slate-200,
+.brand-app .border-emerald-100,
+.brand-app .border-emerald-50 {
+  border-color: var(--brand-line) !important;
+}
+
+.brand-app .bg-emerald-50,
+.brand-app .bg-emerald-100 {
+  background-color: rgba(184, 255, 61, 0.08) !important;
+}
+
+.brand-app .bg-emerald-200 {
+  background-color: rgba(184, 255, 61, 0.14) !important;
+}
+
+.brand-app .text-emerald-600,
+.brand-app .text-emerald-700,
+.brand-app .text-emerald-500 {
+  color: var(--brand-lime) !important;
+}
+
+.brand-app .shadow-emerald-100,
+.brand-app .shadow-emerald-200 {
+  --tw-shadow-color: rgba(113, 255, 31, 0.12) !important;
+}
+
+.brand-app .hover\:bg-emerald-600:hover,
+.brand-app .hover\:bg-emerald-500:hover {
+  background-color: #8cf52e !important;
+}
+
+.brand-app .bg-emerald-500 {
+  background-color: var(--brand-green) !important;
+}
+
+.brand-app .bg-emerald-600 {
+  background-color: #38c919 !important;
+}
+
+.brand-app .bg-teal-600 {
+  background-color: #198c4d !important;
+}
+
+.brand-app .bg-gradient-to-br.from-emerald-50 {
+  background-image: linear-gradient(135deg, var(--brand-deep), var(--brand-ink)) !important;
+}
+
+/* Small screens need a little more room around the brand mark and controls. */
+@media (max-width: 640px) {
+  .brand-title {
+    letter-spacing: -0.055em;
+  }
+
+  .brand-glow {
+    width: 18rem;
+    height: 18rem;
+  }
+}
+
+/* Auth sheets intentionally stay fixed: the Join/Login experience should fit
+   inside the viewport instead of opening a second scrollable page. */
+.auth-dialog {
+  max-height: calc(100dvh - 1.5rem);
+}
+
+.auth-modal-content {
+  max-height: calc(100dvh - 1.5rem);
+  overflow: hidden;
+}
+
+.auth-modal-header h2 {
+  font-size: clamp(1.65rem, 3vw, 2rem);
+}
+
+.auth-modal-header > div:first-child {
+  width: 3.5rem;
+  height: 3.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.auth-modal-header > div:first-child img {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.auth-modal-field {
+  min-height: 2.85rem;
+}
+
+@media (max-height: 760px) {
+  .auth-modal-content {
+    padding: 1.25rem 1.5rem 1.35rem !important;
+  }
+
+  .auth-modal-header {
+    margin-bottom: 0.65rem !important;
+  }
+
+  .auth-modal-header > div:first-child {
+    width: 3rem;
+    height: 3rem;
+    margin-bottom: 0.45rem;
+  }
+
+  .auth-modal-header > div:first-child img {
+    width: 2.3rem;
+    height: 2.3rem;
+  }
+
+  .auth-modal-header h2 {
+    font-size: 1.55rem;
+  }
+
+  .auth-modal-header p {
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+  }
+
+  .auth-modal-form {
+    gap: 0.5rem !important;
+  }
+
+  .auth-modal-field {
+    min-height: 2.55rem;
+    padding-top: 0.65rem !important;
+    padding-bottom: 0.65rem !important;
+  }
+
+  .auth-modal-submit {
+    min-height: 2.7rem;
+  }
+
+  .auth-modal-connect {
+    margin-top: 0.65rem !important;
+  }
+
+  .auth-modal-connect p {
+    margin-bottom: 0.45rem !important;
+  }
+
+  .auth-modal-connect a {
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
+  }
+
+  .auth-modal-footer {
+    margin-top: 0.65rem !important;
+    font-size: 0.72rem;
+  }
+}
+
+@media (max-height: 640px) {
+  .auth-modal-content {
+    padding: 0.85rem 1.15rem 0.95rem !important;
+  }
+
+  .auth-modal-header > div:first-child {
+    display: none;
+  }
+
+  .auth-modal-header h2 {
+    font-size: 1.4rem;
+  }
+
+  .auth-modal-header p {
+    display: none;
+  }
+
+  .auth-modal-field {
+    min-height: 2.35rem;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+  }
+
+  .auth-modal-connect,
+  .auth-modal-footer {
+    margin-top: 0.45rem !important;
   }
 }
