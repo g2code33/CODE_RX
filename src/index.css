@@ -276,14 +276,48 @@ section[id] {
   pointer-events: none;
 }
 
-.brand-nav {
-  background: rgba(2, 6, 4, 0.78);
-  border-bottom: 1px solid rgba(184, 255, 61, 0.14);
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.2);
+/* Pharmacy "roaming the background" layer.
+   A subtle set of pills, syringes, capsules, bottles and lab glass that drift
+   slowly behind a brand-section's content. Purely decorative. */
+.pharmacy-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--brand-lime);
 }
 
+.pharmacy-bg-icon {
+  position: absolute;
+  width: var(--icon-size, 2rem);
+  height: var(--icon-size, 2rem);
+  opacity: var(--bg-op, 0.5);
+  filter: drop-shadow(0 0 12px rgba(184, 255, 61, 0.3)) drop-shadow(0 0 34px rgba(77, 255, 36, 0.12));
+  animation: pharmacy-roam var(--bg-dur, 26s) ease-in-out infinite;
+  animation-delay: var(--bg-delay, 0s);
+  transform: rotate(var(--bg-rot, 0deg));
+  will-change: transform;
+}
+
+@keyframes pharmacy-roam {
+  0%, 100% { transform: translate(0, 0) rotate(var(--bg-rot, 0deg)); }
+  20% { transform: translate(14px, -24px) rotate(calc(var(--bg-rot, 0deg) + 8deg)); }
+  45% { transform: translate(-20px, 12px) rotate(calc(var(--bg-rot, 0deg) - 6deg)); }
+  70% { transform: translate(10px, 22px) rotate(calc(var(--bg-rot, 0deg) + 5deg)); }
+}
+
+/* Header: clean white bar with lime-green accents, over the dark site. */
+.brand-nav {
+  background: #ffffff;
+  border-bottom: 1px solid rgba(6, 17, 10, 0.08);
+  box-shadow: 0 12px 34px rgba(2, 6, 4, 0.08);
+}
+
+/* Navigation links on the white header use dark, readable text with a
+   lime-green accent for hover / active states. */
 .brand-nav-link {
-  color: rgba(242, 248, 237, 0.62);
+  color: rgba(6, 17, 10, 0.72);
   font-size: 0.67rem;
   font-weight: 850;
   letter-spacing: 0.11em;
@@ -293,6 +327,22 @@ section[id] {
 
 .brand-nav-link:hover,
 .brand-nav-link.is-active {
+  color: #0e7a1c;
+  background: rgba(184, 255, 61, 0.3);
+}
+
+/* Mobile dropdown keeps the dark brand identity (links flip to light text). */
+.brand-nav-dropdown {
+  background: #030a06;
+  border-top: 1px solid rgba(184, 255, 61, 0.15);
+}
+
+.brand-nav-dropdown .brand-nav-link {
+  color: rgba(242, 248, 237, 0.72);
+}
+
+.brand-nav-dropdown .brand-nav-link:hover,
+.brand-nav-dropdown .brand-nav-link.is-active {
   color: var(--brand-lime);
   background: rgba(184, 255, 61, 0.08);
 }
@@ -552,7 +602,7 @@ section[id] {
 }
 
 .header-wordmark-title {
-  color: var(--brand-white);
+  color: #06110a;
   font-family: "Avenir Next", "Trebuchet MS", "Arial Rounded MT Bold", ui-sans-serif, sans-serif;
   font-size: clamp(1.12rem, 1.8vw, 1.45rem);
   font-weight: 950;
@@ -562,13 +612,13 @@ section[id] {
 }
 
 .header-wordmark-title span {
-  color: var(--brand-lime);
+  color: #13a82e;
   font-style: italic;
   letter-spacing: -0.02em;
 }
 
 .header-wordmark-subtitle {
-  color: var(--brand-lime);
+  color: #13a82e;
   font-family: "Avenir Next", "Trebuchet MS", ui-sans-serif, sans-serif;
   font-size: 0.62rem;
   font-weight: 900;

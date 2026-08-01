@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, ArrowRight, Code2, ExternalLink, Globe, Layers3, Users, Trophy } from 'lucide-react';
 import { Project } from '../data/mockData';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 const ProjectMark = ({ category, large = false }: { category: Project['category']; large?: boolean }) => {
   const Icon = category === 'AI Lab' ? Code2 : category === 'Competitions' ? Trophy : category === 'Software Engineering' ? Layers3 : Globe;
@@ -14,6 +15,7 @@ export const Projects = ({ projects }: { projects: Project[] }) => {
 
   return (
     <section id="projects" className="brand-section brand-grid-fine min-h-screen py-28 sm:py-36">
+      <PharmacyBackground layout="lab" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <AnimatePresence mode="wait">
           {!selectedProject ? (

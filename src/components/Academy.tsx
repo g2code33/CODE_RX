@@ -1,9 +1,11 @@
 import { ArrowRight, BookOpen, CheckCircle2, Terminal } from 'lucide-react';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Academy = ({ steps }: { steps: string[] }) => {
   return (
     <section id="learn" className="brand-section brand-grid py-28 sm:py-36">
+      <PharmacyBackground layout="lab" />
       <div className="brand-glow right-[-14rem] top-20 opacity-50" />
       <div className="relative z-10 mx-auto grid max-w-[1440px] items-center gap-16 px-5 sm:px-8 lg:grid-cols-[0.9fr_1.1fr] lg:px-10">
         <div>

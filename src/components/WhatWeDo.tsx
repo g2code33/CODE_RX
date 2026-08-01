@@ -1,10 +1,12 @@
 import { ArrowUpRight } from 'lucide-react';
 import { WHAT_WE_DO } from '../data/mockData';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const WhatWeDo = ({ tracks }: { tracks: typeof WHAT_WE_DO }) => {
   return (
     <section id="what-we-do" className="brand-section brand-section--alt py-28 sm:py-36">
+      <PharmacyBackground layout="hero" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <div className="mb-14 flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
           <div className="max-w-3xl">

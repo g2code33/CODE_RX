@@ -1,6 +1,7 @@
 import { ArrowUpRight, Check, Globe, Mail, Phone, Send, X } from 'lucide-react';
 import { FormEvent, useState } from 'react';
 import { db } from '../lib/cloudflare';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Footer = () => {
   const [isContactOpen, setIsContactOpen] = useState(false);
@@ -27,6 +28,7 @@ export const Footer = () => {
   return (
     <>
       <footer className="brand-section brand-grid border-t border-[#b8ff3d]/15 pt-20 sm:pt-28">
+        <PharmacyBackground layout="lab" />
         <div className="brand-scanlines absolute inset-0" />
         <div className="relative z-10 mx-auto max-w-[1440px] px-5 pb-8 sm:px-8 lg:px-10">
           <div className="grid gap-14 lg:grid-cols-[1.35fr_0.8fr_0.8fr_1fr]">

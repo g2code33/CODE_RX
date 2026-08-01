@@ -1,10 +1,12 @@
 import { Lock, Timer, Trophy, Users } from 'lucide-react';
 import { SiteContent } from '../data/siteState';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Competitions = ({ active }: { active: SiteContent['challenges']['active'] }) => {
   return (
     <section id="challenges" className="brand-section brand-section--alt brand-grid-fine relative overflow-hidden py-28 sm:py-36">
+      <PharmacyBackground layout="clinic" />
       <div className="brand-glow left-[-15rem] top-20 opacity-50" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <div className="mb-14 flex flex-col items-center text-center">

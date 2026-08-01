@@ -1,9 +1,11 @@
 import { ArrowUpRight, Briefcase, GraduationCap, Handshake, Rocket } from 'lucide-react';
 import { SectionLink } from './SectionLink';
+import { PharmacyBackground } from './PharmacyBackground';
 
 export const Extras = () => {
   return (
     <section id="extras" className="brand-section brand-grid-fine py-24 sm:py-28">
+      <PharmacyBackground layout="lab" />
       <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
         <div className="mb-12 flex items-end justify-between gap-4"><div><div className="brand-eyebrow">Connect & grow</div><h2 className="brand-title mt-5 text-3xl sm:text-4xl">More ways to<br /><span className="brand-gradient-text">plug in.</span></h2></div><SectionLink id="extras" /></div>
         <div className="grid gap-4 lg:grid-cols-2">
