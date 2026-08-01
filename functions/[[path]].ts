@@ -4,9 +4,10 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { jwt } from 'hono/jwt';
+import type { Env } from './env';
 
 // Initialize Hono app
-const app = new Hono();
+const app = new Hono<{ Bindings: Env }>();
 
 // Enable CORS for frontend access
 app.use('/*', cors());

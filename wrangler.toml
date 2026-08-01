@@ -1,7 +1,7 @@
 # Cloudflare Workers Configuration for CODE Rx SOCIETY
 # This file configures your backend API, database, and storage
 
-name = "code-rx-api"
+name = "coderxsociety-api"
 main = "functions/[[path]].ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -14,7 +14,7 @@ bucket = "./dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "code-rx-db"
-database_id = "YOUR_D1_DATABASE_ID"
+database_id = "2fa4bfb7-2b63-4cb3-8ae2-2b2644711b32"
 
 # R2 Storage (Files & Images)
 [[r2_buckets]]
