@@ -152,14 +152,20 @@ section[id] {
 }
 
 .brand-title {
-  color: var(--brand-text);
+  color: #0f172a;
   font-weight: 950;
   letter-spacing: -0.065em;
   line-height: 0.94;
 }
 
+.brand-copy,
+p,
+h1, h2, h3, h4, h5, h6 {
+  color: #0f172a;
+}
+
 .brand-copy {
-  color: var(--brand-text-secondary);
+  color: #475569;
   line-height: 1.75;
 }
 
@@ -315,6 +321,34 @@ section[id] {
   background: #ffffff;
   border-bottom: 1px solid #e2e8f0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* Footer keeps original dark professional theme */
+footer {
+  background: #020604 !important;
+  color: #f2f8ed !important;
+}
+
+footer .brand-card,
+footer .brand-section {
+  background: #06110a !important;
+  color: #f2f8ed !important;
+}
+
+footer a,
+footer p,
+footer span,
+footer li {
+  color: #8da18e !important;
+}
+
+footer a:hover {
+  color: #b8ff3d !important;
+}
+
+footer .brand-button {
+  background: #b8ff3d !important;
+  color: #020604 !important;
 }
 
 /* Navigation links on the white header use dark, readable text with a
