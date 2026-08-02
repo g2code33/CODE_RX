@@ -2,106 +2,54 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, ArrowRight, Code2, ExternalLink, Globe, Layers3, Users, Trophy } from 'lucide-react';
 import { Project } from '../data/mockData';
+import { getCopy, getMedia, MediaAsset } from '../data/editorSchema';
 import { SectionLink } from './SectionLink';
 import { PharmacyBackground } from './PharmacyBackground';
+import { EditableImage, EditableRegion, EditableText } from './VisualEditorContext';
 
 const ProjectMark = ({ category, large = false }: { category: Project['category']; large?: boolean }) => {
   const Icon = category === 'AI Lab' ? Code2 : category === 'Competitions' ? Trophy : category === 'Software Engineering' ? Layers3 : Globe;
   return <Icon className={large ? 'h-24 w-24 text-[#15803d]/25' : 'h-5 w-5 text-[#15803d]'} />;
 };
 
-export const Projects = ({ projects }: { projects: Project[] }) => {
+export const Projects = ({ projects, copy, media }: { projects: Project[]; copy?: Record<string, string>; media?: Record<string, MediaAsset> }) => {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
   return (
-    <section id="projects" className="brand-section brand-grid-fine min-h-screen py-28 sm:py-36">
-      <PharmacyBackground layout="lab" />
-      <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
-        <AnimatePresence mode="wait">
-          {!selectedProject ? (
-            <motion.div key="list" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
-              <div className="mb-14 flex flex-col justify-between gap-6 sm:flex-row sm:items-end">
-                <div>
-                  <div className="brand-eyebrow mb-5">Project lab</div>
-                  <h2 className="brand-title text-4xl sm:text-5xl lg:text-6xl">Ideas into<br /><span className="brand-gradient-text">working systems.</span></h2>
-                  <p className="brand-copy mt-6 max-w-2xl text-base">The central home for Code Rx initiatives — from pharmacy management to adaptive learning and AI.</p>
-                </div>
-                <SectionLink id="projects" />
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {projects.map((project, index) => (
-                  <motion.button
-                    key={project.id}
-                    type="button"
-                    whileHover={{ y: -6 }}
-                    onClick={() => setSelectedProject(project)}
-                    className="brand-card brand-card-hover group flex flex-col overflow-hidden text-left"
-                  >
-                    <div className="relative flex h-44 items-center justify-center overflow-hidden border-b border-[#16a34a]/20 bg-[#f8fafc]">
-                      <div className="brand-grid-fine absolute inset-0 opacity-60" />
-                      <div className="absolute inset-0 bg-[radial-gradient(circle,rgba(184,255,61,0.12),transparent_55%)]" />
-                      <ProjectMark category={project.category} large />
-                      <span className="absolute left-5 top-5 rounded-full border border-[#16a34a]/20 bg-[#b8ff3d]/8 px-3 py-1.5 text-[0.64rem] font-black uppercase tracking-[0.13em] text-[#15803d]">{project.category}</span>
-                      <span className="absolute bottom-5 right-5 brand-number">0{index + 1}</span>
-                    </div>
-                    <div className="flex flex-grow flex-col p-6 sm:p-7">
-                      <div className="flex items-start justify-between gap-4">
-                        <h3 className="text-xl font-black tracking-tight text-[#0f172a]">{project.title}</h3>
-                        <ArrowRight className="h-5 w-5 shrink-0 text-[#64748b] transition-all group-hover:translate-x-1 group-hover:text-[#15803d]" />
-                      </div>
-                      <p className="mt-3 flex-grow text-sm leading-7 text-[#475569]">{project.description}</p>
-                      <div className="mt-6 flex flex-wrap gap-2">
-                        {project.technology.slice(0, 3).map((tech, i) => <span key={i} className="rounded-md border border-[#16a34a]/20 bg-[#b8ff3d]/5 px-2.5 py-1 text-[0.64rem] font-bold uppercase tracking-wide text-[#475569]">{tech}</span>)}
-                      </div>
-                      <div className="mt-6 flex items-center justify-between border-t border-[#16a34a]/20 pt-4">
-                        <span className="text-[0.64rem] font-black uppercase tracking-[0.16em] text-[#64748b]">{project.status}</span>
-                        <span className="text-[0.65rem] font-black uppercase tracking-[0.15em] text-[#15803d]">Open case →</span>
-                      </div>
-                    </div>
-                  </motion.button>
-                ))}
-              </div>
-            </motion.div>
-          ) : (
-            <motion.div key="details" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="mx-auto max-w-6xl">
-              <button type="button" onClick={() => setSelectedProject(null)} className="mb-10 flex items-center gap-2 text-[0.68rem] font-black uppercase tracking-[0.16em] text-[#475569] transition-colors hover:text-[#15803d]"><ArrowLeft className="h-4 w-4" /> Back to lab</button>
-              <div className="grid gap-12 lg:grid-cols-[1fr_320px]">
-                <div>
-                  <div className="brand-eyebrow mb-5"><ProjectMark category={selectedProject.category} /> {selectedProject.category}</div>
-                  <h1 className="brand-title text-5xl sm:text-6xl">{selectedProject.title}</h1>
-                  <div className="mt-6 flex flex-wrap items-center gap-4 text-[0.68rem] font-bold uppercase tracking-[0.13em] text-[#475569]">
-                    <span className="text-[#15803d]">{selectedProject.status}</span><span className="h-1 w-1 rounded-full bg-[#94a992]" /><span className="brand-mono">Progress: {selectedProject.progress}%</span>
+    <EditableRegion elementKey="projects.section" label="Projects section" collection="projects">
+      <section id="projects" className="brand-section brand-grid-fine min-h-screen py-28 sm:py-36">
+        <PharmacyBackground layout="lab" />
+        <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
+          <AnimatePresence mode="wait">
+            {!selectedProject ? (
+              <motion.div key="list" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+                <div className="mb-14 flex flex-col justify-between gap-6 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5"><EditableText elementKey="projects.eyebrow" copyKey="projects.eyebrow" label="Projects eyebrow">{getCopy(copy, 'projects.eyebrow', 'Project lab')}</EditableText></div><h2 className="brand-title text-4xl sm:text-5xl lg:text-6xl"><EditableText elementKey="projects.title" copyKey="projects.title" label="Projects heading">{getCopy(copy, 'projects.title', 'Ideas into')}</EditableText><br /><span className="brand-gradient-text"><EditableText elementKey="projects.title-accent" copyKey="projects.titleAccent" label="Projects heading accent">{getCopy(copy, 'projects.titleAccent', 'working systems.')}</EditableText></span></h2><p className="brand-copy mt-6 max-w-2xl text-base"><EditableText elementKey="projects.description" copyKey="projects.description" label="Projects description">{getCopy(copy, 'projects.description', '')}</EditableText></p></div><SectionLink id="projects" /></div>
+                <EditableRegion elementKey="projects.grid" label="Project card grid" collection="projects" className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {projects.map((project, index) => { const image = getMedia(media, `projects.${project.id}.image`, { src: project.image || '', alt: project.title }); return (
+                    <motion.button key={project.id} type="button" whileHover={{ y: -6 }} onClick={() => setSelectedProject(project)} className="brand-card brand-card-hover group flex flex-col overflow-hidden text-left">
+                      <EditableRegion elementKey={`projects.card.${project.id}`} label={`${project.title} project card`} collection="projects" className="contents">
+                        <div className="relative flex h-44 items-center justify-center overflow-hidden border-b border-[#16a34a]/20 bg-[#f8fafc]">{image.src ? <EditableImage elementKey={`projects.card.${project.id}.image`} mediaKey={`projects.${project.id}.image`} label={`${project.title} image`} src={image.src} alt={image.alt || project.title} className="absolute inset-0 h-full w-full object-cover" /> : <><div className="brand-grid-fine absolute inset-0 opacity-60" /><div className="absolute inset-0 bg-[radial-gradient(circle,rgba(184,255,61,0.12),transparent_55%)]" /><ProjectMark category={project.category} large /><EditableImage elementKey={`projects.card.${project.id}.image`} mediaKey={`projects.${project.id}.image`} label={`${project.title} image upload`} src="" alt={project.title} className="absolute inset-0" /></>}<span className="absolute left-5 top-5 rounded-full border border-[#16a34a]/20 bg-[#b8ff3d]/8 px-3 py-1.5 text-[0.64rem] font-black uppercase tracking-[0.13em] text-[#15803d]"><EditableText elementKey={`projects.card.${project.id}.category`} copyKey={`projects.${index}.category`} label={`${project.title} category`}>{project.category}</EditableText></span><span className="absolute bottom-5 right-5 brand-number">0{index + 1}</span></div>
+                        <div className="flex flex-grow flex-col p-6 sm:p-7"><div className="flex items-start justify-between gap-4"><h3 className="text-xl font-black tracking-tight text-[#0f172a]"><EditableText elementKey={`projects.card.${project.id}.title`} copyKey={`projects.${index}.title`} label={`${project.title} title`}>{project.title}</EditableText></h3><ArrowRight className="h-5 w-5 shrink-0 text-[#64748b] transition-all group-hover:translate-x-1 group-hover:text-[#15803d]" /></div><p className="mt-3 flex-grow text-sm leading-7 text-[#475569]"><EditableText elementKey={`projects.card.${project.id}.description`} copyKey={`projects.${index}.description`} label={`${project.title} description`}>{project.description}</EditableText></p><div className="mt-6 flex flex-wrap gap-2">{project.technology.slice(0, 3).map((tech, techIndex) => <span key={techIndex} className="rounded-md border border-[#16a34a]/20 bg-[#b8ff3d]/5 px-2.5 py-1 text-[0.64rem] font-bold uppercase tracking-wide text-[#475569]"><EditableText elementKey={`projects.card.${project.id}.technology.${techIndex}`} copyKey={`projects.${index}.technology.${techIndex}`} label={`${project.title} technology ${techIndex + 1}`}>{tech}</EditableText></span>)}</div><div className="mt-6 flex items-center justify-between border-t border-[#16a34a]/20 pt-4"><span className="text-[0.64rem] font-black uppercase tracking-[0.16em] text-[#64748b]"><EditableText elementKey={`projects.card.${project.id}.status`} copyKey={`projects.${index}.status`} label={`${project.title} status`}>{project.status}</EditableText></span><span className="text-[0.65rem] font-black uppercase tracking-[0.15em] text-[#15803d]"><EditableText elementKey="projects.open-case" copyKey="projects.openCase" label="Open project label">{getCopy(copy, 'projects.openCase', 'Open case →')}</EditableText></span></div></div>
+                      </EditableRegion>
+                    </motion.button>
+                  ); })}
+                </EditableRegion>
+              </motion.div>
+            ) : (
+              <motion.div key="details" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="mx-auto max-w-6xl">
+                <button type="button" onClick={() => setSelectedProject(null)} className="mb-10 flex items-center gap-2 text-[0.68rem] font-black uppercase tracking-[0.16em] text-[#475569] transition-colors hover:text-[#15803d]"><ArrowLeft className="h-4 w-4" /><EditableText elementKey="projects.back" copyKey="projects.back" label="Back to projects label">{getCopy(copy, 'projects.back', 'Back to lab')}</EditableText></button>
+                <EditableRegion elementKey={`projects.detail.${selectedProject.id}`} label={`${selectedProject.title} project details`} collection="projects" className="grid gap-12 lg:grid-cols-[1fr_320px]">
+                  <div><div className="brand-eyebrow mb-5"><ProjectMark category={selectedProject.category} /> <EditableText elementKey={`projects.detail.${selectedProject.id}.category`} copyKey={`projects.${projects.indexOf(selectedProject)}.category`} label="Project category">{selectedProject.category}</EditableText></div><h1 className="brand-title text-5xl sm:text-6xl"><EditableText elementKey={`projects.detail.${selectedProject.id}.title`} copyKey={`projects.${projects.indexOf(selectedProject)}.title`} label="Project title">{selectedProject.title}</EditableText></h1><div className="mt-6 flex flex-wrap items-center gap-4 text-[0.68rem] font-bold uppercase tracking-[0.13em] text-[#475569]"><span className="text-[#15803d]">{selectedProject.status}</span><span className="h-1 w-1 rounded-full bg-[#94a992]" /><span className="brand-mono">Progress: <EditableText elementKey={`projects.detail.${selectedProject.id}.progress`} copyKey={`projects.${projects.indexOf(selectedProject)}.progress`} label="Project progress">{selectedProject.progress}%</EditableText></span></div><div className="mt-5 h-1.5 w-full overflow-hidden rounded-full bg-[#b8ff3d]/10"><motion.div initial={{ width: 0 }} animate={{ width: `${selectedProject.progress}%` }} className="h-full rounded-full bg-[#b8ff3d] shadow-[0_0_14px_#b8ff3d]" /></div>
+                    <div className="brand-card mt-12 p-7 sm:p-10"><div className="brand-eyebrow mb-7"><EditableText elementKey="projects.mission-label" copyKey="projects.missionLabel" label="Project mission label">{getCopy(copy, 'projects.missionLabel', 'The mission')}</EditableText></div><div className="grid gap-8 sm:grid-cols-2"><div><p className="brand-number mb-2"><EditableText elementKey="projects.problem-label" copyKey="projects.problemLabel" label="Project problem label">{getCopy(copy, 'projects.problemLabel', '01 / Problem')}</EditableText></p><p className="text-sm leading-7 text-[#475569]"><EditableText elementKey={`projects.detail.${selectedProject.id}.problem`} copyKey={`projects.${projects.indexOf(selectedProject)}.problem`} label="Project problem">{selectedProject.problem}</EditableText></p></div><div><p className="brand-number mb-2"><EditableText elementKey="projects.solution-label" copyKey="projects.solutionLabel" label="Project solution label">{getCopy(copy, 'projects.solutionLabel', '02 / Solution')}</EditableText></p><p className="text-sm leading-7 text-[#475569]"><EditableText elementKey={`projects.detail.${selectedProject.id}.solution`} copyKey={`projects.${projects.indexOf(selectedProject)}.solution`} label="Project solution">{selectedProject.solution}</EditableText></p></div></div></div>
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2"><div className="brand-card p-7"><h4 className="flex items-center gap-2 text-lg font-black text-[#0f172a]"><Code2 className="h-5 w-5 text-[#15803d]" /><EditableText elementKey="projects.technology-label" copyKey="projects.technologyLabel" label="Technology label">{getCopy(copy, 'projects.technologyLabel', 'Technology')}</EditableText></h4><div className="mt-5 flex flex-wrap gap-2">{selectedProject.technology.map((tech, i) => <span key={i} className="rounded-lg border border-[#16a34a]/20 bg-[#b8ff3d]/5 px-3 py-1.5 text-xs font-bold text-[#475569]">{tech}</span>)}</div></div><div className="brand-card p-7"><h4 className="flex items-center gap-2 text-lg font-black text-[#0f172a]"><Users className="h-5 w-5 text-[#15803d]" /><EditableText elementKey="projects.team-label" copyKey="projects.teamLabel" label="Project team label">{getCopy(copy, 'projects.teamLabel', 'Team')}</EditableText></h4><div className="mt-5 flex flex-wrap gap-2">{selectedProject.team.map((member, i) => <span key={i} className="rounded-lg border border-[#16a34a]/20 bg-[#b8ff3d]/5 px-3 py-1.5 text-xs font-bold text-[#475569]">{member}</span>)}</div></div></div>
                   </div>
-                  <div className="mt-5 h-1.5 w-full overflow-hidden rounded-full bg-[#b8ff3d]/10"><motion.div initial={{ width: 0 }} animate={{ width: `${selectedProject.progress}%` }} className="h-full rounded-full bg-[#b8ff3d] shadow-[0_0_14px_#b8ff3d]" /></div>
-
-                  <div className="brand-card mt-12 p-7 sm:p-10">
-                    <div className="brand-eyebrow mb-7">The mission</div>
-                    <div className="grid gap-8 sm:grid-cols-2">
-                      <div><p className="brand-number mb-2">01 / PROBLEM</p><p className="text-sm leading-7 text-[#475569]">{selectedProject.problem}</p></div>
-                      <div><p className="brand-number mb-2">02 / SOLUTION</p><p className="text-sm leading-7 text-[#475569]">{selectedProject.solution}</p></div>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <div className="brand-card p-7"><h4 className="flex items-center gap-2 text-lg font-black text-[#0f172a]"><Code2 className="h-5 w-5 text-[#15803d]" /> Technology</h4><div className="mt-5 flex flex-wrap gap-2">{selectedProject.technology.map((tech, i) => <span key={i} className="rounded-lg border border-[#16a34a]/20 bg-[#b8ff3d]/5 px-3 py-1.5 text-xs font-bold text-[#475569]">{tech}</span>)}</div></div>
-                    <div className="brand-card p-7"><h4 className="flex items-center gap-2 text-lg font-black text-[#0f172a]"><Users className="h-5 w-5 text-[#15803d]" /> Team</h4><div className="mt-5 flex flex-wrap gap-2">{selectedProject.team.map((member, i) => <span key={i} className="rounded-lg border border-[#16a34a]/20 bg-[#b8ff3d]/5 px-3 py-1.5 text-xs font-bold text-[#475569]">{member}</span>)}</div></div>
-                  </div>
-                </div>
-
-                <aside className="brand-card h-fit p-6 sm:p-7">
-                  <div className="mb-7 flex items-center justify-between"><span className="brand-number">PROJECT / LINKS</span><ExternalLink className="h-4 w-4 text-[#15803d]" /></div>
-                  <div className="space-y-3">
-                    <button type="button" className="flex w-full items-center justify-between rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 text-sm font-bold text-[#334155] transition-colors hover:border-[#b8ff3d]/40 hover:text-[#15803d]"><span className="flex items-center gap-3"><Code2 className="h-4 w-4 text-[#15803d]" />Repository</span><ExternalLink className="h-4 w-4" /></button>
-                    <button type="button" className="flex w-full items-center justify-between rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 text-sm font-bold text-[#334155] transition-colors hover:border-[#b8ff3d]/40 hover:text-[#15803d]"><span className="flex items-center gap-3"><Globe className="h-4 w-4 text-[#15803d]" />Live demo</span><ExternalLink className="h-4 w-4" /></button>
-                  </div>
-                  <div className="mt-10 border-t border-[#16a34a]/20 pt-7"><p className="text-xs leading-6 text-[#475569]">Want to help move this project forward? Join the society and contribute your perspective.</p><button type="button" className="brand-button mt-5 w-full">Join this project</button></div>
-                </aside>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    </section>
+                  <aside className="brand-card h-fit p-6 sm:p-7"><div className="mb-7 flex items-center justify-between"><span className="brand-number"><EditableText elementKey="projects.links-label" copyKey="projects.linksLabel" label="Project links label">{getCopy(copy, 'projects.linksLabel', 'Project / Links')}</EditableText></span><ExternalLink className="h-4 w-4 text-[#15803d]" /></div><div className="space-y-3"><EditableRegion elementKey={`projects.detail.${selectedProject.id}.github`} copyKey={`projects.${projects.indexOf(selectedProject)}.github`} label="Project repository link" className="block"><a href={selectedProject.github || '#'} target={selectedProject.github ? '_blank' : undefined} rel="noreferrer" className="flex w-full items-center justify-between rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 text-sm font-bold text-[#334155] transition-colors hover:border-[#b8ff3d]/40 hover:text-[#15803d]"><span className="flex items-center gap-3"><Code2 className="h-4 w-4 text-[#15803d]" /><EditableText elementKey="projects.repository-label" copyKey="projects.repositoryLabel" label="Repository label">{getCopy(copy, 'projects.repositoryLabel', 'Repository')}</EditableText></span><ExternalLink className="h-4 w-4" /></a></EditableRegion><EditableRegion elementKey={`projects.detail.${selectedProject.id}.demo`} copyKey={`projects.${projects.indexOf(selectedProject)}.demo`} label="Project live demo link" className="block"><a href={selectedProject.demo || '#'} target={selectedProject.demo ? '_blank' : undefined} rel="noreferrer" className="flex w-full items-center justify-between rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 text-sm font-bold text-[#334155] transition-colors hover:border-[#b8ff3d]/40 hover:text-[#15803d]"><span className="flex items-center gap-3"><Globe className="h-4 w-4 text-[#15803d]" /><EditableText elementKey="projects.demo-label" copyKey="projects.demoLabel" label="Live demo label">{getCopy(copy, 'projects.demoLabel', 'Live demo')}</EditableText></span><ExternalLink className="h-4 w-4" /></a></EditableRegion></div><div className="mt-10 border-t border-[#16a34a]/20 pt-7"><p className="text-xs leading-6 text-[#475569]"><EditableText elementKey="projects.contribute" copyKey="projects.contribute" label="Project contribution prompt">{getCopy(copy, 'projects.contribute', '')}</EditableText></p><button type="button" className="brand-button mt-5 w-full"><EditableText elementKey="projects.join-cta" copyKey="projects.joinCta" label="Project join button">{getCopy(copy, 'projects.joinCta', 'Join this project')}</EditableText></button></div></aside>
+                </EditableRegion>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </section>
+    </EditableRegion>
   );
 };

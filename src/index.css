@@ -188,7 +188,7 @@ h1, h2, h3, h4, h5, h6 {
   justify-content: center;
   gap: 0.7rem;
   border: 1px solid var(--brand-lime);
-  border-radius: 999px;
+  border-radius: var(--editor-button-radius, 999px);
   padding: 0.9rem 1.35rem;
   color: #03170a;
   background: var(--brand-lime);
@@ -233,7 +233,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .brand-card {
   border: 1px solid var(--brand-line);
-  border-radius: 1.35rem;
+  border-radius: var(--editor-card-radius, 1.35rem);
   background: var(--brand-panel);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 14px 30px -12px rgba(0, 0, 0, 0.55);
 }
@@ -329,10 +329,10 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
-/* Footer keeps original dark professional theme */
+/* Footer follows the editable site theme. */
 footer {
-  background: #f8fafc !important;
-  color: #0f172a !important;
+  background: var(--brand-deep);
+  color: var(--brand-text);
 }
 
 /* Navigation links on the white header use dark, readable text with a
@@ -558,6 +558,7 @@ footer {
     padding: 1.25rem 1.5rem 1.35rem !important;
   }
 
+
   .auth-modal-header {
     margin-bottom: 0.65rem !important;
   }
@@ -675,4 +676,312 @@ footer {
   letter-spacing: 0.32em;
   line-height: 1;
   text-transform: uppercase;
+}
+
+/* -----------------------------------------------------------------------
+   ADMIN CORE · LIVE WEBSITE BUILDER
+   These classes only become active when the admin selects Edit mode. The
+   public site receives the same components and design variables with none of
+   these controls or outlines. */
+.visual-editor-canvas {
+  min-height: 100vh;
+}
+
+.visual-editor-canvas .visual-editor-target {
+  position: relative;
+  cursor: crosshair;
+  outline: 1px dashed rgba(5, 150, 105, 0.52);
+  outline-offset: 3px;
+  transition: outline-color 150ms ease, box-shadow 150ms ease;
+}
+
+.visual-editor-canvas .visual-editor-target:hover,
+.visual-editor-canvas .visual-editor-target.is-selected {
+  outline: 2px solid #059669;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.16);
+}
+
+.visual-editor-canvas span.visual-editor-target::after,
+.visual-editor-canvas div.visual-editor-target::after {
+  position: absolute;
+  z-index: 60;
+  left: 0;
+  top: -1.55rem;
+  display: none;
+  content: attr(data-editor-label);
+  max-width: 12rem;
+  overflow: hidden;
+  border-radius: 0.45rem;
+  background: #047857;
+  padding: 0.22rem 0.42rem;
+  color: #fff;
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.visual-editor-canvas .visual-editor-target:hover::after,
+.visual-editor-canvas .visual-editor-target.is-selected::after {
+  display: block;
+}
+
+.visual-editor-preview {
+  min-height: 100vh;
+  padding-top: 3.05rem;
+  transition: max-width 220ms ease, margin 220ms ease, box-shadow 220ms ease;
+}
+
+.visual-editor-preview--tablet {
+  max-width: 920px;
+  margin: 0 auto;
+  box-shadow: 0 0 0 10px #d8e4dc, 0 18px 50px rgba(15, 23, 42, 0.18);
+}
+
+.visual-editor-preview--mobile {
+  max-width: 430px;
+  margin: 0 auto;
+  box-shadow: 0 0 0 10px #d8e4dc, 0 18px 50px rgba(15, 23, 42, 0.22);
+}
+
+.visual-editor-toolbar-button,
+.visual-editor-publish-button,
+.visual-editor-secondary-button,
+.visual-editor-save-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  border-radius: 0.65rem;
+  padding: 0.58rem 0.72rem;
+  font-size: 0.72rem;
+  font-weight: 850;
+  line-height: 1;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease, transform 150ms ease;
+}
+
+.visual-editor-toolbar-button {
+  border: 1px solid #bbd9c7;
+  color: #166534;
+  background: #fff;
+}
+
+.visual-editor-toolbar-button:hover,
+.visual-editor-toolbar-button.is-active {
+  border-color: #34d399;
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.visual-editor-toolbar-button--quiet {
+  border-color: transparent;
+  background: transparent;
+}
+
+.visual-editor-publish-button,
+.visual-editor-save-button {
+  border: 1px solid #047857;
+  color: #fff;
+  background: #047857;
+  box-shadow: 0 6px 14px rgba(4, 120, 87, 0.2);
+}
+
+.visual-editor-publish-button:hover:not(:disabled),
+.visual-editor-save-button:hover:not(:disabled) {
+  background: #065f46;
+  transform: translateY(-1px);
+}
+
+.visual-editor-publish-button:disabled,
+.visual-editor-save-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.visual-editor-secondary-button {
+  border: 1px solid #d8e1dc;
+  color: #475569;
+  background: #f8fafc;
+}
+
+.visual-editor-segment,
+.visual-editor-breakpoint {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #d8e1dc;
+  border-radius: 0.65rem;
+  background: #f8fafc;
+}
+
+.visual-editor-segment button,
+.visual-editor-breakpoint button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 0;
+  border-right: 1px solid #d8e1dc;
+  padding: 0.55rem 0.65rem;
+  color: #64748b;
+  background: transparent;
+  font-size: 0.68rem;
+  font-weight: 850;
+  line-height: 1;
+  text-transform: capitalize;
+}
+
+.visual-editor-segment button:last-child,
+.visual-editor-breakpoint button:last-child {
+  border-right: 0;
+}
+
+.visual-editor-segment button.is-active,
+.visual-editor-breakpoint button.is-active {
+  color: #fff;
+  background: #047857;
+}
+
+.visual-editor-add-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 90;
+  display: grid;
+  width: 12rem;
+  max-height: min(65vh, 27rem);
+  overflow-y: auto;
+  border: 1px solid #d8e1dc;
+  border-radius: 0.85rem;
+  background: #fff;
+  padding: 0.35rem;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
+}
+
+.visual-editor-add-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 0;
+  border-radius: 0.55rem;
+  padding: 0.65rem;
+  color: #334155;
+  background: transparent;
+  font-size: 0.75rem;
+  font-weight: 750;
+  text-align: left;
+}
+
+.visual-editor-add-menu button:hover {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.visual-editor-notice {
+  position: fixed;
+  right: 1rem;
+  top: 8rem;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  max-width: min(24rem, calc(100vw - 2rem));
+  border: 1px solid #a7f3d0;
+  border-radius: 0.75rem;
+  background: #ecfdf5;
+  padding: 0.7rem 0.85rem;
+  color: #047857;
+  box-shadow: 0 10px 28px rgba(4, 120, 87, 0.16);
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.visual-editor-inspector-tab {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 0.5rem;
+  padding: 0.46rem 0.55rem;
+  color: #64748b;
+  background: transparent;
+  font-size: 0.67rem;
+  font-weight: 850;
+}
+
+.visual-editor-inspector-tab.is-active {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.visual-editor-field {
+  display: block;
+}
+
+.visual-editor-field > span {
+  display: block;
+  margin: 0 0 0.35rem 0.1rem;
+  color: #64748b;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.visual-editor-field input,
+.visual-editor-field textarea,
+.visual-editor-field select {
+  width: 100%;
+  border: 1px solid #d8e1dc;
+  border-radius: 0.65rem;
+  padding: 0.64rem 0.7rem;
+  color: #0f172a;
+  background: #fff;
+  font-size: 0.78rem;
+  outline: none;
+  resize: vertical;
+}
+
+.visual-editor-field input:focus,
+.visual-editor-field textarea:focus,
+.visual-editor-field select:focus {
+  border-color: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+}
+
+.visual-editor-upload {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 2.7rem;
+  cursor: pointer;
+  border: 1px dashed #6ee7b7;
+  border-radius: 0.75rem;
+  color: #047857;
+  background: #ecfdf5;
+  font-size: 0.74rem;
+  font-weight: 850;
+}
+
+@media (max-width: 760px) {
+  .visual-editor-toolbar {
+    padding-left: 0.45rem;
+    padding-right: 0.45rem;
+  }
+
+  .visual-editor-preview {
+    padding-top: 3.4rem;
+  }
+
+  .visual-editor-preview--tablet,
+  .visual-editor-preview--mobile {
+    max-width: none;
+    box-shadow: none;
+  }
+
+  .visual-editor-inspector {
+    top: auto;
+    max-height: min(70vh, 38rem);
+  }
 }

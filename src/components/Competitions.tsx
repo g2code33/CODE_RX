@@ -1,40 +1,20 @@
 import { Lock, Timer, Trophy, Users } from 'lucide-react';
+import { getCopy } from '../data/editorSchema';
 import { SiteContent } from '../data/siteState';
 import { SectionLink } from './SectionLink';
 import { PharmacyBackground } from './PharmacyBackground';
+import { EditableRegion, EditableText } from './VisualEditorContext';
 
-export const Competitions = ({ active }: { active: SiteContent['challenges']['active'] }) => {
+export const Competitions = ({ active, copy }: { active: SiteContent['challenges']['active']; copy?: Record<string, string> }) => {
   return (
-    <section id="challenges" className="brand-section brand-section--alt brand-grid-fine relative overflow-hidden py-28 sm:py-36">
-      <PharmacyBackground layout="clinic" />
-      <div className="brand-glow left-[-15rem] top-20 opacity-50" />
-      <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
-        <div className="mb-14 flex flex-col items-center text-center">
-          <div className="brand-eyebrow mb-6"><Trophy className="h-3.5 w-3.5" /> Decoder challenge</div>
-          <h2 className="brand-title max-w-4xl text-4xl sm:text-5xl lg:text-6xl">Can you decode<br /><span className="brand-gradient-text">what others can't see?</span></h2>
-          <p className="brand-copy mt-6 max-w-2xl text-base">Push your limits in pharmacy-themed coding, cryptography, and problem-solving challenges.</p>
-          <div className="mt-6"><SectionLink id="challenges" /></div>
+    <EditableRegion elementKey="challenges.section" label="Challenges section" collection="challenges">
+      <section id="challenges" className="brand-section brand-section--alt brand-grid-fine relative overflow-hidden py-28 sm:py-36">
+        <PharmacyBackground layout="clinic" /><div className="brand-glow left-[-15rem] top-20 opacity-50" />
+        <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
+          <div className="mb-14 flex flex-col items-center text-center"><div className="brand-eyebrow mb-6"><Trophy className="h-3.5 w-3.5" /><EditableText elementKey="challenges.eyebrow" copyKey="challenges.eyebrow" label="Challenges eyebrow">{getCopy(copy, 'challenges.eyebrow', 'Decoder challenge')}</EditableText></div><h2 className="brand-title max-w-4xl text-4xl sm:text-5xl lg:text-6xl"><EditableText elementKey="challenges.title" copyKey="challenges.title" label="Challenges heading">{getCopy(copy, 'challenges.title', 'Can you decode')}</EditableText><br /><span className="brand-gradient-text"><EditableText elementKey="challenges.title-accent" copyKey="challenges.titleAccent" label="Challenges heading accent">{getCopy(copy, 'challenges.titleAccent', "what others can't see?")}</EditableText></span></h2><p className="brand-copy mt-6 max-w-2xl text-base"><EditableText elementKey="challenges.description" copyKey="challenges.description" label="Challenges description">{getCopy(copy, 'challenges.description', '')}</EditableText></p><div className="mt-6"><SectionLink id="challenges" /></div></div>
+          <EditableRegion elementKey="challenges.active-card" label="Active challenge card" collection="challenges" className="brand-card relative mx-auto max-w-5xl overflow-hidden p-7 sm:p-10 lg:p-14"><Lock className="absolute -right-8 -top-8 h-64 w-64 text-[#15803d]/5" /><div className="relative z-10"><div className="flex flex-col justify-between gap-7 border-b border-[#16a34a]/20 pb-8 sm:flex-row sm:items-start"><div><p className="brand-number mb-3"><EditableText elementKey="challenges.active-label" copyKey="challenges.activeLabel" label="Active challenge label">{getCopy(copy, 'challenges.activeLabel', 'Active / CRX-DECODER')}</EditableText></p><h3 className="text-3xl font-black tracking-tight text-[#0f172a] sm:text-4xl"><EditableText elementKey="challenges.id" copyKey="challenges.active.id" label="Challenge ID">{active.id}</EditableText></h3><div className="mt-4 flex flex-wrap items-center gap-4 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#475569]"><span className="rounded-full border border-[#16a34a]/20 bg-[#b8ff3d]/8 px-3 py-1.5 text-[#15803d]"><EditableText elementKey="challenges.difficulty" copyKey="challenges.active.difficulty" label="Challenge difficulty">{active.difficulty}</EditableText></span><span className="flex items-center gap-2"><Users className="h-3.5 w-3.5 text-[#15803d]" /><EditableText elementKey="challenges.participants" copyKey="challenges.active.participants" label="Challenge participants">{active.participants}</EditableText> <EditableText elementKey="challenges.participants-label" copyKey="challenges.participantsLabel" label="Participants label">{getCopy(copy, 'challenges.participantsLabel', 'participants')}</EditableText></span></div></div><div className="rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 sm:min-w-[170px]"><div className="flex items-center gap-2 text-[#15803d]"><Timer className="h-4 w-4" /><span className="brand-mono text-xl font-black"><EditableText elementKey="challenges.time" copyKey="challenges.active.timeRemaining" label="Challenge time remaining">{active.timeRemaining}</EditableText></span></div><p className="mt-2 text-[0.64rem] font-black uppercase tracking-[0.15em] text-[#64748b]"><EditableText elementKey="challenges.time-label" copyKey="challenges.timeLabel" label="Time remaining label">{getCopy(copy, 'challenges.timeLabel', 'Time remaining')}</EditableText></p></div></div><div className="grid gap-10 pt-9 lg:grid-cols-[1fr_260px] lg:items-center"><div><p className="text-sm leading-7 text-[#475569]"><EditableText elementKey="challenges.problem" copyKey="challenges.active.problem" label="Challenge brief">{active.problem}</EditableText></p><div className="mt-8 flex flex-wrap gap-8"><div><p className="brand-number"><EditableText elementKey="challenges.prize-label" copyKey="challenges.prizeLabel" label="Prize label">{getCopy(copy, 'challenges.prizeLabel', 'Prize')}</EditableText></p><p className="mt-2 text-2xl font-black text-[#15803d]"><EditableText elementKey="challenges.prize" copyKey="challenges.active.prize" label="Challenge prize">{active.prize}</EditableText></p></div><div className="h-12 w-px bg-[#b8ff3d]/15" /><div><p className="brand-number"><EditableText elementKey="challenges.reward-label" copyKey="challenges.rewardLabel" label="Reward label">{getCopy(copy, 'challenges.rewardLabel', 'Reward')}</EditableText></p><p className="mt-2 text-2xl font-black text-[#0f172a]"><EditableText elementKey="challenges.reward" copyKey="challenges.active.reward" label="Challenge reward">{active.reward}</EditableText></p></div></div></div><button type="button" className="brand-button w-full !rounded-xl !py-6"><EditableText elementKey="challenges.cta" copyKey="challenges.cta" label="Challenge button">{getCopy(copy, 'challenges.cta', 'Enter challenge')}</EditableText> <span>→</span></button></div></div></EditableRegion>
         </div>
-
-        <div className="brand-card relative mx-auto max-w-5xl overflow-hidden p-7 sm:p-10 lg:p-14">
-          <Lock className="absolute -right-8 -top-8 h-64 w-64 text-[#15803d]/5" />
-          <div className="relative z-10">
-            <div className="flex flex-col justify-between gap-7 border-b border-[#16a34a]/20 pb-8 sm:flex-row sm:items-start">
-              <div>
-                <p className="brand-number mb-3">ACTIVE / CRX-DECODER</p>
-                <h3 className="text-3xl font-black tracking-tight text-[#0f172a] sm:text-4xl">{active.id}</h3>
-                <div className="mt-4 flex flex-wrap items-center gap-4 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#475569]"><span className="rounded-full border border-[#16a34a]/20 bg-[#b8ff3d]/8 px-3 py-1.5 text-[#15803d]">{active.difficulty}</span><span className="flex items-center gap-2"><Users className="h-3.5 w-3.5 text-[#15803d]" /> {active.participants} participants</span></div>
-              </div>
-              <div className="rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 sm:min-w-[170px]"><div className="flex items-center gap-2 text-[#15803d]"><Timer className="h-4 w-4" /><span className="brand-mono text-xl font-black">{active.timeRemaining}</span></div><p className="mt-2 text-[0.64rem] font-black uppercase tracking-[0.15em] text-[#64748b]">Time remaining</p></div>
-            </div>
-
-            <div className="grid gap-10 pt-9 lg:grid-cols-[1fr_260px] lg:items-center">
-              <div><p className="text-sm leading-7 text-[#475569]">{active.problem}</p><div className="mt-8 flex flex-wrap gap-8"><div><p className="brand-number">PRIZE</p><p className="mt-2 text-2xl font-black text-[#15803d]">{active.prize}</p></div><div className="h-12 w-px bg-[#b8ff3d]/15" /><div><p className="brand-number">REWARD</p><p className="mt-2 text-2xl font-black text-[#0f172a]">{active.reward}</p></div></div></div>
-              <button type="button" className="brand-button w-full !rounded-xl !py-6">Enter challenge <span>→</span></button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
+      </section>
+    </EditableRegion>
   );
 };

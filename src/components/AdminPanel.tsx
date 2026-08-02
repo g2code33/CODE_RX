@@ -25,8 +25,10 @@ import {
 } from 'lucide-react';
 import { SiteContent, INITIAL_SITE_CONTENT, normalizeSiteContent } from '../data/siteState';
 import { db, auth } from '../lib/cloudflare';
+import { VisualEditor } from './VisualEditor';
 
 const STORAGE_KEY = 'codeRx_siteContent';
+const PENDING_PUBLISH_KEY = 'codeRx_pendingSiteContent';
 
 // Applications Section Component
 const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) => void }) => {
@@ -700,10 +702,20 @@ const SecuritySection = () => {
 
 export const AdminPanel = ({ 
   siteContent, 
-  setSiteContent 
+  setSiteContent,
+  workspace,
+  onWorkspaceChange,
+  activeTab,
+  onNavigate,
+  onJoin,
 }: { 
   siteContent: SiteContent, 
-  setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>> 
+  setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>>;
+  workspace: 'controller' | 'builder';
+  onWorkspaceChange: (workspace: 'controller' | 'builder') => void;
+  activeTab: string;
+  onNavigate: (id: string) => void;
+  onJoin?: () => void;
 }) => {
   const [activeView, setActiveView] = useState<'overview' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -713,6 +725,8 @@ export const AdminPanel = ({
   const [savedToStorage, setSavedToStorage] = useState(false);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [hasPendingPublish, setHasPendingPublish] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   // Defensive: never trust external payloads to have the full schema.
   const projectsList = Array.isArray(siteContent.projects) ? siteContent.projects : [];
@@ -720,6 +734,23 @@ export const AdminPanel = ({
   // Load from Cloudflare D1 on mount (with localStorage fallback)
   useEffect(() => {
     const loadContent = async () => {
+      // A per-item save that fails must survive a refresh. Pending content is
+      // intentionally preferred until the admin explicitly retries Publish all.
+      try {
+        const pending = localStorage.getItem(PENDING_PUBLISH_KEY);
+        if (pending) {
+          const normalized = normalizeSiteContent(JSON.parse(pending));
+          setSiteContent(normalized);
+          setContentHistory([normalized]);
+          setHistoryIndex(0);
+          setHasPendingPublish(true);
+          setHasUnsavedChanges(true);
+          setSavedToStorage(true);
+          return;
+        }
+      } catch {
+        localStorage.removeItem(PENDING_PUBLISH_KEY);
+      }
       try {
         // Try to load from the API first
         const content = await db.siteContent.get();
@@ -794,26 +825,50 @@ export const AdminPanel = ({
     }
   };
 
-  const handleSave = async () => {
+  /** Persist a supplied snapshot. Visual-editor saves call this immediately;
+   * controller saves call it with the current draft. A failure is never treated
+   * as published and is kept locally for Publish all to retry. */
+  const persistContent = async (contentToPublish: SiteContent, showFailureAlert = false): Promise<boolean> => {
+    setIsPublishing(true);
     try {
-      // Save to Cloudflare D1
-      await db.siteContent.update(siteContent);
-      
-      // Also save to localStorage as backup
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(siteContent));
-      
+      const normalized = normalizeSiteContent(contentToPublish);
+      await db.siteContent.update(normalized);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+      localStorage.removeItem(PENDING_PUBLISH_KEY);
       setShowSuccess(true);
       setSavedToStorage(true);
-      setTimeout(() => setShowSuccess(false), 3000);
+      setHasPendingPublish(false);
       setHasUnsavedChanges(false);
-      
-      // Dispatch custom event to notify other components of the change
-      window.dispatchEvent(new CustomEvent('siteContentUpdated', { detail: siteContent }));
+      setTimeout(() => setShowSuccess(false), 3000);
+      window.dispatchEvent(new CustomEvent('siteContentUpdated', { detail: normalized }));
+      return true;
     } catch (error) {
       console.error('Failed to save to Cloudflare:', error);
-      alert('Could not save to the database. Check that the API and D1 binding are working.');
+      // The latest full content snapshot is a durable retry queue. It also lets
+      // the live canvas recover exactly after a page refresh or connection loss.
+      localStorage.setItem(PENDING_PUBLISH_KEY, JSON.stringify(contentToPublish));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(contentToPublish));
+      setHasPendingPublish(true);
+      setHasUnsavedChanges(true);
+      if (showFailureAlert) alert('Could not publish to the database. Your changes are protected locally; use Publish all to retry.');
+      return false;
+    } finally {
+      setIsPublishing(false);
     }
   };
+
+  const handleSave = async () => {
+    await persistContent(siteContent, true);
+  };
+
+  const handleImmediatePublish = async (nextContent: SiteContent) => {
+    const normalized = normalizeSiteContent(nextContent);
+    setSiteContent(normalized);
+    setHasUnsavedChanges(true);
+    return persistContent(normalized, false);
+  };
+
+  const handlePublishAll = async () => persistContent(siteContent, false);
 
   const handleUpdateHome = (updates: Partial<SiteContent['home']>) => {
     setSiteContent(prev => ({
@@ -846,6 +901,22 @@ export const AdminPanel = ({
     const newTeam = siteContent.about.team.filter((_, i) => i !== index);
     handleUpdateAbout({ team: newTeam });
   };
+
+  if (workspace === 'builder') {
+    return (
+      <VisualEditor
+        siteContent={siteContent}
+        activeTab={activeTab}
+        onNavigate={onNavigate}
+        onJoin={onJoin}
+        onExit={() => onWorkspaceChange('controller')}
+        onImmediatePublish={handleImmediatePublish}
+        onPublishAll={handlePublishAll}
+        isPublishing={isPublishing}
+        hasPendingChanges={hasPendingPublish || hasUnsavedChanges}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 pt-20">
@@ -893,6 +964,15 @@ export const AdminPanel = ({
                 </div>
               )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => onWorkspaceChange('builder')}
+              className="mb-4 flex w-full items-center justify-between rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-left transition-colors hover:border-emerald-400 hover:bg-emerald-100"
+            >
+              <span><span className="block text-xs font-black uppercase tracking-widest text-emerald-700">Second view</span><span className="mt-1 block text-sm font-black text-slate-900">Live Website Builder</span><span className="mt-1 block text-xs text-slate-500">Edit and publish directly on the site.</span></span>
+              <Edit3 className="h-5 w-5 text-emerald-600" />
+            </button>
 
             {/* Action Buttons */}
             <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm mb-4 space-y-2">
@@ -1283,7 +1363,7 @@ export const AdminPanel = ({
                         onChange={(e) => {
                           const newSteps = [...siteContent.learn.steps];
                           newSteps[idx] = e.target.value;
-                          setSiteContent({...siteContent, learn: {steps: newSteps}});
+                          setSiteContent({...siteContent, learn: { ...siteContent.learn, steps: newSteps }});
                           setHasUnsavedChanges(true);
                         }}
                         className="bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-sm flex-grow"
@@ -1291,7 +1371,7 @@ export const AdminPanel = ({
                       <button 
                         onClick={() => {
                           const newSteps = siteContent.learn.steps.filter((_, i) => i !== idx);
-                          setSiteContent({...siteContent, learn: {steps: newSteps}});
+                          setSiteContent({...siteContent, learn: { ...siteContent.learn, steps: newSteps }});
                           setHasUnsavedChanges(true);
                         }}
                         className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-all"
@@ -1303,7 +1383,7 @@ export const AdminPanel = ({
                   <button 
                     onClick={() => {
                       const newSteps = [...siteContent.learn.steps, 'New Module'];
-                      setSiteContent({...siteContent, learn: {steps: newSteps}});
+                      setSiteContent({...siteContent, learn: { ...siteContent.learn, steps: newSteps }});
                       setHasUnsavedChanges(true);
                     }}
                     className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 font-bold hover:border-emerald-500 hover:text-emerald-500 transition-all"

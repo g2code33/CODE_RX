@@ -1,4 +1,26 @@
-import { INITIAL_PROJECTS, WHAT_WE_DO } from './mockData';
+import { INITIAL_PROJECTS, WHAT_WE_DO, Project } from './mockData';
+import {
+  CoreValueContent,
+  DEFAULT_MEDIA,
+  DEFAULT_SITE_COPY,
+  DEFAULT_SITE_DESIGN,
+  DEFAULT_SITE_LINKS,
+  ExtrasContent,
+  MediaAsset,
+  SiteDesign,
+  TrackContent,
+} from './editorSchema';
+
+export interface CustomBlock {
+  id: string;
+  page: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+  buttonLabel: string;
+  buttonLink: string;
+  image?: string;
+}
 
 export interface SiteContent {
   home: {
@@ -14,18 +36,20 @@ export interface SiteContent {
       title: string;
       text: string;
     }>;
+    coreValues: CoreValueContent[];
   };
   about: {
     mission: string;
     vision: string;
     motto: string;
     team: Array<{ name: string; role: string; image: string }>;
-    tracks: typeof WHAT_WE_DO;
+    tracks: TrackContent[];
   };
   learn: {
     steps: string[];
+    benefits: string[];
   };
-  projects: typeof INITIAL_PROJECTS;
+  projects: Project[];
   challenges: {
     active: {
       id: string;
@@ -58,7 +82,38 @@ export interface SiteContent {
       content: string;
     }>;
   };
+  extras: ExtrasContent;
+  /** Reusable visual sections added from the live builder. */
+  customBlocks: CustomBlock[];
+  /** Public copy which used to be hardcoded inside individual components. */
+  copy: Record<string, string>;
+  links: Record<string, string>;
+  media: Record<string, MediaAsset>;
+  design: SiteDesign;
 }
+
+const DEFAULT_TRACKS: TrackContent[] = WHAT_WE_DO.map((track, index) => ({
+  id: `track-${index + 1}`,
+  title: track.title,
+  items: [...track.items],
+  icon: ['terminal', 'stethoscope', 'cpu', 'database', 'shield', 'lightbulb'][index] || 'terminal',
+}));
+
+const DEFAULT_CORE_VALUES: CoreValueContent[] = [
+  { id: 'pharmacy', title: 'Pharmacy', description: 'Improving pharmaceutical practice through technology.', icon: 'stethoscope' },
+  { id: 'coding', title: 'Coding', description: 'Building programming and software-development skills.', icon: 'code' },
+  { id: 'ai', title: 'AI & Digital Health', description: 'Exploring responsible AI and digital healthcare.', icon: 'cpu' },
+  { id: 'innovation', title: 'Innovation', description: 'Turning pharmacy problems into technology solutions.', icon: 'lightbulb' },
+];
+
+const DEFAULT_EXTRAS: ExtrasContent = {
+  partnerships: ['UCC Pharmacy', 'PharmaLink', 'TechHealth', 'MediCode'],
+  opportunities: [
+    { id: 'clinical-tech-internship', title: 'Clinical Tech Internship', organization: 'PharmaLink AI', icon: 'briefcase' },
+    { id: 'innovation-scholarship', title: 'Tech Innovation Scholarship', organization: 'Code Rx Foundation', icon: 'graduation-cap' },
+    { id: 'startup-grant', title: 'HealthTech Startup Grant', organization: 'Health Launchpad', icon: 'rocket' },
+  ],
+};
 
 export const INITIAL_SITE_CONTENT: SiteContent = {
   home: {
@@ -77,7 +132,8 @@ export const INITIAL_SITE_CONTENT: SiteContent = {
       { id: 1, category: 'ANNOUNCEMENT', title: 'New Chapter Opening at UCC', text: 'We are excited to announce the expansion of Code Rx...' },
       { id: 2, category: 'EVENT', title: 'AI in Pharmacy Workshop', text: 'Join us for a deep dive into Large Language Models...' },
       { id: 3, category: 'RESEARCH', title: 'Medication Safety Algorithm Published', text: 'A new research paper by our Informatics team...' },
-    ]
+    ],
+    coreValues: DEFAULT_CORE_VALUES,
   },
   about: {
     mission: 'To bridge Pharmacy and IT by equipping professionals with skills to create tech-driven solutions for healthcare.',
@@ -89,7 +145,7 @@ export const INITIAL_SITE_CONTENT: SiteContent = {
       { name: 'Alex Code', role: 'Technology Director', image: 'https://images.unsplash.com/photo-1612349317150-e413f6a5b16d?w=400&h=400&fit=crop' },
       { name: 'Elena AI', role: 'AI & Data Lead', image: 'https://images.unsplash.com/photo-1527613426441-4da17471b66d?w=400&h=400&fit=crop' }
     ],
-    tracks: WHAT_WE_DO
+    tracks: DEFAULT_TRACKS
   },
   learn: {
     steps: [
@@ -101,6 +157,11 @@ export const INITIAL_SITE_CONTENT: SiteContent = {
       'AI & Machine Learning',
       'Health Informatics',
       'Pharmacy Projects'
+    ],
+    benefits: [
+      'Earn practical, portfolio-ready skills',
+      'Work on real pharmacy problems',
+      'Learn with a community that gets both sides',
     ]
   },
   projects: INITIAL_PROJECTS,
@@ -581,7 +642,13 @@ Version: 1.0
 Effective Date: 22/03/2026
 Last Updated: 22/03/2026` }
     ]
-  }
+  },
+  extras: DEFAULT_EXTRAS,
+  customBlocks: [],
+  copy: DEFAULT_SITE_COPY,
+  links: DEFAULT_SITE_LINKS,
+  media: DEFAULT_MEDIA,
+  design: DEFAULT_SITE_DESIGN,
 };
 
 /**
@@ -612,6 +679,11 @@ export const normalizeSiteContent = (raw: unknown): SiteContent => {
   const community = asObj(r.community);
   const resources = asObj(r.resources);
   const terms = asObj(r.terms);
+  const extras = asObj(r.extras);
+  const design = asObj(r.design);
+  const designTheme = asObj(design.theme);
+  const designElements = asObj(design.elements);
+  const rawTracks = asArr<any>(about.tracks, d.about.tracks);
 
   return {
     home: {
@@ -619,19 +691,36 @@ export const normalizeSiteContent = (raw: unknown): SiteContent => {
       ...home,
       communityMembers: asArr(home.communityMembers, d.home.communityMembers),
       latestNews: asArr(home.latestNews, d.home.latestNews),
+      coreValues: asArr(home.coreValues, d.home.coreValues),
     },
     about: {
       ...d.about,
       ...about,
       team: asArr(about.team, d.about.team),
-      tracks: asArr(about.tracks, d.about.tracks),
+      // Older payloads included a non-serializable React icon field. Repair it
+      // to a stable icon name so a legacy save can never break the live canvas.
+      tracks: rawTracks.map((track, index) => ({
+        ...d.about.tracks[index % d.about.tracks.length],
+        ...asObj(track),
+        id: typeof asObj(track).id === 'string' ? asObj(track).id : `track-${index + 1}`,
+        icon: typeof asObj(track).icon === 'string'
+          ? asObj(track).icon
+          : d.about.tracks[index % d.about.tracks.length].icon,
+        items: asArr(asObj(track).items, d.about.tracks[index % d.about.tracks.length].items),
+      })),
     },
     learn: {
       ...d.learn,
       ...learn,
       steps: asArr(learn.steps, d.learn.steps),
+      benefits: asArr(learn.benefits, d.learn.benefits),
     },
-    projects: asArr(r.projects, d.projects),
+    projects: asArr<any>(r.projects, d.projects).map((project) => ({
+      ...project,
+      github: typeof project?.github === 'string' ? project.github : '',
+      demo: typeof project?.demo === 'string' ? project.demo : '',
+      image: typeof project?.image === 'string' ? project.image : '',
+    })),
     challenges: {
       ...d.challenges,
       ...challenges,
@@ -647,6 +736,20 @@ export const normalizeSiteContent = (raw: unknown): SiteContent => {
       ...d.terms,
       ...terms,
       sections: asArr(terms.sections, d.terms.sections),
+    },
+    extras: {
+      ...d.extras,
+      ...extras,
+      partnerships: asArr(extras.partnerships, d.extras.partnerships),
+      opportunities: asArr(extras.opportunities, d.extras.opportunities),
+    },
+    customBlocks: asArr(r.customBlocks, d.customBlocks),
+    copy: { ...d.copy, ...asObj(r.copy) },
+    links: { ...d.links, ...asObj(r.links) },
+    media: { ...d.media, ...asObj(r.media) },
+    design: {
+      theme: { ...d.design.theme, ...designTheme },
+      elements: { ...d.design.elements, ...designElements },
     },
   };
 };

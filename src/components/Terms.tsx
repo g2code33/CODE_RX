@@ -1,33 +1,22 @@
 import { motion } from 'framer-motion';
 import { FileText } from 'lucide-react';
+import { getCopy } from '../data/editorSchema';
 import { SiteContent } from '../data/siteState';
 import { SectionLink } from './SectionLink';
 import { PharmacyBackground } from './PharmacyBackground';
+import { EditableRegion, EditableText } from './VisualEditorContext';
 
-export const Terms = ({ content }: { content: SiteContent['terms'] }) => {
+export const Terms = ({ content, copy }: { content: SiteContent['terms']; copy?: Record<string, string> }) => {
   return (
-    <section id="terms" className="brand-section brand-grid-fine min-h-screen py-28 text-[#475569] sm:py-36">
-      <PharmacyBackground layout="clinic" />
-      <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
-        <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
-          <div className="mb-16 flex flex-col justify-between gap-6 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5"><FileText className="h-3.5 w-3.5" /> Legal / society terms</div><h1 className="brand-title text-4xl sm:text-5xl lg:text-6xl">Terms <span className="brand-gradient-text">&</span><br />Conditions</h1><p className="mt-6 text-sm uppercase tracking-[0.14em] text-[#64748b]">Coding the future of pharmacy</p></div><SectionLink id="terms" /></div>
-
-          <div className="mb-10 grid gap-3 sm:grid-cols-3">
-            {[['VERSION', content.version], ['EFFECTIVE DATE', '22/03/2026'], ['LAST UPDATED', '22/03/2026']].map(([label, value]) => <div key={label} className="brand-card p-5"><p className="brand-number">{label}</p><p className="mt-2 text-sm font-bold text-[#0f172a]">{value}</p></div>)}
-          </div>
-
-          <div className="grid items-start gap-4 md:grid-cols-2">
-            {content.sections.map((section) => (
-              <motion.article key={section.id} initial={{ opacity: 0, y: 15 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} className="brand-card brand-card-hover p-6 sm:p-8">
-                <div className="mb-6 flex items-start gap-4 border-b border-[#16a34a]/20 pb-5"><span className="brand-number text-lg">{section.id}</span><h2 className="text-base font-black leading-snug text-[#0f172a]">{section.title}</h2></div>
-                <div className="whitespace-pre-line text-sm leading-7 text-[#475569]">{section.content}</div>
-              </motion.article>
-            ))}
-          </div>
-
-          <div className="relative mt-16 overflow-hidden rounded-2xl border border-[#b8ff3d]/30 bg-[#f1f5f9] p-8 text-center sm:p-12"><div className="brand-glow left-1/2 top-[-14rem] -translate-x-1/2 opacity-40" /><div className="relative z-10"><p className="brand-eyebrow justify-center">Official acceptance</p><h3 className="mt-5 text-2xl font-black text-[#0f172a] sm:text-3xl">Build with care. Build with purpose.</h3><p className="mx-auto mt-5 max-w-2xl text-sm leading-7 text-[#475569]">By registering for Code Rx Society membership, you acknowledge that you have read, understood, and agreed to these Terms & Conditions.</p><p className="mt-7 text-sm font-black uppercase tracking-[0.12em] text-[#15803d]">We don't just learn pharmacy. We build what moves it forward.</p><p className="mt-9 text-[0.64rem] font-black uppercase tracking-[0.18em] text-[#64748b]">Code Rx Society © 2026 / Ghana</p></div></div>
-        </motion.div>
-      </div>
-    </section>
+    <EditableRegion elementKey="terms.section" label="Terms section" collection="terms">
+      <section id="terms" className="brand-section brand-grid-fine min-h-screen py-28 text-[#475569] sm:py-36">
+        <PharmacyBackground layout="clinic" />
+        <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10"><motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}><div className="mb-16 flex flex-col justify-between gap-6 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5"><FileText className="h-3.5 w-3.5" /><EditableText elementKey="terms.eyebrow" copyKey="terms.eyebrow" label="Terms eyebrow">{getCopy(copy, 'terms.eyebrow', 'Legal / society terms')}</EditableText></div><h1 className="brand-title text-4xl sm:text-5xl lg:text-6xl"><EditableText elementKey="terms.title" copyKey="terms.title" label="Terms title">{getCopy(copy, 'terms.title', 'Terms')}</EditableText> <span className="brand-gradient-text"><EditableText elementKey="terms.title-accent" copyKey="terms.titleAccent" label="Terms title accent">{getCopy(copy, 'terms.titleAccent', '&')}</EditableText></span><br /><EditableText elementKey="terms.title-after" copyKey="terms.titleAfter" label="Terms title ending">{getCopy(copy, 'terms.titleAfter', 'Conditions')}</EditableText></h1><p className="mt-6 text-sm uppercase tracking-[0.14em] text-[#64748b]"><EditableText elementKey="terms.tagline" copyKey="terms.tagline" label="Terms tagline">{getCopy(copy, 'terms.tagline', 'Coding the future of pharmacy')}</EditableText></p></div><SectionLink id="terms" /></div>
+          <EditableRegion elementKey="terms.metadata" label="Terms metadata cards" className="mb-10 grid gap-3 sm:grid-cols-3">{[[getCopy(copy, 'terms.versionLabel', 'Version'), content.version, 'version'], [getCopy(copy, 'terms.effectiveDateLabel', 'Effective date'), getCopy(copy, 'terms.effectiveDate', '22/03/2026'), 'effectiveDate'], [getCopy(copy, 'terms.lastUpdatedLabel', 'Last updated'), content.lastUpdated, 'lastUpdated']].map(([label, value, id]) => <div key={id} className="brand-card p-5"><p className="brand-number"><EditableText elementKey={`terms.meta.${id}.label`} copyKey={`terms.${id === 'effectiveDate' ? 'effectiveDateLabel' : id === 'lastUpdated' ? 'lastUpdatedLabel' : 'versionLabel'}`} label={`${label} label`}>{label}</EditableText></p><p className="mt-2 text-sm font-bold text-[#0f172a]"><EditableText elementKey={`terms.meta.${id}.value`} copyKey={id === 'version' ? 'terms.version' : id === 'lastUpdated' ? 'terms.lastUpdated' : 'terms.effectiveDate'} label={`${label} value`}>{value}</EditableText></p></div>)}</EditableRegion>
+          <EditableRegion elementKey="terms.cards" label="Terms cards" collection="terms" className="grid items-start gap-4 md:grid-cols-2">{content.sections.map((section, index) => <motion.article key={section.id} initial={{ opacity: 0, y: 15 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} className="brand-card brand-card-hover p-6 sm:p-8"><EditableRegion elementKey={`terms.card.${section.id}`} label={`${section.title} terms card`} collection="terms"><div className="mb-6 flex items-start gap-4 border-b border-[#16a34a]/20 pb-5"><span className="brand-number text-lg"><EditableText elementKey={`terms.card.${section.id}.id`} copyKey={`terms.sections.${index}.id`} label={`Terms section ${index + 1} ID`}>{section.id}</EditableText></span><h2 className="text-base font-black leading-snug text-[#0f172a]"><EditableText elementKey={`terms.card.${section.id}.title`} copyKey={`terms.sections.${index}.title`} label={`${section.title} title`}>{section.title}</EditableText></h2></div><div className="whitespace-pre-line text-sm leading-7 text-[#475569]"><EditableText elementKey={`terms.card.${section.id}.content`} copyKey={`terms.sections.${index}.content`} label={`${section.title} content`}>{section.content}</EditableText></div></EditableRegion></motion.article>)}</EditableRegion>
+          <EditableRegion elementKey="terms.acceptance" label="Terms acceptance panel" className="relative mt-16 overflow-hidden rounded-2xl border border-[#b8ff3d]/30 bg-[#f1f5f9] p-8 text-center sm:p-12"><div className="brand-glow left-1/2 top-[-14rem] -translate-x-1/2 opacity-40" /><div className="relative z-10"><p className="brand-eyebrow justify-center"><EditableText elementKey="terms.acceptance-eyebrow" copyKey="terms.acceptanceEyebrow" label="Terms acceptance eyebrow">{getCopy(copy, 'terms.acceptanceEyebrow', 'Official acceptance')}</EditableText></p><h3 className="mt-5 text-2xl font-black text-[#0f172a] sm:text-3xl"><EditableText elementKey="terms.acceptance-title" copyKey="terms.acceptanceTitle" label="Terms acceptance heading">{getCopy(copy, 'terms.acceptanceTitle', '')}</EditableText></h3><p className="mx-auto mt-5 max-w-2xl text-sm leading-7 text-[#475569]"><EditableText elementKey="terms.acceptance-description" copyKey="terms.acceptanceDescription" label="Terms acceptance description">{getCopy(copy, 'terms.acceptanceDescription', '')}</EditableText></p><p className="mt-7 text-sm font-black uppercase tracking-[0.12em] text-[#15803d]"><EditableText elementKey="terms.acceptance-motto" copyKey="terms.acceptanceMotto" label="Terms acceptance motto">{getCopy(copy, 'terms.acceptanceMotto', '')}</EditableText></p><p className="mt-9 text-[0.64rem] font-black uppercase tracking-[0.18em] text-[#64748b]"><EditableText elementKey="terms.acceptance-copyright" copyKey="terms.acceptanceCopyright" label="Terms acceptance copyright">{getCopy(copy, 'terms.acceptanceCopyright', '')}</EditableText></p></div></EditableRegion>
+        </motion.div></div>
+      </section>
+    </EditableRegion>
   );
 };
