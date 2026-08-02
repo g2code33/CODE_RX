@@ -39,7 +39,6 @@ function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // Defensive normalization to prevent "Cannot read properties of undefined (reading 'length')"
         return {
           ...INITIAL_SITE_CONTENT,
           ...parsed,
@@ -60,7 +59,6 @@ function App() {
     return INITIAL_SITE_CONTENT;
   });
 
-  // Restore a valid session on load (validates the stored token with the API)
   useEffect(() => {
     auth.me().then((u) => {
       if (!u) return;
@@ -75,19 +73,12 @@ function App() {
     });
   }, []);
 
-  // Keep a ref of activeTab for the hash handler (avoids re-binding)
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
 
-  // Deep-linkable sections: every section has its own URL hash, e.g.
-  // https://coderxsociety.pages.dev/#learn or .../#what-we-do. Tab-level hashes
-  // open the page (scrolled to top); sub-section hashes open the parent page and
-  // then smooth-scroll straight to that section.
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
-      // Password-reset links look like #reset?token=...&email=... — show the
-      // reset screen instead of mapping the hash to a section.
       if (window.location.hash.startsWith('#reset')) {
         setIsResetView(true);
         return;
@@ -103,14 +94,13 @@ function App() {
       if (id === tab) {
         window.scrollTo({ top: 0, behavior: 'instant' });
       } else {
-        // The parent tab may not be rendered yet — wait for it, then scroll.
         setTimeout(() => {
           const el = document.getElementById(id);
           if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
         }, 80);
       }
     };
-    applyHash(); // on first load, honor any incoming hash (deep link)
+    applyHash();
     window.addEventListener('hashchange', applyHash);
     return () => window.removeEventListener('hashchange', applyHash);
   }, []);
@@ -125,7 +115,6 @@ function App() {
       setAuthMode('login');
       setIsAuthOpen(true);
     } else {
-      // Exiting the portal / admin panel signs the session out
       auth.logout();
       setUser(null);
       setIsDashboard(false);
@@ -147,28 +136,20 @@ function App() {
   };
 
   const handleTabChange = (tabId: string) => {
-    // A section id may point at a sub-section of a page (e.g. #what-we-do lives
-    // on the About page). Resolve it to its parent tab and scroll to it.
     const section = SECTION_MAP[tabId];
     const tab = section ? section.tab : tabId;
     setActiveTab(tab);
     setIsDashboard(false);
-    // Update the URL hash so the section is shareable / directly visitable.
-    // The hashchange listener keeps the state in sync (guarded, so no loop).
     if (window.location.hash !== `#${tabId}`) {
       window.location.hash = tabId;
     }
     if (tabId === tab) {
       window.scrollTo({ top: 0, behavior: 'instant' });
-    } else if (tab !== activeTabRef.current) {
-      // The parent page just switched — let it render, then scroll to the section.
+    } else {
       setTimeout(() => {
         const el = document.getElementById(tabId);
         if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
       }, 80);
-    } else {
-      const el = document.getElementById(tabId);
-      if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
   };
 
@@ -176,7 +157,6 @@ function App() {
     if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={setSiteContent} />;
     if (isDashboard) return <Dashboard user={user} />;
 
-    // Defensive fallbacks — prevents "Cannot read properties of undefined (reading 'length')"
     const safeContent = {
       ...siteContent,
       home: {
@@ -203,10 +183,7 @@ function App() {
       case 'home':
         return (
           <>
-            <Hero 
-              content={safeContent.home} 
-              onJoin={handleOpenJoin}
-            />
+            <Hero content={safeContent.home} onJoin={handleOpenJoin} />
             <ValueCards />
             <section id="news" className="brand-section brand-section--panel border-y border-[#b8ff3d]/12 py-24 sm:py-28">
               <PharmacyBackground layout="lab" />
@@ -246,7 +223,7 @@ function App() {
       case 'projects':
         return <Projects projects={safeContent.projects} />;
       case 'challenges':
-        return <Competitions active={siteContent.challenges.active} />;
+        return <Competitions active={safeContent.challenges.active} />;
       case 'community':
         return (
           <section id="community" className="brand-section brand-grid min-h-[70vh] py-28 sm:py-36">
@@ -255,9 +232,9 @@ function App() {
             <div className="relative z-10 mx-auto flex min-h-[55vh] max-w-[1440px] items-center px-5 sm:px-8 lg:px-10">
               <div className="max-w-3xl">
                 <div className="mb-6 flex items-center gap-5"><div className="brand-eyebrow">Community hub</div><SectionLink id="community" /></div>
-                <h2 className="brand-title text-5xl sm:text-6xl lg:text-8xl">{siteContent.community.hubTitle}<span className="brand-gradient-text block text-[0.7em]">Find your people.</span></h2>
-                <p className="brand-copy mt-7 max-w-2xl text-base sm:text-lg">{siteContent.community.description}</p>
-                <a href={siteContent.community.telegramLink} target="_blank" rel="noopener noreferrer" className="brand-button mt-9">Join Telegram channel <ArrowRight className="h-4 w-4" /></a>
+                <h2 className="brand-title text-5xl sm:text-6xl lg:text-8xl">{safeContent.community.hubTitle}<span className="brand-gradient-text block text-[0.7em]">Find your people.</span></h2>
+                <p className="brand-copy mt-7 max-w-2xl text-base sm:text-lg">{safeContent.community.description}</p>
+                <a href={safeContent.community.telegramLink} target="_blank" rel="noopener noreferrer" className="brand-button mt-9">Join Telegram channel <ArrowRight className="h-4 w-4" /></a>
               </div>
             </div>
           </section>
@@ -269,7 +246,7 @@ function App() {
             <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
               <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-                {siteContent.resources.categories.map((cat, index) => (
+                {(safeContent.resources.categories || []).map((cat, index) => (
                   <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#8da18e]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
                 ))}
               </div>
@@ -277,14 +254,12 @@ function App() {
           </section>
         );
       case 'terms':
-        return <Terms content={siteContent.terms} />;
+        return <Terms content={safeContent.terms} />;
       default:
-        return <Hero content={siteContent.home} onJoin={handleOpenJoin} />;
+        return <Hero content={safeContent.home} onJoin={handleOpenJoin} />;
     }
   };
 
-  // Password reset view (reached via the email's reset link) — full screen,
-  // no navbar/footer.
   if (isResetView) {
     return (
       <ResetPassword
@@ -319,7 +294,6 @@ function App() {
 
       <ContactForm isOpen={isContactOpen} onClose={() => setIsContactOpen(false)} />
       
-      {/* Floating Action Button */}
       {!isDashboard && !isAdmin && (
         <button 
           onClick={handleOpenJoin}
