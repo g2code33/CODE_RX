@@ -18,6 +18,8 @@ export interface EditorSelection {
   copyKey?: string;
   mediaKey?: string;
   collection?: string;
+  /** Index of the backing list item when a whole repeat card is selected. */
+  itemIndex?: number;
 }
 
 interface VisualEditorContextValue {
@@ -216,6 +218,7 @@ export const EditableRegion = ({
   children,
   className,
   collection,
+  itemIndex,
   copyKey,
   as: Tag = 'div',
 }: {
@@ -224,11 +227,12 @@ export const EditableRegion = ({
   children: ReactNode;
   className?: string;
   collection?: string;
+  itemIndex?: number;
   copyKey?: string;
   as?: 'div' | 'section' | 'nav' | 'footer' | 'article' | 'main';
 }) => {
   const context = useVisualEditor();
-  const selection: EditorSelection = { kind: copyKey ? 'text' : collection ? 'collection' : 'region', elementKey, label, collection, copyKey };
+  const selection: EditorSelection = { kind: copyKey ? 'text' : collection ? 'collection' : 'region', elementKey, label, collection, itemIndex, copyKey };
   const { isEditing, onClick, onKeyDown } = editorHandlers(selection, context);
   const isSelected = context.selected?.elementKey === elementKey;
   return (

@@ -457,6 +457,7 @@ const Inspector = ({
   const showContent = tab === 'content';
   const showStyle = tab === 'style' || tab === 'responsive';
   const showLayout = tab === 'layout';
+  const isProjectCardContent = showContent && selected?.collection === 'projects' && selected.itemIndex !== undefined;
 
   return (
     <aside className="visual-editor-inspector fixed bottom-3 right-3 top-[8.7rem] z-[80] flex w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-2xl border border-emerald-900/10 bg-white shadow-2xl">
@@ -464,13 +465,15 @@ const Inspector = ({
       <div className="flex gap-1 overflow-x-auto border-b border-slate-100 px-3 py-2">{(['content', 'style', 'layout', 'responsive', 'theme'] as InspectorTab[]).map((item) => <button key={item} type="button" onClick={() => setTab(item)} className={`visual-editor-inspector-tab ${tab === item ? 'is-active' : ''}`}>{item === 'content' ? 'Content' : item === 'style' ? 'Style' : item === 'layout' ? 'Layout' : item === 'responsive' ? 'Responsive' : 'Theme'}</button>)}</div>
       <div className="flex-1 overflow-y-auto p-4">
         {tab === 'theme' ? <ThemeControls value={themeValue} onChange={setThemeValue} onSave={saveTheme} saving={publishing} /> : !selected ? <EmptySelection /> : <>
-          {showContent && <ContentControls selected={selected} textValue={textValue} setTextValue={setTextValue} mediaValue={mediaValue} setMediaValue={setMediaValue} uploading={uploading} onUpload={uploadImage} onQuickAdd={onQuickAdd} onAddNestedItem={onAddNestedItem} />}
+          {showContent && (selected.collection === 'projects' && selected.itemIndex !== undefined
+            ? <ProjectCardEditor content={content} projectIndex={selected.itemIndex} publishing={publishing} onImmediatePublish={onImmediatePublish} />
+            : <ContentControls selected={selected} textValue={textValue} setTextValue={setTextValue} mediaValue={mediaValue} setMediaValue={setMediaValue} uploading={uploading} onUpload={uploadImage} onQuickAdd={onQuickAdd} onAddNestedItem={onAddNestedItem} />)}
           {showStyle && <><div className="mb-4 flex items-center justify-between rounded-xl bg-slate-50 p-1"><span className="pl-2 text-[10px] font-black uppercase tracking-wider text-slate-500">Applies at</span><div className="visual-editor-breakpoint">{(['desktop', 'tablet', 'mobile'] as EditorBreakpoint[]).map((item) => <button key={item} type="button" onClick={() => setBreakpoint(item)} className={breakpoint === item ? 'is-active' : ''}>{item}</button>)}</div></div><StyleControls value={styleValue} onChange={setStyleValue} layoutOnly={false} /></>}
           {showLayout && <StyleControls value={styleValue} onChange={setStyleValue} layoutOnly />}
-          <div className="mt-5 flex gap-2"><button type="button" onClick={() => setStyleValue(currentElementStyle(content, selected, breakpoint))} className="visual-editor-secondary-button flex-1"><RotateCcw className="h-3.5 w-3.5" />Cancel</button><button type="button" disabled={publishing} onClick={saveSelection} className="visual-editor-save-button flex-[1.4]">{publishing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save & publish</button></div>
+          {!isProjectCardContent && <><div className="mt-5 flex gap-2"><button type="button" onClick={() => setStyleValue(currentElementStyle(content, selected, breakpoint))} className="visual-editor-secondary-button flex-1"><RotateCcw className="h-3.5 w-3.5" />Cancel</button><button type="button" disabled={publishing} onClick={saveSelection} className="visual-editor-save-button flex-[1.4]">{publishing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save & publish</button></div>
           <button type="button" onClick={async () => { const next = resetElementStyle(content, selected, breakpoint); await publish(next, 'Style reset and published.'); }} className="mt-3 w-full text-xs font-bold text-slate-500 hover:text-red-600">Reset {breakpoint} styling</button>
           {itemRemovalTarget(selected) && <button type="button" onClick={() => { if (window.confirm('Remove this item from the website?')) onRemoveSelection(selected); }} className="mt-3 w-full text-xs font-black text-red-600 hover:text-red-700">Remove selected item</button>}
-          {message && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{message}</p>}
+          {message && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{message}</p>}</>}
         </>}
       </div>
     </aside>
@@ -478,6 +481,79 @@ const Inspector = ({
 };
 
 const EmptySelection = () => <div className="rounded-2xl border border-dashed border-emerald-200 bg-emerald-50/50 p-5 text-center"><WandSparkles className="mx-auto h-7 w-7 text-emerald-500" /><h3 className="mt-3 text-sm font-black text-slate-800">Select an element</h3><p className="mt-2 text-xs leading-5 text-slate-500">In Edit mode, click a text item, image, card, or section on the live canvas. Its content, visual style, layout, and responsive rules appear here.</p></div>;
+
+const ProjectCardEditor = ({
+  content,
+  projectIndex,
+  publishing,
+  onImmediatePublish,
+}: {
+  content: SiteContent;
+  projectIndex: number;
+  publishing: boolean;
+  onImmediatePublish: (content: SiteContent) => Promise<SaveResult>;
+}) => {
+  const source = content.projects[projectIndex] || null;
+  const [draft, setDraft] = useState<SiteContent['projects'][number] | null>(source);
+  const [technologyText, setTechnologyText] = useState(source?.technology.join(', ') || '');
+  const [teamText, setTeamText] = useState(source?.team.join(', ') || '');
+  const [imageUrl, setImageUrl] = useState(source ? selectionMediaValue(content, `projects.${source.id}.image`).src : '');
+  const [imageAlt, setImageAlt] = useState(source ? selectionMediaValue(content, `projects.${source.id}.image`).alt : '');
+  const [uploading, setUploading] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const latest = content.projects[projectIndex] || null;
+    setDraft(latest);
+    setTechnologyText(latest?.technology.join(', ') || '');
+    setTeamText(latest?.team.join(', ') || '');
+    if (latest) {
+      const asset = selectionMediaValue(content, `projects.${latest.id}.image`);
+      setImageUrl(asset.src);
+      setImageAlt(asset.alt);
+    }
+    setMessage(null);
+  }, [content, projectIndex]);
+
+  if (!draft) return <p className="text-sm text-slate-500">This project is no longer available.</p>;
+
+  const update = (key: keyof SiteContent['projects'][number], value: string | number) => {
+    setDraft((current) => current ? { ...current, [key]: value } : current);
+  };
+  const splitList = (value: string) => value.split(',').map((item) => item.trim()).filter(Boolean);
+
+  const uploadImage = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const result = await uploadFile(file, 'site-media/projects');
+      setImageUrl(result.url);
+      setMessage('Image uploaded. Select Save project content to publish it.');
+    } catch (error: any) {
+      setMessage(error?.message || 'Image upload failed. You can paste an image URL instead.');
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
+  };
+
+  const save = async () => {
+    const next = cloneContent(content);
+    next.projects[projectIndex] = {
+      ...draft,
+      technology: splitList(technologyText),
+      team: splitList(teamText),
+      progress: Math.max(0, Math.min(100, Number(draft.progress) || 0)),
+      image: imageUrl,
+    };
+    const withImage = updateMediaAsset(next, `projects.${draft.id}.image`, { src: imageUrl, alt: imageAlt || draft.title });
+    const published = await onImmediatePublish(withImage);
+    setMessage(published === false ? 'Saved locally. Publish all will retry this project.' : 'Project card published.');
+  };
+
+  return <div className="space-y-4"><div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3"><p className="text-xs font-black text-emerald-800">Project card content</p><p className="mt-1 text-xs leading-5 text-emerald-700">Edit the entire card here, then save it in one publish action.</p></div><div className="grid grid-cols-2 gap-3"><Field label="Title" value={draft.title} onChange={(value) => update('title', value)} /><Field label="Category" value={draft.category} onChange={(value) => update('category', value)} /><Field label="Status" value={draft.status} onChange={(value) => update('status', value)} /><Field label="Progress (%)" value={String(draft.progress)} onChange={(value) => update('progress', Number(value))} /></div><label className="visual-editor-field"><span>Short description</span><textarea rows={3} value={draft.description} onChange={(event) => update('description', event.target.value)} /></label><label className="visual-editor-field"><span>Problem</span><textarea rows={3} value={draft.problem} onChange={(event) => update('problem', event.target.value)} /></label><label className="visual-editor-field"><span>Solution</span><textarea rows={3} value={draft.solution} onChange={(event) => update('solution', event.target.value)} /></label><label className="visual-editor-field"><span>Technology tags — comma separated</span><input value={technologyText} onChange={(event) => setTechnologyText(event.target.value)} placeholder="React, Cloudflare D1, API" /></label><label className="visual-editor-field"><span>Team members — comma separated</span><input value={teamText} onChange={(event) => setTeamText(event.target.value)} placeholder="Team Alpha, Jane Doe" /></label><div className="grid grid-cols-2 gap-3"><Field label="Repository URL" value={draft.github || ''} onChange={(value) => update('github', value)} placeholder="https://github.com/..." /><Field label="Demo URL" value={draft.demo || ''} onChange={(value) => update('demo', value)} placeholder="https://..." /></div><label className="visual-editor-field"><span>Card image URL</span><input type="url" value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} placeholder="https://… or /api/files/…" /></label><label className="visual-editor-field"><span>Image alt text</span><input value={imageAlt} onChange={(event) => setImageAlt(event.target.value)} placeholder="Describe the project image" /></label><label className="visual-editor-upload"><input className="sr-only" type="file" accept="image/*" onChange={uploadImage} disabled={uploading} />{uploading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}{uploading ? 'Uploading image…' : 'Upload project image'}</label><button type="button" disabled={publishing || uploading} onClick={save} className="visual-editor-save-button w-full">{publishing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save project content</button>{message && <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{message}</p>}</div>;
+};
 
 const ContentControls = ({
   selected,
