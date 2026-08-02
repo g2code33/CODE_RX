@@ -135,7 +135,7 @@ section[id] {
   display: inline-flex;
   align-items: center;
   gap: 0.6rem;
-  color: var(--brand-lime);
+  color: #166534;
   font-size: 0.68rem;
   line-height: 1;
   font-weight: 900;
@@ -327,6 +327,8 @@ h1, h2, h3, h4, h5, h6 {
 footer {
   background: #020604 !important;
   color: #f2f8ed !important;
+  padding-top: 1.75rem !important;
+  padding-bottom: 1.5rem !important;
 }
 
 footer .brand-card,
@@ -349,6 +351,21 @@ footer a:hover {
 footer .brand-button {
   background: #b8ff3d !important;
   color: #020604 !important;
+}
+
+/* Footer column separators */
+footer .grid > div:not(:last-child) {
+  border-right: 1px solid #1f2a24;
+  padding-right: 1.5rem;
+}
+
+@media (max-width: 1024px) {
+  footer .grid > div:not(:last-child) {
+    border-right: none;
+    border-bottom: 1px solid #1f2a24;
+    padding-bottom: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
 }
 
 /* Navigation links on the white header use dark, readable text with a

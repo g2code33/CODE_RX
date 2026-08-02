@@ -18,7 +18,7 @@ export const Academy = ({ steps }: { steps: string[] }) => {
 
           <div className="mt-9 space-y-4">
             {['Earn practical, portfolio-ready skills', 'Work on real pharmacy problems', 'Learn with a community that gets both sides'].map((item) => (
-              <div key={item} className="flex items-center gap-3 text-sm font-bold text-[#c5d5c3]"><CheckCircle2 className="h-5 w-5 text-[#b8ff3d]" />{item}</div>
+              <div key={item} className="flex items-center gap-3 text-sm font-bold text-[#334155]"><CheckCircle2 className="h-5 w-5 text-[#b8ff3d]" />{item}</div>
             ))}
           </div>
 
@@ -38,7 +38,7 @@ export const Academy = ({ steps }: { steps: string[] }) => {
               <div key={index} className="group flex items-center gap-4 rounded-xl border border-transparent px-3 py-3 transition-colors hover:border-[#b8ff3d]/20 hover:bg-[#b8ff3d]/5 sm:px-4 sm:py-3.5">
                 <span className="brand-number w-8 shrink-0">{String(index + 1).padStart(2, '0')}</span>
                 <span className="h-px w-5 bg-[#b8ff3d]/25 transition-all group-hover:w-8 group-hover:bg-[#b8ff3d]" />
-                <span className="text-sm font-bold text-[#c5d5c3] transition-colors group-hover:text-[#b8ff3d]">{step}</span>
+                <span className="text-sm font-bold text-[#334155] transition-colors group-hover:text-[#b8ff3d]">{step}</span>
               </div>
             ))}
           </div>
