@@ -33,7 +33,21 @@ function App() {
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
 
-  // Load from localStorage on mount
+  // Auto-clear broken localStorage data
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('codeRx_siteContent');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.projects)) {
+          localStorage.removeItem('codeRx_siteContent');
+        }
+      }
+    } catch {
+      localStorage.removeItem('codeRx_siteContent');
+    }
+  }, []);
+
   const [siteContent, setSiteContent] = useState<SiteContent>(() => {
     const saved = localStorage.getItem('codeRx_siteContent');
     if (saved) {
@@ -157,8 +171,7 @@ function App() {
     if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={setSiteContent} />;
     if (isDashboard) return <Dashboard user={user} />;
 
-    const safeContent = {
-      ...siteContent,
+    const safe = {
       home: {
         ...siteContent.home,
         latestNews: Array.isArray(siteContent.home?.latestNews) ? siteContent.home.latestNews : [],
@@ -177,13 +190,16 @@ function App() {
         ...siteContent.resources,
         categories: Array.isArray(siteContent.resources?.categories) ? siteContent.resources.categories : [],
       },
+      challenges: siteContent.challenges,
+      community: siteContent.community,
+      terms: siteContent.terms,
     };
 
     switch (activeTab) {
       case 'home':
         return (
           <>
-            <Hero content={safeContent.home} onJoin={handleOpenJoin} />
+            <Hero content={safe.home} onJoin={handleOpenJoin} />
             <ValueCards />
             <section id="news" className="brand-section brand-section--panel border-y border-[#b8ff3d]/12 py-24 sm:py-28">
               <PharmacyBackground layout="lab" />
@@ -196,7 +212,7 @@ function App() {
                   <SectionLink id="news" />
                 </div>
                 <div className="grid gap-4 md:grid-cols-3">
-                  {(safeContent.home.latestNews || []).map((news, index) => (
+                  {(safe.home.latestNews || []).map((news, index) => (
                     <article key={news.id} className="brand-card brand-card-hover p-6 sm:p-7">
                       <div className="flex items-center justify-between"><span className="brand-number">0{index + 1} / {news.category}</span><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" /></div>
                       <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#f2f8ed]">{news.title}</h3>
@@ -212,18 +228,18 @@ function App() {
       case 'about':
         return (
           <>
-            <About mission={safeContent.about.mission} vision={safeContent.about.vision} motto={safeContent.about.motto} />
-            <WhatWeDo tracks={safeContent.about.tracks} />
-            <Leadership team={safeContent.about.team} />
+            <About mission={safe.about.mission} vision={safe.about.vision} motto={safe.about.motto} />
+            <WhatWeDo tracks={safe.about.tracks} />
+            <Leadership team={safe.about.team} />
             <Extras />
           </>
         );
       case 'learn':
-        return <Academy steps={safeContent.learn.steps} />;
+        return <Academy steps={safe.learn.steps} />;
       case 'projects':
-        return <Projects projects={safeContent.projects} />;
+        return <Projects projects={safe.projects} />;
       case 'challenges':
-        return <Competitions active={safeContent.challenges.active} />;
+        return <Competitions active={safe.challenges.active} />;
       case 'community':
         return (
           <section id="community" className="brand-section brand-grid min-h-[70vh] py-28 sm:py-36">
@@ -232,9 +248,9 @@ function App() {
             <div className="relative z-10 mx-auto flex min-h-[55vh] max-w-[1440px] items-center px-5 sm:px-8 lg:px-10">
               <div className="max-w-3xl">
                 <div className="mb-6 flex items-center gap-5"><div className="brand-eyebrow">Community hub</div><SectionLink id="community" /></div>
-                <h2 className="brand-title text-5xl sm:text-6xl lg:text-8xl">{safeContent.community.hubTitle}<span className="brand-gradient-text block text-[0.7em]">Find your people.</span></h2>
-                <p className="brand-copy mt-7 max-w-2xl text-base sm:text-lg">{safeContent.community.description}</p>
-                <a href={safeContent.community.telegramLink} target="_blank" rel="noopener noreferrer" className="brand-button mt-9">Join Telegram channel <ArrowRight className="h-4 w-4" /></a>
+                <h2 className="brand-title text-5xl sm:text-6xl lg:text-8xl">{safe.community.hubTitle}<span className="brand-gradient-text block text-[0.7em]">Find your people.</span></h2>
+                <p className="brand-copy mt-7 max-w-2xl text-base sm:text-lg">{safe.community.description}</p>
+                <a href={safe.community.telegramLink} target="_blank" rel="noopener noreferrer" className="brand-button mt-9">Join Telegram channel <ArrowRight className="h-4 w-4" /></a>
               </div>
             </div>
           </section>
@@ -246,7 +262,7 @@ function App() {
             <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
               <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-                {(safeContent.resources.categories || []).map((cat, index) => (
+                {(safe.resources.categories || []).map((cat, index) => (
                   <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#8da18e]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
                 ))}
               </div>
@@ -254,9 +270,9 @@ function App() {
           </section>
         );
       case 'terms':
-        return <Terms content={safeContent.terms} />;
+        return <Terms content={safe.terms} />;
       default:
-        return <Hero content={safeContent.home} onJoin={handleOpenJoin} />;
+        return <Hero content={safe.home} onJoin={handleOpenJoin} />;
     }
   };
 
