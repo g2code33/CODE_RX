@@ -8,8 +8,8 @@ export const SectionLink = ({ id, light = false }: { id: string; light?: boolean
     title={`Direct link: #${id}`}
     className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-2 text-[0.66rem] font-black uppercase tracking-[0.14em] no-underline transition-colors ${
       light
-        ? 'border-white/30 text-white/90 hover:border-[#b8ff3d]/60 hover:text-[#b8ff3d]'
-        : 'border-[#b8ff3d]/25 text-[#a9bda3] hover:border-[#b8ff3d]/60 hover:text-[#b8ff3d]'
+        ? 'border-white/30 text-white/90 hover:border-[#b8ff3d]/60 hover:text-[#15803d]'
+        : 'border-[#16a34a]/20 text-[#475569] hover:border-[#b8ff3d]/60 hover:text-[#15803d]'
     }`}
   >
     <Link2 className="h-3.5 w-3.5" />

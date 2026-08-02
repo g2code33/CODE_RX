@@ -192,7 +192,7 @@ function App() {
           <>
             <Hero content={safe.home} onJoin={handleOpenJoin} />
             <ValueCards />
-            <section id="news" className="brand-section brand-section--panel border-y border-[#b8ff3d]/12 py-24 sm:py-28">
+            <section id="news" className="brand-section brand-section--panel border-y border-[#16a34a]/20 py-24 sm:py-28">
               <PharmacyBackground layout="lab" />
               <div className="relative z-10 mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-10">
                 <div className="mb-12 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
@@ -206,8 +206,8 @@ function App() {
                   {(safe.home.latestNews || []).map((news, index) => (
                     <article key={news.id} className="brand-card brand-card-hover p-6 sm:p-7">
                       <div className="flex items-center justify-between"><span className="brand-number">0{index + 1} / {news.category}</span><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" /></div>
-                      <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#f2f8ed]">{news.title}</h3>
-                      <p className="mt-4 text-sm leading-7 text-[#a9bda3]">{news.text}</p>
+                      <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#0f172a]">{news.title}</h3>
+                      <p className="mt-4 text-sm leading-7 text-[#475569]">{news.text}</p>
                       <div className="mt-7 h-px w-12 bg-[#b8ff3d]/60" />
                     </article>
                   ))}
@@ -254,7 +254,7 @@ function App() {
               <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 {(safe.resources.categories || []).map((cat, index) => (
-                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#a9bda3]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
+                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#0f172a]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#16a34a]/20 pt-5 text-sm text-[#475569]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
                 ))}
               </div>
             </div>
@@ -315,7 +315,7 @@ function App() {
       <main>
         {renderContent()}
         {!isDashboard && !isAdmin && (
-          <section id="join" className="brand-section brand-grid relative overflow-hidden border-y border-[#b8ff3d]/20 py-28 sm:py-36">
+          <section id="join" className="brand-section brand-grid relative overflow-hidden border-y border-[#16a34a]/20 py-28 sm:py-36">
             <PharmacyBackground layout="hero" />
             <div className="brand-glow left-1/2 top-[-16rem] -translate-x-1/2 opacity-50" />
             <div className="brand-scanlines absolute inset-0" />
