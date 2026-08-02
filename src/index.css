@@ -1,16 +1,19 @@
 @import "tailwindcss";
 
 :root {
-  --brand-ink: #020604;
-  --brand-deep: #06110a;
-  --brand-panel: #0a170f;
-  --brand-panel-strong: #0e2115;
-  --brand-line: rgba(151, 255, 46, 0.18);
-  --brand-lime: #b8ff3d;
-  --brand-green: #55e51d;
-  --brand-mint: #caff85;
-  --brand-muted: #8da18e;
-  --brand-white: #f2f8ed;
+  /* Professional White Theme */
+  --brand-ink: #ffffff;
+  --brand-deep: #f8fafc;
+  --brand-panel: #ffffff;
+  --brand-panel-strong: #f1f5f9;
+  --brand-line: #e2e8f0;
+  --brand-lime: #16a34a;
+  --brand-green: #15803d;
+  --brand-mint: #4ade80;
+  --brand-muted: #64748b;
+  --brand-white: #0f172a;
+  --brand-text: #0f172a;
+  --brand-text-secondary: #475569;
 }
 
 * {
@@ -72,7 +75,7 @@ section[id] {
 /* Brand system ----------------------------------------------------------- */
 .brand-app {
   background: var(--brand-ink);
-  color: var(--brand-white);
+  color: var(--brand-text);
   overflow-x: hidden;
 }
 
@@ -83,19 +86,24 @@ section[id] {
   overflow: hidden;
 }
 
+/* Beautiful horizontal section dividers when scrolling */
+.brand-section + .brand-section {
+  border-top: 1px solid #e2e8f0;
+}
+
 .brand-section--alt {
   background: var(--brand-deep);
 }
 
 .brand-section--panel {
-  background: linear-gradient(180deg, var(--brand-deep), var(--brand-ink));
+  background: var(--brand-deep);
 }
 
 .brand-grid {
   background-color: var(--brand-ink);
   background-image:
-    linear-gradient(rgba(151, 255, 46, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(151, 255, 46, 0.045) 1px, transparent 1px);
+    linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
   background-size: 56px 56px;
 }
 
@@ -132,7 +140,7 @@ section[id] {
   display: inline-flex;
   align-items: center;
   gap: 0.6rem;
-  color: var(--brand-lime);
+  color: #166534;
   font-size: 0.68rem;
   line-height: 1;
   font-weight: 900;
@@ -149,14 +157,20 @@ section[id] {
 }
 
 .brand-title {
-  color: var(--brand-white);
+  color: #0f172a;
   font-weight: 950;
   letter-spacing: -0.065em;
   line-height: 0.94;
 }
 
+.brand-copy,
+p,
+h1, h2, h3, h4, h5, h6 {
+  color: #0f172a;
+}
+
 .brand-copy {
-  color: var(--brand-muted);
+  color: #475569;
   line-height: 1.75;
 }
 
@@ -176,9 +190,9 @@ section[id] {
   border: 1px solid var(--brand-lime);
   border-radius: 999px;
   padding: 0.9rem 1.35rem;
-  color: var(--brand-ink);
+  color: white;
   background: var(--brand-lime);
-  box-shadow: 0 0 0 rgba(184, 255, 61, 0), 0 14px 34px rgba(113, 255, 31, 0.16);
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   font-size: 0.75rem;
   font-weight: 900;
   letter-spacing: 0.12em;
@@ -188,8 +202,8 @@ section[id] {
 }
 
 .brand-button:hover {
-  background: var(--brand-white);
-  box-shadow: 0 0 28px rgba(184, 255, 61, 0.32), 0 18px 40px rgba(113, 255, 31, 0.2);
+  background: var(--brand-green);
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
   transform: translateY(-2px);
 }
 
@@ -219,8 +233,8 @@ section[id] {
 .brand-card {
   border: 1px solid var(--brand-line);
   border-radius: 1.35rem;
-  background: linear-gradient(145deg, rgba(14, 33, 21, 0.92), rgba(5, 15, 9, 0.92));
-  box-shadow: inset 0 1px 0 rgba(202, 255, 133, 0.04), 0 18px 60px rgba(0, 0, 0, 0.24);
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 10px 15px -3px rgba(0, 0, 0, 0.1);
 }
 
 .brand-card-hover {
@@ -228,10 +242,10 @@ section[id] {
 }
 
 .brand-card-hover:hover {
-  border-color: rgba(184, 255, 61, 0.5);
-  background: linear-gradient(145deg, rgba(17, 43, 24, 0.98), rgba(5, 15, 9, 0.98));
-  box-shadow: 0 0 0 1px rgba(184, 255, 61, 0.08), 0 20px 70px rgba(0, 0, 0, 0.35), 0 0 32px rgba(113, 255, 31, 0.08);
-  transform: translateY(-5px);
+  border-color: var(--brand-lime);
+  background: #ffffff;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+  transform: translateY(-3px);
 }
 
 .brand-icon {
@@ -310,8 +324,14 @@ section[id] {
 /* Header: clean white bar with lime-green accents, over the dark site. */
 .brand-nav {
   background: #ffffff;
-  border-bottom: 1px solid rgba(6, 17, 10, 0.08);
-  box-shadow: 0 12px 34px rgba(2, 6, 4, 0.08);
+  border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* Footer keeps original dark professional theme */
+footer {
+  background: #020604 !important;
+  color: #f2f8ed !important;
 }
 
 /* Navigation links on the white header use dark, readable text with a

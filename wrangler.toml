@@ -27,7 +27,7 @@ ADMIN_EMAIL = "coderxsociety@gmail.com"
 ADMIN_PASSWORD = "Admin@12345"
 TELEGRAM_LINK = "https://t.me/+EdRpfR1GTGNjM2Q0"
 # Secret used to sign login tokens. CHANGE THIS to a long random string.
-JWT_SECRET = "change-this-to-a-long-random-secret-string"
+JWT_SECRET = "CRX-LOCAL-DEV-SECRET-2026-CHANGE-IN-PRODUCTION-8f3k9m2p7qXvL4nR"
 
 # EmailJS (optional) — enables email notifications for new applications,
 # contact messages, and application approvals. Leave empty to disable.
