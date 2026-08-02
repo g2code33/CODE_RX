@@ -25,7 +25,7 @@ export const Leadership = ({ team }: { team: Array<{ name: string; role: string;
                 <div className="absolute inset-x-2 bottom-2 z-20 bg-gradient-to-t from-[#020604] to-transparent px-4 pb-4 pt-12"><span className="brand-number">0{index + 1} / TEAM</span></div>
               </div>
               <h3 className="mt-5 text-base font-black text-[#f2f8ed] sm:text-lg">{leader.name}</h3>
-              <p className="mt-1 text-[0.6rem] font-black uppercase tracking-[0.18em] text-[#b8ff3d]">{leader.role}</p>
+              <p className="mt-1 text-[0.65rem] font-black uppercase tracking-[0.18em] text-[#b8ff3d]">{leader.role}</p>
             </article>
           ))}
         </div>

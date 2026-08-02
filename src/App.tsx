@@ -20,7 +20,7 @@ import { ResetPassword } from './components/ResetPassword';
 import { SectionLink } from './components/SectionLink';
 import { PharmacyBackground } from './components/PharmacyBackground';
 import { SECTION_MAP } from './data/mockData';
-import { INITIAL_SITE_CONTENT, SiteContent } from './data/siteState';
+import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
 import { auth, AuthUser } from './lib/cloudflare';
 
 function App() {
@@ -33,45 +33,36 @@ function App() {
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
 
-  // Auto-clear broken localStorage data
+  // Auto-clear corrupted localStorage data (unparseable JSON only —
+  // partial/old-schema payloads are repaired by normalizeSiteContent below)
   useEffect(() => {
     try {
       const saved = localStorage.getItem('codeRx_siteContent');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.projects)) {
-          localStorage.removeItem('codeRx_siteContent');
-        }
-      }
+      if (saved) JSON.parse(saved);
     } catch {
       localStorage.removeItem('codeRx_siteContent');
     }
   }, []);
 
   const [siteContent, setSiteContent] = useState<SiteContent>(() => {
-    const saved = localStorage.getItem('codeRx_siteContent');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return {
-          ...INITIAL_SITE_CONTENT,
-          ...parsed,
-          home: { ...INITIAL_SITE_CONTENT.home, ...parsed.home },
-          about: { ...INITIAL_SITE_CONTENT.about, ...parsed.about },
-          learn: { ...INITIAL_SITE_CONTENT.learn, ...parsed.learn },
-          projects: Array.isArray(parsed.projects) ? parsed.projects : INITIAL_SITE_CONTENT.projects,
-          challenges: { ...INITIAL_SITE_CONTENT.challenges, ...parsed.challenges },
-          community: { ...INITIAL_SITE_CONTENT.community, ...parsed.community },
-          resources: { ...INITIAL_SITE_CONTENT.resources, ...parsed.resources },
-          terms: { ...INITIAL_SITE_CONTENT.terms, ...parsed.terms },
-        };
-      } catch (e) {
-        console.error('Failed to load saved content:', e);
-        return INITIAL_SITE_CONTENT;
-      }
+    try {
+      const saved = localStorage.getItem('codeRx_siteContent');
+      if (saved) return normalizeSiteContent(JSON.parse(saved));
+    } catch (e) {
+      console.error('Failed to load saved content:', e);
+      localStorage.removeItem('codeRx_siteContent');
     }
     return INITIAL_SITE_CONTENT;
   });
+
+  // Wrapped setter handed to the AdminPanel: guarantees no code path
+  // (D1 load, undo history, reset, edits) can ever put a partial or
+  // old-schema content shape into state and crash the renders.
+  const handleSetSiteContent: React.Dispatch<React.SetStateAction<SiteContent>> = (action) => {
+    setSiteContent((prev) =>
+      normalizeSiteContent(typeof action === 'function' ? (action as (p: SiteContent) => SiteContent)(prev) : action)
+    );
+  };
 
   useEffect(() => {
     auth.me().then((u) => {
@@ -168,7 +159,7 @@ function App() {
   };
 
   const renderContent = () => {
-    if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={setSiteContent} />;
+    if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} />;
     if (isDashboard) return <Dashboard user={user} />;
 
     const safe = {
@@ -216,7 +207,7 @@ function App() {
                     <article key={news.id} className="brand-card brand-card-hover p-6 sm:p-7">
                       <div className="flex items-center justify-between"><span className="brand-number">0{index + 1} / {news.category}</span><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" /></div>
                       <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#f2f8ed]">{news.title}</h3>
-                      <p className="mt-4 text-sm leading-7 text-[#8da18e]">{news.text}</p>
+                      <p className="mt-4 text-sm leading-7 text-[#a9bda3]">{news.text}</p>
                       <div className="mt-7 h-px w-12 bg-[#b8ff3d]/60" />
                     </article>
                   ))}
@@ -263,7 +254,7 @@ function App() {
               <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 {(safe.resources.categories || []).map((cat, index) => (
-                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#8da18e]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
+                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#a9bda3]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
                 ))}
               </div>
             </div>
@@ -313,7 +304,7 @@ function App() {
       {!isDashboard && !isAdmin && (
         <button 
           onClick={handleOpenJoin}
-          className="fixed bottom-6 right-5 z-50 grid h-14 w-14 place-items-center rounded-full border border-[#b8ff3d] bg-[#b8ff3d] text-[0.62rem] font-black uppercase tracking-wide text-[#020604] shadow-[0_0_24px_rgba(184,255,61,0.35)] transition-all hover:scale-110 active:scale-95 md:hidden"
+          className="fixed bottom-6 right-5 z-50 grid h-14 w-14 place-items-center rounded-full border border-[#b8ff3d] bg-[#b8ff3d] text-[0.66rem] font-black uppercase tracking-wide text-[#020604] shadow-[0_0_24px_rgba(184,255,61,0.35)] transition-all hover:scale-110 active:scale-95 md:hidden"
         >
            <div className="flex flex-col items-center">
               <span className="text-xl font-black leading-none uppercase">Join</span>

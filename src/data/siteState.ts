@@ -583,3 +583,70 @@ Last Updated: 22/03/2026` }
     ]
   }
 };
+
+/**
+ * Deep-merge externally loaded content (D1 database / localStorage) onto the
+ * default site content.
+ *
+ * Payloads saved by older builds may be missing entire sections (e.g.
+ * `projects`), and the UI dereferences those collections unconditionally
+ * (`siteContent.projects.length`, `.map`, spreads). Running every external
+ * payload through this normalizer guarantees every section exists and every
+ * collection is a real array, so a partial payload can never crash the app.
+ * Existing arrays — including intentionally emptied ones — are kept as-is.
+ */
+export const normalizeSiteContent = (raw: unknown): SiteContent => {
+  const d = INITIAL_SITE_CONTENT;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return d;
+
+  const r = raw as Record<string, unknown>;
+  const asObj = (v: unknown): Record<string, any> =>
+    v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, any>) : {};
+  const asArr = <T>(v: unknown, fallback: T[]): T[] =>
+    Array.isArray(v) ? (v as T[]) : fallback;
+
+  const home = asObj(r.home);
+  const about = asObj(r.about);
+  const learn = asObj(r.learn);
+  const challenges = asObj(r.challenges);
+  const community = asObj(r.community);
+  const resources = asObj(r.resources);
+  const terms = asObj(r.terms);
+
+  return {
+    home: {
+      ...d.home,
+      ...home,
+      communityMembers: asArr(home.communityMembers, d.home.communityMembers),
+      latestNews: asArr(home.latestNews, d.home.latestNews),
+    },
+    about: {
+      ...d.about,
+      ...about,
+      team: asArr(about.team, d.about.team),
+      tracks: asArr(about.tracks, d.about.tracks),
+    },
+    learn: {
+      ...d.learn,
+      ...learn,
+      steps: asArr(learn.steps, d.learn.steps),
+    },
+    projects: asArr(r.projects, d.projects),
+    challenges: {
+      ...d.challenges,
+      ...challenges,
+      active: { ...d.challenges.active, ...asObj(challenges.active) },
+    },
+    community: { ...d.community, ...community },
+    resources: {
+      ...d.resources,
+      ...resources,
+      categories: asArr(resources.categories, d.resources.categories),
+    },
+    terms: {
+      ...d.terms,
+      ...terms,
+      sections: asArr(terms.sections, d.terms.sections),
+    },
+  };
+};
