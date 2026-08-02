@@ -323,7 +323,7 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
-/* Footer keeps original dark professional theme */
+/* Footer keeps original dark professional theme (scoped only to footer) */
 footer {
   background: #020604 !important;
   color: #f2f8ed !important;
@@ -353,14 +353,14 @@ footer .brand-button {
   color: #020604 !important;
 }
 
-/* Footer column separators */
-footer .grid > div:not(:last-child) {
+/* Footer column separators — EXTREMELY SCOPED (only footer) */
+footer .mx-auto.max-w-\\[1440px\\] > .grid.lg\\:grid-cols-\\[1\\.35fr_0\\.8fr_0\\.8fr_1fr\\] > div:not(:last-child) {
   border-right: 1px solid #1f2a24;
   padding-right: 1.5rem;
 }
 
 @media (max-width: 1024px) {
-  footer .grid > div:not(:last-child) {
+  footer .mx-auto.max-w-\\[1440px\\] > .grid.lg\\:grid-cols-\\[1\\.35fr_0\\.8fr_0\\.8fr_1fr\\] > div:not(:last-child) {
     border-right: none;
     border-bottom: 1px solid #1f2a24;
     padding-bottom: 1.5rem;
