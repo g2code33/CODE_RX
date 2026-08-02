@@ -1,21 +1,19 @@
 @import "tailwindcss";
 
 :root {
-  /* Dark Code Rx identity — the public site renders on deep green-black
-     panels with bright, high-contrast text. The header bar stays white and
-     the admin/portal flows are remapped below. */
-  --brand-ink: #020604;
-  --brand-deep: #07150b;
-  --brand-panel: #0b1c10;
-  --brand-panel-strong: #0f2a17;
-  --brand-line: rgba(184, 255, 61, 0.16);
-  --brand-lime: #b8ff3d;
+  /* Professional White Theme (light) — white bg everywhere, dark readable text */
+  --brand-ink: #ffffff;
+  --brand-deep: #f8fafc;
+  --brand-panel: #ffffff;
+  --brand-panel-strong: #f1f5f9;
+  --brand-line: #e2e8f0;
+  --brand-lime: #16a34a;
   --brand-green: #15803d;
   --brand-mint: #4ade80;
-  --brand-muted: #94a992;
-  --brand-white: #f2f8ed;
-  --brand-text: #eef6e9;
-  --brand-text-secondary: #a9bda3;
+  --brand-muted: #64748b;
+  --brand-white: #0f172a;
+  --brand-text: #0f172a;
+  --brand-text-secondary: #475569;
 }
 
 * {
@@ -31,7 +29,7 @@ body {
   margin: 0;
   min-width: 320px;
   background: var(--brand-ink);
-  color: var(--brand-white);
+  color: var(--brand-text);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -142,7 +140,7 @@ section[id] {
   display: inline-flex;
   align-items: center;
   gap: 0.6rem;
-  color: var(--brand-lime);
+  color: var(--brand-green);
   font-size: 0.72rem;
   line-height: 1;
   font-weight: 900;
@@ -333,8 +331,8 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Footer keeps original dark professional theme */
 footer {
-  background: #020604 !important;
-  color: #f2f8ed !important;
+  background: #f8fafc !important;
+  color: #0f172a !important;
 }
 
 /* Navigation links on the white header use dark, readable text with a
@@ -372,21 +370,21 @@ footer {
 
 .brand-input {
   width: 100%;
-  border: 1px solid rgba(184, 255, 61, 0.25);
+  border: 1px solid #e2e8f0;
   border-radius: 0.75rem;
-  background: #07120b;
-  color: var(--brand-white);
+  background: #ffffff;
+  color: #0f172a;
   outline: none;
 }
 
 .brand-input::placeholder {
-  color: #7e947f;
+  color: #64748b;
   opacity: 1;
 }
 
 .brand-input:focus {
-  border-color: var(--brand-lime);
-  box-shadow: 0 0 0 3px rgba(184, 255, 61, 0.1);
+  border-color: var(--brand-green);
+  box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.1);
 }
 
 @keyframes brand-pulse {

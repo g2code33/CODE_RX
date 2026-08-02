@@ -24,8 +24,8 @@ export const ValueCards = () => {
                 <div className="brand-icon"><value.icon className="h-6 w-6" /></div>
                 <span className="brand-number">0{index + 1}</span>
               </div>
-              <h3 className="mt-9 text-xl font-black tracking-tight text-[#f2f8ed]">{value.title}</h3>
-              <p className="mt-3 text-sm leading-7 text-[#a9bda3]">{value.description}</p>
+              <h3 className="mt-9 text-xl font-black tracking-tight text-[#0f172a]">{value.title}</h3>
+              <p className="mt-3 text-sm leading-7 text-[#475569]">{value.description}</p>
               <div className="mt-7 h-px w-12 bg-[#b8ff3d]/60 transition-all duration-300 group-hover:w-20 group-hover:bg-[#b8ff3d]" />
             </article>
           ))}
@@ -44,26 +44,26 @@ export const About = ({ mission, vision, motto }: { mission: string; vision: str
         <div className="relative mx-auto w-full max-w-[520px]">
           <div className="brand-card relative overflow-hidden p-5 sm:p-8">
             <div className="brand-grid-fine absolute inset-0 opacity-40" />
-            <div className="relative flex aspect-square items-center justify-center rounded-2xl border border-[#b8ff3d]/20 bg-[#020604]/50">
-              <div className="absolute inset-5 rounded-xl border border-dashed border-[#b8ff3d]/15" />
+            <div className="relative flex aspect-square items-center justify-center rounded-2xl border border-[#16a34a]/20 bg-[#ffffff]/50">
+              <div className="absolute inset-5 rounded-xl border border-dashed border-[#16a34a]/20" />
               <img src="/logo.png" alt="Code Rx Society emblem" className="brand-logo-glow relative h-[78%] w-[78%] object-contain" />
               <span className="absolute left-4 top-4 brand-number">RX / MISSION</span>
               <span className="absolute bottom-4 right-4 brand-number">GHA / 2026</span>
             </div>
             <div className="mt-5 grid grid-cols-2 gap-3">
-              <div className="rounded-xl border border-[#b8ff3d]/15 bg-[#b8ff3d]/5 p-4">
-                <Binary className="h-4 w-4 text-[#b8ff3d]" />
-                <p className="mt-3 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#a9bda3]">Technology</p>
+              <div className="rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4">
+                <Binary className="h-4 w-4 text-[#15803d]" />
+                <p className="mt-3 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#475569]">Technology</p>
               </div>
-              <div className="rounded-xl border border-[#b8ff3d]/15 bg-[#b8ff3d]/5 p-4">
-                <Eye className="h-4 w-4 text-[#b8ff3d]" />
-                <p className="mt-3 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#a9bda3]">Care first</p>
+              <div className="rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4">
+                <Eye className="h-4 w-4 text-[#15803d]" />
+                <p className="mt-3 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#475569]">Care first</p>
               </div>
             </div>
           </div>
-          <div className="absolute -bottom-6 -right-4 hidden rounded-xl border border-[#b8ff3d]/25 bg-[#0b1c10] px-5 py-4 shadow-2xl sm:block">
+          <div className="absolute -bottom-6 -right-4 hidden rounded-xl border border-[#16a34a]/20 bg-[#f1f5f9] px-5 py-4 shadow-2xl sm:block">
             <p className="brand-number">STATUS</p>
-            <p className="mt-1 text-sm font-bold text-[#b8ff3d]">Bridging two worlds</p>
+            <p className="mt-1 text-sm font-bold text-[#15803d]">Bridging two worlds</p>
           </div>
         </div>
 
@@ -79,20 +79,20 @@ export const About = ({ mission, vision, motto }: { mission: string; vision: str
 
           <div className="mt-10 grid gap-4 sm:grid-cols-2">
             <div className="brand-card p-6">
-              <div className="mb-5 flex items-center gap-3 text-[#b8ff3d]"><Target className="h-5 w-5" /><span className="brand-number">01 / MISSION</span></div>
-              <p className="text-sm leading-7 text-[#a9bda3]">{mission}</p>
+              <div className="mb-5 flex items-center gap-3 text-[#15803d]"><Target className="h-5 w-5" /><span className="brand-number">01 / MISSION</span></div>
+              <p className="text-sm leading-7 text-[#475569]">{mission}</p>
             </div>
             <div className="brand-card p-6">
-              <div className="mb-5 flex items-center gap-3 text-[#b8ff3d]"><Eye className="h-5 w-5" /><span className="brand-number">02 / VISION</span></div>
-              <p className="text-sm leading-7 text-[#a9bda3]">{vision}</p>
+              <div className="mb-5 flex items-center gap-3 text-[#15803d]"><Eye className="h-5 w-5" /><span className="brand-number">02 / VISION</span></div>
+              <p className="text-sm leading-7 text-[#475569]">{vision}</p>
             </div>
           </div>
 
           <div className="mt-8 flex items-start gap-4 border-l-2 border-[#b8ff3d] pl-5">
-            <Quote className="mt-1 h-5 w-5 shrink-0 text-[#b8ff3d]" />
+            <Quote className="mt-1 h-5 w-5 shrink-0 text-[#15803d]" />
             <div>
-              <p className="text-[0.66rem] font-black uppercase tracking-[0.2em] text-[#94a992]">Our motto</p>
-              <p className="mt-2 text-lg font-black uppercase tracking-[0.04em] text-[#f2f8ed]">{motto}</p>
+              <p className="text-[0.66rem] font-black uppercase tracking-[0.2em] text-[#64748b]">Our motto</p>
+              <p className="mt-2 text-lg font-black uppercase tracking-[0.04em] text-[#0f172a]">{motto}</p>
             </div>
           </div>
         </div>

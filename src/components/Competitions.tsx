@@ -17,19 +17,19 @@ export const Competitions = ({ active }: { active: SiteContent['challenges']['ac
         </div>
 
         <div className="brand-card relative mx-auto max-w-5xl overflow-hidden p-7 sm:p-10 lg:p-14">
-          <Lock className="absolute -right-8 -top-8 h-64 w-64 text-[#b8ff3d]/5" />
+          <Lock className="absolute -right-8 -top-8 h-64 w-64 text-[#15803d]/5" />
           <div className="relative z-10">
-            <div className="flex flex-col justify-between gap-7 border-b border-[#b8ff3d]/15 pb-8 sm:flex-row sm:items-start">
+            <div className="flex flex-col justify-between gap-7 border-b border-[#16a34a]/20 pb-8 sm:flex-row sm:items-start">
               <div>
                 <p className="brand-number mb-3">ACTIVE / CRX-DECODER</p>
-                <h3 className="text-3xl font-black tracking-tight text-[#f2f8ed] sm:text-4xl">{active.id}</h3>
-                <div className="mt-4 flex flex-wrap items-center gap-4 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#a9bda3]"><span className="rounded-full border border-[#b8ff3d]/25 bg-[#b8ff3d]/8 px-3 py-1.5 text-[#b8ff3d]">{active.difficulty}</span><span className="flex items-center gap-2"><Users className="h-3.5 w-3.5 text-[#b8ff3d]" /> {active.participants} participants</span></div>
+                <h3 className="text-3xl font-black tracking-tight text-[#0f172a] sm:text-4xl">{active.id}</h3>
+                <div className="mt-4 flex flex-wrap items-center gap-4 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#475569]"><span className="rounded-full border border-[#16a34a]/20 bg-[#b8ff3d]/8 px-3 py-1.5 text-[#15803d]">{active.difficulty}</span><span className="flex items-center gap-2"><Users className="h-3.5 w-3.5 text-[#15803d]" /> {active.participants} participants</span></div>
               </div>
-              <div className="rounded-xl border border-[#b8ff3d]/20 bg-[#b8ff3d]/5 p-4 sm:min-w-[170px]"><div className="flex items-center gap-2 text-[#b8ff3d]"><Timer className="h-4 w-4" /><span className="brand-mono text-xl font-black">{active.timeRemaining}</span></div><p className="mt-2 text-[0.64rem] font-black uppercase tracking-[0.15em] text-[#94a992]">Time remaining</p></div>
+              <div className="rounded-xl border border-[#16a34a]/20 bg-[#b8ff3d]/5 p-4 sm:min-w-[170px]"><div className="flex items-center gap-2 text-[#15803d]"><Timer className="h-4 w-4" /><span className="brand-mono text-xl font-black">{active.timeRemaining}</span></div><p className="mt-2 text-[0.64rem] font-black uppercase tracking-[0.15em] text-[#64748b]">Time remaining</p></div>
             </div>
 
             <div className="grid gap-10 pt-9 lg:grid-cols-[1fr_260px] lg:items-center">
-              <div><p className="text-sm leading-7 text-[#a9bf9f]">{active.problem}</p><div className="mt-8 flex flex-wrap gap-8"><div><p className="brand-number">PRIZE</p><p className="mt-2 text-2xl font-black text-[#b8ff3d]">{active.prize}</p></div><div className="h-12 w-px bg-[#b8ff3d]/15" /><div><p className="brand-number">REWARD</p><p className="mt-2 text-2xl font-black text-[#f2f8ed]">{active.reward}</p></div></div></div>
+              <div><p className="text-sm leading-7 text-[#475569]">{active.problem}</p><div className="mt-8 flex flex-wrap gap-8"><div><p className="brand-number">PRIZE</p><p className="mt-2 text-2xl font-black text-[#15803d]">{active.prize}</p></div><div className="h-12 w-px bg-[#b8ff3d]/15" /><div><p className="brand-number">REWARD</p><p className="mt-2 text-2xl font-black text-[#0f172a]">{active.reward}</p></div></div></div>
               <button type="button" className="brand-button w-full !rounded-xl !py-6">Enter challenge <span>→</span></button>
             </div>
           </div>

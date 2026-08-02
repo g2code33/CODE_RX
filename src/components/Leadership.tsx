@@ -20,12 +20,12 @@ export const Leadership = ({ team }: { team: Array<{ name: string; role: string;
           {team.map((leader, index) => (
             <article key={index} className="group">
               <div className="brand-card relative aspect-square overflow-hidden rounded-2xl p-2 transition-colors duration-300 group-hover:border-[#b8ff3d]/50">
-                <div className="absolute inset-2 z-10 rounded-xl border border-[#b8ff3d]/20" />
+                <div className="absolute inset-2 z-10 rounded-xl border border-[#16a34a]/20" />
                 <img src={leader.image} alt={leader.name} className="h-full w-full rounded-xl object-cover grayscale transition-all duration-500 group-hover:scale-105 group-hover:grayscale-0" />
                 <div className="absolute inset-x-2 bottom-2 z-20 bg-gradient-to-t from-[#020604] to-transparent px-4 pb-4 pt-12"><span className="brand-number">0{index + 1} / TEAM</span></div>
               </div>
-              <h3 className="mt-5 text-base font-black text-[#f2f8ed] sm:text-lg">{leader.name}</h3>
-              <p className="mt-1 text-[0.65rem] font-black uppercase tracking-[0.18em] text-[#b8ff3d]">{leader.role}</p>
+              <h3 className="mt-5 text-base font-black text-[#0f172a] sm:text-lg">{leader.name}</h3>
+              <p className="mt-1 text-[0.65rem] font-black uppercase tracking-[0.18em] text-[#15803d]">{leader.role}</p>
             </article>
           ))}
         </div>
