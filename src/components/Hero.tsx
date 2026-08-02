@@ -70,15 +70,15 @@ export const Hero = ({
           <div className="mt-12 grid max-w-xl grid-cols-3 divide-x divide-[#b8ff3d]/15 border-y border-[#b8ff3d]/15 py-5">
             <div className="pr-4">
               <p className="brand-number">{String(content.communityCount).padStart(3, '0')}+</p>
-              <p className="mt-1 text-[0.62rem] font-bold uppercase tracking-[0.16em] text-[#8da18e]">Members</p>
+              <p className="mt-1 text-[0.66rem] font-bold uppercase tracking-[0.16em] text-[#a9bda3]">Members</p>
             </div>
             <div className="px-4">
               <p className="brand-number">06</p>
-              <p className="mt-1 text-[0.62rem] font-bold uppercase tracking-[0.16em] text-[#8da18e]">Tracks</p>
+              <p className="mt-1 text-[0.66rem] font-bold uppercase tracking-[0.16em] text-[#a9bda3]">Tracks</p>
             </div>
             <div className="pl-4">
               <p className="brand-number">24/7</p>
-              <p className="mt-1 text-[0.62rem] font-bold uppercase tracking-[0.16em] text-[#8da18e]">Curiosity</p>
+              <p className="mt-1 text-[0.66rem] font-bold uppercase tracking-[0.16em] text-[#a9bda3]">Curiosity</p>
             </div>
           </div>
         </motion.div>
@@ -93,13 +93,13 @@ export const Hero = ({
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,rgba(184,255,61,0.22),transparent_38%)]" />
             <div className="brand-grid-fine absolute inset-0 opacity-30" />
             <div className="absolute inset-5 rounded-[1.35rem] border border-[#b8ff3d]/20 sm:inset-8" />
-            <div className="absolute left-8 top-8 flex items-center gap-2 text-[0.58rem] font-black uppercase tracking-[0.2em] text-[#8da18e] sm:left-12 sm:top-12">
+            <div className="absolute left-8 top-8 flex items-center gap-2 text-[0.64rem] font-black uppercase tracking-[0.2em] text-[#a9bda3] sm:left-12 sm:top-12">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" />
               Live / brand_system
             </div>
             <div className="absolute right-8 top-8 text-right sm:right-12 sm:top-12">
               <p className="brand-number">CRX / 001</p>
-              <p className="mt-1 text-[0.55rem] uppercase tracking-[0.17em] text-[#718675]">Est. Ghana</p>
+              <p className="mt-1 text-[0.66rem] uppercase tracking-[0.17em] text-[#94a992]">Est. Ghana</p>
             </div>
 
             <div className="relative flex h-full items-center justify-center">
@@ -114,7 +114,7 @@ export const Hero = ({
 
             <div className="absolute bottom-8 left-8 right-8 flex items-end justify-between sm:bottom-12 sm:left-12 sm:right-12">
               <div>
-                <p className="text-[0.58rem] font-black uppercase tracking-[0.2em] text-[#718675]">Signal</p>
+                <p className="text-[0.64rem] font-black uppercase tracking-[0.2em] text-[#94a992]">Signal</p>
                 <div className="mt-2 flex items-end gap-1">
                   {[18, 28, 22, 35, 30, 46, 38, 54, 44].map((height, index) => (
                     <span key={index} className="w-1 rounded-full bg-[#b8ff3d]/70" style={{ height: `${height}px` }} />
@@ -133,7 +133,7 @@ export const Hero = ({
             transition={{ duration: 4.5, repeat: Infinity, ease: 'easeInOut' }}
             className="brand-card absolute -bottom-7 -left-2 hidden w-52 p-4 sm:block sm:-left-8"
           >
-            <div className="flex items-center gap-2 text-[0.58rem] font-black uppercase tracking-[0.18em] text-[#b8ff3d]">
+            <div className="flex items-center gap-2 text-[0.64rem] font-black uppercase tracking-[0.18em] text-[#b8ff3d]">
               <Zap className="h-3.5 w-3.5" />
               Build signal
             </div>
@@ -142,8 +142,8 @@ export const Hero = ({
           </motion.div>
 
           <div className="brand-card absolute -right-2 -top-6 hidden w-44 p-4 sm:block sm:-right-7">
-            <div className="flex items-center gap-2 text-[0.58rem] font-black uppercase tracking-[0.18em] text-[#8da18e]"><ShieldCheck className="h-3.5 w-3.5 text-[#b8ff3d]" /> Safe by design</div>
-            <p className="mt-2 text-xs leading-relaxed text-[#8da18e]">Responsible tech for better care.</p>
+            <div className="flex items-center gap-2 text-[0.64rem] font-black uppercase tracking-[0.18em] text-[#a9bda3]"><ShieldCheck className="h-3.5 w-3.5 text-[#b8ff3d]" /> Safe by design</div>
+            <p className="mt-2 text-xs leading-relaxed text-[#a9bda3]">Responsible tech for better care.</p>
           </div>
         </motion.div>
       </div>

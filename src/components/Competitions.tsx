@@ -23,9 +23,9 @@ export const Competitions = ({ active }: { active: SiteContent['challenges']['ac
               <div>
                 <p className="brand-number mb-3">ACTIVE / CRX-DECODER</p>
                 <h3 className="text-3xl font-black tracking-tight text-[#f2f8ed] sm:text-4xl">{active.id}</h3>
-                <div className="mt-4 flex flex-wrap items-center gap-4 text-[0.62rem] font-black uppercase tracking-[0.15em] text-[#8da18e]"><span className="rounded-full border border-[#b8ff3d]/25 bg-[#b8ff3d]/8 px-3 py-1.5 text-[#b8ff3d]">{active.difficulty}</span><span className="flex items-center gap-2"><Users className="h-3.5 w-3.5 text-[#b8ff3d]" /> {active.participants} participants</span></div>
+                <div className="mt-4 flex flex-wrap items-center gap-4 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#a9bda3]"><span className="rounded-full border border-[#b8ff3d]/25 bg-[#b8ff3d]/8 px-3 py-1.5 text-[#b8ff3d]">{active.difficulty}</span><span className="flex items-center gap-2"><Users className="h-3.5 w-3.5 text-[#b8ff3d]" /> {active.participants} participants</span></div>
               </div>
-              <div className="rounded-xl border border-[#b8ff3d]/20 bg-[#b8ff3d]/5 p-4 sm:min-w-[170px]"><div className="flex items-center gap-2 text-[#b8ff3d]"><Timer className="h-4 w-4" /><span className="brand-mono text-xl font-black">{active.timeRemaining}</span></div><p className="mt-2 text-[0.58rem] font-black uppercase tracking-[0.15em] text-[#718675]">Time remaining</p></div>
+              <div className="rounded-xl border border-[#b8ff3d]/20 bg-[#b8ff3d]/5 p-4 sm:min-w-[170px]"><div className="flex items-center gap-2 text-[#b8ff3d]"><Timer className="h-4 w-4" /><span className="brand-mono text-xl font-black">{active.timeRemaining}</span></div><p className="mt-2 text-[0.64rem] font-black uppercase tracking-[0.15em] text-[#94a992]">Time remaining</p></div>
             </div>
 
             <div className="grid gap-10 pt-9 lg:grid-cols-[1fr_260px] lg:items-center">

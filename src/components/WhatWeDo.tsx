@@ -27,11 +27,11 @@ export const WhatWeDo = ({ tracks }: { tracks: typeof WHAT_WE_DO }) => {
               </div>
               <div className="relative z-10 mt-9 flex items-center justify-between gap-4">
                 <h3 className="text-2xl font-black tracking-tight text-[#f2f8ed]">{item.title}</h3>
-                <ArrowUpRight className="h-5 w-5 text-[#718675] transition-colors group-hover:text-[#b8ff3d]" />
+                <ArrowUpRight className="h-5 w-5 text-[#94a992] transition-colors group-hover:text-[#b8ff3d]" />
               </div>
               <ul className="relative z-10 mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5">
                 {item.items.map((sub, i) => (
-                  <li key={i} className="flex items-center gap-3 text-sm text-[#8da18e]">
+                  <li key={i} className="flex items-center gap-3 text-sm text-[#a9bda3]">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#b8ff3d] shadow-[0_0_8px_#b8ff3d]" />
                     {sub}
                   </li>

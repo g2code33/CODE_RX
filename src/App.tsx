@@ -207,7 +207,7 @@ function App() {
                     <article key={news.id} className="brand-card brand-card-hover p-6 sm:p-7">
                       <div className="flex items-center justify-between"><span className="brand-number">0{index + 1} / {news.category}</span><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d] shadow-[0_0_10px_#b8ff3d]" /></div>
                       <h3 className="mt-8 text-xl font-black leading-tight tracking-tight text-[#f2f8ed]">{news.title}</h3>
-                      <p className="mt-4 text-sm leading-7 text-[#8da18e]">{news.text}</p>
+                      <p className="mt-4 text-sm leading-7 text-[#a9bda3]">{news.text}</p>
                       <div className="mt-7 h-px w-12 bg-[#b8ff3d]/60" />
                     </article>
                   ))}
@@ -254,7 +254,7 @@ function App() {
               <div className="mb-14 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><div className="brand-eyebrow mb-5">The library</div><h2 className="brand-title text-4xl sm:text-5xl">Tools for the<br /><span className="brand-gradient-text">next prescription.</span></h2></div><SectionLink id="resources" /></div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 {(safe.resources.categories || []).map((cat, index) => (
-                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#8da18e]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
+                  <article key={cat.name} className="brand-card brand-card-hover p-6 sm:p-7"><span className="brand-number">0{index + 1} / LIBRARY</span><h3 className="mt-8 text-xl font-black text-[#f2f8ed]">{cat.name}</h3><ul className="mt-6 space-y-3 border-t border-[#b8ff3d]/12 pt-5 text-sm text-[#a9bda3]">{cat.items.map((item, i) => <li key={i} className="flex items-center gap-3"><span className="h-1.5 w-1.5 rounded-full bg-[#b8ff3d]" />{item}</li>)}</ul></article>
                 ))}
               </div>
             </div>
@@ -304,7 +304,7 @@ function App() {
       {!isDashboard && !isAdmin && (
         <button 
           onClick={handleOpenJoin}
-          className="fixed bottom-6 right-5 z-50 grid h-14 w-14 place-items-center rounded-full border border-[#b8ff3d] bg-[#b8ff3d] text-[0.62rem] font-black uppercase tracking-wide text-[#020604] shadow-[0_0_24px_rgba(184,255,61,0.35)] transition-all hover:scale-110 active:scale-95 md:hidden"
+          className="fixed bottom-6 right-5 z-50 grid h-14 w-14 place-items-center rounded-full border border-[#b8ff3d] bg-[#b8ff3d] text-[0.66rem] font-black uppercase tracking-wide text-[#020604] shadow-[0_0_24px_rgba(184,255,61,0.35)] transition-all hover:scale-110 active:scale-95 md:hidden"
         >
            <div className="flex flex-col items-center">
               <span className="text-xl font-black leading-none uppercase">Join</span>

@@ -1,19 +1,21 @@
 @import "tailwindcss";
 
 :root {
-  /* Professional White Theme */
-  --brand-ink: #ffffff;
-  --brand-deep: #f8fafc;
-  --brand-panel: #ffffff;
-  --brand-panel-strong: #f1f5f9;
-  --brand-line: #e2e8f0;
-  --brand-lime: #16a34a;
+  /* Dark Code Rx identity — the public site renders on deep green-black
+     panels with bright, high-contrast text. The header bar stays white and
+     the admin/portal flows are remapped below. */
+  --brand-ink: #020604;
+  --brand-deep: #07150b;
+  --brand-panel: #0b1c10;
+  --brand-panel-strong: #0f2a17;
+  --brand-line: rgba(184, 255, 61, 0.16);
+  --brand-lime: #b8ff3d;
   --brand-green: #15803d;
   --brand-mint: #4ade80;
-  --brand-muted: #64748b;
-  --brand-white: #0f172a;
-  --brand-text: #0f172a;
-  --brand-text-secondary: #475569;
+  --brand-muted: #94a992;
+  --brand-white: #f2f8ed;
+  --brand-text: #eef6e9;
+  --brand-text-secondary: #a9bda3;
 }
 
 * {
@@ -88,7 +90,7 @@ section[id] {
 
 /* Beautiful horizontal section dividers when scrolling */
 .brand-section + .brand-section {
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid rgba(184, 255, 61, 0.12);
 }
 
 .brand-section--alt {
@@ -102,8 +104,8 @@ section[id] {
 .brand-grid {
   background-color: var(--brand-ink);
   background-image:
-    linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+    linear-gradient(rgba(184, 255, 61, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(184, 255, 61, 0.045) 1px, transparent 1px);
   background-size: 56px 56px;
 }
 
@@ -140,8 +142,8 @@ section[id] {
   display: inline-flex;
   align-items: center;
   gap: 0.6rem;
-  color: #166534;
-  font-size: 0.68rem;
+  color: var(--brand-lime);
+  font-size: 0.72rem;
   line-height: 1;
   font-weight: 900;
   letter-spacing: 0.22em;
@@ -157,7 +159,7 @@ section[id] {
 }
 
 .brand-title {
-  color: #0f172a;
+  color: var(--brand-text);
   font-weight: 950;
   letter-spacing: -0.065em;
   line-height: 0.94;
@@ -166,17 +168,17 @@ section[id] {
 .brand-copy,
 p,
 h1, h2, h3, h4, h5, h6 {
-  color: #0f172a;
+  color: var(--brand-text);
 }
 
 .brand-copy {
-  color: #475569;
+  color: var(--brand-text-secondary);
   line-height: 1.75;
 }
 
 .brand-gradient-text {
   color: var(--brand-lime);
-  background: linear-gradient(100deg, var(--brand-white) 0%, var(--brand-lime) 55%, var(--brand-green) 100%);
+  background: linear-gradient(100deg, var(--brand-white) 0%, var(--brand-lime) 55%, var(--brand-mint) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -190,20 +192,21 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid var(--brand-lime);
   border-radius: 999px;
   padding: 0.9rem 1.35rem;
-  color: white;
+  color: #03170a;
   background: var(--brand-lime);
-  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  font-size: 0.75rem;
+  box-shadow: 0 0 18px rgba(184, 255, 61, 0.28), 0 4px 6px -1px rgb(0 0 0 / 0.35);
+  font-size: 0.78rem;
   font-weight: 900;
   letter-spacing: 0.12em;
   line-height: 1;
   text-transform: uppercase;
-  transition: transform 180ms ease, background 180ms ease, box-shadow 180ms ease;
+  transition: transform 180ms ease, background 180ms ease, box-shadow 180ms ease, color 180ms ease;
 }
 
 .brand-button:hover {
-  background: var(--brand-green);
-  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  color: #f2f8ed;
+  background: #16753a;
+  box-shadow: 0 0 26px rgba(184, 255, 61, 0.35), 0 10px 15px -3px rgb(0 0 0 / 0.4);
   transform: translateY(-2px);
 }
 
@@ -217,9 +220,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .brand-button--ghost {
-  border-color: rgba(202, 255, 133, 0.3);
+  border-color: rgba(202, 255, 133, 0.45);
   color: var(--brand-white);
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(184, 255, 61, 0.06);
   box-shadow: none;
 }
 
@@ -233,8 +236,8 @@ h1, h2, h3, h4, h5, h6 {
 .brand-card {
   border: 1px solid var(--brand-line);
   border-radius: 1.35rem;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+  background: var(--brand-panel);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 14px 30px -12px rgba(0, 0, 0, 0.55);
 }
 
 .brand-card-hover {
@@ -242,9 +245,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .brand-card-hover:hover {
-  border-color: var(--brand-lime);
-  background: #ffffff;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+  border-color: rgba(184, 255, 61, 0.45);
+  background: var(--brand-panel-strong);
+  box-shadow: 0 0 24px rgba(184, 255, 61, 0.10), 0 14px 30px -12px rgba(0, 0, 0, 0.6);
   transform: translateY(-3px);
 }
 
@@ -267,9 +270,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .brand-number {
-  color: rgba(184, 255, 61, 0.62);
+  color: rgba(184, 255, 61, 0.9);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.12em;
 }
@@ -337,8 +340,8 @@ footer {
 /* Navigation links on the white header use dark, readable text with a
    lime-green accent for hover / active states. */
 .brand-nav-link {
-  color: rgba(6, 17, 10, 0.72);
-  font-size: 0.67rem;
+  color: rgba(6, 17, 10, 0.88);
+  font-size: 0.7rem;
   font-weight: 850;
   letter-spacing: 0.11em;
   text-transform: uppercase;
@@ -358,7 +361,7 @@ footer {
 }
 
 .brand-nav-dropdown .brand-nav-link {
-  color: rgba(242, 248, 237, 0.72);
+  color: rgba(242, 248, 237, 0.92);
 }
 
 .brand-nav-dropdown .brand-nav-link:hover,
@@ -369,11 +372,16 @@ footer {
 
 .brand-input {
   width: 100%;
-  border: 1px solid rgba(184, 255, 61, 0.18);
+  border: 1px solid rgba(184, 255, 61, 0.25);
   border-radius: 0.75rem;
   background: #07120b;
   color: var(--brand-white);
   outline: none;
+}
+
+.brand-input::placeholder {
+  color: #7e947f;
+  opacity: 1;
 }
 
 .brand-input:focus {
@@ -404,37 +412,61 @@ footer {
   animation: brand-float 5s ease-in-out infinite;
 }
 
-/* Keep the existing portal/admin flows readable while the public site uses
-   the selected dark Code Rx identity. */
+/* Keep the portal/admin/member flows readable on the dark Code Rx identity:
+   remap the light-theme utility classes they were written with onto the
+   dark brand tokens, and keep white button text on greens deep enough to
+   stay legible. */
 .brand-app .bg-white {
   background-color: var(--brand-panel) !important;
 }
 
-.brand-app .bg-slate-50 {
+.brand-app .hover\:bg-white:hover {
+  background-color: var(--brand-panel-strong) !important;
+}
+
+.brand-app .bg-slate-50,
+.brand-app .bg-gray-50 {
   background-color: var(--brand-deep) !important;
 }
 
-.brand-app .bg-slate-100 {
+.brand-app .bg-slate-100,
+.brand-app .bg-gray-100 {
   background-color: var(--brand-panel-strong) !important;
 }
 
 .brand-app .text-slate-900,
 .brand-app .text-slate-800,
-.brand-app .text-slate-700 {
+.brand-app .text-slate-700,
+.brand-app .text-gray-900,
+.brand-app .text-gray-800,
+.brand-app .text-gray-700,
+.brand-app .text-gray-600 {
+  color: var(--brand-white) !important;
+}
+
+.brand-app .hover\:text-black:hover {
   color: var(--brand-white) !important;
 }
 
 .brand-app .text-slate-600,
-.brand-app .text-slate-500 {
+.brand-app .text-slate-500,
+.brand-app .text-gray-500,
+.brand-app .text-gray-400 {
   color: var(--brand-muted) !important;
 }
 
 .brand-app .text-slate-400 {
-  color: #718675 !important;
+  color: #94a992 !important;
+}
+
+.brand-app .text-yellow-600 {
+  color: #f0c453 !important;
 }
 
 .brand-app .border-slate-100,
 .brand-app .border-slate-200,
+.brand-app .border-gray-100,
+.brand-app .border-gray-200,
 .brand-app .border-emerald-100,
 .brand-app .border-emerald-50 {
   border-color: var(--brand-line) !important;
@@ -460,17 +492,17 @@ footer {
   --tw-shadow-color: rgba(113, 255, 31, 0.12) !important;
 }
 
-.brand-app .hover\:bg-emerald-600:hover,
-.brand-app .hover\:bg-emerald-500:hover {
-  background-color: #8cf52e !important;
-}
-
 .brand-app .bg-emerald-500 {
-  background-color: var(--brand-green) !important;
+  background-color: #16a34a !important;
 }
 
 .brand-app .bg-emerald-600 {
-  background-color: #38c919 !important;
+  background-color: #15803d !important;
+}
+
+.brand-app .hover\:bg-emerald-600:hover,
+.brand-app .hover\:bg-emerald-500:hover {
+  background-color: #146e36 !important;
 }
 
 .brand-app .bg-teal-600 {
@@ -638,11 +670,11 @@ footer {
 }
 
 .header-wordmark-subtitle {
-  color: #13a82e;
+  color: #0e7a1c;
   font-family: "Avenir Next", "Trebuchet MS", ui-sans-serif, sans-serif;
-  font-size: 0.62rem;
+  font-size: 0.66rem;
   font-weight: 900;
-  letter-spacing: 0.34em;
+  letter-spacing: 0.32em;
   line-height: 1;
   text-transform: uppercase;
 }

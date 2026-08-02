@@ -25,7 +25,7 @@ export const ValueCards = () => {
                 <span className="brand-number">0{index + 1}</span>
               </div>
               <h3 className="mt-9 text-xl font-black tracking-tight text-[#f2f8ed]">{value.title}</h3>
-              <p className="mt-3 text-sm leading-7 text-[#8da18e]">{value.description}</p>
+              <p className="mt-3 text-sm leading-7 text-[#a9bda3]">{value.description}</p>
               <div className="mt-7 h-px w-12 bg-[#b8ff3d]/60 transition-all duration-300 group-hover:w-20 group-hover:bg-[#b8ff3d]" />
             </article>
           ))}
@@ -53,11 +53,11 @@ export const About = ({ mission, vision, motto }: { mission: string; vision: str
             <div className="mt-5 grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-[#b8ff3d]/15 bg-[#b8ff3d]/5 p-4">
                 <Binary className="h-4 w-4 text-[#b8ff3d]" />
-                <p className="mt-3 text-[0.62rem] font-black uppercase tracking-[0.15em] text-[#8da18e]">Technology</p>
+                <p className="mt-3 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#a9bda3]">Technology</p>
               </div>
               <div className="rounded-xl border border-[#b8ff3d]/15 bg-[#b8ff3d]/5 p-4">
                 <Eye className="h-4 w-4 text-[#b8ff3d]" />
-                <p className="mt-3 text-[0.62rem] font-black uppercase tracking-[0.15em] text-[#8da18e]">Care first</p>
+                <p className="mt-3 text-[0.66rem] font-black uppercase tracking-[0.15em] text-[#a9bda3]">Care first</p>
               </div>
             </div>
           </div>
@@ -80,18 +80,18 @@ export const About = ({ mission, vision, motto }: { mission: string; vision: str
           <div className="mt-10 grid gap-4 sm:grid-cols-2">
             <div className="brand-card p-6">
               <div className="mb-5 flex items-center gap-3 text-[#b8ff3d]"><Target className="h-5 w-5" /><span className="brand-number">01 / MISSION</span></div>
-              <p className="text-sm leading-7 text-[#8da18e]">{mission}</p>
+              <p className="text-sm leading-7 text-[#a9bda3]">{mission}</p>
             </div>
             <div className="brand-card p-6">
               <div className="mb-5 flex items-center gap-3 text-[#b8ff3d]"><Eye className="h-5 w-5" /><span className="brand-number">02 / VISION</span></div>
-              <p className="text-sm leading-7 text-[#8da18e]">{vision}</p>
+              <p className="text-sm leading-7 text-[#a9bda3]">{vision}</p>
             </div>
           </div>
 
           <div className="mt-8 flex items-start gap-4 border-l-2 border-[#b8ff3d] pl-5">
             <Quote className="mt-1 h-5 w-5 shrink-0 text-[#b8ff3d]" />
             <div>
-              <p className="text-[0.62rem] font-black uppercase tracking-[0.2em] text-[#718675]">Our motto</p>
+              <p className="text-[0.66rem] font-black uppercase tracking-[0.2em] text-[#94a992]">Our motto</p>
               <p className="mt-2 text-lg font-black uppercase tracking-[0.04em] text-[#f2f8ed]">{motto}</p>
             </div>
           </div>
