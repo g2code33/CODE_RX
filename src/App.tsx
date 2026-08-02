@@ -20,7 +20,7 @@ import { ResetPassword } from './components/ResetPassword';
 import { SectionLink } from './components/SectionLink';
 import { PharmacyBackground } from './components/PharmacyBackground';
 import { SECTION_MAP } from './data/mockData';
-import { INITIAL_SITE_CONTENT, SiteContent } from './data/siteState';
+import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
 import { auth, AuthUser } from './lib/cloudflare';
 
 function App() {
@@ -33,45 +33,36 @@ function App() {
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
 
-  // Auto-clear broken localStorage data
+  // Auto-clear corrupted localStorage data (unparseable JSON only —
+  // partial/old-schema payloads are repaired by normalizeSiteContent below)
   useEffect(() => {
     try {
       const saved = localStorage.getItem('codeRx_siteContent');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.projects)) {
-          localStorage.removeItem('codeRx_siteContent');
-        }
-      }
+      if (saved) JSON.parse(saved);
     } catch {
       localStorage.removeItem('codeRx_siteContent');
     }
   }, []);
 
   const [siteContent, setSiteContent] = useState<SiteContent>(() => {
-    const saved = localStorage.getItem('codeRx_siteContent');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return {
-          ...INITIAL_SITE_CONTENT,
-          ...parsed,
-          home: { ...INITIAL_SITE_CONTENT.home, ...parsed.home },
-          about: { ...INITIAL_SITE_CONTENT.about, ...parsed.about },
-          learn: { ...INITIAL_SITE_CONTENT.learn, ...parsed.learn },
-          projects: Array.isArray(parsed.projects) ? parsed.projects : INITIAL_SITE_CONTENT.projects,
-          challenges: { ...INITIAL_SITE_CONTENT.challenges, ...parsed.challenges },
-          community: { ...INITIAL_SITE_CONTENT.community, ...parsed.community },
-          resources: { ...INITIAL_SITE_CONTENT.resources, ...parsed.resources },
-          terms: { ...INITIAL_SITE_CONTENT.terms, ...parsed.terms },
-        };
-      } catch (e) {
-        console.error('Failed to load saved content:', e);
-        return INITIAL_SITE_CONTENT;
-      }
+    try {
+      const saved = localStorage.getItem('codeRx_siteContent');
+      if (saved) return normalizeSiteContent(JSON.parse(saved));
+    } catch (e) {
+      console.error('Failed to load saved content:', e);
+      localStorage.removeItem('codeRx_siteContent');
     }
     return INITIAL_SITE_CONTENT;
   });
+
+  // Wrapped setter handed to the AdminPanel: guarantees no code path
+  // (D1 load, undo history, reset, edits) can ever put a partial or
+  // old-schema content shape into state and crash the renders.
+  const handleSetSiteContent: React.Dispatch<React.SetStateAction<SiteContent>> = (action) => {
+    setSiteContent((prev) =>
+      normalizeSiteContent(typeof action === 'function' ? (action as (p: SiteContent) => SiteContent)(prev) : action)
+    );
+  };
 
   useEffect(() => {
     auth.me().then((u) => {
@@ -168,7 +159,7 @@ function App() {
   };
 
   const renderContent = () => {
-    if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={setSiteContent} />;
+    if (isAdmin) return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} />;
     if (isDashboard) return <Dashboard user={user} />;
 
     const safe = {

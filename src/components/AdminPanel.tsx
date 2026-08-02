@@ -23,7 +23,7 @@ import {
   UserCheck,
   Power
 } from 'lucide-react';
-import { SiteContent, INITIAL_SITE_CONTENT } from '../data/siteState';
+import { SiteContent, INITIAL_SITE_CONTENT, normalizeSiteContent } from '../data/siteState';
 import { db, auth } from '../lib/cloudflare';
 
 const STORAGE_KEY = 'codeRx_siteContent';
@@ -714,6 +714,9 @@ export const AdminPanel = ({
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
 
+  // Defensive: never trust external payloads to have the full schema.
+  const projectsList = Array.isArray(siteContent.projects) ? siteContent.projects : [];
+
   // Load from Cloudflare D1 on mount (with localStorage fallback)
   useEffect(() => {
     const loadContent = async () => {
@@ -721,8 +724,11 @@ export const AdminPanel = ({
         // Try to load from the API first
         const content = await db.siteContent.get();
         if (content) {
-          setSiteContent(content);
-          setContentHistory([content]);
+          // Normalize: payloads saved by older builds may be missing whole
+          // sections (e.g. `projects`), which would crash the renders below.
+          const normalized = normalizeSiteContent(content);
+          setSiteContent(normalized);
+          setContentHistory([normalized]);
           setHistoryIndex(0);
           setSavedToStorage(true);
           return;
@@ -735,7 +741,7 @@ export const AdminPanel = ({
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         try {
-          const parsed = JSON.parse(saved);
+          const parsed = normalizeSiteContent(JSON.parse(saved));
           setSiteContent(parsed);
           setContentHistory([parsed]);
           setHistoryIndex(0);
@@ -974,7 +980,7 @@ export const AdminPanel = ({
                 <div className="grid md:grid-cols-3 gap-6">
                   {[
                     { label: 'Total Members', value: stats ? String(stats.members) : '—', color: 'text-emerald-600' },
-                    { label: 'Active Projects', value: String(siteContent.projects.length), color: 'text-slate-900' },
+                    { label: 'Active Projects', value: String(projectsList.length), color: 'text-slate-900' },
                     { label: 'Pending Applications', value: stats ? String(stats.pendingApplications) : '—', color: 'text-yellow-600' },
                     { label: 'Subscribers', value: stats ? String(stats.subscribers) : '—', color: 'text-blue-600' },
                     { label: 'Total Applications', value: stats ? String(stats.applications) : '—', color: 'text-slate-900' },
@@ -1318,7 +1324,7 @@ export const AdminPanel = ({
                 </div>
                 
                 <div className="space-y-4">
-                  {siteContent.projects.map((proj) => (
+                  {projectsList.map((proj) => (
                     <div key={proj.id} className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
                       <div className="flex items-start justify-between mb-4">
                         <div>
