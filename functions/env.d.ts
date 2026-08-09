@@ -6,6 +6,9 @@ export interface Env {
   BUCKET: R2Bucket;
   JWT_SECRET: string;
   ADMIN_EMAIL: string;
+  /** Optional dedicated founder email. Defaults to ADMIN_EMAIL. */
+  PHANTOM_EMAIL?: string;
+  /** Seed-only secret; configure in Cloudflare, never in frontend code. */
   ADMIN_PASSWORD?: string;
   TELEGRAM_LINK: string;
   SITE_URL?: string;
@@ -17,4 +20,5 @@ export interface Env {
   EMAILJS_TEMPLATE_ID_CONTACT?: string;
   EMAILJS_TEMPLATE_ID_APPROVAL?: string;
   EMAILJS_TEMPLATE_ID_RESET?: string;
+  EMAILJS_TEMPLATE_ID_ACTIVATION?: string;
 }

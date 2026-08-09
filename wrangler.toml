@@ -19,15 +19,14 @@ binding = "BUCKET"
 bucket_name = "code-rx-storage"
 
 # Environment Variables
+# JWT_SECRET and ADMIN_PASSWORD are deliberately NOT stored in this repository.
+# Configure them as encrypted Cloudflare Pages/Worker secrets before a fresh
+# production deployment. PHANTOM_EMAIL defaults to ADMIN_EMAIL when omitted.
 [vars]
 ADMIN_EMAIL = "coderxsociety@gmail.com"
-# Password used ONLY to seed the first admin account (when the users table
-# is empty). CHANGE THIS before going live, then log in with the new password
-# and update ADMIN_PASSWORD here for future deploys.
-ADMIN_PASSWORD = "Admin@12345"
+PHANTOM_EMAIL = "coderxsociety@gmail.com"
 TELEGRAM_LINK = "https://t.me/+EdRpfR1GTGNjM2Q0"
-# Secret used to sign login tokens. CHANGE THIS to a long random string.
-JWT_SECRET = "MJHRYDYbCwzUqe7FXrmgdfJxWsX39/nUaty1e9vD/j2UuPDKebJl866iVWfB5pyI"
+# SITE_URL = "https://coderxsociety.pages.dev"
 
 # EmailJS (optional) — enables email notifications for new applications,
 # contact messages, and application approvals. Leave empty to disable.
@@ -38,6 +37,7 @@ EMAILJS_TEMPLATE_ID_JOIN = ""
 EMAILJS_TEMPLATE_ID_CONTACT = ""
 EMAILJS_TEMPLATE_ID_APPROVAL = ""
 EMAILJS_TEMPLATE_ID_RESET = ""
+EMAILJS_TEMPLATE_ID_ACTIVATION = ""
 
 # Development environment
 [env.dev]

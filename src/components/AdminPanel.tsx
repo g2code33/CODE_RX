@@ -24,7 +24,8 @@ import {
   Power
 } from 'lucide-react';
 import { SiteContent, INITIAL_SITE_CONTENT, normalizeSiteContent } from '../data/siteState';
-import { db, auth } from '../lib/cloudflare';
+import { db, auth, AuthUser } from '../lib/cloudflare';
+import { PhantomControlCenter } from './PhantomControlCenter';
 import { VisualEditor } from './VisualEditor';
 
 const STORAGE_KEY = 'codeRx_siteContent';
@@ -63,17 +64,9 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
         app.id === id ? { ...app, status: 'approved' } : app
       );
       setApplications(updated);
-      
-      // Create member record when approved
-      const app = applications.find(a => a.id === id);
-      if (app) {
-        await db.members.create({
-          name: app.name,
-          email: app.email,
-          phone: app.phone,
-          role: 'member'
-        });
-      }
+      // Approval is review only. PHANTOM must deliberately use Create Member
+      // in the Control Center to issue a member ID and secure activation link.
+      alert('Application reviewed. Open PHANTOM Control Center → Applications → Create Member to issue the secure activation process.');
     } catch (error) {
       console.error('Failed to approve application:', error);
     }
@@ -333,7 +326,7 @@ const MembersSection = () => {
   };
 
   const handleRemove = async (member: any) => {
-    if (!window.confirm(`Remove ${member.name} from the members list?`)) return;
+    if (!window.confirm(`Archive ${member.name}? Their history will be preserved.`)) return;
     try {
       await db.members.remove(member.id);
       flash('success', `${member.name} removed.`);
@@ -559,7 +552,7 @@ const MemberRow = ({
           <button
             onClick={onRemove}
             className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-all"
-            title="Remove member"
+            title="Archive member"
           >
             <Trash2 className="w-4 h-4" />
           </button>
@@ -708,6 +701,7 @@ export const AdminPanel = ({
   activeTab,
   onNavigate,
   onJoin,
+  user,
 }: { 
   siteContent: SiteContent, 
   setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>>;
@@ -716,8 +710,9 @@ export const AdminPanel = ({
   activeTab: string;
   onNavigate: (id: string) => void;
   onJoin?: () => void;
+  user: AuthUser | null;
 }) => {
-  const [activeView, setActiveView] = useState<'overview' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
+  const [activeView, setActiveView] = useState<'overview' | 'phantom' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [contentHistory, setContentHistory] = useState<SiteContent[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -793,10 +788,11 @@ export const AdminPanel = ({
 
   // Load live stats for the dashboard overview
   useEffect(() => {
+    if (!user?.isPhantom) return;
     db.getStats()
       .then((s) => setStats(s))
       .catch((e) => console.error('Failed to load stats:', e));
-  }, []);
+  }, [user?.isPhantom]);
 
   // Save to history when content changes
   useEffect(() => {
@@ -1000,9 +996,9 @@ export const AdminPanel = ({
             <nav className="space-y-1">
                <p className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">System</p>
                {[
+                 ...(user?.isPhantom ? [{ id: 'phantom', label: 'PHANTOM Control', icon: ShieldAlert }] : []),
                  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
-                 { id: 'applications', label: 'Applications', icon: Users, badge: pendingCount },
-                 { id: 'members', label: 'Members', icon: UserCheck },
+                 ...(user?.isPhantom ? [{ id: 'applications', label: 'Applications', icon: Users, badge: pendingCount }, { id: 'members', label: 'Members', icon: UserCheck }] : []),
                  { id: 'security', label: 'Security', icon: ShieldAlert },
                ].map((item) => (
                  <button
@@ -1051,6 +1047,7 @@ export const AdminPanel = ({
 
           {/* Main Admin Content */}
           <main className="flex-grow space-y-6 bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
+            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter />}
             {activeView === 'overview' && (
               <div className="space-y-6">
                 <div className="flex justify-between items-center">

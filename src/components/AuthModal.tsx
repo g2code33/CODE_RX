@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle } from 'lucide-react';
 import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
 
-type Mode = 'join' | 'login' | 'register' | 'forgot';
+type Mode = 'join' | 'login' | 'forgot';
 
 export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaultMode = 'join' }: {
   isOpen: boolean,
@@ -22,7 +22,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
   });
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [forgotResult, setForgotResult] = useState<{ message: string; devResetLink?: string } | null>(null);
+  const [forgotResult, setForgotResult] = useState<{ message: string } | null>(null);
 
   // Each time the modal opens, honour the mode requested by the caller.
   // Without this, a previously opened Join form could remain active when the
@@ -51,15 +51,12 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
     try {
       if (mode === 'forgot') {
         const res = await auth.forgotPassword(formData.email);
-        setForgotResult({ message: res.message, devResetLink: res.devResetLink });
+        setForgotResult({ message: res.message });
       } else if (mode === 'login') {
         const user = await auth.login(formData.email, formData.password);
         onLoginSuccess(user);
-      } else if (mode === 'register') {
-        const user = await auth.register(formData.name, formData.email, formData.password);
-        onLoginSuccess(user);
       } else {
-        // Join: submit membership application + subscribe
+        // Join: submit a pending membership application. It never creates an account.
         await db.applications.create({
           name: formData.name,
           email: formData.email,
@@ -94,7 +91,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 <CheckCircle className="w-10 h-10" />
               </div>
               <h2 className="text-3xl font-black text-slate-900 mb-2 tracking-tighter uppercase">Application Sent!</h2>
-              <p className="text-slate-500 font-medium mb-8">The Admin team will review your info and get back to you via email shortly.</p>
+              <p className="text-slate-500 font-medium mb-8">Your pending JOIN CODE Rx request has been sent. PHANTOM will review it and contact you by email.</p>
               <button onClick={onClose} className="w-full py-4 bg-slate-900 text-white font-black rounded-2xl hover:bg-black transition-all">CLOSE</button>
             </motion.div>
           </div>
@@ -134,21 +131,19 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                   <img src="/logo.png" alt="Logo" className="w-10 h-10 object-contain" />
                 </div>
                 <h2 className="text-3xl font-black text-slate-900 leading-none tracking-tighter">
-                  {mode === 'join' ? 'Join the Society' : mode === 'register' ? 'Create Account' : mode === 'forgot' ? 'Forgot Password?' : 'Welcome Back'}
+                  {mode === 'join' ? 'Join the Society' : mode === 'forgot' ? 'Forgot Password?' : 'Welcome Back'}
                 </h2>
                 <p className="text-slate-500 mt-2 text-sm font-medium">
                   {mode === 'join'
                     ? 'Start your journey at the intersection of RX & Tech'
-                    : mode === 'register'
-                      ? 'Register to access the member portal'
-                      : mode === 'forgot'
+                    : mode === 'forgot'
                         ? 'Enter your email and we will send you a reset link'
                         : 'Enter your credentials to access the portal'}
                 </p>
               </div>
 
               <form className="auth-modal-form space-y-3" onSubmit={handleSubmit}>
-                {mode !== 'login' && (
+                {mode === 'join' && (
                   <>
                     <div className="relative">
                       <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
@@ -168,6 +163,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                         <input
                           type="tel"
                           placeholder="Telephone Number"
+                          required
                           value={formData.phone}
                           onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                           className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
@@ -189,12 +185,12 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                   />
                 </div>
 
-                {(mode === 'login' || mode === 'register') && (
+                {mode === 'login' && (
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                     <input
                       type="password"
-                      placeholder={mode === 'register' ? 'Password (min 6 characters)' : 'Password'}
+                      placeholder="Password"
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                       className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
@@ -239,14 +235,6 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                       <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
                       <span>{forgotResult.message}</span>
                     </div>
-                    {forgotResult.devResetLink && (
-                      <a
-                        href={forgotResult.devResetLink}
-                        className="text-xs font-bold text-emerald-600 underline break-all"
-                      >
-                        {forgotResult.devResetLink}
-                      </a>
-                    )}
                   </div>
                 )}
 
@@ -266,7 +254,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                     'Please wait...'
                   ) : (
                     <>
-                      {mode === 'join' ? 'SEND APPLICATION' : mode === 'register' ? 'CREATE ACCOUNT' : mode === 'forgot' ? 'SEND RESET LINK' : 'SIGN IN'}
+                      {mode === 'join' ? 'SEND APPLICATION' : mode === 'forgot' ? 'SEND RESET LINK' : 'SIGN IN'}
                       <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                     </>
                   )}
@@ -289,12 +277,8 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 {mode === 'login' ? (
                   <>
                     New here?{' '}
-                    <button onClick={() => switchMode('register')} className="text-emerald-600 font-black hover:underline">
-                      Create an account
-                    </button>{' '}
-                    or{' '}
                     <button onClick={() => switchMode('join')} className="text-emerald-600 font-black hover:underline">
-                      apply to join
+                      Apply to JOIN CODE Rx
                     </button>
                   </>
                 ) : mode === 'forgot' ? (
@@ -306,7 +290,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                   </>
                 ) : (
                   <>
-                    {mode === 'join' ? 'Already have an account?' : 'Already registered?'}{' '}
+                    {mode === 'join' ? 'Already have an account?' : 'Already have an account?'}{' '}
                     <button onClick={() => switchMode('login')} className="text-emerald-600 font-black hover:underline">
                       Sign In
                     </button>

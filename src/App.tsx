@@ -4,11 +4,12 @@ import { AuthModal } from './components/AuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { Dashboard } from './components/Dashboard';
 import { ResetPassword } from './components/ResetPassword';
+import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
 import { VisualEditorProvider } from './components/VisualEditorContext';
 import { SECTION_MAP } from './data/mockData';
 import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
-import { auth, AuthUser, db } from './lib/cloudflare';
+import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
 
 function App() {
   const [isDashboard, setIsDashboard] = useState(false);
@@ -19,6 +20,7 @@ function App() {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
+  const [isActivationView, setIsActivationView] = useState(() => window.location.hash.startsWith('#activate'));
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
   useEffect(() => {
@@ -64,7 +66,7 @@ function App() {
     auth.me().then((authenticatedUser) => {
       if (!authenticatedUser) return;
       setUser(authenticatedUser);
-      if (authenticatedUser.role === 'admin') {
+      if (isAdminUser(authenticatedUser)) {
         setIsAdmin(true);
         setIsDashboard(false);
         setAdminWorkspace('controller');
@@ -81,11 +83,18 @@ function App() {
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
+      if (window.location.hash.startsWith('#activate')) {
+        setIsActivationView(true);
+        setIsResetView(false);
+        return;
+      }
       if (window.location.hash.startsWith('#reset')) {
         setIsResetView(true);
+        setIsActivationView(false);
         return;
       }
       setIsResetView(false);
+      setIsActivationView(false);
       const id = idFromHash();
       const section = SECTION_MAP[id];
       const tab = section ? section.tab : 'home';
@@ -125,7 +134,7 @@ function App() {
   const handleLoginSuccess = (authenticatedUser: AuthUser) => {
     setUser(authenticatedUser);
     setIsAuthOpen(false);
-    if (authenticatedUser.role === 'admin') {
+    if (isAdminUser(authenticatedUser)) {
       setIsAdmin(true);
       setIsDashboard(false);
       setAdminWorkspace('controller');
@@ -153,9 +162,16 @@ function App() {
     return <ResetPassword onDone={() => { window.location.hash = ''; setIsResetView(false); window.scrollTo({ top: 0, behavior: 'instant' }); }} />;
   }
 
+  if (isActivationView) {
+    return <ActivateAccount
+      onDone={() => { window.location.hash = ''; setIsActivationView(false); }}
+      onActivated={(activatedUser) => { setIsActivationView(false); handleLoginSuccess(activatedUser); }}
+    />;
+  }
+
   const inLiveBuilder = isAdmin && adminWorkspace === 'builder';
   const mainContent = isAdmin
-    ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} />
+    ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
     : isDashboard
       ? <Dashboard user={user} />
       : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;

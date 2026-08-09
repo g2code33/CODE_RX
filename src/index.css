@@ -985,3 +985,42 @@ footer {
     max-height: min(70vh, 38rem);
   }
 }
+
+/* Shared compact controls used by PHANTOM Control Center. */
+.mini-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dce7e0;
+  border-radius: 0.65rem;
+  background: #fff;
+  padding: 0.5rem 0.65rem;
+  color: #475569;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
+}
+
+.mini-button:hover {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #047857;
+}
+
+.icon-button {
+  display: inline-grid;
+  height: 2rem;
+  width: 2rem;
+  place-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.55rem;
+  color: #64748b;
+  background: #fff;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.icon-button:hover {
+  color: #047857;
+  background: #ecfdf5;
+}
