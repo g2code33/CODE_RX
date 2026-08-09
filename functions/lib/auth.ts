@@ -75,10 +75,12 @@ export const verifyPassword = async (password: string, stored: string): Promise<
 };
 
 // ---------- JWT (HMAC-SHA256) ----------
+export type SystemRole = 'phantom' | 'admin' | 'member';
+
 export interface JwtPayload {
   sub: string; // user id
   email: string;
-  role: 'admin' | 'member';
+  role: SystemRole;
   iat: number;
   exp: number;
 }
@@ -149,7 +151,7 @@ export const requireAdmin = async (
   if (!token) return c.json({ success: false, error: 'Authentication required' }, 401);
   const payload = await verifyToken(token, c.env.JWT_SECRET);
   if (!payload) return c.json({ success: false, error: 'Invalid or expired token' }, 401);
-  if (payload.role !== 'admin') return c.json({ success: false, error: 'Admin access required' }, 403);
+  if (payload.role !== 'admin' && payload.role !== 'phantom') return c.json({ success: false, error: 'Admin access required' }, 403);
   c.set('user', payload);
   await next();
 };

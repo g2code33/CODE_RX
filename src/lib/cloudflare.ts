@@ -27,8 +27,17 @@ export interface AuthUser {
   id: number | string;
   email: string;
   name?: string;
-  role: 'admin' | 'member';
+  role: 'phantom' | 'admin' | 'member';
+  isPhantom?: boolean;
+  isWebsiteAdmin?: boolean;
+  memberCode?: string | null;
+  memberStatus?: 'pending_activation' | 'active' | 'locked' | 'archived' | null;
+  codename?: string | null;
 }
+
+export const isAdminUser = (user: AuthUser | null | undefined) => Boolean(
+  user && (user.isPhantom || user.isWebsiteAdmin || user.role === 'phantom' || user.role === 'admin')
+);
 
 export const getStoredUser = (): AuthUser | null => {
   try {
@@ -134,6 +143,102 @@ export const db = {
     remove: (id: number) => apiCall(`/api/members/${id}`, { method: 'DELETE' }),
   },
 
+  member: {
+    me: async () => {
+      const result = await apiCall<{ data: any }>('/api/member/me');
+      return result.data;
+    },
+  },
+
+  codenames: {
+    ballot: async () => {
+      const result = await apiCall<{ data: any }>('/api/codenames/ballot');
+      return result.data;
+    },
+    check: async (codenameId: number) => {
+      const result = await apiCall<{ data: any }>('/api/codenames/check', { method: 'POST', body: JSON.stringify({ codenameId }) });
+      return result.data;
+    },
+    pass: async (codenameId: number) => {
+      const result = await apiCall<{ data: any }>('/api/codenames/pass', { method: 'POST', body: JSON.stringify({ codenameId }) });
+      return result.data;
+    },
+    claim: async (codenameId: number) => {
+      const result = await apiCall<{ data: any }>('/api/codenames/claim', { method: 'POST', body: JSON.stringify({ codenameId }) });
+      return result.data;
+    },
+  },
+
+  vault: {
+    sections: async () => {
+      const result = await apiCall<{ data: any[] }>('/api/vault/sections');
+      return result.data || [];
+    },
+    uploadFile: async (file: File, section: string) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('section', section);
+      return apiCall<{ fileKey: string; url: string }>('/api/vault/upload', { method: 'POST', body: formData });
+    },
+    documents: async (section: string) => {
+      const result = await apiCall<{ data: any[] }>(`/api/vault/documents?section=${encodeURIComponent(section)}`);
+      return result.data || [];
+    },
+    document: async (id: number) => {
+      const result = await apiCall<{ data: any }>(`/api/vault/documents/${id}`);
+      return result.data;
+    },
+    createDocument: (data: { section: string; title: string; content?: string; visibility?: string; fileKey?: string }) =>
+      apiCall('/api/vault/documents', { method: 'POST', body: JSON.stringify(data) }),
+    updateDocument: (id: number, data: { title?: string; content?: string; fileKey?: string; changeNote?: string }) =>
+      apiCall(`/api/vault/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    archiveDocument: (id: number) => apiCall(`/api/vault/documents/${id}`, { method: 'DELETE' }),
+    documentVersions: async (id: number) => {
+      const result = await apiCall<{ data: any[] }>(`/api/vault/documents/${id}/versions`);
+      return result.data || [];
+    },
+    projects: async () => {
+      const result = await apiCall<{ data: any[] }>('/api/vault/projects');
+      return result.data || [];
+    },
+    createProject: (data: any) => apiCall('/api/vault/projects', { method: 'POST', body: JSON.stringify(data) }),
+    updateProject: (id: number, data: any) => apiCall(`/api/vault/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    project: async (id: number) => (await apiCall<{ data: any }>(`/api/vault/projects/${id}`)).data,
+    createTask: (projectId: number, data: any) => apiCall(`/api/vault/projects/${projectId}/tasks`, { method: 'POST', body: JSON.stringify(data) }),
+    meetings: async () => (await apiCall<{ data: any[] }>('/api/vault/meetings')).data || [],
+    createMeeting: (data: any) => apiCall('/api/vault/meetings', { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  phantom: {
+    overview: async () => (await apiCall<{ data: any }>('/api/phantom/overview')).data,
+    applications: async () => (await apiCall<{ data: any[] }>('/api/phantom/applications')).data || [],
+    reviewApplication: (id: number, status: 'approved' | 'rejected' | 'pending', note?: string) =>
+      apiCall(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify({ status, note }) }),
+    createFromApplication: (id: number, data: any) =>
+      apiCall<{ data: any }>(`/api/phantom/applications/${id}/create-member`, { method: 'POST', body: JSON.stringify(data) }),
+    createMember: (data: any) => apiCall<{ data: any }>('/api/phantom/members', { method: 'POST', body: JSON.stringify(data) }),
+    members: async (status?: string) => (await apiCall<{ data: any[] }>(`/api/phantom/members${status ? `?status=${encodeURIComponent(status)}` : ''}`)).data || [],
+    updateMember: (id: number, data: any) => apiCall(`/api/phantom/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    memberHistory: async (id: number) => (await apiCall<{ data: any }>(`/api/phantom/members/${id}/history`)).data,
+    roles: async () => (await apiCall<{ data: any }>('/api/phantom/roles')).data,
+    createRole: (data: any) => apiCall('/api/phantom/roles', { method: 'POST', body: JSON.stringify(data) }),
+    updateRolePermissions: (id: number, permissions: any[]) => apiCall(`/api/phantom/roles/${id}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) }),
+    updateMemberPermissions: (id: number, permissions: any[]) => apiCall(`/api/phantom/members/${id}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) }),
+    websiteAdmins: async () => (await apiCall<{ data: any }>('/api/phantom/website-admins')).data,
+    assignWebsiteAdmin: (data: any) => apiCall('/api/phantom/website-admins', { method: 'POST', body: JSON.stringify(data) }),
+    updateWebsiteAdmin: (id: number, data: any) => apiCall(`/api/phantom/website-admins/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    vaultSections: async () => (await apiCall<{ data: any[] }>('/api/phantom/vault-sections')).data || [],
+    createVaultSection: (data: any) => apiCall('/api/phantom/vault-sections', { method: 'POST', body: JSON.stringify(data) }),
+    updateVaultSection: (id: number, data: any) => apiCall(`/api/phantom/vault-sections/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    codenames: async () => (await apiCall<{ data: any }>('/api/phantom/codenames')).data,
+    addCodename: (data: { name: string; reserve?: boolean; note?: string }) => apiCall('/api/phantom/codenames', { method: 'POST', body: JSON.stringify(data) }),
+    updateCodename: (id: number, data: any) => apiCall(`/api/phantom/codenames/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    releaseCodename: (id: number, data: { confirm: boolean; mode?: 'available' | 'retired' }) => apiCall(`/api/phantom/codenames/${id}/release`, { method: 'POST', body: JSON.stringify(data) }),
+    auditLogs: async (limit = 100) => (await apiCall<{ data: any[] }>(`/api/phantom/audit-logs?limit=${limit}`)).data || [],
+    settings: async () => (await apiCall<{ data: any[] }>('/api/phantom/settings')).data || [],
+    saveSetting: (key: string, value: string) => apiCall(`/api/phantom/settings/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
+  },
+
   getStats: async () => {
     const result = await apiCall<{ data: any }>('/api/stats');
     return result.data;
@@ -167,10 +272,10 @@ export const auth = {
     return data.user;
   },
 
-  register: async (name: string, email: string, password: string): Promise<AuthUser> => {
-    const data = await apiCall<{ token: string; user: AuthUser }>('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ name, email, password }),
+  /** Completes an invitation-only member activation and stores the resulting session. */
+  activate: async (email: string, token: string, password: string): Promise<AuthUser> => {
+    const data = await apiCall<{ token: string; user: AuthUser }>('/api/auth/activate', {
+      method: 'POST', body: JSON.stringify({ email, token, password }),
     });
     setToken(data.token);
     setStoredUser(data.user);
@@ -201,7 +306,7 @@ export const auth = {
 
   /** Requests a password-reset link for an email address. */
   forgotPassword: async (email: string) =>
-    apiCall<{ message: string; devResetLink?: string }>('/api/auth/forgot-password', {
+    apiCall<{ message: string }>('/api/auth/forgot-password', {
       method: 'POST',
       body: JSON.stringify({ email }),
     }),

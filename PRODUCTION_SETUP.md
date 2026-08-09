@@ -43,11 +43,12 @@ The API sends emails via the EmailJS REST API when configured. Until then it log
 and skips (never breaks the API).
 
 1. Create a free account at https://www.emailjs.com (connect your Gmail — see `EMAILJS_SETUP.md`)
-2. Create 4 templates with these variables:
+2. Create 5 templates with these variables:
    - **Join notification** (to admin): `{{to_email}}`, `{{applicant_name}}`, `{{applicant_email}}`, `{{applicant_phone}}`, `{{date}}`
    - **Contact notification** (to admin): `{{to_email}}`, `{{sender_name}}`, `{{sender_email}}`, `{{subject}}`, `{{message}}`, `{{date}}`
    - **Approval/rejection** (to applicant): `{{to_email}}`, `{{member_name}}`, `{{status}}`, `{{date}}`
    - **Password reset** (to user): `{{to_email}}`, `{{name}}`, `{{reset_link}}`
+   - **Member activation** (to new member): `{{to_email}}`, `{{member_name}}`, `{{member_code}}`, `{{activation_link}}`, `{{role_name}}`
 3. Copy the **Public Key**, **Service ID**, and the 4 **Template IDs** into `wrangler.toml` (and the Pages project environment variables):
    ```toml
    EMAILJS_PUBLIC_KEY = "..."
@@ -58,16 +59,13 @@ and skips (never breaks the API).
    EMAILJS_TEMPLATE_ID_RESET = "..."
    ```
 4. Redeploy. New applications, contact messages, approvals, and password-reset links now email automatically.
-   > No EmailJS keys? Everything still works — emails are skipped and logged, and the
-   > reset flow returns a dev-only link so you can test it locally.
+   > No EmailJS keys? Public requests still work, but reset and activation links are not exposed in browsers. Configure mail before production use.
 
-### 🔑 Default admin account (auto-created on first request)
-- **Email:** `coderxsociety@gmail.com`
-- **Password:** `Admin@12345` ← **CHANGE THIS before going live!**
+### 🔑 PHANTOM founder account (created on first request)
+- **Email:** `PHANTOM_EMAIL` (falls back to `ADMIN_EMAIL`)
+- **Password:** supplied only through the encrypted `ADMIN_PASSWORD` Cloudflare secret on a fresh database.
 
-The admin password is set by the `ADMIN_PASSWORD` variable in `wrangler.toml`. To change it:
-1. Set `ADMIN_PASSWORD` to a strong value in `wrangler.toml` (and in the Pages project's environment variables).
-2. Delete the `users` table rows **or** register a new admin via the DB — simplest is to keep the seeded admin, sign in, and (coming soon) change it from the admin panel. Until then, treat the seed password as a deployment secret you replace before launch.
+Never commit a founder password or `JWT_SECRET` into `wrangler.toml`, `.env`, Git, screenshots, or chat. Configure those values as Cloudflare Pages/Worker secrets and rotate any previously exposed values. Existing databases retain their existing founder account.
 
 ### 🧪 Run everything locally and test (before deploying!)
 ```bash
@@ -79,15 +77,15 @@ Open **http://localhost:8788** — the site AND the API run together (fresh loca
 
 Test checklist:
 1. Visit `/` — homepage loads; `http://localhost:8788/api/health` returns `{"status":"ok",...}`
-2. "Member Portal" → Sign In → admin email + `Admin@12345` → **Admin Core** panel opens
-3. Admin → Applications → Approve a test application → it appears under Members
+2. "Member Portal" → Sign In with the configured PHANTOM credentials → **Admin Core** panel opens
+3. PHANTOM Control Center → Applications → review a test application → Create Member → verify the activation link and member ID
 4. Join form → submit → appears in Admin → Applications (pending)
 5. Contact form → submit → appears in Admin → Applications → Contact Messages
 6. Home editor → change hero title → Save → hard-refresh homepage → change is live
 7. Wrong password → clean error, no access; logged-out visitors get 401/403 on admin data
 8. Admin → Security → change your password → sign in again with the new one
-9. Admin → Members → add a member, edit points/level, deactivate, remove
-10. Sign in → "Forgot Password?" → enter the admin email → (without EmailJS keys the dev reset link is shown right on the screen) → open it → set a new password → sign in
+9. PHANTOM Control Center → Members → lock/unlock/archive, reassign a role, and inspect member history
+10. Sign in → "Forgot Password?" → enter the founder email → confirm the generic response; configure EmailJS to deliver the secure reset link
 11. Visit `/#learn` directly → Academy section opens (same for every section)
 12. Chrome/phone → the site is installable (Add to Home Screen shows the CODE Rx logo); open it from the home screen — it launches fullscreen
 

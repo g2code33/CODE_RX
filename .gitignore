@@ -29,6 +29,8 @@ dist-ssr
 .env.development.local
 .env.test.local
 .env.production.local
+.dev.vars
+*.dev.vars
 
 # Build files
 build

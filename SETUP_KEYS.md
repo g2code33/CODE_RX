@@ -11,12 +11,12 @@ database. These are the only keys/secrets you need:
 |---|---|
 | **D1 database binding** | Pages project → Settings → Functions → D1 → binding `DB` → `code-rx-db` |
 | **R2 bucket binding** | Pages project → Settings → Functions → R2 → binding `BUCKET` → `code-rx-storage` |
-| **JWT_SECRET** | Pages project → Settings → Environment variables → a long random string (used to sign login tokens) |
-| **ADMIN_EMAIL** | `coderxsociety@gmail.com` (seeds the first admin account) |
-| **ADMIN_PASSWORD** | Password used to seed the admin account — **change from `Admin@12345` before going live** |
+| **JWT_SECRET** | **Encrypted secret** in Pages project → Settings → Environment variables → long random string (used to sign login tokens) |
+| **ADMIN_EMAIL** | Founder contact email; `PHANTOM_EMAIL` may override it |
+| **ADMIN_PASSWORD** | **Encrypted seed-only secret** for a fresh database; never commit or share it |
+| **PHANTOM_EMAIL** | Optional founder identity; defaults to `ADMIN_EMAIL` |
 
-> You can also keep these in `wrangler.toml` for local dev; the Pages project
-> environment variables override them in production.
+> Keep secrets out of `wrangler.toml`. For local development use an ignored local secret file or Wrangler bindings; production secrets belong only in Cloudflare.
 
 ---
 
@@ -24,7 +24,7 @@ database. These are the only keys/secrets you need:
 
 1. Create a free account at https://www.emailjs.com with coderxsociety@gmail.com
 2. **Email Services → Add New Service** → connect Gmail → copy the **Service ID**
-3. **Email Templates** → create 4 templates:
+3. **Email Templates** → create 5 templates:
 
 | Template | Purpose | Variables |
 |---|---|---|
@@ -32,13 +32,15 @@ database. These are the only keys/secrets you need:
 | `template_contact` | Contact form → admin | `to_email`, `sender_name`, `sender_email`, `subject`, `message`, `date` |
 | `template_approval` | Approval/rejection → applicant | `to_email`, `member_name`, `status`, `date` |
 | `template_reset` | Password reset → user | `to_email`, `reset_link`, `name` |
+| `template_activation` | New member activation → member | `to_email`, `member_name`, `member_code`, `activation_link`, `role_name` |
 
 4. Copy the **Public Key** (Account → General) and the template IDs.
 5. Set these variables on the Pages project (and in `wrangler.toml` for local):
    ```
    EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID,
    EMAILJS_TEMPLATE_ID_JOIN, EMAILJS_TEMPLATE_ID_CONTACT,
-   EMAILJS_TEMPLATE_ID_APPROVAL, EMAILJS_TEMPLATE_ID_RESET
+   EMAILJS_TEMPLATE_ID_APPROVAL, EMAILJS_TEMPLATE_ID_RESET,
+   EMAILJS_TEMPLATE_ID_ACTIVATION
    ```
 
 ---
