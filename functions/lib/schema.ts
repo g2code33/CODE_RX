@@ -445,25 +445,28 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_subject ON audit_logs(subject_type, su
 // created by older versions receive non-destructive columns. Duplicate-column
 // errors are safely ignored by runSafeMigrations below.
 const SAFE_MIGRATIONS = [
-  'ALTER TABLE applications ADD COLUMN reviewed_by_user_id INTEGER',
-  'ALTER TABLE applications ADD COLUMN reviewed_at TEXT',
-  'ALTER TABLE applications ADD COLUMN review_note TEXT',
-  'ALTER TABLE applications ADD COLUMN member_profile_id INTEGER',
-  'ALTER TABLE applications ADD COLUMN updated_at TEXT',
-  'ALTER TABLE meetings ADD COLUMN project_id INTEGER',
-  'ALTER TABLE vault_documents ADD COLUMN content_json TEXT',
-  "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'",
-  "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'",
-  "ALTER TABLE vault_documents ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
-  'ALTER TABLE vault_documents ADD COLUMN related_project_id INTEGER',
-  'ALTER TABLE vault_documents ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0',
-  'ALTER TABLE vault_documents ADD COLUMN last_saved_at TEXT',
-  'ALTER TABLE document_versions ADD COLUMN content_json TEXT',
-  "ALTER TABLE document_versions ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'",
-  "ALTER TABLE document_versions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
-  'ALTER TABLE document_versions ADD COLUMN related_project_id INTEGER',
-  'ALTER TABLE document_versions ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0',
-];
+  { table: 'applications', column: 'reviewed_by_user_id', sql: 'ALTER TABLE applications ADD COLUMN reviewed_by_user_id INTEGER' },
+  { table: 'applications', column: 'reviewed_at', sql: 'ALTER TABLE applications ADD COLUMN reviewed_at TEXT' },
+  { table: 'applications', column: 'review_note', sql: 'ALTER TABLE applications ADD COLUMN review_note TEXT' },
+  { table: 'applications', column: 'member_profile_id', sql: 'ALTER TABLE applications ADD COLUMN member_profile_id INTEGER' },
+  { table: 'applications', column: 'updated_at', sql: 'ALTER TABLE applications ADD COLUMN updated_at TEXT' },
+  { table: 'meetings', column: 'project_id', sql: 'ALTER TABLE meetings ADD COLUMN project_id INTEGER' },
+  { table: 'vault_documents', column: 'content_json', sql: 'ALTER TABLE vault_documents ADD COLUMN content_json TEXT' },
+  { table: 'vault_documents', column: 'content_format', sql: "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'" },
+  { table: 'vault_documents', column: 'status', sql: "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
+  { table: 'vault_documents', column: 'tags_json', sql: "ALTER TABLE vault_documents ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'" },
+  { table: 'vault_documents', column: 'related_project_id', sql: 'ALTER TABLE vault_documents ADD COLUMN related_project_id INTEGER' },
+  { table: 'vault_documents', column: 'word_count', sql: 'ALTER TABLE vault_documents ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0' },
+  { table: 'vault_documents', column: 'last_saved_at', sql: 'ALTER TABLE vault_documents ADD COLUMN last_saved_at TEXT' },
+  { table: 'document_versions', column: 'content_json', sql: 'ALTER TABLE document_versions ADD COLUMN content_json TEXT' },
+  { table: 'document_versions', column: 'status', sql: "ALTER TABLE document_versions ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
+  { table: 'document_versions', column: 'tags_json', sql: "ALTER TABLE document_versions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'" },
+  { table: 'document_versions', column: 'related_project_id', sql: 'ALTER TABLE document_versions ADD COLUMN related_project_id INTEGER' },
+  { table: 'document_versions', column: 'word_count', sql: 'ALTER TABLE document_versions ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0' },
+] as const;
+
+const VAULT_SCHEMA_VERSION = '2026-08-10-performance-1';
+
 
 const ROLE_SEEDS = [
   ['phantom', 'PHANTOM', 'Founder identity / full system coordination', 1],
@@ -487,16 +490,24 @@ const asRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
   return result.results || [];
 };
 
-const runSafeMigrations = async (db: D1Database) => {
-  for (const statement of SAFE_MIGRATIONS) {
-    try {
-      await db.prepare(statement).run();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/duplicate column name|already exists/i.test(message)) throw error;
-    }
+const runBatchInChunks = async (db: D1Database, statements: D1PreparedStatement[], size = 50) => {
+  for (let index = 0; index < statements.length; index += size) {
+    await db.batch(statements.slice(index, index + size));
   }
 };
+
+const runSafeMigrations = async (db: D1Database) => {
+  const tables = [...new Set(SAFE_MIGRATIONS.map((migration) => migration.table))];
+  const infos = await db.batch(tables.map((table) => db.prepare(`PRAGMA table_info(${table})`)));
+  const existing = new Map<string, Set<string>>();
+  tables.forEach((table, index) => {
+    const rows = (infos[index].results || []) as Array<{ name?: string }>;
+    existing.set(table, new Set(rows.map((row) => row.name).filter((name): name is string => Boolean(name))));
+  });
+  const missing = SAFE_MIGRATIONS.filter((migration) => !existing.get(migration.table)?.has(migration.column));
+  if (missing.length) await runBatchInChunks(db, missing.map((migration) => db.prepare(migration.sql)), 25);
+};
+
 
 const migrateFoundingRoleCodes = async (db: D1Database) => {
   // Earlier development builds used operational labels as founding role codes.
@@ -519,42 +530,40 @@ const migrateFoundingRoleCodes = async (db: D1Database) => {
 };
 
 const seedRolesAndPermissions = async (db: D1Database) => {
-  for (const [code, name, description, isSystem] of ROLE_SEEDS) {
-    await db.prepare('INSERT OR IGNORE INTO roles (code, name, description, is_system) VALUES (?, ?, ?, ?)')
-      .bind(code, name, description, isSystem).run();
-    if (['phantom', 'nexus', 'ghost', 'falcon', 'quantum', 'matrix'].includes(code)) {
-      await db.prepare('UPDATE roles SET name = ?, description = ?, is_system = ? WHERE code = ?')
-        .bind(name, description, isSystem, code).run();
-    }
-  }
+  const roleInserts = ROLE_SEEDS.map(([code, name, description, isSystem]) =>
+    db.prepare('INSERT OR IGNORE INTO roles (code, name, description, is_system) VALUES (?, ?, ?, ?)').bind(code, name, description, isSystem)
+  );
+  await runBatchInChunks(db, roleInserts);
+  const founderUpdates = ROLE_SEEDS.filter(([code]) => ['phantom', 'nexus', 'ghost', 'falcon', 'quantum', 'matrix'].includes(code)).map(([code, name, description, isSystem]) =>
+    db.prepare('UPDATE roles SET name = ?, description = ?, is_system = ? WHERE code = ?').bind(name, description, isSystem, code)
+  );
+  await runBatchInChunks(db, founderUpdates);
 
   const roles = await asRows<{ id: number; code: string }>(db.prepare('SELECT id, code FROM roles'));
-  const roleByCode = new Map(roles.map((role) => [role.code, role.id]));
   const sections = VAULT_SECTION_SEEDS.map(([slug]) => slug);
-
-  for (const [code, roleId] of roleByCode) {
+  const permissions: D1PreparedStatement[] = [];
+  for (const role of roles) {
     for (const section of sections) {
-      let permissions = [0, 0, 0, 0, 0];
-      if (code === 'phantom') permissions = [1, 1, 1, 1, 1];
-      else if (code === 'member' && MEMBER_VIEW_SECTIONS.has(section)) permissions = [1, 0, 0, 0, 0];
-      else if ((ROLE_DEFAULT_SECTIONS[code] || []).includes(section)) permissions = [1, 1, 1, 1, 1];
-      else if (section === 'society' || section === 'roadmap') permissions = [1, 0, 0, 0, 0];
-
-      await db.prepare(
+      let values = [0, 0, 0, 0, 0];
+      if (role.code === 'phantom') values = [1, 1, 1, 1, 1];
+      else if (role.code === 'member' && MEMBER_VIEW_SECTIONS.has(section)) values = [1, 0, 0, 0, 0];
+      else if ((ROLE_DEFAULT_SECTIONS[role.code] || []).includes(section)) values = [1, 1, 1, 1, 1];
+      else if (section === 'society' || section === 'roadmap') values = [1, 0, 0, 0, 0];
+      permissions.push(db.prepare(
         `INSERT OR IGNORE INTO role_permissions
          (role_id, section_slug, can_view, can_create, can_edit, can_delete, can_manage)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).bind(roleId, section, ...permissions).run();
+      ).bind(role.id, section, ...values));
     }
   }
+  await runBatchInChunks(db, permissions);
 };
 
 const seedVaultSections = async (db: D1Database) => {
-  for (const [slug, title, description, order] of VAULT_SECTION_SEEDS) {
-    await db.prepare(
-      'INSERT OR IGNORE INTO vault_sections (slug, title, description, is_sensitive, sort_order) VALUES (?, ?, ?, ?, ?)'
-    ).bind(slug, title, description, slug === 'finance' ? 1 : 0, order).run();
-  }
+  await runBatchInChunks(db, VAULT_SECTION_SEEDS.map(([slug, title, description, order]) =>
+    db.prepare('INSERT OR IGNORE INTO vault_sections (slug, title, description, is_sensitive, sort_order) VALUES (?, ?, ?, ?, ?)')
+      .bind(slug, title, description, slug === 'finance' ? 1 : 0, order)
+  ));
 };
 
 const ensureFoundingCodenames = async (db: D1Database, phantomProfileId: number) => {
@@ -634,21 +643,28 @@ export async function ensureSchema(env: Env): Promise<void> {
   if (g.__codeRxSchemaReady) return;
   const db = env.DB;
   const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
-  // Existing D1 databases may have an earlier table shape. Create tables first,
-  // run additive ALTER migrations, and only then create indexes that reference
-  // newly added columns such as vault_documents.status.
+  // One D1 batch avoids dozens of sequential network round trips on a cold
+  // login. Indexes wait until ALTER migrations add their referenced columns.
   const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
   const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
-  for (const statement of schemaStatements) await db.prepare(statement).run();
-  await runSafeMigrations(db);
-  for (const statement of indexStatements) await db.prepare(statement).run();
-
+  await runBatchInChunks(db, schemaStatements.map((statement) => db.prepare(statement)));
   await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
   await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
-  await migrateFoundingRoleCodes(db);
-  await seedRolesAndPermissions(db);
-  await seedVaultSections(db);
-  await ensurePhantom(env);
+
+  const versionRows = await asRows<{ setting_value: string }>(db.prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'"));
+  if (versionRows[0]?.setting_value !== VAULT_SCHEMA_VERSION) {
+    await runSafeMigrations(db);
+    await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
+    await migrateFoundingRoleCodes(db);
+    await seedRolesAndPermissions(db);
+    await seedVaultSections(db);
+    await ensurePhantom(env);
+    await db.prepare(
+      `INSERT INTO system_settings (setting_key, setting_value, updated_at)
+       VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`
+    ).bind(VAULT_SCHEMA_VERSION).run();
+  }
 
   g.__codeRxSchemaReady = true;
 }
