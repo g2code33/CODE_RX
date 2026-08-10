@@ -14,7 +14,7 @@ import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
 function App() {
   const [isDashboard, setIsDashboard] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder'>('controller');
+  const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault'>('controller');
   const [user, setUser] = useState<AuthUser | null>(auth.getUser());
   const [activeTab, setActiveTab] = useState('home');
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -169,7 +169,7 @@ function App() {
     />;
   }
 
-  const inLiveBuilder = isAdmin && adminWorkspace === 'builder';
+  const inImmersiveAdminWorkspace = isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault');
   const mainContent = isAdmin
     ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
     : isDashboard
@@ -178,7 +178,7 @@ function App() {
 
   const shell = (
     <div className="brand-app min-h-screen">
-      {!inLiveBuilder && <Navbar onDashboardToggle={toggleDashboard} isDashboard={isDashboard} activeTab={activeTab} setActiveTab={handleTabChange} copy={siteContent.copy} media={siteContent.media} />}
+      {!inImmersiveAdminWorkspace && <Navbar onDashboardToggle={toggleDashboard} isDashboard={isDashboard} activeTab={activeTab} setActiveTab={handleTabChange} copy={siteContent.copy} media={siteContent.media} />}
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}

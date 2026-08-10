@@ -27,6 +27,7 @@ import { SiteContent, INITIAL_SITE_CONTENT, normalizeSiteContent } from '../data
 import { db, auth, AuthUser } from '../lib/cloudflare';
 import { PhantomControlCenter } from './PhantomControlCenter';
 import { VisualEditor } from './VisualEditor';
+import { Vault } from './Vault';
 
 const STORAGE_KEY = 'codeRx_siteContent';
 const PENDING_PUBLISH_KEY = 'codeRx_pendingSiteContent';
@@ -705,8 +706,8 @@ export const AdminPanel = ({
 }: { 
   siteContent: SiteContent, 
   setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>>;
-  workspace: 'controller' | 'builder';
-  onWorkspaceChange: (workspace: 'controller' | 'builder') => void;
+  workspace: 'controller' | 'builder' | 'vault';
+  onWorkspaceChange: (workspace: 'controller' | 'builder' | 'vault') => void;
   activeTab: string;
   onNavigate: (id: string) => void;
   onJoin?: () => void;
@@ -898,6 +899,10 @@ export const AdminPanel = ({
     handleUpdateAbout({ team: newTeam });
   };
 
+  if (workspace === 'vault') {
+    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('controller')} />;
+  }
+
   if (workspace === 'builder') {
     return (
       <VisualEditor
@@ -1047,7 +1052,7 @@ export const AdminPanel = ({
 
           {/* Main Admin Content */}
           <main className="flex-grow space-y-6 bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter />}
+            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} />}
             {activeView === 'overview' && (
               <div className="space-y-6">
                 <div className="flex justify-between items-center">
