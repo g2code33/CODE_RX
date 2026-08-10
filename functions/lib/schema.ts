@@ -634,8 +634,14 @@ export async function ensureSchema(env: Env): Promise<void> {
   if (g.__codeRxSchemaReady) return;
   const db = env.DB;
   const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
-  for (const statement of statements) await db.prepare(statement).run();
+  // Existing D1 databases may have an earlier table shape. Create tables first,
+  // run additive ALTER migrations, and only then create indexes that reference
+  // newly added columns such as vault_documents.status.
+  const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
+  const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
+  for (const statement of schemaStatements) await db.prepare(statement).run();
   await runSafeMigrations(db);
+  for (const statement of indexStatements) await db.prepare(statement).run();
 
   await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
   await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
