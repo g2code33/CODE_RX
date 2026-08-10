@@ -108,24 +108,22 @@ export const ensureLegacyProfile = async (db: D1Database, userId: number): Promi
   ).bind(user.id, memberRows[0].id, code, roleId, user.id).run();
 };
 
-export const getActor = async (db: D1Database, userId: number): Promise<Actor | null> => {
-  await ensureLegacyProfile(db, userId);
-  const rows = await asRows<any>(db.prepare(
-    `SELECT
-       u.id AS user_id, u.email, u.name, u.role AS user_role,
-       mp.id AS profile_id, mp.member_code, mp.status AS member_status, mp.primary_role_id,
-       r.code AS primary_role_code,
-       c.display_name AS codename,
-       wa.id AS website_admin_id, wa.status AS website_admin_status
-     FROM users u
-     LEFT JOIN member_profiles mp ON mp.user_id = u.id
-     LEFT JOIN roles r ON r.id = mp.primary_role_id
-     LEFT JOIN codenames c ON c.claimed_by_member_profile_id = mp.id AND c.status = 'claimed'
-     LEFT JOIN website_admins wa ON wa.member_profile_id = mp.id AND wa.status = 'active'
-     WHERE u.id = ?`
-  ).bind(userId));
-  const row = rows[0];
-  if (!row) return null;
+const actorRowsFor = (db: D1Database, userId: number) => asRows<any>(db.prepare(
+  `SELECT
+     u.id AS user_id, u.email, u.name, u.role AS user_role,
+     mp.id AS profile_id, mp.member_code, mp.status AS member_status, mp.primary_role_id,
+     r.code AS primary_role_code,
+     c.display_name AS codename,
+     wa.id AS website_admin_id, wa.status AS website_admin_status
+   FROM users u
+   LEFT JOIN member_profiles mp ON mp.user_id = u.id
+   LEFT JOIN roles r ON r.id = mp.primary_role_id
+   LEFT JOIN codenames c ON c.claimed_by_member_profile_id = mp.id AND c.status = 'claimed'
+   LEFT JOIN website_admins wa ON wa.member_profile_id = mp.id AND wa.status = 'active'
+   WHERE u.id = ?`
+).bind(userId));
+
+const actorFromRow = (row: any): Actor => {
   const isPhantom = row.user_role === 'phantom' || row.primary_role_code === 'phantom';
   return {
     userId: Number(row.user_id),
@@ -142,6 +140,20 @@ export const getActor = async (db: D1Database, userId: number): Promise<Actor | 
     isWebsiteAdmin: Boolean(row.website_admin_id) || row.user_role === 'admin',
     websiteAdminId: row.website_admin_id === null || row.website_admin_id === undefined ? null : Number(row.website_admin_id),
   };
+};
+
+export const getActor = async (db: D1Database, userId: number): Promise<Actor | null> => {
+  // Normal logins already have a profile: one query is enough. The legacy
+  // profile migration runs only when that fast lookup finds no profile.
+  let rows = await actorRowsFor(db, userId);
+  let row = rows[0];
+  if (!row) return null;
+  if (row.profile_id === null || row.profile_id === undefined) {
+    await ensureLegacyProfile(db, userId);
+    rows = await actorRowsFor(db, userId);
+    row = rows[0];
+  }
+  return row ? actorFromRow(row) : null;
 };
 
 export const actorFromContext = async (c: AppContext): Promise<Actor | null> => {
