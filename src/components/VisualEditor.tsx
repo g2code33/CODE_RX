@@ -468,8 +468,8 @@ const Inspector = ({
           {showContent && (selected.collection === 'projects' && selected.itemIndex !== undefined
             ? <ProjectCardEditor content={content} projectIndex={selected.itemIndex} publishing={publishing} onImmediatePublish={onImmediatePublish} />
             : <ContentControls selected={selected} textValue={textValue} setTextValue={setTextValue} mediaValue={mediaValue} setMediaValue={setMediaValue} uploading={uploading} onUpload={uploadImage} onQuickAdd={onQuickAdd} onAddNestedItem={onAddNestedItem} />)}
-          {showStyle && <><div className="mb-4 flex items-center justify-between rounded-xl bg-slate-50 p-1"><span className="pl-2 text-[10px] font-black uppercase tracking-wider text-slate-500">Applies at</span><div className="visual-editor-breakpoint">{(['desktop', 'tablet', 'mobile'] as EditorBreakpoint[]).map((item) => <button key={item} type="button" onClick={() => setBreakpoint(item)} className={breakpoint === item ? 'is-active' : ''}>{item}</button>)}</div></div><StyleControls value={styleValue} onChange={setStyleValue} layoutOnly={false} /></>}
-          {showLayout && <StyleControls value={styleValue} onChange={setStyleValue} layoutOnly />}
+          {showStyle && <><div className="mb-4 flex items-center justify-between rounded-xl bg-slate-50 p-1"><span className="pl-2 text-[10px] font-black uppercase tracking-wider text-slate-500">Applies at</span><div className="visual-editor-breakpoint">{(['desktop', 'tablet', 'mobile'] as EditorBreakpoint[]).map((item) => <button key={item} type="button" onClick={() => setBreakpoint(item)} className={breakpoint === item ? 'is-active' : ''}>{item}</button>)}</div></div><StyleControls value={styleValue} onChange={setStyleValue} layoutOnly={false} theme={content.design.theme} /></>}
+          {showLayout && <StyleControls value={styleValue} onChange={setStyleValue} layoutOnly theme={content.design.theme} />}
           {!isProjectCardContent && <><div className="mt-5 flex gap-2"><button type="button" onClick={() => setStyleValue(currentElementStyle(content, selected, breakpoint))} className="visual-editor-secondary-button flex-1"><RotateCcw className="h-3.5 w-3.5" />Cancel</button><button type="button" disabled={publishing} onClick={saveSelection} className="visual-editor-save-button flex-[1.4]">{publishing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save & publish</button></div>
           <button type="button" onClick={async () => { const next = resetElementStyle(content, selected, breakpoint); await publish(next, 'Style reset and published.'); }} className="mt-3 w-full text-xs font-bold text-slate-500 hover:text-red-600">Reset {breakpoint} styling</button>
           {itemRemovalTarget(selected) && <button type="button" onClick={() => { if (window.confirm('Remove this item from the website?')) onRemoveSelection(selected); }} className="mt-3 w-full text-xs font-black text-red-600 hover:text-red-700">Remove selected item</button>}
@@ -577,16 +577,111 @@ const ContentControls = ({
   onAddNestedItem: (selection: EditorSelection) => void;
 }) => <div className="space-y-4">{selected.copyKey && <label className="visual-editor-field"><span>Content</span><textarea rows={Math.min(10, Math.max(3, Math.ceil(textValue.length / 46)))} value={textValue} onChange={(event) => setTextValue(event.target.value)} placeholder="Write the visible content" /></label>}{selected.mediaKey && <><label className="visual-editor-field"><span>Image URL</span><input type="url" value={mediaValue.src} onChange={(event) => setMediaValue({ ...mediaValue, src: event.target.value })} placeholder="https://… or /api/files/…" /></label><label className="visual-editor-field"><span>Alt text</span><input value={mediaValue.alt} onChange={(event) => setMediaValue({ ...mediaValue, alt: event.target.value })} placeholder="Describe the image" /></label><label className="visual-editor-upload"><input className="sr-only" type="file" accept="image/*" onChange={onUpload} disabled={uploading} />{uploading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}{uploading ? 'Uploading image…' : 'Upload to media library'}</label>{mediaValue.src && <img src={mediaValue.src} alt={mediaValue.alt || 'Selected asset preview'} className="max-h-40 w-full rounded-xl border border-slate-200 object-cover" />}</>}{selected.collection && <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-700">This is a repeating content group.</p><button type="button" onClick={() => onQuickAdd(selected.collection!)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-black text-emerald-700"><Plus className="h-3.5 w-3.5" />Add another item</button></div>}{nestedListTarget(selected) && <button type="button" onClick={() => onAddNestedItem(selected)} className="inline-flex items-center gap-1.5 text-xs font-black text-emerald-700"><Plus className="h-3.5 w-3.5" />Add another item to this list</button>}{!selected.copyKey && !selected.mediaKey && !selected.collection && <p className="text-sm leading-6 text-slate-500">This is a visual container. Use Style and Layout to change it, or select its text/image inside the container.</p>}</div>;
 
+type ColorTarget = 'color' | 'backgroundColor' | 'borderColor';
+
+const normalizeHex = (value?: string) => {
+  const hex = (value || '').trim();
+  if (/^#[0-9a-f]{6}$/i.test(hex)) return hex.toUpperCase();
+  if (/^#[0-9a-f]{3}$/i.test(hex)) return `#${hex.slice(1).split('').map((part) => `${part}${part}`).join('')}`.toUpperCase();
+  return '';
+};
+
+const hexRgb = (value?: string) => {
+  const hex = normalizeHex(value);
+  if (!hex) return null;
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)] as const;
+};
+
+const luminance = (value?: string) => {
+  const rgb = hexRgb(value);
+  if (!rgb) return null;
+  const channels = rgb.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+};
+
+const contrastRatio = (foreground?: string, background?: string) => {
+  const fg = luminance(foreground);
+  const bg = luminance(background);
+  if (fg === null || bg === null) return null;
+  return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+};
+
+const readableText = (background?: string) => {
+  const againstWhite = contrastRatio('#FFFFFF', background) || 0;
+  const againstBlack = contrastRatio('#0F172A', background) || 0;
+  return againstWhite >= againstBlack ? '#FFFFFF' : '#0F172A';
+};
+
+const colorValue = (value?: string, fallback = '#0F172A') => normalizeHex(value) || fallback;
+
+const themeSwatches = (theme: SiteContent['design']['theme']) => [
+  { name: 'Canvas', value: theme.ink }, { name: 'Surface', value: theme.panel },
+  { name: 'Accent', value: theme.lime }, { name: 'Accent dark', value: theme.green },
+  { name: 'Mint', value: theme.mint }, { name: 'Text', value: theme.text },
+  { name: 'Muted', value: theme.textSecondary }, { name: 'Line', value: theme.line },
+];
+
+const SMART_NEUTRALS = ['#FFFFFF', '#F8FAFC', '#E2E8F0', '#94A3B8', '#475569', '#0F172A', '#020617'];
+const RECENT_COLOR_KEY = 'codeRx_builderRecentColors';
+
+const rememberColor = (value: string) => {
+  const hex = normalizeHex(value);
+  if (!hex) return [];
+  try {
+    const existing = JSON.parse(localStorage.getItem(RECENT_COLOR_KEY) || '[]') as string[];
+    const next = [hex, ...existing.filter((item) => normalizeHex(item) !== hex)].slice(0, 12);
+    localStorage.setItem(RECENT_COLOR_KEY, JSON.stringify(next));
+    return next;
+  } catch { return [hex]; }
+};
+
+const SmartColorPanel = ({
+  value,
+  onChange,
+  theme,
+}: {
+  value: ElementStyle;
+  onChange: (key: ColorTarget, value?: string) => void;
+  theme: SiteContent['design']['theme'];
+}) => {
+  const [target, setTarget] = useState<ColorTarget>('color');
+  const [recent, setRecent] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(RECENT_COLOR_KEY) || '[]'); } catch { return []; }
+  });
+  const selected = value[target];
+  const surface = value.backgroundColor || theme.panel || '#FFFFFF';
+  const text = value.color || theme.text || '#0F172A';
+  const contrast = contrastRatio(text, surface);
+  const apply = (next: string) => {
+    const hex = normalizeHex(next) || next;
+    onChange(target, hex);
+    const latest = rememberColor(hex);
+    if (latest.length) setRecent(latest);
+  };
+  const targets: Array<{ key: ColorTarget; label: string; fallback: string }> = [
+    { key: 'color', label: 'Text', fallback: theme.text },
+    { key: 'backgroundColor', label: 'Surface', fallback: theme.panel },
+    { key: 'borderColor', label: 'Border', fallback: theme.line },
+  ];
+  return <section className="visual-color-panel"><div className="visual-color-panel__head"><div><p>Smart Colour Studio</p><small>Choose a role, pick a colour, then preview it live.</small></div><div className="visual-color-preview" style={{ color: text, backgroundColor: surface, borderColor: value.borderColor || theme.line }}>Aa</div></div><div className="visual-color-targets">{targets.map((item) => <button key={item.key} type="button" onClick={() => setTarget(item.key)} className={target === item.key ? 'is-active' : ''}><span className="visual-color-target-dot" style={{ backgroundColor: colorValue(value[item.key], item.fallback) }} />{item.label}</button>)}</div><div className="visual-color-picker-row"><input aria-label="Choose colour" type="color" value={colorValue(selected, targets.find((item) => item.key === target)?.fallback)} onChange={(event) => apply(event.target.value)} /><input value={selected || ''} onChange={(event) => onChange(target, event.target.value)} onBlur={(event) => { if (normalizeHex(event.target.value)) apply(event.target.value); }} placeholder="Inherited" /><button type="button" onClick={() => onChange(target, undefined)} className="visual-color-inherit">Inherit</button></div><div className="visual-color-palette"><span>Code Rx palette</span><div>{themeSwatches(theme).map((swatch) => <button key={swatch.name} title={swatch.name} type="button" onClick={() => apply(swatch.value)} style={{ backgroundColor: swatch.value }} />)}</div></div><div className="visual-color-palette"><span>Neutrals</span><div>{SMART_NEUTRALS.map((swatch) => <button key={swatch} title={swatch} type="button" onClick={() => apply(swatch)} style={{ backgroundColor: swatch }} />)}</div></div>{recent.length > 0 && <div className="visual-color-palette"><span>Recent</span><div>{recent.map((swatch) => <button key={swatch} title={swatch} type="button" onClick={() => apply(swatch)} style={{ backgroundColor: swatch }} />)}</div></div>}<div className="visual-color-smart-actions"><button type="button" onClick={() => { onChange('color', readableText(surface)); setRecent(rememberColor(readableText(surface))); }}>Auto readable text</button>{contrast !== null && <span className={contrast >= 4.5 ? 'is-good' : 'is-low'}>{contrast >= 4.5 ? 'AA contrast' : `Low contrast ${contrast.toFixed(1)}:1`}</span>}</div></section>;
+};
+
+const ThemeColorField = ({ label, value, onChange, theme }: { label: string; value: string; onChange: (value: string) => void; theme: SiteContent['design']['theme'] }) => <label className="visual-theme-color"><span>{label}</span><div><input type="color" value={colorValue(value)} onChange={(event) => onChange(event.target.value)} /><input value={value || ''} onChange={(event) => onChange(event.target.value)} onBlur={(event) => { const hex = normalizeHex(event.target.value); if (hex) onChange(hex); }} /></div><div className="visual-theme-color__swatches">{themeSwatches(theme).slice(0, 5).map((swatch) => <button key={swatch.name} type="button" title={swatch.name} onClick={() => onChange(swatch.value)} style={{ backgroundColor: swatch.value }} />)}</div></label>;
+
 const Field = ({ label, value, onChange, placeholder }: { label: string; value?: string; onChange: (value: string) => void; placeholder?: string }) => <label className="visual-editor-field"><span>{label}</span><input value={value || ''} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /></label>;
 
-const StyleControls = ({ value, onChange, layoutOnly }: { value: ElementStyle; onChange: (value: ElementStyle) => void; layoutOnly: boolean }) => {
-  const set = (key: keyof ElementStyle, nextValue: string | boolean) => onChange({ ...value, [key]: nextValue || undefined });
-  return <div className="space-y-3">{!layoutOnly && <><div className="grid grid-cols-2 gap-3"><Field label="Text color" value={value.color} onChange={(next) => set('color', next)} placeholder="#0f172a" /><Field label="Background" value={value.backgroundColor} onChange={(next) => set('backgroundColor', next)} placeholder="#ffffff" /><Field label="Font size" value={value.fontSize} onChange={(next) => set('fontSize', next)} placeholder="1rem" /><Field label="Font weight" value={value.fontWeight} onChange={(next) => set('fontWeight', next)} placeholder="700" /><Field label="Line height" value={value.lineHeight} onChange={(next) => set('lineHeight', next)} placeholder="1.5" /><Field label="Letter spacing" value={value.letterSpacing} onChange={(next) => set('letterSpacing', next)} placeholder="0em" /><Field label="Border color" value={value.borderColor} onChange={(next) => set('borderColor', next)} placeholder="#16a34a" /><Field label="Border radius" value={value.borderRadius} onChange={(next) => set('borderRadius', next)} placeholder="1rem" /></div><label className="visual-editor-field"><span>Text alignment</span><select value={value.textAlign || ''} onChange={(event) => set('textAlign', event.target.value)}><option value="">Inherited</option><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option><option value="justify">Justify</option></select></label><Field label="Shadow" value={value.boxShadow} onChange={(next) => set('boxShadow', next)} placeholder="0 8px 20px rgba(0,0,0,.15)" /><label className="visual-editor-field"><span>Advanced CSS declarations</span><textarea rows={3} value={value.customCss || ''} onChange={(event) => set('customCss', event.target.value)} placeholder="e.g. text-transform: uppercase;" /></label></>}{layoutOnly && <><div className="grid grid-cols-2 gap-3"><Field label="Width" value={value.width} onChange={(next) => set('width', next)} placeholder="100%" /><Field label="Maximum width" value={value.maxWidth} onChange={(next) => set('maxWidth', next)} placeholder="70rem" /><Field label="Minimum height" value={value.minHeight} onChange={(next) => set('minHeight', next)} placeholder="20rem" /><Field label="Padding" value={value.padding} onChange={(next) => set('padding', next)} placeholder="2rem" /><Field label="Margin" value={value.margin} onChange={(next) => set('margin', next)} placeholder="0 auto" /><Field label="Gap" value={value.gap} onChange={(next) => set('gap', next)} placeholder="1rem" /><Field label="Grid columns" value={value.gridTemplateColumns} onChange={(next) => set('gridTemplateColumns', next)} placeholder="repeat(3, 1fr)" /><Field label="Order" value={value.order} onChange={(next) => set('order', next)} placeholder="0" /></div><label className="visual-editor-field"><span>Display</span><select value={value.display || ''} onChange={(event) => set('display', event.target.value)}><option value="">Inherited</option><option value="block">Block</option><option value="flex">Flex</option><option value="grid">Grid</option><option value="none">None</option></select></label><label className="visual-editor-field"><span>Object fit (images)</span><select value={value.objectFit || ''} onChange={(event) => set('objectFit', event.target.value)}><option value="">Inherited</option><option value="cover">Cover</option><option value="contain">Contain</option><option value="fill">Fill</option></select></label><label className="mt-2 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-3 text-sm font-bold text-slate-700">Hide at this breakpoint <input type="checkbox" checked={Boolean(value.hidden)} onChange={(event) => set('hidden', event.target.checked)} /></label></>}</div>;
+const StyleControls = ({ value, onChange, layoutOnly, theme }: { value: ElementStyle; onChange: (value: ElementStyle) => void; layoutOnly: boolean; theme: SiteContent['design']['theme'] }) => {
+  const set = (key: keyof ElementStyle, nextValue: string | boolean | undefined) => onChange({ ...value, [key]: nextValue || undefined });
+  const setColor = (key: ColorTarget, nextValue?: string) => onChange({ ...value, [key]: nextValue });
+  return <div className="space-y-3">{!layoutOnly && <><SmartColorPanel value={value} onChange={setColor} theme={theme} /><div className="grid grid-cols-2 gap-3"><Field label="Font size" value={value.fontSize} onChange={(next) => set('fontSize', next)} placeholder="1rem" /><Field label="Font weight" value={value.fontWeight} onChange={(next) => set('fontWeight', next)} placeholder="700" /><Field label="Line height" value={value.lineHeight} onChange={(next) => set('lineHeight', next)} placeholder="1.5" /><Field label="Letter spacing" value={value.letterSpacing} onChange={(next) => set('letterSpacing', next)} placeholder="0em" /><Field label="Border radius" value={value.borderRadius} onChange={(next) => set('borderRadius', next)} placeholder="1rem" /></div><label className="visual-editor-field"><span>Text alignment</span><select value={value.textAlign || ''} onChange={(event) => set('textAlign', event.target.value)}><option value="">Inherited</option><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option><option value="justify">Justify</option></select></label><Field label="Shadow" value={value.boxShadow} onChange={(next) => set('boxShadow', next)} placeholder="0 8px 20px rgba(0,0,0,.15)" /><label className="visual-editor-field"><span>Advanced CSS declarations</span><textarea rows={3} value={value.customCss || ''} onChange={(event) => set('customCss', event.target.value)} placeholder="e.g. text-transform: uppercase;" /></label></>}{layoutOnly && <><div className="grid grid-cols-2 gap-3"><Field label="Width" value={value.width} onChange={(next) => set('width', next)} placeholder="100%" /><Field label="Maximum width" value={value.maxWidth} onChange={(next) => set('maxWidth', next)} placeholder="70rem" /><Field label="Minimum height" value={value.minHeight} onChange={(next) => set('minHeight', next)} placeholder="20rem" /><Field label="Padding" value={value.padding} onChange={(next) => set('padding', next)} placeholder="2rem" /><Field label="Margin" value={value.margin} onChange={(next) => set('margin', next)} placeholder="0 auto" /><Field label="Gap" value={value.gap} onChange={(next) => set('gap', next)} placeholder="1rem" /><Field label="Grid columns" value={value.gridTemplateColumns} onChange={(next) => set('gridTemplateColumns', next)} placeholder="repeat(3, 1fr)" /><Field label="Order" value={value.order} onChange={(next) => set('order', next)} placeholder="0" /></div><label className="visual-editor-field"><span>Display</span><select value={value.display || ''} onChange={(event) => set('display', event.target.value)}><option value="">Inherited</option><option value="block">Block</option><option value="flex">Flex</option><option value="grid">Grid</option><option value="none">None</option></select></label><label className="visual-editor-field"><span>Object fit (images)</span><select value={value.objectFit || ''} onChange={(event) => set('objectFit', event.target.value)}><option value="">Inherited</option><option value="cover">Cover</option><option value="contain">Contain</option><option value="fill">Fill</option></select></label><label className="mt-2 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-3 text-sm font-bold text-slate-700">Hide at this breakpoint <input type="checkbox" checked={Boolean(value.hidden)} onChange={(event) => set('hidden', event.target.checked)} /></label></>}</div>;
 };
 
 const ThemeControls = ({ value, onChange, onSave, saving }: { value: SiteContent['design']['theme']; onChange: (value: SiteContent['design']['theme']) => void; onSave: () => void; saving: boolean }) => {
   const update = (key: keyof SiteContent['design']['theme'], nextValue: string) => onChange({ ...value, [key]: nextValue });
-  return <div className="space-y-4"><div className="rounded-xl bg-emerald-50 p-3 text-xs leading-5 text-emerald-800"><Palette className="mr-1 inline h-4 w-4" />Global tokens update the shared site identity. Select an element for a local override.</div><div className="grid grid-cols-2 gap-3"><Field label="Page background" value={value.ink} onChange={(next) => update('ink', next)} /><Field label="Alt background" value={value.deep} onChange={(next) => update('deep', next)} /><Field label="Panel" value={value.panel} onChange={(next) => update('panel', next)} /><Field label="Accent" value={value.lime} onChange={(next) => update('lime', next)} /><Field label="Accent dark" value={value.green} onChange={(next) => update('green', next)} /><Field label="Main text" value={value.text} onChange={(next) => update('text', next)} /><Field label="Muted text" value={value.textSecondary} onChange={(next) => update('textSecondary', next)} /><Field label="Card radius" value={value.cardRadius} onChange={(next) => update('cardRadius', next)} /><Field label="Button radius" value={value.buttonRadius} onChange={(next) => update('buttonRadius', next)} /></div><Field label="Font family" value={value.fontFamily} onChange={(next) => update('fontFamily', next)} placeholder="Inter, sans-serif" /><button type="button" disabled={saving} onClick={onSave} className="visual-editor-save-button w-full">{saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save & publish global design</button></div>;
+  return <div className="space-y-4"><div className="rounded-xl bg-emerald-50 p-3 text-xs leading-5 text-emerald-800"><Palette className="mr-1 inline h-4 w-4" />Global colour tokens update the shared Code Rx visual identity. Use element Style for a local override.</div><div className="visual-theme-colour-grid"><ThemeColorField label="Page background" value={value.ink} onChange={(next) => update('ink', next)} theme={value} /><ThemeColorField label="Alt background" value={value.deep} onChange={(next) => update('deep', next)} theme={value} /><ThemeColorField label="Panel" value={value.panel} onChange={(next) => update('panel', next)} theme={value} /><ThemeColorField label="Accent" value={value.lime} onChange={(next) => update('lime', next)} theme={value} /><ThemeColorField label="Accent dark" value={value.green} onChange={(next) => update('green', next)} theme={value} /><ThemeColorField label="Main text" value={value.text} onChange={(next) => update('text', next)} theme={value} /><ThemeColorField label="Muted text" value={value.textSecondary} onChange={(next) => update('textSecondary', next)} theme={value} /></div><div className="grid grid-cols-2 gap-3"><Field label="Card radius" value={value.cardRadius} onChange={(next) => update('cardRadius', next)} /><Field label="Button radius" value={value.buttonRadius} onChange={(next) => update('buttonRadius', next)} /></div><Field label="Font family" value={value.fontFamily} onChange={(next) => update('fontFamily', next)} placeholder="Inter, sans-serif" /><button type="button" disabled={saving} onClick={onSave} className="visual-editor-save-button w-full">{saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save & publish global design</button></div>;
 };
 
 const ContentLibrary = ({ content, onClose }: { content: SiteContent; onClose: () => void }) => {
