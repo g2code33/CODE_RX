@@ -4,7 +4,7 @@
 
 import type { Env } from '../env';
 import { hashPassword } from './auth';
-import { allocateMemberCode, VAULT_SECTION_SEEDS } from './vault';
+import { allocateMemberCode, FOUNDING_CODENAMES, VAULT_SECTION_SEEDS } from './vault';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS applications (
@@ -246,6 +246,13 @@ CREATE TABLE IF NOT EXISTS vault_documents (
   section_id INTEGER NOT NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL DEFAULT '',
+  content_json TEXT,
+  content_format TEXT NOT NULL DEFAULT 'plain',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','in_review','approved','active','archived')),
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  related_project_id INTEGER,
+  word_count INTEGER NOT NULL DEFAULT 0,
+  last_saved_at DATETIME,
   visibility TEXT NOT NULL DEFAULT 'section' CHECK (visibility IN ('section','members','restricted')),
   file_key TEXT,
   created_by_member_profile_id INTEGER,
@@ -262,12 +269,72 @@ CREATE TABLE IF NOT EXISTS document_versions (
   version_number INTEGER NOT NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL DEFAULT '',
+  content_json TEXT,
+  status TEXT NOT NULL DEFAULT 'draft',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  related_project_id INTEGER,
+  word_count INTEGER NOT NULL DEFAULT 0,
   file_key TEXT,
   changed_by_member_profile_id INTEGER,
   change_note TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(document_id, version_number),
   FOREIGN KEY(document_id) REFERENCES vault_documents(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  normalized_name TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS vault_document_tags (
+  document_id INTEGER NOT NULL,
+  tag_id INTEGER NOT NULL,
+  PRIMARY KEY(document_id, tag_id),
+  FOREIGN KEY(document_id) REFERENCES vault_documents(id),
+  FOREIGN KEY(tag_id) REFERENCES vault_tags(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER,
+  section_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  file_key TEXT NOT NULL UNIQUE,
+  mime_type TEXT,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  uploaded_by_member_profile_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(document_id) REFERENCES vault_documents(id),
+  FOREIGN KEY(section_id) REFERENCES vault_sections(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_member_profile_id INTEGER,
+  action TEXT NOT NULL,
+  section_id INTEGER,
+  document_id INTEGER,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(actor_member_profile_id) REFERENCES member_profiles(id),
+  FOREIGN KEY(section_id) REFERENCES vault_sections(id),
+  FOREIGN KEY(document_id) REFERENCES vault_documents(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL,
+  block_id TEXT,
+  author_member_profile_id INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  is_resolved INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(document_id) REFERENCES vault_documents(id),
+  FOREIGN KEY(author_member_profile_id) REFERENCES member_profiles(id)
 );
 
 CREATE TABLE IF NOT EXISTS vault_projects (
@@ -364,6 +431,9 @@ CREATE INDEX IF NOT EXISTS idx_member_profiles_role ON member_profiles(primary_r
 CREATE INDEX IF NOT EXISTS idx_codenames_status ON codenames(status);
 CREATE INDEX IF NOT EXISTS idx_codename_events_session ON codename_selection_events(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_documents_section ON vault_documents(section_id, is_archived, updated_at);
+CREATE INDEX IF NOT EXISTS idx_vault_documents_status ON vault_documents(status, is_archived, updated_at);
+CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_projects_status ON vault_projects(status, is_archived);
 CREATE INDEX IF NOT EXISTS idx_vault_tasks_project ON vault_tasks(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_meetings_project ON meetings(project_id, held_at DESC);
@@ -381,28 +451,34 @@ const SAFE_MIGRATIONS = [
   'ALTER TABLE applications ADD COLUMN member_profile_id INTEGER',
   'ALTER TABLE applications ADD COLUMN updated_at TEXT',
   'ALTER TABLE meetings ADD COLUMN project_id INTEGER',
+  'ALTER TABLE vault_documents ADD COLUMN content_json TEXT',
+  "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'",
+  "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'",
+  "ALTER TABLE vault_documents ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+  'ALTER TABLE vault_documents ADD COLUMN related_project_id INTEGER',
+  'ALTER TABLE vault_documents ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE vault_documents ADD COLUMN last_saved_at TEXT',
+  'ALTER TABLE document_versions ADD COLUMN content_json TEXT',
+  "ALTER TABLE document_versions ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'",
+  "ALTER TABLE document_versions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+  'ALTER TABLE document_versions ADD COLUMN related_project_id INTEGER',
+  'ALTER TABLE document_versions ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0',
 ];
 
 const ROLE_SEEDS = [
-  ['phantom', 'PHANTOM', 'Founder / Super Admin / Overall Coordination', 1],
-  ['nexus', 'NEXUS', 'Projects & Innovation', 1],
-  ['kernel', 'KERNEL', 'Technology & Infrastructure', 1],
-  ['signal', 'SIGNAL', 'Media & Publicity', 1],
-  ['pulse', 'PULSE', 'Members & Community', 1],
-  ['vault', 'VAULT', 'Finance & Resources', 1],
+  ['phantom', 'PHANTOM', 'Founder identity / full system coordination', 1],
+  ['nexus', 'NEXUS', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
+  ['ghost', 'GHOST', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
+  ['falcon', 'FALCON', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
+  ['quantum', 'QUANTUM', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
+  ['matrix', 'MATRIX', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
   ['member', 'Member', 'Standard Code Rx member', 1],
   ['custom', 'Custom', 'Custom responsibility profile', 0],
 ] as const;
 
-const ROLE_DEFAULT_SECTIONS: Record<string, string[]> = {
-  nexus: ['projects'],
-  kernel: ['technology'],
-  signal: ['media'],
-  pulse: ['members', 'meetings'],
-  vault: ['finance', 'resources'],
-};
+const ROLE_DEFAULT_SECTIONS: Record<string, string[]> = {};
 
-const MEMBER_VIEW_SECTIONS = new Set(['society', 'meetings', 'projects', 'resources', 'sops', 'achievements', 'roadmap']);
+const MEMBER_VIEW_SECTIONS = new Set(['society', 'meetings', 'projects', 'technology', 'coding', 'pharmacy-healthcare', 'resources', 'sops', 'research', 'ideas', 'achievements', 'roadmap']);
 
 const g = globalThis as Record<string, unknown>;
 
@@ -422,10 +498,34 @@ const runSafeMigrations = async (db: D1Database) => {
   }
 };
 
+const migrateFoundingRoleCodes = async (db: D1Database) => {
+  // Earlier development builds used operational labels as founding role codes.
+  // Rename only where the new identity has not yet been created, preserving the
+  // same role ID, memberships, permissions, and role history.
+  const replacements = [
+    ['kernel', 'ghost', 'GHOST'],
+    ['signal', 'falcon', 'FALCON'],
+    ['pulse', 'quantum', 'QUANTUM'],
+    ['vault', 'matrix', 'MATRIX'],
+  ] as const;
+  for (const [oldCode, newCode, newName] of replacements) {
+    const oldRows = await asRows<{ id: number }>(db.prepare('SELECT id FROM roles WHERE code = ?').bind(oldCode));
+    const newRows = await asRows<{ id: number }>(db.prepare('SELECT id FROM roles WHERE code = ?').bind(newCode));
+    if (oldRows[0] && !newRows[0]) {
+      await db.prepare('UPDATE roles SET code = ?, name = ?, description = ? WHERE id = ?')
+        .bind(newCode, newName, 'Founding Code Rx identity; responsibilities configured by PHANTOM', oldRows[0].id).run();
+    }
+  }
+};
+
 const seedRolesAndPermissions = async (db: D1Database) => {
   for (const [code, name, description, isSystem] of ROLE_SEEDS) {
     await db.prepare('INSERT OR IGNORE INTO roles (code, name, description, is_system) VALUES (?, ?, ?, ?)')
       .bind(code, name, description, isSystem).run();
+    if (['phantom', 'nexus', 'ghost', 'falcon', 'quantum', 'matrix'].includes(code)) {
+      await db.prepare('UPDATE roles SET name = ?, description = ?, is_system = ? WHERE code = ?')
+        .bind(name, description, isSystem, code).run();
+    }
   }
 
   const roles = await asRows<{ id: number; code: string }>(db.prepare('SELECT id, code FROM roles'));
@@ -454,6 +554,30 @@ const seedVaultSections = async (db: D1Database) => {
     await db.prepare(
       'INSERT OR IGNORE INTO vault_sections (slug, title, description, is_sensitive, sort_order) VALUES (?, ?, ?, ?, ?)'
     ).bind(slug, title, description, slug === 'finance' ? 1 : 0, order).run();
+  }
+};
+
+const ensureFoundingCodenames = async (db: D1Database, phantomProfileId: number) => {
+  for (const identity of FOUNDING_CODENAMES) {
+    const normalized = identity.toLowerCase();
+    const existing = await asRows<any>(db.prepare('SELECT * FROM codenames WHERE normalized_name = ?').bind(normalized));
+    if (!existing[0]) {
+      const isPhantom = identity === 'PHANTOM';
+      const result = await db.prepare(
+        `INSERT INTO codenames (normalized_name, display_name, status, reserved_note, claimed_by_member_profile_id, claimed_at)
+         VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)`
+      ).bind(normalized, identity, isPhantom ? 'claimed' : 'reserved', isPhantom ? null : 'Founding identity reserved', isPhantom ? phantomProfileId : null, isPhantom ? 1 : 0).run();
+      const codenameId = Number(result.meta.last_row_id);
+      await db.prepare('INSERT INTO codename_history (codename_id, member_profile_id, event_type, note) VALUES (?, ?, ?, ?)')
+        .bind(codenameId, isPhantom ? phantomProfileId : null, isPhantom ? 'claimed' : 'reserved', isPhantom ? 'PHANTOM founding identity' : 'Founding identity reserved').run();
+      continue;
+    }
+    if (identity === 'PHANTOM' && !existing[0].claimed_by_member_profile_id && ['available', 'reserved'].includes(existing[0].status)) {
+      await db.prepare("UPDATE codenames SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, reserved_note = NULL WHERE id = ?")
+        .bind(phantomProfileId, existing[0].id).run();
+      await db.prepare('INSERT INTO codename_history (codename_id, member_profile_id, event_type, note) VALUES (?, ?, ?, ?)')
+        .bind(existing[0].id, phantomProfileId, 'claimed', 'PHANTOM founding identity').run();
+    }
   }
 };
 
@@ -498,6 +622,8 @@ const ensurePhantom = async (env: Env) => {
     await db.prepare("UPDATE member_profiles SET status = 'active', primary_role_id = ? WHERE id = ?")
       .bind(phantomRoleId ?? null, profileRows[0].id).run();
   }
+  const currentProfile = await asRows<{ id: number }>(db.prepare('SELECT id FROM member_profiles WHERE user_id = ?').bind(user.id));
+  if (currentProfile[0]) await ensureFoundingCodenames(db, currentProfile[0].id);
 };
 
 /**
@@ -513,6 +639,7 @@ export async function ensureSchema(env: Env): Promise<void> {
 
   await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
   await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
+  await migrateFoundingRoleCodes(db);
   await seedRolesAndPermissions(db);
   await seedVaultSections(db);
   await ensurePhantom(env);

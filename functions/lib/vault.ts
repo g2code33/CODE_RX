@@ -7,15 +7,22 @@ export const VAULT_SECTION_SEEDS = [
   ['members', 'Members', 'Member records and community information', 1],
   ['meetings', 'Meetings', 'Meeting notes, agendas, and decisions', 2],
   ['projects', 'Projects', 'Project workspaces, tasks, and roadmaps', 3],
-  ['technology', 'Technology', 'Technical systems and engineering documentation', 4],
-  ['media', 'Media', 'Brand, media, and public communications', 5],
-  ['finance', 'Finance', 'Budgets, sponsorship, and financial records', 6],
-  ['resources', 'Resources', 'Learning and organizational resources', 7],
-  ['sops', 'SOPs', 'Standard operating procedures', 8],
-  ['achievements', 'Achievements', 'Milestones and achievements', 9],
-  ['roadmap', 'Roadmap', 'Society direction and planning', 10],
-  ['archive', 'Archive', 'Historical and archived records', 11],
+  ['technology', 'Technology', 'Technical systems, architecture, and infrastructure', 4],
+  ['coding', 'Coding', 'Programming guides, code standards, and developer notes', 5],
+  ['pharmacy-healthcare', 'Pharmacy & Healthcare', 'Clinical, pharmaceutical, and digital-health knowledge', 6],
+  ['media', 'Media', 'Brand, media, graphics, and public communications', 7],
+  ['resources', 'Resources', 'Learning and organizational resources', 8],
+  ['sops', 'SOPs', 'Standard operating procedures', 9],
+  ['research', 'Research', 'Research notes, evidence, and technical investigations', 10],
+  ['ideas', 'Ideas', 'Proposals, concepts, and innovation backlog', 11],
+  ['roadmap', 'Roadmap', 'Society direction and planning', 12],
+  ['archive', 'Archive', 'Historical and archived records', 13],
+  // Retained from the earlier secure Vault schema. PHANTOM may archive or
+  // reconfigure it; retaining it prevents loss of any finance records.
+  ['finance', 'Finance', 'Budgets, sponsorship, and financial records', 14],
 ] as const;
+
+export const FOUNDING_CODENAMES = ['PHANTOM', 'NEXUS', 'GHOST', 'FALCON', 'QUANTUM', 'MATRIX'] as const;
 
 export const VAULT_ACTIONS = ['view', 'create', 'edit', 'delete', 'manage'] as const;
 export type VaultAction = typeof VAULT_ACTIONS[number];
@@ -184,7 +191,8 @@ export const requireVaultPermission = (sectionFromRequest: string | ((c: AppCont
     const actor = await actorFromContext(c);
     if (!actor) return c.json({ success: false, error: 'Account not found' }, 404);
     const section = typeof sectionFromRequest === 'function' ? sectionFromRequest(c) : sectionFromRequest;
-    if (!VAULT_SECTION_SEEDS.some(([slug]) => slug === section)) return c.json({ success: false, error: 'Unknown Vault section' }, 400);
+    const sectionRows = await asRows<{ id: number }>(c.env.DB.prepare('SELECT id FROM vault_sections WHERE slug = ? AND is_archived = 0').bind(section));
+    if (!sectionRows[0]) return c.json({ success: false, error: 'Unknown Vault section' }, 400);
     if (!await hasVaultPermission(c.env.DB, actor, section, action)) {
       return c.json({ success: false, error: 'You are not authorized for this Vault action' }, 403);
     }

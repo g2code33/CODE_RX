@@ -15,6 +15,7 @@ import {
 import { cleanStr, cleanEmail, cleanOptionalStr } from './lib/validate';
 import { checkRateLimit } from './lib/rate-limit';
 import { sendEmail } from './lib/email';
+import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
 
 type AppEnv = { Bindings: Env; Variables: { user: JwtPayload; actor: Awaited<ReturnType<typeof getActor>> } };
 
@@ -188,6 +189,23 @@ const vaultAccess = async (c: any, slug: string, action: VaultAction) => {
   }
   return { actor: access.actor, section, response: null };
 };
+
+const DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active', 'archived']);
+const documentStatus = (value: unknown, fallback = 'draft') => {
+  const status = cleanOptionalStr(value, 30)?.toLowerCase().replace(/\s+/g, '_');
+  return status && DOCUMENT_STATUSES.has(status) ? status : fallback;
+};
+const documentProjectId = (value: unknown) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+const documentTags = async (db: D1Database, documentId: number) => {
+  const tags = await dbRows<any>(db.prepare(
+    `SELECT t.id, t.normalized_name, t.display_name FROM vault_tags t
+     JOIN vault_document_tags dt ON dt.tag_id = t.id WHERE dt.document_id = ? ORDER BY t.display_name`
+  ).bind(documentId));
+  return tags.map((tag) => tag.display_name);
+};
+const documentAttachments = async (db: D1Database, documentId: number) => dbRows<any>(db.prepare(
+  'SELECT id, name, file_key, mime_type, size_bytes, created_at FROM vault_attachments WHERE document_id = ? ORDER BY created_at DESC'
+).bind(documentId));
 
 // ---------- CORS (same-origin is the norm; allow local dev + pages.dev) ----------
 app.use('/api/*', cors({
@@ -1023,17 +1041,149 @@ app.get('/api/vault/sections', requireAuth, async (c) => {
   return c.json({ success: true, data: visible });
 });
 
+app.get('/api/vault/home', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const allSections = await dbRows<any>(c.env.DB.prepare(
+    'SELECT id, slug, title, description, is_sensitive, sort_order FROM vault_sections WHERE is_archived = 0 ORDER BY sort_order, title'
+  ));
+  const sections: any[] = [];
+  for (const section of allSections) {
+    if (!await hasVaultPermission(c.env.DB, actor, section.slug, 'view')) continue;
+    const countRows = await dbRows<any>(c.env.DB.prepare('SELECT COUNT(*) AS count FROM vault_documents WHERE section_id = ? AND is_archived = 0').bind(section.id));
+    sections.push({ ...section, documentCount: Number(countRows[0]?.count || 0), permissions: {
+      view: true,
+      create: await hasVaultPermission(c.env.DB, actor, section.slug, 'create'),
+      edit: await hasVaultPermission(c.env.DB, actor, section.slug, 'edit'),
+      delete: await hasVaultPermission(c.env.DB, actor, section.slug, 'delete'),
+      manage: await hasVaultPermission(c.env.DB, actor, section.slug, 'manage'),
+    } });
+  }
+  const visibleIds = new Set(sections.map((section) => section.id));
+  const latestRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.id, d.section_id, d.title, d.status, d.tags_json, d.word_count, d.updated_at, d.created_at,
+            d.created_by_member_profile_id, d.updated_by_member_profile_id,
+            s.slug AS section_slug, s.title AS section_title, u.name AS updated_by_name
+     FROM vault_documents d
+     JOIN vault_sections s ON s.id = d.section_id
+     LEFT JOIN member_profiles mp ON mp.id = d.updated_by_member_profile_id
+     LEFT JOIN users u ON u.id = mp.user_id
+     WHERE d.is_archived = 0 ORDER BY d.updated_at DESC, d.id DESC LIMIT 80`
+  ));
+  const recentDocuments = latestRows.filter((document) => visibleIds.has(document.section_id)).slice(0, 10);
+  const myDocuments = latestRows.filter((document) => visibleIds.has(document.section_id) && (document.created_by_member_profile_id === actor.profileId || document.updated_by_member_profile_id === actor.profileId)).slice(0, 10);
+  const activityRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT va.*, s.slug AS section_slug, s.title AS section_title, d.title AS document_title, u.name AS actor_name
+     FROM vault_activity va
+     LEFT JOIN vault_sections s ON s.id = va.section_id
+     LEFT JOIN vault_documents d ON d.id = va.document_id
+     LEFT JOIN member_profiles mp ON mp.id = va.actor_member_profile_id
+     LEFT JOIN users u ON u.id = mp.user_id
+     ORDER BY va.created_at DESC, va.id DESC LIMIT 80`
+  ));
+  const recentActivity = activityRows.filter((activity) => !activity.section_id || visibleIds.has(activity.section_id)).slice(0, 15);
+  return c.json({ success: true, data: { sections, recentDocuments, myDocuments, recentActivity } });
+});
+
+app.get('/api/vault/activity', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') || 30)));
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT va.*, s.slug AS section_slug, s.title AS section_title, d.title AS document_title, u.name AS actor_name
+     FROM vault_activity va
+     LEFT JOIN vault_sections s ON s.id = va.section_id
+     LEFT JOIN vault_documents d ON d.id = va.document_id
+     LEFT JOIN member_profiles mp ON mp.id = va.actor_member_profile_id
+     LEFT JOIN users u ON u.id = mp.user_id
+     ORDER BY va.created_at DESC, va.id DESC LIMIT ?`
+  ).bind(limit));
+  const visible: any[] = [];
+  for (const row of rows) {
+    if (!row.section_slug || await hasVaultPermission(c.env.DB, actor, row.section_slug, 'view')) visible.push(row);
+  }
+  return c.json({ success: true, data: visible });
+});
+
+app.get('/api/vault/search', requireAuth, async (c) => {
+  const query = cleanStr(c.req.query('q'), 1, 120);
+  if (!query) return c.json({ success: false, error: 'Enter a search term.' }, 400);
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const wildcard = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT DISTINCT d.id, d.section_id, d.title, d.content, d.tags_json, d.status, d.updated_at,
+       s.slug AS section_slug, s.title AS section_title, u.name AS author_name, p.title AS project_title
+     FROM vault_documents d
+     JOIN vault_sections s ON s.id = d.section_id
+     LEFT JOIN member_profiles author_profile ON author_profile.id = d.created_by_member_profile_id
+     LEFT JOIN users u ON u.id = author_profile.user_id
+     LEFT JOIN vault_projects p ON p.id = d.related_project_id
+     WHERE d.is_archived = 0 AND (
+       d.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR d.content LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+       d.tags_json LIKE ? ESCAPE '\\' COLLATE NOCASE OR u.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+       p.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR s.title LIKE ? ESCAPE '\\' COLLATE NOCASE
+     ) ORDER BY d.updated_at DESC LIMIT 80`
+  ).bind(wildcard, wildcard, wildcard, wildcard, wildcard, wildcard));
+  const results: any[] = [];
+  for (const row of rows) {
+    if (await hasVaultPermission(c.env.DB, actor, row.section_slug, 'view')) results.push(row);
+  }
+  return c.json({ success: true, data: results });
+});
+
+app.get('/api/vault/tags', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const tags = await dbRows<any>(c.env.DB.prepare(
+    `SELECT t.id, t.normalized_name, t.display_name, COUNT(dt.document_id) AS document_count
+     FROM vault_tags t LEFT JOIN vault_document_tags dt ON dt.tag_id = t.id
+     GROUP BY t.id ORDER BY document_count DESC, t.display_name`
+  ));
+  return c.json({ success: true, data: tags });
+});
+
+app.get('/api/vault/sections', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const sections = await dbRows<any>(c.env.DB.prepare(
+    'SELECT id, slug, title, description, is_sensitive, sort_order FROM vault_sections WHERE is_archived = 0 ORDER BY sort_order, title'
+  ));
+  const visible = [] as any[];
+  for (const section of sections) {
+    if (await hasVaultPermission(c.env.DB, actor, section.slug, 'view')) {
+      visible.push({ ...section, permissions: {
+        view: true,
+        create: await hasVaultPermission(c.env.DB, actor, section.slug, 'create'),
+        edit: await hasVaultPermission(c.env.DB, actor, section.slug, 'edit'),
+        delete: await hasVaultPermission(c.env.DB, actor, section.slug, 'delete'),
+        manage: await hasVaultPermission(c.env.DB, actor, section.slug, 'manage'),
+      } });
+    }
+  }
+  return c.json({ success: true, data: visible });
+});
+
 app.get('/api/vault/documents', requireAuth, async (c) => {
   const slug = cleanStr(c.req.query('section'), 1, 60);
   if (!slug) return c.json({ success: false, error: 'Vault section is required' }, 400);
   const access = await vaultAccess(c, slug, 'view');
   if (access.response) return access.response;
   const documents = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.id, d.title, d.visibility, d.file_key, d.created_at, d.updated_at,
-            creator.member_code AS created_by_member_id, updater.member_code AS updated_by_member_id
+    `SELECT d.id, d.title, d.status, d.visibility, d.file_key, d.tags_json, d.related_project_id, d.word_count, d.created_at, d.updated_at,
+            creator.member_code AS created_by_member_id, creator_user.name AS created_by_name,
+            updater.member_code AS updated_by_member_id, updater_user.name AS updated_by_name,
+            p.title AS related_project_title
      FROM vault_documents d
      LEFT JOIN member_profiles creator ON creator.id = d.created_by_member_profile_id
+     LEFT JOIN users creator_user ON creator_user.id = creator.user_id
      LEFT JOIN member_profiles updater ON updater.id = d.updated_by_member_profile_id
+     LEFT JOIN users updater_user ON updater_user.id = updater.user_id
+     LEFT JOIN vault_projects p ON p.id = d.related_project_id
      WHERE d.section_id = ? AND d.is_archived = 0 ORDER BY d.updated_at DESC, d.id DESC`
   ).bind(access.section.id));
   return c.json({ success: true, data: documents });
@@ -1043,14 +1193,29 @@ app.get('/api/vault/documents/:id', requireAuth, async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id' }, 400);
   const rows = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.*, s.slug AS section_slug, s.title AS section_title
-     FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+    `SELECT d.*, s.slug AS section_slug, s.title AS section_title,
+       creator_user.name AS created_by_name, updater_user.name AS updated_by_name,
+       p.title AS related_project_title
+     FROM vault_documents d
+     JOIN vault_sections s ON s.id = d.section_id
+     LEFT JOIN member_profiles creator ON creator.id = d.created_by_member_profile_id
+     LEFT JOIN users creator_user ON creator_user.id = creator.user_id
+     LEFT JOIN member_profiles updater ON updater.id = d.updated_by_member_profile_id
+     LEFT JOIN users updater_user ON updater_user.id = updater.user_id
+     LEFT JOIN vault_projects p ON p.id = d.related_project_id
+     WHERE d.id = ?`
   ).bind(id));
   const document = rows[0];
   if (!document || document.is_archived) return c.json({ success: false, error: 'Document not found' }, 404);
   const access = await vaultAccess(c, document.section_slug, 'view');
   if (access.response) return access.response;
-  return c.json({ success: true, data: document });
+  const parsed = parseStoredDocumentContent(document.content_json, document.content || '');
+  return c.json({ success: true, data: {
+    ...document,
+    contentJson: { version: 1, blocks: parsed.blocks },
+    tags: await documentTags(c.env.DB, id),
+    attachments: await documentAttachments(c.env.DB, id),
+  } });
 });
 
 app.post('/api/vault/documents', requireAuth, async (c) => {
@@ -1058,23 +1223,34 @@ app.post('/api/vault/documents', requireAuth, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const slug = cleanStr(body.section, 1, 60);
     const title = cleanStr(body.title, 2, 180);
-    const content = cleanOptionalStr(body.content, 100_000) || '';
     const fileKey = cleanOptionalStr(body.fileKey, 500);
     const visibility = body.visibility === 'members' || body.visibility === 'restricted' ? body.visibility : 'section';
     if (!slug || !title) return c.json({ success: false, error: 'Section and document title are required' }, 400);
     const access = await vaultAccess(c, slug, 'create');
     if (access.response) return access.response;
     const actor = access.actor!;
+    const content = normalizeDocumentContent(body.contentJson ?? body.content, cleanOptionalStr(body.content, 100_000) || '');
+    const tags = normalizeTags(body.tags);
+    const status = documentStatus(body.status, 'draft');
+    if (status !== 'draft' && status !== 'in_review' && !await hasVaultPermission(c.env.DB, actor, slug, 'manage')) {
+      return c.json({ success: false, error: 'Only a section manager can create an approved or active document.' }, 403);
+    }
+    const relatedProjectId = documentProjectId(body.relatedProjectId);
     const created = await c.env.DB.prepare(
-      `INSERT INTO vault_documents (section_id, title, content, visibility, file_key, created_by_member_profile_id, updated_by_member_profile_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(access.section.id, title, content, visibility, fileKey, actor.profileId, actor.profileId).run();
+      `INSERT INTO vault_documents (section_id, title, content, content_json, content_format, status, tags_json, related_project_id, word_count, last_saved_at, visibility, file_key, created_by_member_profile_id, updated_by_member_profile_id)
+       VALUES (?, ?, ?, ?, 'blocks', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)`
+    ).bind(access.section.id, title, content.plainText, content.contentJson, status, JSON.stringify(tags), relatedProjectId, content.wordCount, visibility, fileKey, actor.profileId, actor.profileId).run();
     const documentId = Number(created.meta.last_row_id);
+    for (const attachmentId of attachmentIdsFromBlocks(content.blocks)) {
+      await c.env.DB.prepare('UPDATE vault_attachments SET document_id = ? WHERE id = ? AND section_id = ?').bind(documentId, attachmentId, access.section.id).run();
+    }
+    await syncDocumentTags(c.env.DB, documentId, tags);
     await c.env.DB.prepare(
-      'INSERT INTO document_versions (document_id, version_number, title, content, file_key, changed_by_member_profile_id, change_note) VALUES (?, 1, ?, ?, ?, ?, ?)'
-    ).bind(documentId, title, content, fileKey, actor.profileId, 'Initial version').run();
-    await audit(c.env.DB, actor, 'vault.document.created', 'vault_document', documentId, { section: slug, title });
-    return c.json({ success: true, data: { id: documentId }, message: 'Vault document created' });
+      `INSERT INTO document_versions (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
+       VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(documentId, title, content.plainText, content.contentJson, status, JSON.stringify(tags), relatedProjectId, content.wordCount, fileKey, actor.profileId, 'Initial version').run();
+    await recordVaultActivity(c.env.DB, actor, 'document.created', access.section.id, documentId, { section: slug, title, status, tags });
+    return c.json({ success: true, data: { id: documentId, version: 1 }, message: 'Vault document created' });
   } catch (error) {
     console.error('[code-rx] create vault document error:', error);
     return c.json({ success: false, error: 'Could not create the Vault document' }, 500);
@@ -1095,20 +1271,36 @@ app.patch('/api/vault/documents/:id', requireAuth, async (c) => {
     const actor = access.actor!;
     const body = await c.req.json().catch(() => ({}));
     const title = body.title === undefined ? document.title : cleanStr(body.title, 2, 180);
-    const content = body.content === undefined ? document.content : (cleanOptionalStr(body.content, 100_000) || '');
-    const fileKey = body.fileKey === undefined ? document.file_key : cleanOptionalStr(body.fileKey, 500);
-    const note = cleanOptionalStr(body.changeNote, 1000) || 'Updated document';
     if (!title) return c.json({ success: false, error: 'A valid title is required' }, 400);
+    const currentContent = parseStoredDocumentContent(document.content_json, document.content || '');
+    const changedContent = body.contentJson !== undefined || body.content !== undefined;
+    const content = changedContent ? normalizeDocumentContent(body.contentJson ?? body.content, cleanOptionalStr(body.content, 100_000) || '') : currentContent;
+    const tags = body.tags === undefined ? normalizeTags(document.tags_json) : normalizeTags(body.tags);
+    const status = body.status === undefined ? document.status : documentStatus(body.status, document.status || 'draft');
+    if (status !== document.status && ['approved', 'active', 'archived'].includes(status) && !await hasVaultPermission(c.env.DB, actor, document.section_slug, 'manage')) {
+      return c.json({ success: false, error: 'Only a section manager can change this document to approved, active, or archived.' }, 403);
+    }
+    const visibility = body.visibility === undefined ? document.visibility : (body.visibility === 'members' || body.visibility === 'restricted' ? body.visibility : 'section');
+    const relatedProjectId = body.relatedProjectId === undefined ? document.related_project_id : documentProjectId(body.relatedProjectId);
+    const fileKey = body.fileKey === undefined ? document.file_key : cleanOptionalStr(body.fileKey, 500);
+    const note = cleanOptionalStr(body.changeNote, 1000) || (body.autosave ? 'Autosaved document update' : 'Updated document');
     const versionRows = await dbRows<any>(c.env.DB.prepare('SELECT MAX(version_number) AS version FROM document_versions WHERE document_id = ?').bind(id));
     const version = Number(versionRows[0]?.version || 0) + 1;
     await c.env.DB.batch([
-      c.env.DB.prepare('UPDATE vault_documents SET title = ?, content = ?, file_key = ?, updated_by_member_profile_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-        .bind(title, content, fileKey, actor.profileId, id),
-      c.env.DB.prepare('INSERT INTO document_versions (document_id, version_number, title, content, file_key, changed_by_member_profile_id, change_note) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .bind(id, version, title, content, fileKey, actor.profileId, note),
+      c.env.DB.prepare(
+        `UPDATE vault_documents SET title = ?, content = ?, content_json = ?, content_format = 'blocks', status = ?, visibility = ?, tags_json = ?, related_project_id = ?, word_count = ?, file_key = ?, updated_by_member_profile_id = ?, last_saved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(title, content.plainText, content.contentJson, status, visibility, JSON.stringify(tags), relatedProjectId, content.wordCount, fileKey, actor.profileId, id),
+      c.env.DB.prepare(
+        `INSERT INTO document_versions (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(id, version, title, content.plainText, content.contentJson, status, JSON.stringify(tags), relatedProjectId, content.wordCount, fileKey, actor.profileId, note),
     ]);
-    await audit(c.env.DB, actor, 'vault.document.edited', 'vault_document', id, { section: document.section_slug, version, note });
-    return c.json({ success: true, message: 'Vault document updated', data: { version } });
+    for (const attachmentId of attachmentIdsFromBlocks(content.blocks)) {
+      await c.env.DB.prepare('UPDATE vault_attachments SET document_id = ? WHERE id = ? AND section_id = ?').bind(id, attachmentId, access.section.id).run();
+    }
+    await syncDocumentTags(c.env.DB, id, tags);
+    await recordVaultActivity(c.env.DB, actor, body.autosave ? 'document.autosaved' : 'document.edited', access.section.id, id, { section: document.section_slug, version, note, status, tags });
+    return c.json({ success: true, message: body.autosave ? 'Autosaved' : 'Vault document updated', data: { version, wordCount: content.wordCount } });
   } catch (error) {
     console.error('[code-rx] update vault document error:', error);
     return c.json({ success: false, error: 'Could not update the Vault document' }, 500);
@@ -1119,14 +1311,14 @@ app.delete('/api/vault/documents/:id', requireAuth, async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id' }, 400);
   const rows = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.id, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+    `SELECT d.id, d.section_id, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
   ).bind(id));
   const document = rows[0];
   if (!document) return c.json({ success: false, error: 'Document not found' }, 404);
   const access = await vaultAccess(c, document.section_slug, 'delete');
   if (access.response) return access.response;
-  await c.env.DB.prepare('UPDATE vault_documents SET is_archived = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(id).run();
-  await audit(c.env.DB, access.actor, 'vault.document.archived', 'vault_document', id, { section: document.section_slug });
+  await c.env.DB.prepare("UPDATE vault_documents SET is_archived = 1, status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run();
+  await recordVaultActivity(c.env.DB, access.actor, 'document.archived', document.section_id, id, { section: document.section_slug });
   return c.json({ success: true, message: 'Document archived. Its history remains preserved.' });
 });
 
@@ -1140,9 +1332,58 @@ app.get('/api/vault/documents/:id/versions', requireAuth, async (c) => {
   const access = await vaultAccess(c, document.section_slug, 'view');
   if (access.response) return access.response;
   const versions = await dbRows<any>(c.env.DB.prepare(
-    'SELECT version_number, title, change_note, created_at FROM document_versions WHERE document_id = ? ORDER BY version_number DESC'
+    `SELECT version_number, title, status, tags_json, related_project_id, word_count, change_note, created_at, changed_by_member_profile_id
+     FROM document_versions WHERE document_id = ? ORDER BY version_number DESC`
   ).bind(id));
   return c.json({ success: true, data: versions });
+});
+
+app.get('/api/vault/documents/:id/versions/:version', requireAuth, async (c) => {
+  const id = Number(c.req.param('id')); const version = Number(c.req.param('version'));
+  if (!Number.isInteger(id) || !Number.isInteger(version)) return c.json({ success: false, error: 'Invalid document version.' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT v.*, d.section_id, s.slug AS section_slug FROM document_versions v
+     JOIN vault_documents d ON d.id = v.document_id JOIN vault_sections s ON s.id = d.section_id
+     WHERE v.document_id = ? AND v.version_number = ?`
+  ).bind(id, version));
+  const snapshot = rows[0];
+  if (!snapshot) return c.json({ success: false, error: 'Version not found.' }, 404);
+  const access = await vaultAccess(c, snapshot.section_slug, 'view');
+  if (access.response) return access.response;
+  const parsed = parseStoredDocumentContent(snapshot.content_json, snapshot.content || '');
+  return c.json({ success: true, data: { ...snapshot, contentJson: { version: 1, blocks: parsed.blocks }, tags: normalizeTags(snapshot.tags_json) } });
+});
+
+app.post('/api/vault/documents/:id/restore/:version', requireAuth, async (c) => {
+  const id = Number(c.req.param('id')); const version = Number(c.req.param('version'));
+  if (!Number.isInteger(id) || !Number.isInteger(version)) return c.json({ success: false, error: 'Invalid document version.' }, 400);
+  const currentRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.*, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+  ).bind(id));
+  const current = currentRows[0];
+  if (!current) return c.json({ success: false, error: 'Document not found.' }, 404);
+  const access = await vaultAccess(c, current.section_slug, 'manage');
+  if (access.response) return access.response;
+  const snapshotRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM document_versions WHERE document_id = ? AND version_number = ?').bind(id, version));
+  const snapshot = snapshotRows[0];
+  if (!snapshot) return c.json({ success: false, error: 'Version not found.' }, 404);
+  const actor = access.actor!;
+  const content = parseStoredDocumentContent(snapshot.content_json, snapshot.content || '');
+  const tags = normalizeTags(snapshot.tags_json);
+  const versionRows = await dbRows<any>(c.env.DB.prepare('SELECT MAX(version_number) AS version FROM document_versions WHERE document_id = ?').bind(id));
+  const restoredVersion = Number(versionRows[0]?.version || 0) + 1;
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE vault_documents SET title = ?, content = ?, content_json = ?, content_format = 'blocks', status = ?, tags_json = ?, related_project_id = ?, word_count = ?, file_key = ?, updated_by_member_profile_id = ?, last_saved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(snapshot.title, content.plainText, content.contentJson, snapshot.status || 'draft', JSON.stringify(tags), snapshot.related_project_id ?? null, Number(snapshot.word_count || content.wordCount), snapshot.file_key ?? null, actor.profileId, id),
+    c.env.DB.prepare(
+      `INSERT INTO document_versions (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, restoredVersion, snapshot.title, content.plainText, content.contentJson, snapshot.status || 'draft', JSON.stringify(tags), snapshot.related_project_id ?? null, Number(snapshot.word_count || content.wordCount), snapshot.file_key ?? null, actor.profileId, `Restored from version ${version}`),
+  ]);
+  await syncDocumentTags(c.env.DB, id, tags);
+  await recordVaultActivity(c.env.DB, actor, 'document.restored', current.section_id, id, { fromVersion: version, restoredVersion });
+  return c.json({ success: true, data: { version: restoredVersion }, message: `Restored version ${version} as version ${restoredVersion}.` });
 });
 
 app.get('/api/vault/projects', requireAuth, async (c) => {
@@ -1291,6 +1532,10 @@ app.get('/api/phantom/overview', requireAuth, requirePhantom, async (c) => {
     dbRows<any>(c.env.DB.prepare("SELECT COUNT(*) AS count FROM website_admins WHERE status = 'active'")),
     dbRows<any>(c.env.DB.prepare('SELECT COUNT(*) AS count FROM vault_documents WHERE is_archived = 0')),
     dbRows<any>(c.env.DB.prepare('SELECT COUNT(*) AS count FROM vault_projects WHERE is_archived = 0')),
+    dbRows<any>(c.env.DB.prepare("SELECT COUNT(*) AS count FROM vault_documents WHERE is_archived = 0 AND status = 'draft'")),
+    dbRows<any>(c.env.DB.prepare("SELECT COUNT(*) AS count FROM vault_documents WHERE is_archived = 0 AND status = 'in_review'")),
+    dbRows<any>(c.env.DB.prepare("SELECT COUNT(*) AS count FROM vault_documents WHERE is_archived = 1 OR status = 'archived'")),
+    dbRows<any>(c.env.DB.prepare('SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM vault_attachments')),
     dbRows<any>(c.env.DB.prepare(`SELECT a.*, u.name AS actor_name, mp.member_code AS actor_member_id
       FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id LEFT JOIN member_profiles mp ON mp.id = a.actor_member_profile_id
       ORDER BY a.created_at DESC, a.id DESC LIMIT 10`)),
@@ -1302,7 +1547,11 @@ app.get('/api/phantom/overview', requireAuth, requirePhantom, async (c) => {
     websiteAdmins: Number(queries[3][0]?.count || 0),
     vaultDocuments: Number(queries[4][0]?.count || 0),
     projects: Number(queries[5][0]?.count || 0),
-    recentActivity: queries[6],
+    draftDocuments: Number(queries[6][0]?.count || 0),
+    reviewDocuments: Number(queries[7][0]?.count || 0),
+    archivedDocuments: Number(queries[8][0]?.count || 0),
+    vaultStorageBytes: Number(queries[9][0]?.bytes || 0),
+    recentActivity: queries[10],
     actor: actor ? publicActor(actor) : null,
   } });
 });
@@ -1691,6 +1940,37 @@ app.post('/api/phantom/codenames', requireAuth, requirePhantom, async (c) => {
   }
 });
 
+app.post('/api/phantom/codenames/:id/assign', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const profileId = Number(body.memberProfileId);
+  if (!Number.isInteger(id) || !Number.isInteger(profileId) || id < 1 || profileId < 1) {
+    return c.json({ success: false, error: 'Choose a codename and member profile.' }, 400);
+  }
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM codenames WHERE id = ?').bind(id));
+  const codename = rows[0];
+  if (!codename || !['available', 'reserved'].includes(codename.status)) return c.json({ success: false, error: 'Only an available or reserved codename can be assigned.' }, 409);
+  const profileRows = await dbRows<any>(c.env.DB.prepare("SELECT id, member_code, status FROM member_profiles WHERE id = ?").bind(profileId));
+  if (!profileRows[0] || !['active', 'pending_activation'].includes(profileRows[0].status)) return c.json({ success: false, error: 'Choose an active or awaiting-activation member.' }, 409);
+  const actor = await actorFromContext(c);
+  const claim = await c.env.DB.prepare(
+    `UPDATE codenames SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, reserved_note = NULL, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND status IN ('available', 'reserved') AND claimed_by_member_profile_id IS NULL`
+  ).bind(profileId, id).run();
+  if (Number(claim.meta.changes || 0) !== 1) return c.json({ success: false, error: 'This codename was just claimed or assigned elsewhere.' }, 409);
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO codename_selection_sessions (member_profile_id, status, passes_used, claimed_codename_id, completed_at)
+       VALUES (?, 'completed', 0, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', claimed_codename_id = excluded.claimed_codename_id, completed_at = CURRENT_TIMESTAMP`
+    ).bind(profileId, id),
+    c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
+      .bind(id, profileId, actor?.userId ?? null, 'Assigned by PHANTOM as a founding or reserved identity'),
+  ]);
+  await audit(c.env.DB, actor, 'codename.assigned', 'codename', id, { codename: codename.display_name, memberProfileId: profileId, memberCode: profileRows[0].member_code });
+  return c.json({ success: true, message: `${codename.display_name} assigned to ${profileRows[0].member_code}.` });
+});
+
 app.patch('/api/phantom/codenames/:id', requireAuth, requirePhantom, async (c) => {
   const id = Number(c.req.param('id'));
   const body = await c.req.json().catch(() => ({}));
@@ -1782,9 +2062,16 @@ app.post('/api/vault/upload', requireAuth, async (c) => {
   try {
     const formData = await c.req.formData();
     const section = cleanStr(formData.get('section') || '', 1, 60);
+    const documentId = Number(formData.get('documentId') || 0);
     if (!section) return c.json({ success: false, error: 'Vault section is required.' }, 400);
-    const access = await vaultAccess(c, section, 'create');
+    const access = await vaultAccess(c, section, documentId ? 'edit' : 'create');
     if (access.response) return access.response;
+    if (documentId) {
+      const documentRows = await dbRows<any>(c.env.DB.prepare(
+        `SELECT d.id, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ? AND d.is_archived = 0`
+      ).bind(documentId));
+      if (!documentRows[0] || documentRows[0].section_slug !== section) return c.json({ success: false, error: 'Document attachment target is invalid.' }, 400);
+    }
     const file = formData.get('file');
     if (!(file instanceof File)) return c.json({ success: false, error: 'No file provided.' }, 400);
     if (file.size > MAX_UPLOAD_BYTES) return c.json({ success: false, error: 'File too large (max 10 MB).' }, 413);
@@ -1793,8 +2080,13 @@ app.post('/api/vault/upload', requireAuth, async (c) => {
     const safeName = (file.name || 'vault-file').replace(/[^\w.\-() ]/g, '_').slice(-100);
     const key = `vault/${section}/${access.actor!.profileId}/${Date.now()}-${safeName}`;
     await c.env.BUCKET.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: mime } });
-    await audit(c.env.DB, access.actor, 'vault.file.uploaded', 'vault_file', key, { section, name: safeName });
-    return c.json({ success: true, fileKey: key, url: `/api/vault-files/${encodeURIComponent(key).replace(/%2F/g, '/')}` });
+    const attachment = await c.env.DB.prepare(
+      `INSERT INTO vault_attachments (document_id, section_id, name, file_key, mime_type, size_bytes, uploaded_by_member_profile_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(documentId || null, access.section.id, safeName, key, mime, file.size, access.actor!.profileId).run();
+    const attachmentId = Number(attachment.meta.last_row_id);
+    await recordVaultActivity(c.env.DB, access.actor, 'attachment.uploaded', access.section.id, documentId || null, { attachmentId, name: safeName, mime, size: file.size });
+    return c.json({ success: true, attachment: { id: attachmentId, name: safeName, fileKey: key, mimeType: mime, sizeBytes: file.size }, fileKey: key, url: `/api/vault-files/${encodeURIComponent(key).replace(/%2F/g, '/')}` });
   } catch (error) {
     console.error('[code-rx] vault upload error:', error);
     return c.json({ success: false, error: 'Vault upload failed.' }, 500);
