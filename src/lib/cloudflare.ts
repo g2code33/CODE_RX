@@ -170,15 +170,32 @@ export const db = {
   },
 
   vault: {
+    home: async () => (await apiCall<{ data: any }>('/api/vault/home')).data,
+    activity: async (limit = 30) => (await apiCall<{ data: any[] }>(`/api/vault/activity?limit=${limit}`)).data || [],
+    search: async (query: string) => (await apiCall<{ data: any[] }>(`/api/vault/search?q=${encodeURIComponent(query)}`)).data || [],
+    tags: async () => (await apiCall<{ data: any[] }>('/api/vault/tags')).data || [],
     sections: async () => {
       const result = await apiCall<{ data: any[] }>('/api/vault/sections');
       return result.data || [];
     },
-    uploadFile: async (file: File, section: string) => {
+    uploadFile: async (file: File, section: string, documentId?: number) => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('section', section);
-      return apiCall<{ fileKey: string; url: string }>('/api/vault/upload', { method: 'POST', body: formData });
+      if (documentId) formData.append('documentId', String(documentId));
+      return apiCall<{ attachment: any; fileKey: string; url: string }>('/api/vault/upload', { method: 'POST', body: formData });
+    },
+    fetchFile: async (fileKey: string) => {
+      const token = getToken();
+      const response = await fetch(`${API_BASE}/api/vault-files/${encodeURIComponent(fileKey).replace(/%2F/g, '/')}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) {
+        let data: any = null;
+        try { data = await response.json(); } catch { /* ignore */ }
+        throw new ApiError(data?.error || 'Could not open Vault attachment.', response.status);
+      }
+      return URL.createObjectURL(await response.blob());
     },
     documents: async (section: string) => {
       const result = await apiCall<{ data: any[] }>(`/api/vault/documents?section=${encodeURIComponent(section)}`);
@@ -188,15 +205,13 @@ export const db = {
       const result = await apiCall<{ data: any }>(`/api/vault/documents/${id}`);
       return result.data;
     },
-    createDocument: (data: { section: string; title: string; content?: string; visibility?: string; fileKey?: string }) =>
-      apiCall('/api/vault/documents', { method: 'POST', body: JSON.stringify(data) }),
-    updateDocument: (id: number, data: { title?: string; content?: string; fileKey?: string; changeNote?: string }) =>
-      apiCall(`/api/vault/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-    archiveDocument: (id: number) => apiCall(`/api/vault/documents/${id}`, { method: 'DELETE' }),
-    documentVersions: async (id: number) => {
-      const result = await apiCall<{ data: any[] }>(`/api/vault/documents/${id}/versions`);
-      return result.data || [];
-    },
+    createDocument: (data: any) => apiCall<{ data: any }>('/api/vault/documents', { method: 'POST', body: JSON.stringify(data) }),
+    updateDocument: (id: number, data: any) =>
+      apiCall<{ data: any }>(`/api/vault/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    archiveDocument: (id: number) => apiCall('/api/vault/documents/' + id, { method: 'DELETE' }),
+    documentVersions: async (id: number) => (await apiCall<{ data: any[] }>(`/api/vault/documents/${id}/versions`)).data || [],
+    documentVersion: async (id: number, version: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${id}/versions/${version}`)).data,
+    restoreDocumentVersion: (id: number, version: number) => apiCall<{ data: any }>(`/api/vault/documents/${id}/restore/${version}`, { method: 'POST' }),
     projects: async () => {
       const result = await apiCall<{ data: any[] }>('/api/vault/projects');
       return result.data || [];
@@ -232,6 +247,7 @@ export const db = {
     updateVaultSection: (id: number, data: any) => apiCall(`/api/phantom/vault-sections/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     codenames: async () => (await apiCall<{ data: any }>('/api/phantom/codenames')).data,
     addCodename: (data: { name: string; reserve?: boolean; note?: string }) => apiCall('/api/phantom/codenames', { method: 'POST', body: JSON.stringify(data) }),
+    assignCodename: (id: number, memberProfileId: number) => apiCall(`/api/phantom/codenames/${id}/assign`, { method: 'POST', body: JSON.stringify({ memberProfileId }) }),
     updateCodename: (id: number, data: any) => apiCall(`/api/phantom/codenames/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     releaseCodename: (id: number, data: { confirm: boolean; mode?: 'available' | 'retired' }) => apiCall(`/api/phantom/codenames/${id}/release`, { method: 'POST', body: JSON.stringify(data) }),
     auditLogs: async (limit = 100) => (await apiCall<{ data: any[] }>(`/api/phantom/audit-logs?limit=${limit}`)).data || [],

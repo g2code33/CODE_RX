@@ -20,6 +20,8 @@ This implementation extends the existing React/Vite site, existing Cloudflare Pa
 - Approved members receive an account activation link and choose their own password. No administrator needs to know a member password.
 - The Code Rx Vault lives inside the existing member dashboard.
 - The PHANTOM Control Center lives inside the existing Admin Core.
+- The six founding identities are `PHANTOM`, `NEXUS`, `GHOST`, `FALCON`, `QUANTUM`, and `MATRIX`. PHANTOM is claimed for the founder; the other founding identities are reserved in the database until PHANTOM assigns them.
+- Vault documents use structured blocks, document templates, code blocks, metadata, tags, autosave/local-draft protection, version history, protected attachments, search, and activity records — not a plain textarea.
 
 ## Safe migration behavior
 
@@ -65,7 +67,9 @@ Frontend controls only visibility. Every protected operation is checked again by
 - **Role permissions:** `view`, `create`, `edit`, `delete`, `manage` per Vault section.
 - **Member overrides:** PHANTOM can set more specific section-level overrides.
 - **Website Admins:** separate from Vault administration; website permissions are stored in `website_admin_permissions`.
-- **Vault files:** stored under `vault/` in R2 and served only through `/api/vault-files/*` after a server-side Vault permission check.
+- **Vault files:** stored under `vault/` in R2, recorded as attachment metadata, and served only through `/api/vault-files/*` after a server-side Vault permission check.
+- Vault documents are stored as sanitized structured block JSON plus a plain-text search index. Each save creates a version snapshot; PHANTOM/section managers restore history as a new audited version.
+- The document editor supports slash commands, Ctrl/Cmd+K commands, templates, rich writing blocks, code blocks, callouts, checklists, tables, protected attachments, metadata, outline navigation, focus mode, autosave, and protected local-draft recovery.
 
 ## Deployment check
 

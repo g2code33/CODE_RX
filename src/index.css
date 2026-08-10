@@ -1024,3 +1024,117 @@ footer {
   color: #047857;
   background: #ecfdf5;
 }
+
+/* Code Rx Vault document workspace ------------------------------------------------ */
+.vault-rich-text {
+  min-height: 1.7rem;
+  color: #334155;
+  font-size: 1rem;
+  line-height: 1.85;
+}
+
+.vault-rich-text h1,
+h1.vault-rich-text {
+  margin: 1.7rem 0 0.7rem;
+  color: #0f172a;
+  font-size: clamp(1.75rem, 4vw, 2.4rem);
+  font-weight: 950;
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+}
+
+.vault-rich-text h2,
+h2.vault-rich-text {
+  margin: 1.45rem 0 0.55rem;
+  color: #0f172a;
+  font-size: clamp(1.35rem, 3vw, 1.75rem);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.vault-rich-text h3,
+h3.vault-rich-text {
+  margin: 1.1rem 0 0.45rem;
+  color: #1e293b;
+  font-size: 1.16rem;
+  font-weight: 850;
+  line-height: 1.25;
+}
+
+.vault-rich-text a {
+  color: #047857;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.editor-toolbar-button,
+.editor-icon-button {
+  display: inline-grid;
+  height: 2rem;
+  min-width: 2rem;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  color: #475569;
+  background: transparent;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.editor-toolbar-button:hover,
+.editor-icon-button:hover {
+  border-color: #bbf7d0;
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.editor-toolbar-divider {
+  width: 1px;
+  margin: 0 0.18rem;
+  background: #e2e8f0;
+}
+
+.block-control {
+  display: grid;
+  height: 1.55rem;
+  width: 1.55rem;
+  place-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.35rem;
+  color: #64748b;
+  background: #fff;
+  font-size: 0.65rem;
+  line-height: 1;
+}
+
+.block-control:hover {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.block-menu-item {
+  display: block;
+  width: 100%;
+  border-radius: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  color: #475569;
+  background: transparent;
+  font-size: 0.7rem;
+  font-weight: 750;
+  text-align: left;
+}
+
+.block-menu-item:hover {
+  background: #f0fdf4;
+}
+
+@media (max-width: 640px) {
+  .vault-rich-text {
+    font-size: 0.96rem;
+    line-height: 1.75;
+  }
+
+  .block-control {
+    display: none;
+  }
+}
