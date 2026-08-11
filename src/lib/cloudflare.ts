@@ -32,6 +32,7 @@ export interface AuthUser {
   isWebsiteAdmin?: boolean;
   memberCode?: string | null;
   memberStatus?: 'pending_activation' | 'active' | 'locked' | 'archived' | null;
+  codenamePath?: 'member' | 'custom_founding' | 'direct_founding' | null;
   codename?: string | null;
 }
 
@@ -246,7 +247,7 @@ export const db = {
     createVaultSection: (data: any) => apiCall('/api/phantom/vault-sections', { method: 'POST', body: JSON.stringify(data) }),
     updateVaultSection: (id: number, data: any) => apiCall(`/api/phantom/vault-sections/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     codenames: async () => (await apiCall<{ data: any }>('/api/phantom/codenames')).data,
-    addCodename: (data: { name: string; reserve?: boolean; note?: string }) => apiCall('/api/phantom/codenames', { method: 'POST', body: JSON.stringify(data) }),
+    addCodename: (data: { name: string; pool?: 'member' | 'founding'; reserve?: boolean; note?: string }) => apiCall('/api/phantom/codenames', { method: 'POST', body: JSON.stringify(data) }),
     assignCodename: (id: number, memberProfileId: number) => apiCall(`/api/phantom/codenames/${id}/assign`, { method: 'POST', body: JSON.stringify({ memberProfileId }) }),
     updateCodename: (id: number, data: any) => apiCall(`/api/phantom/codenames/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     releaseCodename: (id: number, data: { confirm: boolean; mode?: 'available' | 'retired' }) => apiCall(`/api/phantom/codenames/${id}/release`, { method: 'POST', body: JSON.stringify(data) }),
