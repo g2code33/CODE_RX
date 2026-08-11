@@ -35,6 +35,7 @@ const publicActor = (actor: NonNullable<Awaited<ReturnType<typeof getActor>>>) =
   isWebsiteAdmin: actor.isWebsiteAdmin,
   memberCode: actor.memberCode,
   memberStatus: actor.memberStatus,
+  codenamePath: actor.codenamePath,
   codename: actor.codename,
 });
 
@@ -45,6 +46,15 @@ const dbRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
 
 type FounderActor = NonNullable<Awaited<ReturnType<typeof getActor>>>;
 
+type CodenamePath = 'member' | 'custom_founding' | 'direct_founding';
+
+const codenamePathFrom = (value: unknown, roleCode: string): CodenamePath => {
+  if (value === 'custom_founding' || value === 'direct_founding' || value === 'member') return value;
+  return roleCode === 'custom' ? 'custom_founding' : 'member';
+};
+
+const poolForPath = (path: CodenamePath) => path === 'custom_founding' || path === 'direct_founding' ? 'founding' : 'member';
+
 const createMemberAccount = async ({
   env,
   actor,
@@ -52,6 +62,8 @@ const createMemberAccount = async ({
   email,
   phone,
   roleCode,
+  codenamePath,
+  foundingCodenameId,
   applicationId,
   requestHost,
 }: {
@@ -61,6 +73,8 @@ const createMemberAccount = async ({
   email: string;
   phone: string | null;
   roleCode: string;
+  codenamePath?: CodenamePath;
+  foundingCodenameId?: number | null;
   applicationId?: number;
   requestHost?: string;
 }) => {
@@ -69,6 +83,10 @@ const createMemberAccount = async ({
   const roleRows = await dbRows<{ id: number; code: string; name: string }>(db.prepare('SELECT id, code, name FROM roles WHERE code = ?').bind(roleCode));
   const role = roleRows[0];
   if (!role) throw new Error('Choose a valid initial responsibility role.');
+  const effectiveCodenamePath = codenamePathFrom(codenamePath, role.code);
+  if (effectiveCodenamePath === 'direct_founding' && (!Number.isInteger(foundingCodenameId) || Number(foundingCodenameId) < 1)) {
+    throw new Error('Select one available founding codename for direct assignment.');
+  }
 
   const existingUsers = await dbRows<{ id: number }>(db.prepare('SELECT id FROM users WHERE email = ?').bind(email));
   if (existingUsers[0]) throw new Error('An account already exists for this email. Review the member record instead.');
@@ -85,6 +103,7 @@ const createMemberAccount = async ({
   let memberRecordId: number | null = null;
   let createdMemberRecord = false;
   let profileId: number | null = null;
+  let directClaimedCodenameId: number | null = null;
   try {
     const temporaryHash = await hashPassword(randomToken());
     const today = new Date().toISOString().slice(0, 10);
@@ -106,10 +125,30 @@ const createMemberAccount = async ({
     }
 
     const profileResult = await db.prepare(
-      `INSERT INTO member_profiles (user_id, member_record_id, member_code, status, primary_role_id, created_by_user_id)
-       VALUES (?, ?, ?, 'pending_activation', ?, ?)`
-    ).bind(userId, memberRecordId, memberCode, role.id, actor.userId).run();
+      `INSERT INTO member_profiles (user_id, member_record_id, member_code, status, primary_role_id, codename_path, created_by_user_id)
+       VALUES (?, ?, ?, 'pending_activation', ?, ?, ?)`
+    ).bind(userId, memberRecordId, memberCode, role.id, effectiveCodenamePath, actor.userId).run();
     profileId = Number(profileResult.meta.last_row_id);
+
+    if (effectiveCodenamePath === 'direct_founding') {
+      const assignment = await db.prepare(
+        `UPDATE codenames
+         SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, reserved_note = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND pool = 'founding' AND status = 'available' AND claimed_by_member_profile_id IS NULL`
+      ).bind(profileId, foundingCodenameId).run();
+      if (Number(assignment.meta.changes || 0) !== 1) throw new Error('That founding codename is no longer available. Choose another one.');
+      directClaimedCodenameId = foundingCodenameId || null;
+      const codeRows = await dbRows<any>(db.prepare('SELECT display_name FROM codenames WHERE id = ?').bind(foundingCodenameId));
+      await db.batch([
+        db.prepare(
+          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, completed_at)
+           VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, CURRENT_TIMESTAMP)`
+        ).bind(profileId, foundingCodenameId),
+        db.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
+          .bind(foundingCodenameId, profileId, actor.userId, 'Direct founding codename assignment by PHANTOM'),
+      ]);
+      await audit(db, actor, 'codename.phantom_assigned', 'codename', foundingCodenameId || null, { memberCode, codename: codeRows[0]?.display_name || null });
+    }
 
     const rawToken = randomToken();
     const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString();
@@ -129,6 +168,8 @@ const createMemberAccount = async ({
       memberCode,
       email,
       role: role.code,
+      codenamePath: effectiveCodenamePath,
+      directFoundingCodenameId: effectiveCodenamePath === 'direct_founding' ? foundingCodenameId : null,
       applicationId: applicationId || null,
       status: 'pending_activation',
     });
@@ -140,12 +181,18 @@ const createMemberAccount = async ({
       role_name: role.name,
     });
 
-    return { profileId, userId, memberRecordId, memberCode, activationUrl, role: role.code };
+    return { profileId, userId, memberRecordId, memberCode, activationUrl, role: role.code, codenamePath: effectiveCodenamePath };
   } catch (error) {
     // Compensate incomplete account rows. The sequence remains consumed by
     // design, preserving the no-reuse member-ID rule.
     try {
       if (profileId) await db.prepare('DELETE FROM member_activations WHERE member_profile_id = ?').bind(profileId).run();
+      if (profileId && directClaimedCodenameId) {
+        await db.prepare("UPDATE codenames SET status = 'available', claimed_by_member_profile_id = NULL, claimed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND claimed_by_member_profile_id = ?")
+          .bind(directClaimedCodenameId, profileId).run();
+        await db.prepare('DELETE FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId).run();
+        await db.prepare('DELETE FROM codename_history WHERE codename_id = ? AND member_profile_id = ? AND note = ?').bind(directClaimedCodenameId, profileId, 'Direct founding codename assignment by PHANTOM').run();
+      }
       if (profileId) await db.prepare('DELETE FROM member_profiles WHERE id = ?').bind(profileId).run();
       if (memberRecordId && createdMemberRecord) await db.prepare('DELETE FROM members WHERE id = ?').bind(memberRecordId).run();
       if (userId) await db.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
@@ -156,10 +203,14 @@ const createMemberAccount = async ({
   }
 };
 
-const getCodenameSession = async (db: D1Database, profileId: number) => {
+const ballotPoolFor = (actor: FounderActor) => actor.codenamePath === 'custom_founding' ? 'founding' : 'member';
+const ballotModeFor = (actor: FounderActor) => actor.codenamePath === 'custom_founding' ? 'custom_founding' : 'member';
+const ballotLabelFor = (pool: 'member' | 'founding') => pool === 'founding' ? 'Founding Codename Ballot' : 'Member Codename Ballot';
+
+const getCodenameSession = async (db: D1Database, profileId: number, pool: 'member' | 'founding') => {
   let rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
   if (!rows[0]) {
-    await db.prepare("INSERT INTO codename_selection_sessions (member_profile_id, status, passes_used) VALUES (?, 'open', 0)").bind(profileId).run();
+    await db.prepare("INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used) VALUES (?, 'open', ?, 'ballot', 0)").bind(profileId, pool).run();
     rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
   }
   return rows[0] || null;
@@ -750,6 +801,8 @@ app.post('/api/members', requireAuth, requirePhantom, async (c) => {
       email,
       phone: cleanOptionalStr(body.phone, 30),
       roleCode: cleanStr(body.role, 2, 50) || 'member',
+      codenamePath: codenamePathFrom(body.codenamePath, cleanStr(body.role, 2, 50) || 'member'),
+      foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
       requestHost: c.req.header('host'),
     });
     return c.json({ success: true, message: 'Member created and awaiting activation', id: created.memberRecordId, data: created });
@@ -870,7 +923,10 @@ app.get('/api/member/me', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const actor = access.actor!;
-  const session = await getCodenameSession(c.env.DB, actor.profileId!);
+  const pool = ballotPoolFor(actor);
+  const session = actor.codename || actor.codenamePath === 'direct_founding'
+    ? await dbRows<any>(c.env.DB.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(actor.profileId!)).then((rows) => rows[0] || null)
+    : await getCodenameSession(c.env.DB, actor.profileId!, pool);
   const roleRows = await dbRows<any>(c.env.DB.prepare(
     `SELECT r.id, r.code, r.name, r.description FROM roles r JOIN member_profiles mp ON mp.primary_role_id = r.id WHERE mp.id = ?`
   ).bind(actor.profileId));
@@ -886,6 +942,8 @@ app.get('/api/member/me', requireAuth, async (c) => {
       permissions,
       codenameSession: session ? {
         status: session.status,
+        pool: session.pool || pool,
+        assignmentSource: session.assignment_source || 'ballot',
         passesUsed: Number(session.passes_used || 0),
         attemptsRemaining: session.status === 'completed' ? 0 : 3 - Number(session.passes_used || 0),
         claimedCodenameId: session.claimed_codename_id || null,
@@ -898,121 +956,124 @@ app.get('/api/codenames/ballot', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const actor = access.actor!;
-  if (actor.codename) return c.json({ success: true, data: { completed: true, codename: actor.codename, choices: [] } });
-  const session = await getCodenameSession(c.env.DB, actor.profileId!);
-  if (!session || session.status !== 'open') {
-    return c.json({ success: false, error: 'Codename selection is no longer open for this account.' }, 409);
-  }
+  if (actor.codename) return c.json({ success: true, data: { completed: true, codename: actor.codename, choices: [], pool: actor.codenamePath === 'direct_founding' ? 'founding' : ballotPoolFor(actor) } });
+  if (actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account is awaiting a direct PHANTOM founding-codename assignment.' }, 409);
+  const pool = ballotPoolFor(actor);
+  const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
+  if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is no longer open for this account.' }, 409);
   const choices = await dbRows<any>(c.env.DB.prepare(
-    `SELECT c.id, c.display_name
+    `SELECT c.id, c.display_name, c.pool
      FROM codenames c
-     WHERE c.status = 'available'
+     WHERE c.pool = ? AND c.status = 'available'
        AND NOT EXISTS (
          SELECT 1 FROM codename_selection_events e
          WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
        )
      ORDER BY c.display_name COLLATE NOCASE`
-  ).bind(session.id));
-  return c.json({ success: true, data: { completed: false, passesUsed: Number(session.passes_used || 0), maxAttempts: 3, choices } });
+  ).bind(pool, session.id));
+  const exhausted = choices.length === 0;
+  return c.json({ success: true, data: {
+    completed: false,
+    pool,
+    ballotTitle: ballotLabelFor(pool),
+    passesUsed: Number(session.passes_used || 0),
+    maxAttempts: 3,
+    choices,
+    exhausted,
+    exhaustedPrompt: exhausted
+      ? pool === 'founding'
+        ? 'All founding codenames are claimed, reserved, or passed. PHANTOM can add a custom founding codename or explicitly release one.'
+        : 'No member codenames are currently available. PHANTOM needs to add more codenames to the Member Ballot Pool.'
+      : null,
+  } });
 });
 
 app.post('/api/codenames/check', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const actor = access.actor!;
+  if (actor.codename || actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account cannot open another codename ballot.' }, 409);
+  const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
   if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Choose a valid codename.' }, 400);
-  const session = await getCodenameSession(c.env.DB, actor.profileId!);
+  const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, status FROM codenames WHERE id = ?').bind(codenameId));
+  const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, pool, status FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0];
-  if (!codename) return c.json({ success: false, error: 'Codename not found.' }, 404);
+  if (!codename || codename.pool !== pool) return c.json({ success: false, error: 'This codename is not available in your ballot pool.' }, 404);
   const passed = await dbRows<any>(c.env.DB.prepare(
     "SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'"
   ).bind(session.id, codenameId));
   const available = codename.status === 'available' && !passed[0];
-  await c.env.DB.prepare(
-    'INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, ?)'
-  ).bind(session.id, codenameId, available ? 'available_check' : 'unavailable_check').run();
-  return c.json({
-    success: true,
-    data: {
-      available,
-      codename: codename.display_name,
-      message: available ? 'AVAILABLE' : passed[0] ? 'This codename was passed and cannot be selected again.' : 'Unavailable.',
-      attemptsUsed: Number(session.passes_used || 0),
-      maxAttempts: 3,
-    },
-  });
+  await c.env.DB.prepare('INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, ?)')
+    .bind(session.id, codenameId, available ? 'available_check' : 'unavailable_check').run();
+  return c.json({ success: true, data: {
+    available,
+    codename: codename.display_name,
+    pool,
+    message: available ? 'AVAILABLE' : passed[0] ? 'This codename was passed and cannot be selected again.' : 'Unavailable.',
+    attemptsUsed: Number(session.passes_used || 0),
+    maxAttempts: 3,
+  } });
 });
 
 app.post('/api/codenames/pass', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const actor = access.actor!;
+  if (actor.codename || actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account cannot open another codename ballot.' }, 409);
+  const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
   if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Choose a valid codename.' }, 400);
-  const session = await getCodenameSession(c.env.DB, actor.profileId!);
+  const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  if (Number(session.passes_used || 0) >= 2) {
-    return c.json({ success: false, error: 'You have reached the final successful selection. Claim it to complete your Code Rx identity.' }, 409);
-  }
-  const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, status FROM codenames WHERE id = ?').bind(codenameId));
+  if (Number(session.passes_used || 0) >= 2) return c.json({ success: false, error: 'You have reached the final successful selection. Claim it to complete your Code Rx identity.' }, 409);
+  const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, pool, status FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0];
-  if (!codename || codename.status !== 'available') {
-    return c.json({ success: false, error: 'This codename is no longer available. Attempts used: ' + Number(session.passes_used || 0) + '/3.' }, 409);
-  }
-  const previous = await dbRows<any>(c.env.DB.prepare(
-    "SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'"
-  ).bind(session.id, codenameId));
+  if (!codename || codename.pool !== pool || codename.status !== 'available') return c.json({ success: false, error: `This codename is no longer available. Attempts used: ${Number(session.passes_used || 0)}/3.` }, 409);
+  const previous = await dbRows<any>(c.env.DB.prepare("SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'").bind(session.id, codenameId));
   if (previous[0]) return c.json({ success: false, error: 'You cannot return to a codename you already passed.' }, 409);
-
   await c.env.DB.batch([
     c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'passed')").bind(session.id, codenameId),
     c.env.DB.prepare('UPDATE codename_selection_sessions SET passes_used = passes_used + 1 WHERE id = ? AND passes_used < 2').bind(session.id),
   ]);
   const attemptsUsed = Number(session.passes_used || 0) + 1;
-  await audit(c.env.DB, actor, 'codename.passed', 'codename', codenameId, { codename: codename.display_name, attemptsUsed });
-  return c.json({ success: true, data: { attemptsUsed, maxAttempts: 3, message: `${codename.display_name} passed. It cannot be selected again.` } });
+  await audit(c.env.DB, actor, 'codename.passed', 'codename', codenameId, { codename: codename.display_name, pool, attemptsUsed });
+  return c.json({ success: true, data: { attemptsUsed, maxAttempts: 3, pool, message: `${codename.display_name} passed. It cannot be selected again.` } });
 });
 
 app.post('/api/codenames/claim', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const actor = access.actor!;
+  if (actor.codename || actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account cannot claim another codename.' }, 409);
+  const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
   if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Choose a valid codename.' }, 400);
-  const session = await getCodenameSession(c.env.DB, actor.profileId!);
+  const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  const passed = await dbRows<any>(c.env.DB.prepare(
-    "SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'"
-  ).bind(session.id, codenameId));
+  const passed = await dbRows<any>(c.env.DB.prepare("SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'").bind(session.id, codenameId));
   if (passed[0]) return c.json({ success: false, error: 'You cannot return to a codename you already passed.' }, 409);
-
   const result = await c.env.DB.prepare(
     `UPDATE codenames
      SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND status = 'available' AND claimed_by_member_profile_id IS NULL`
-  ).bind(actor.profileId, codenameId).run();
-  if (Number(result.meta.changes || 0) !== 1) {
-    return c.json({ success: false, error: 'This codename was just claimed by another member. Please choose another.' }, 409);
-  }
+     WHERE id = ? AND pool = ? AND status = 'available' AND claimed_by_member_profile_id IS NULL`
+  ).bind(actor.profileId, codenameId, pool).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'This codename was just claimed by another member. Please choose another.' }, 409);
   const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT display_name FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0]?.display_name || 'Codename';
   const attemptsUsed = Number(session.passes_used || 0) + 1;
   await c.env.DB.batch([
-    c.env.DB.prepare(
-      "UPDATE codename_selection_sessions SET status = 'completed', claimed_codename_id = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?"
-    ).bind(codenameId, session.id),
+    c.env.DB.prepare("UPDATE codename_selection_sessions SET status = 'completed', claimed_codename_id = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(codenameId, session.id),
     c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'claimed')").bind(session.id, codenameId),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
-      .bind(codenameId, actor.profileId, actor.userId, `Claimed on successful selection ${attemptsUsed}/3`),
+      .bind(codenameId, actor.profileId, actor.userId, `Claimed from ${pool} ballot on successful selection ${attemptsUsed}/3`),
   ]);
-  await audit(c.env.DB, actor, 'codename.claimed', 'codename', codenameId, { codename, attemptsUsed });
-  return c.json({ success: true, data: { codename, attemptsUsed, maxAttempts: 3, message: `${codename} is now your permanent Code Rx identity.` } });
+  await audit(c.env.DB, actor, 'codename.claimed', 'codename', codenameId, { codename, pool, attemptsUsed });
+  return c.json({ success: true, data: { codename, pool, attemptsUsed, maxAttempts: 3, message: `${codename} is now your permanent Code Rx identity.` } });
 });
 
 // ============================================
@@ -1583,6 +1644,8 @@ app.post('/api/phantom/applications/:id/create-member', requireAuth, requirePhan
       email: cleanEmail(body.email) || application.email,
       phone: cleanOptionalStr(body.phone, 30) || application.phone || null,
       roleCode: cleanStr(body.roleCode, 2, 50) || 'member',
+      codenamePath: codenamePathFrom(body.codenamePath, cleanStr(body.roleCode, 2, 50) || 'member'),
+      foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
       applicationId,
       requestHost: c.req.header('host'),
     });
@@ -1606,6 +1669,8 @@ app.post('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
       env: c.env, actor, name, email,
       phone: cleanOptionalStr(body.phone, 30),
       roleCode: cleanStr(body.roleCode, 2, 50) || 'member',
+      codenamePath: codenamePathFrom(body.codenamePath, cleanStr(body.roleCode, 2, 50) || 'member'),
+      foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
       requestHost: c.req.header('host'),
     });
     return c.json({ success: true, data: member, message: 'Member created. Activation is required before the account becomes active.' }, 201);
@@ -1925,14 +1990,15 @@ app.post('/api/phantom/codenames', requireAuth, requirePhantom, async (c) => {
       return c.json({ success: false, error: 'Use a 2–50 character codename with letters, numbers, spaces, dots, hyphens, or underscores.' }, 400);
     }
     const normalized = normalizeCodename(displayName);
+    const pool = body.pool === 'founding' ? 'founding' : 'member';
     const actor = await actorFromContext(c);
     const result = await c.env.DB.prepare(
-      'INSERT INTO codenames (normalized_name, display_name, status, created_by_user_id) VALUES (?, ?, ?, ?)'
-    ).bind(normalized, displayName, body.reserve ? 'reserved' : 'available', actor?.userId ?? null).run();
+      'INSERT INTO codenames (normalized_name, display_name, pool, status, created_by_user_id) VALUES (?, ?, ?, ?, ?)'
+    ).bind(normalized, displayName, pool, body.reserve ? 'reserved' : 'available', actor?.userId ?? null).run();
     const id = Number(result.meta.last_row_id);
     await c.env.DB.prepare('INSERT INTO codename_history (codename_id, event_type, acted_by_user_id, note) VALUES (?, ?, ?, ?)')
       .bind(id, body.reserve ? 'reserved' : 'added', actor?.userId ?? null, cleanOptionalStr(body.note, 1000)).run();
-    await audit(c.env.DB, actor, `codename.${body.reserve ? 'reserved' : 'added'}`, 'codename', id, { name: displayName });
+    await audit(c.env.DB, actor, `codename.${body.reserve ? 'reserved' : 'added'}`, 'codename', id, { name: displayName, pool });
     return c.json({ success: true, data: { id, displayName } }, 201);
   } catch (error: any) {
     if (String(error?.message || '').includes('UNIQUE')) return c.json({ success: false, error: 'That codename already exists.' }, 409);
@@ -1949,20 +2015,23 @@ app.post('/api/phantom/codenames/:id/assign', requireAuth, requirePhantom, async
   }
   const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM codenames WHERE id = ?').bind(id));
   const codename = rows[0];
-  if (!codename || !['available', 'reserved'].includes(codename.status)) return c.json({ success: false, error: 'Only an available or reserved codename can be assigned.' }, 409);
+  if (!codename || codename.pool !== 'founding' || codename.status !== 'available') return c.json({ success: false, error: 'Only an available founding codename can be assigned directly.' }, 409);
   const profileRows = await dbRows<any>(c.env.DB.prepare("SELECT id, member_code, status FROM member_profiles WHERE id = ?").bind(profileId));
   if (!profileRows[0] || !['active', 'pending_activation'].includes(profileRows[0].status)) return c.json({ success: false, error: 'Choose an active or awaiting-activation member.' }, 409);
+  const existingClaim = await dbRows<any>(c.env.DB.prepare("SELECT id FROM codenames WHERE claimed_by_member_profile_id = ? AND status = 'claimed'").bind(profileId));
+  if (existingClaim[0]) return c.json({ success: false, error: 'This member already has a permanent codename.' }, 409);
   const actor = await actorFromContext(c);
   const claim = await c.env.DB.prepare(
     `UPDATE codenames SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, reserved_note = NULL, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND status IN ('available', 'reserved') AND claimed_by_member_profile_id IS NULL`
+     WHERE id = ? AND pool = 'founding' AND status = 'available' AND claimed_by_member_profile_id IS NULL`
   ).bind(profileId, id).run();
   if (Number(claim.meta.changes || 0) !== 1) return c.json({ success: false, error: 'This codename was just claimed or assigned elsewhere.' }, 409);
   await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE member_profiles SET codename_path = 'direct_founding', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(profileId),
     c.env.DB.prepare(
-      `INSERT INTO codename_selection_sessions (member_profile_id, status, passes_used, claimed_codename_id, completed_at)
-       VALUES (?, 'completed', 0, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', claimed_codename_id = excluded.claimed_codename_id, completed_at = CURRENT_TIMESTAMP`
+      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, completed_at)
+       VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', pool = 'founding', assignment_source = 'phantom_direct', claimed_codename_id = excluded.claimed_codename_id, completed_at = CURRENT_TIMESTAMP`
     ).bind(profileId, id),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
       .bind(id, profileId, actor?.userId ?? null, 'Assigned by PHANTOM as a founding or reserved identity'),

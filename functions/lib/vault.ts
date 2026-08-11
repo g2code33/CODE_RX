@@ -37,6 +37,7 @@ export interface Actor {
   memberStatus: 'pending_activation' | 'active' | 'locked' | 'archived' | null;
   primaryRoleId: number | null;
   primaryRoleCode: string | null;
+  codenamePath: 'member' | 'custom_founding' | 'direct_founding' | null;
   codename: string | null;
   isPhantom: boolean;
   isWebsiteAdmin: boolean;
@@ -111,7 +112,7 @@ export const ensureLegacyProfile = async (db: D1Database, userId: number): Promi
 const actorRowsFor = (db: D1Database, userId: number) => asRows<any>(db.prepare(
   `SELECT
      u.id AS user_id, u.email, u.name, u.role AS user_role,
-     mp.id AS profile_id, mp.member_code, mp.status AS member_status, mp.primary_role_id,
+     mp.id AS profile_id, mp.member_code, mp.status AS member_status, mp.primary_role_id, mp.codename_path,
      r.code AS primary_role_code,
      c.display_name AS codename,
      wa.id AS website_admin_id, wa.status AS website_admin_status
@@ -135,6 +136,7 @@ const actorFromRow = (row: any): Actor => {
     memberStatus: row.member_status || null,
     primaryRoleId: row.primary_role_id === null || row.primary_role_id === undefined ? null : Number(row.primary_role_id),
     primaryRoleCode: row.primary_role_code || null,
+    codenamePath: row.codename_path || null,
     codename: row.codename || null,
     isPhantom,
     isWebsiteAdmin: Boolean(row.website_admin_id) || row.user_role === 'admin',

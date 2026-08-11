@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS member_profiles (
   member_code TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'pending_activation' CHECK (status IN ('pending_activation','active','locked','archived')),
   primary_role_id INTEGER,
+  codename_path TEXT NOT NULL DEFAULT 'member' CHECK (codename_path IN ('member','custom_founding','direct_founding')),
   locked_reason TEXT,
   locked_at DATETIME,
   archived_at DATETIME,
@@ -165,6 +166,7 @@ CREATE TABLE IF NOT EXISTS codenames (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   normalized_name TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
+  pool TEXT NOT NULL DEFAULT 'member' CHECK (pool IN ('member','founding')),
   status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','reserved','claimed','retired')),
   reserved_note TEXT,
   reserved_by_user_id INTEGER,
@@ -180,6 +182,8 @@ CREATE TABLE IF NOT EXISTS codename_selection_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   member_profile_id INTEGER NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','completed','expired')),
+  pool TEXT NOT NULL DEFAULT 'member' CHECK (pool IN ('member','founding')),
+  assignment_source TEXT NOT NULL DEFAULT 'ballot' CHECK (assignment_source IN ('ballot','phantom_direct')),
   passes_used INTEGER NOT NULL DEFAULT 0 CHECK (passes_used BETWEEN 0 AND 2),
   claimed_codename_id INTEGER,
   started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -429,6 +433,7 @@ CREATE INDEX IF NOT EXISTS idx_subscribers_email ON subscribers(email);
 CREATE INDEX IF NOT EXISTS idx_member_profiles_status ON member_profiles(status);
 CREATE INDEX IF NOT EXISTS idx_member_profiles_role ON member_profiles(primary_role_id);
 CREATE INDEX IF NOT EXISTS idx_codenames_status ON codenames(status);
+CREATE INDEX IF NOT EXISTS idx_codenames_pool_status ON codenames(pool, status);
 CREATE INDEX IF NOT EXISTS idx_codename_events_session ON codename_selection_events(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_documents_section ON vault_documents(section_id, is_archived, updated_at);
 CREATE INDEX IF NOT EXISTS idx_vault_documents_status ON vault_documents(status, is_archived, updated_at);
@@ -463,9 +468,13 @@ const SAFE_MIGRATIONS = [
   { table: 'document_versions', column: 'tags_json', sql: "ALTER TABLE document_versions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'" },
   { table: 'document_versions', column: 'related_project_id', sql: 'ALTER TABLE document_versions ADD COLUMN related_project_id INTEGER' },
   { table: 'document_versions', column: 'word_count', sql: 'ALTER TABLE document_versions ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0' },
+  { table: 'member_profiles', column: 'codename_path', sql: "ALTER TABLE member_profiles ADD COLUMN codename_path TEXT NOT NULL DEFAULT 'member'" },
+  { table: 'codenames', column: 'pool', sql: "ALTER TABLE codenames ADD COLUMN pool TEXT NOT NULL DEFAULT 'member'" },
+  { table: 'codename_selection_sessions', column: 'pool', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN pool TEXT NOT NULL DEFAULT 'member'" },
+  { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-10-performance-1';
+const VAULT_SCHEMA_VERSION = '2026-08-11-codename-pools-1';
 
 
 const ROLE_SEEDS = [
@@ -573,19 +582,26 @@ const ensureFoundingCodenames = async (db: D1Database, phantomProfileId: number)
     if (!existing[0]) {
       const isPhantom = identity === 'PHANTOM';
       const result = await db.prepare(
-        `INSERT INTO codenames (normalized_name, display_name, status, reserved_note, claimed_by_member_profile_id, claimed_at)
-         VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)`
-      ).bind(normalized, identity, isPhantom ? 'claimed' : 'reserved', isPhantom ? null : 'Founding identity reserved', isPhantom ? phantomProfileId : null, isPhantom ? 1 : 0).run();
+        `INSERT INTO codenames (normalized_name, display_name, pool, status, reserved_note, claimed_by_member_profile_id, claimed_at)
+         VALUES (?, ?, 'founding', ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)`
+      ).bind(normalized, identity, isPhantom ? 'claimed' : 'available', isPhantom ? null : 'Founding identity available for PHANTOM assignment or Custom ballot', isPhantom ? phantomProfileId : null, isPhantom ? 1 : 0).run();
       const codenameId = Number(result.meta.last_row_id);
       await db.prepare('INSERT INTO codename_history (codename_id, member_profile_id, event_type, note) VALUES (?, ?, ?, ?)')
         .bind(codenameId, isPhantom ? phantomProfileId : null, isPhantom ? 'claimed' : 'reserved', isPhantom ? 'PHANTOM founding identity' : 'Founding identity reserved').run();
       continue;
     }
     if (identity === 'PHANTOM' && !existing[0].claimed_by_member_profile_id && ['available', 'reserved'].includes(existing[0].status)) {
-      await db.prepare("UPDATE codenames SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, reserved_note = NULL WHERE id = ?")
+      await db.prepare("UPDATE codenames SET pool = 'founding', status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, reserved_note = NULL WHERE id = ?")
         .bind(phantomProfileId, existing[0].id).run();
       await db.prepare('INSERT INTO codename_history (codename_id, member_profile_id, event_type, note) VALUES (?, ?, ?, ?)')
         .bind(existing[0].id, phantomProfileId, 'claimed', 'PHANTOM founding identity').run();
+    } else if (identity !== 'PHANTOM' && !existing[0].claimed_by_member_profile_id && existing[0].reserved_note === 'Founding identity reserved') {
+      // Earlier builds reserved these names. The corrected flow keeps them in
+      // the founding pool but makes them available to PHANTOM/custom users.
+      await db.prepare("UPDATE codenames SET pool = 'founding', status = 'available', reserved_note = 'Founding identity available for PHANTOM assignment or Custom ballot' WHERE id = ?")
+        .bind(existing[0].id).run();
+    } else if (FOUNDING_CODENAMES.includes(identity as typeof FOUNDING_CODENAMES[number])) {
+      await db.prepare("UPDATE codenames SET pool = 'founding' WHERE id = ?").bind(existing[0].id).run();
     }
   }
 };
@@ -624,11 +640,11 @@ const ensurePhantom = async (env: Env) => {
   if (!profileRows[0]) {
     const code = await allocateMemberCode(db);
     await db.prepare(
-      `INSERT INTO member_profiles (user_id, member_record_id, member_code, status, primary_role_id, created_by_user_id)
-       VALUES (?, ?, ?, 'active', ?, ?)`
+      `INSERT INTO member_profiles (user_id, member_record_id, member_code, status, primary_role_id, codename_path, created_by_user_id)
+       VALUES (?, ?, ?, 'active', ?, 'direct_founding', ?)`
     ).bind(user.id, memberRows[0].id, code, phantomRoleId ?? null, user.id).run();
   } else {
-    await db.prepare("UPDATE member_profiles SET status = 'active', primary_role_id = ? WHERE id = ?")
+    await db.prepare("UPDATE member_profiles SET status = 'active', primary_role_id = ?, codename_path = 'direct_founding' WHERE id = ?")
       .bind(phantomRoleId ?? null, profileRows[0].id).run();
   }
   const currentProfile = await asRows<{ id: number }>(db.prepare('SELECT id FROM member_profiles WHERE user_id = ?').bind(user.id));
