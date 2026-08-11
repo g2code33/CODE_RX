@@ -37,18 +37,63 @@ const ALLOWED_LANGUAGES = new Set([
 const newBlockId = () => crypto.randomUUID?.() || `block-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 const clampString = (value: unknown, limit: number) => typeof value === 'string' ? value.slice(0, limit) : '';
 
+const RICH_TEXT_TAGS = new Set(['strong', 'b', 'em', 'i', 'u', 's', 'strike', 'mark', 'a', 'code', 'br', 'span']);
+
+const decodeHtmlEntities = (value: string) => value
+  .replace(/&#(x[0-9a-f]+|\d+);?/gi, (_match, entity: string) => {
+    const codePoint = entity.toLowerCase().startsWith('x') ? parseInt(entity.slice(1), 16) : parseInt(entity, 10);
+    return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : '';
+  })
+  .replace(/&(amp|quot|apos|lt|gt|colon|tab|newline|nbsp);?/gi, (_match, entity: string) => ({
+    amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', colon: ':', tab: '\t', newline: '\n', nbsp: ' ',
+  }[entity.toLowerCase()] || ''));
+
+const escapeHtmlAttribute = (value: string) => value
+  .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const attributeValue = (attributes: string, name: string) => {
+  const expression = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`, 'i');
+  const match = attributes.match(expression);
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? '';
+};
+
+const safeLinkHref = (value: string) => {
+  const href = decodeHtmlEntities(value).trim().replace(/[\u0000-\u0020\u007f-\u009f]/g, '');
+  return /^(?:https?:\/\/|mailto:|#|\/(?!\/))/i.test(href) ? href : '';
+};
+
+const safeSpanStyle = (attributes: string) => {
+  const style = decodeHtmlEntities(attributeValue(attributes, 'style')).trim().replace(/\s+/g, ' ');
+  // Preserve the editor's own highlight command without allowing arbitrary CSS.
+  return /^background-color:\s*(?:#[0-9a-f]{3,8}|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|0?\.\d+|1))?\s*\)|[a-z]{3,20})\s*;?$/i.test(style)
+    ? style
+    : '';
+};
+
 /**
- * Rich text is intentionally restricted to a small harmless formatting set.
- * Stored document JSON is never allowed to contain scripts, event handlers,
- * embedded frames, or javascript URLs before it reaches a contentEditable view.
+ * Rich text is reconstructed from a very small allow-list rather than merely
+ * stripping suspicious fragments. Attributes are dropped by default; anchors
+ * retain only a safe URL and spans retain only the editor's highlight color.
+ * This protects both stored documents and the contentEditable rendering path.
  */
 export const sanitizeRichText = (value: unknown) => {
-  let html = clampString(value, 30_000);
-  html = html.replace(/<\/?(script|style|iframe|object|embed|svg|math)[^>]*>/gi, '');
-  html = html.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-  html = html.replace(/(href|src)\s*=\s*("|')?\s*javascript:[^\s>"']*("|')?/gi, '');
-  html = html.replace(/<(?!\/?(?:strong|b|em|i|u|s|strike|mark|a|code|br|span)\b)[^>]*>/gi, '');
-  return html;
+  let html = clampString(value, 30_000).replace(/\u0000/g, '');
+  html = html.replace(/<!--[\s\S]*?-->/g, '');
+  html = html.replace(/<(script|style|iframe|object|embed|svg|math|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  return html.replace(/<\s*(\/?)([a-z0-9:-]+)([^>]*)>/gi, (full, slash: string, rawTag: string, attributes: string) => {
+    const tag = rawTag.toLowerCase();
+    if (!RICH_TEXT_TAGS.has(tag)) return '';
+    if (slash) return tag === 'br' ? '' : `</${tag}>`;
+    if (tag === 'a') {
+      const href = safeLinkHref(attributeValue(attributes, 'href'));
+      return href ? `<a href="${escapeHtmlAttribute(href)}" rel="noopener noreferrer">` : '<a>';
+    }
+    if (tag === 'span') {
+      const style = safeSpanStyle(attributes);
+      return style ? `<span style="${escapeHtmlAttribute(style)}">` : '<span>';
+    }
+    return `<${tag}>`;
+  });
 };
 
 const visibleText = (value: string) => value.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();

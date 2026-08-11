@@ -478,7 +478,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-11-codename-pools-archive-1';
+const VAULT_SCHEMA_VERSION = '2026-08-11-audit-integrity-2';
 
 
 const ROLE_SEEDS = [
@@ -521,6 +521,24 @@ const runSafeMigrations = async (db: D1Database) => {
   if (missing.length) await runBatchInChunks(db, missing.map((migration) => db.prepare(migration.sql)), 25);
 };
 
+
+/**
+ * Older Vault builds could set a document's status to `archived` without
+ * moving it into the actual archive. Normalize those rows once so archive
+ * navigation, restoration, and status counts stay in agreement.
+ */
+const normalizeDocumentArchiveState = async (db: D1Database) => {
+  await db.prepare(
+    `UPDATE vault_documents
+     SET is_archived = 1,
+         archived_from_status = CASE
+           WHEN archived_from_status IN ('draft', 'in_review', 'approved', 'active') THEN archived_from_status
+           ELSE 'draft'
+         END,
+         archived_at = COALESCE(archived_at, updated_at, created_at, CURRENT_TIMESTAMP)
+     WHERE status = 'archived' AND is_archived = 0`
+  ).run();
+};
 
 const migrateFoundingRoleCodes = async (db: D1Database) => {
   // Earlier development builds used operational labels as founding role codes.
@@ -678,6 +696,7 @@ export async function ensureSchema(env: Env): Promise<void> {
     const versionRows = await asRows<{ setting_value: string }>(db.prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'"));
     if (versionRows[0]?.setting_value !== VAULT_SCHEMA_VERSION) {
       await runSafeMigrations(db);
+      await normalizeDocumentArchiveState(db);
       await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
       await migrateFoundingRoleCodes(db);
       await seedRolesAndPermissions(db);

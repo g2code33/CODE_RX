@@ -44,8 +44,8 @@ export const ResetPassword = ({ onDone }: { onDone: () => void }) => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(null);
-    if (password.length < 6) {
-      setMessage({ type: 'error', text: 'Password must be at least 6 characters.' });
+    if (password.length < 8) {
+      setMessage({ type: 'error', text: 'Password must be at least 8 characters.' });
       return;
     }
     if (password !== confirm) {
@@ -101,8 +101,8 @@ export const ResetPassword = ({ onDone }: { onDone: () => void }) => {
             <input
               type={showPassword ? "text" : "password"}
               required
-              minLength={6}
-              placeholder="New password (min 6 characters)"
+              minLength={8}
+              placeholder="New password (min 8 characters)"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full pl-11 pr-12 py-3 bg-slate-50 border border-slate-100 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
@@ -114,7 +114,7 @@ export const ResetPassword = ({ onDone }: { onDone: () => void }) => {
             <input
               type={showConfirm ? "text" : "password"}
               required
-              minLength={6}
+              minLength={8}
               placeholder="Confirm new password"
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}

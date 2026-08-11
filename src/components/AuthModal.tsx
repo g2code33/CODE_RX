@@ -197,7 +197,6 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                       className="auth-modal-field w-full pl-12 pr-12 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                       required
-                      minLength={6}
                     />
                     <button type="button" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? 'Hide password' : 'Show password'} className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-emerald-600">{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button>
                   </div>

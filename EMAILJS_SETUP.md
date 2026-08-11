@@ -1,170 +1,57 @@
-# EmailJS Setup Guide for CODE Rx SOCIETY
+# EmailJS Setup — Code Rx Society
 
-## Step 1: Create EmailJS Account
-1. Go to https://www.emailjs.com/
-2. Sign up for a free account
-3. Verify your email
+Email notifications are sent by the **Cloudflare Pages Functions API**, not by browser code. Configure EmailJS values in the Cloudflare Pages environment (and only in an ignored local environment file when testing locally). Do not put them in `src/config.ts`, a `VITE_*` variable, Git, screenshots, or chat.
 
-## Step 2: Add Email Service
-1. Go to **Email Services** in the dashboard
-2. Click **Add New Service**
-3. Choose your email provider (Gmail recommended)
-4. Connect your Gmail account (coderxsociety@gmail.com)
-5. Copy the **Service ID** (e.g., `service_xyz123`)
+## 1. Create the EmailJS service
 
-## Step 3: Create Email Templates
+1. Create or sign in to an EmailJS account.
+2. Add an email service (for example, the Code Rx Society Gmail mailbox).
+3. Copy the **Service ID** and **Public Key**.
 
-### Template 1: Join Application Notification
-**Template ID:** `template_join`
+## 2. Create the five API templates
 
-**Subject:** New Membership Application - {{applicant_name}}
+The Function sends these template parameters.
 
-**Content (HTML):**
-```html
-<h2>New Membership Application</h2>
-<p><strong>Applicant:</strong> {{applicant_name}}</p>
-<p><strong>Email:</strong> {{applicant_email}}</p>
-<p><strong>Phone:</strong> {{applicant_phone}}</p>
-<p><strong>Date:</strong> {{date}}</p>
-<hr>
-<p>Login to the admin panel to review and approve this application.</p>
-<p><a href="https://coderx.org/admin" style="background: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Review Application</a></p>
+| Purpose | Pages variable | Required template parameters |
+|---|---|---|
+| New Join application | `EMAILJS_TEMPLATE_ID_JOIN` | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `date` |
+| New contact message | `EMAILJS_TEMPLATE_ID_CONTACT` | `to_email`, `sender_name`, `sender_email`, `subject`, `message`, `date` |
+| Application review notice | `EMAILJS_TEMPLATE_ID_APPROVAL` | `to_email`, `member_name`, `status`, `date` |
+| Password reset | `EMAILJS_TEMPLATE_ID_RESET` | `to_email`, `name`, `reset_link` |
+| Member activation | `EMAILJS_TEMPLATE_ID_ACTIVATION` | `to_email`, `member_name`, `member_code`, `activation_link`, `role_name` |
+
+The activation and reset templates should use the supplied secure link exactly as received. Do not manually replace it with a fixed URL.
+
+## 3. Set the Pages variables
+
+In **Workers & Pages → coderxsociety → Settings → Variables and Secrets**, add:
+
+```text
+EMAILJS_PUBLIC_KEY
+EMAILJS_SERVICE_ID
+EMAILJS_TEMPLATE_ID_JOIN
+EMAILJS_TEMPLATE_ID_CONTACT
+EMAILJS_TEMPLATE_ID_APPROVAL
+EMAILJS_TEMPLATE_ID_RESET
+EMAILJS_TEMPLATE_ID_ACTIVATION
 ```
 
-**Variables:**
-- `{{applicant_name}}`
-- `{{applicant_email}}`
-- `{{applicant_phone}}`
-- `{{date}}`
-- `{{to_email}}` (auto-filled with admin email)
+`JWT_SECRET` and `ADMIN_PASSWORD` remain encrypted Cloudflare secrets; they are unrelated to EmailJS and must never be placed in an EmailJS template or client-side setting.
 
----
+## 4. Test safely
 
-### Template 2: Contact Message Notification
-**Template ID:** `template_contact`
+After deployment:
 
-**Subject:** New Contact Message - {{subject}}
+1. Submit a test Join application and confirm the admin notification.
+2. Submit a test contact message and confirm the admin notification.
+3. Create a test member as PHANTOM and confirm the activation email contains the one-time link.
+4. Request a password reset for a test account and confirm the reset email contains the one-time link.
 
-**Content (HTML):**
-```html
-<h2>New Contact Message</h2>
-<p><strong>From:</strong> {{sender_name}} ({{sender_email}})</p>
-<p><strong>Subject:</strong> {{subject}}</p>
-<p><strong>Date:</strong> {{date}}</p>
-<hr>
-<h3>Message:</h3>
-<p>{{message}}</p>
-<hr>
-<p><a href="https://coderx.org/admin" style="background: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View in Admin Panel</a></p>
-```
-
-**Variables:**
-- `{{sender_name}}`
-- `{{sender_email}}`
-- `{{subject}}`
-- `{{message}}`
-- `{{date}}`
-- `{{to_email}}` (auto-filled with admin email)
-
----
-
-### Template 3: Subscription Confirmation (Optional)
-**Template ID:** `template_subscribe`
-
-**Subject:** Welcome to CODE Rx Society! 🎉
-
-**Content (HTML):**
-```html
-<h2>Welcome to CODE Rx Society! 💊💻</h2>
-<p>Hi {{subscriber_name}},</p>
-<p>Thank you for subscribing to CODE Rx Society updates!</p>
-<p>You'll now receive:</p>
-<ul>
-  <li>Latest pharmacy technology news</li>
-  <li>Event announcements</li>
-  <li>Learning opportunities</li>
-  <li>Competition updates</li>
-</ul>
-<p>Stay tuned for exciting updates!</p>
-<hr>
-<p style="font-size: 12px; color: #666;">
-  CODE Rx Society - Coding the Future of Pharmacy<br>
-  Email: coderxsociety@gmail.com<br>
-  Telegram: <a href="https://t.me/+EdRpfR1GTGNjM2Q0">Join Channel</a>
-</p>
-```
-
-**Variables:**
-- `{{subscriber_name}}`
-- `{{date}}`
-- `{{to_email}}` (auto-filled with subscriber email)
-
----
-
-### Template 4: Application Approval (Optional)
-**Template ID:** `template_approval`
-
-**Subject:** Welcome to CODE Rx Society - Application Approved! 🎉
-
-**Content (HTML):**
-```html
-<h2>Welcome to CODE Rx Society! 🎉</h2>
-<p>Dear {{member_name}},</p>
-<p>Congratulations! Your membership application has been <strong>approved</strong>.</p>
-<p>You are now part of our community of pharmacy innovators!</p>
-<h3>Next Steps:</h3>
-<ol>
-  <li>Join our Telegram channel: <a href="https://t.me/+EdRpfR1GTGNjM2Q0">Click Here</a></li>
-  <li>Check out our learning platform</li>
-  <li>Explore ongoing projects</li>
-  <li>Participate in upcoming events</li>
-</ol>
-<p>We're excited to have you on board!</p>
-<hr>
-<p style="font-size: 12px; color: #666;">
-  CODE Rx Society - Coding the Future of Pharmacy<br>
-  Email: coderxsociety@gmail.com
-</p>
-```
-
-**Variables:**
-- `{{member_name}}`
-- `{{date}}`
-- `{{to_email}}` (auto-filled with member email)
-
----
-
-## Step 4: Get Your Public Key
-1. Go to **Account** (click your name in top right)
-2. Copy your **Public Key** (e.g., `user_abc123`)
-
-## Step 5: Update config.ts
-Open `src/config.ts` and replace the placeholder values:
-
-```typescript
-export const CONFIG = {
-  EMAILJS: {
-    PUBLIC_KEY: 'user_abc123', // Your public key
-    SERVICE_ID: 'service_xyz123', // Your service ID
-    TEMPLATE_ID_JOIN: 'template_join',
-    TEMPLATE_ID_CONTACT: 'template_contact',
-    TEMPLATE_ID_SUBSCRIBE: 'template_subscribe'
-  },
-  // ... rest of config
-};
-```
-
-## Step 6: Test Email Sending
-1. Deploy your website
-2. Fill out the join application form
-3. Check your admin email (coderxsociety@gmail.com)
-4. You should receive a notification!
-
-## Free Tier Limits
-- 200 emails/month (free tier)
-- Upgrade to paid plan for more emails
+When EmailJS is not configured, public forms still save to D1. Reset and activation links are deliberately not returned to public browsers, so configure email before relying on those flows in production.
 
 ## Troubleshooting
-- **Emails not sending?** Check browser console for errors
-- **Wrong template?** Verify template IDs match in config.ts
-- **Not receiving?** Check spam folder
+
+- Confirm every variable is configured in the **production** Pages environment, not only preview.
+- Confirm the EmailJS template variable names match the table above exactly.
+- Check EmailJS activity and the destination mailbox spam folder.
+- The Functions log `Email skipped — EmailJS not configured` when a template ID or required EmailJS setting is absent.

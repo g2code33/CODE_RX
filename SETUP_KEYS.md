@@ -35,7 +35,7 @@ database. These are the only keys/secrets you need:
 | `template_activation` | New member activation → member | `to_email`, `member_name`, `member_code`, `activation_link`, `role_name` |
 
 4. Copy the **Public Key** (Account → General) and the template IDs.
-5. Set these variables on the Pages project (and in `wrangler.toml` for local):
+5. Set these variables on the Pages project (and only in an ignored local environment file for local development):
    ```
    EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID,
    EMAILJS_TEMPLATE_ID_JOIN, EMAILJS_TEMPLATE_ID_CONTACT,
@@ -62,7 +62,7 @@ VITE_ENABLE_AUTH=true
 
 - **Login fails?** Confirm the `users` table was seeded (first API request) and
   that `ADMIN_EMAIL`/`ADMIN_PASSWORD` match what you used at seed time.
-- **Emails not sending?** Verify the 4 EmailJS template IDs and the service ID;
+- **Emails not sending?** Verify all 5 EmailJS template IDs and the service ID;
   the API logs "Email skipped — EmailJS not configured" when keys are missing.
 - **Admin routes return 401?** You're not signed in as admin — use the admin
   email + password, or re-login after a password change.
