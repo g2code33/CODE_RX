@@ -262,6 +262,8 @@ CREATE TABLE IF NOT EXISTS vault_documents (
   created_by_member_profile_id INTEGER,
   updated_by_member_profile_id INTEGER,
   is_archived INTEGER NOT NULL DEFAULT 0,
+  archived_from_status TEXT,
+  archived_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(section_id) REFERENCES vault_sections(id)
@@ -463,6 +465,8 @@ const SAFE_MIGRATIONS = [
   { table: 'vault_documents', column: 'related_project_id', sql: 'ALTER TABLE vault_documents ADD COLUMN related_project_id INTEGER' },
   { table: 'vault_documents', column: 'word_count', sql: 'ALTER TABLE vault_documents ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_documents', column: 'last_saved_at', sql: 'ALTER TABLE vault_documents ADD COLUMN last_saved_at TEXT' },
+  { table: 'vault_documents', column: 'archived_from_status', sql: 'ALTER TABLE vault_documents ADD COLUMN archived_from_status TEXT' },
+  { table: 'vault_documents', column: 'archived_at', sql: 'ALTER TABLE vault_documents ADD COLUMN archived_at TEXT' },
   { table: 'document_versions', column: 'content_json', sql: 'ALTER TABLE document_versions ADD COLUMN content_json TEXT' },
   { table: 'document_versions', column: 'status', sql: "ALTER TABLE document_versions ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
   { table: 'document_versions', column: 'tags_json', sql: "ALTER TABLE document_versions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'" },
@@ -474,7 +478,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-11-codename-pools-1';
+const VAULT_SCHEMA_VERSION = '2026-08-11-codename-pools-archive-1';
 
 
 const ROLE_SEEDS = [
@@ -657,30 +661,41 @@ const ensurePhantom = async (env: Env) => {
  */
 export async function ensureSchema(env: Env): Promise<void> {
   if (g.__codeRxSchemaReady) return;
-  const db = env.DB;
-  const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
-  // One D1 batch avoids dozens of sequential network round trips on a cold
-  // login. Indexes wait until ALTER migrations add their referenced columns.
-  const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
-  const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
-  await runBatchInChunks(db, schemaStatements.map((statement) => db.prepare(statement)));
-  await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
-  await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
+  const inFlight = g.__codeRxSchemaReadyPromise as Promise<void> | undefined;
+  if (inFlight) return inFlight;
 
-  const versionRows = await asRows<{ setting_value: string }>(db.prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'"));
-  if (versionRows[0]?.setting_value !== VAULT_SCHEMA_VERSION) {
-    await runSafeMigrations(db);
-    await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
-    await migrateFoundingRoleCodes(db);
-    await seedRolesAndPermissions(db);
-    await seedVaultSections(db);
-    await ensurePhantom(env);
-    await db.prepare(
-      `INSERT INTO system_settings (setting_key, setting_value, updated_at)
-       VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`
-    ).bind(VAULT_SCHEMA_VERSION).run();
+  const initialize = (async () => {
+    const db = env.DB;
+    const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
+    // One D1 batch avoids dozens of sequential network round trips on a cold
+    // login. Indexes wait until ALTER migrations add their referenced columns.
+    const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
+    const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
+    await runBatchInChunks(db, schemaStatements.map((statement) => db.prepare(statement)));
+    await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
+    await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
+
+    const versionRows = await asRows<{ setting_value: string }>(db.prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'"));
+    if (versionRows[0]?.setting_value !== VAULT_SCHEMA_VERSION) {
+      await runSafeMigrations(db);
+      await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
+      await migrateFoundingRoleCodes(db);
+      await seedRolesAndPermissions(db);
+      await seedVaultSections(db);
+      await ensurePhantom(env);
+      await db.prepare(
+        `INSERT INTO system_settings (setting_key, setting_value, updated_at)
+         VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`
+      ).bind(VAULT_SCHEMA_VERSION).run();
+    }
+    g.__codeRxSchemaReady = true;
+  })();
+
+  g.__codeRxSchemaReadyPromise = initialize;
+  try {
+    await initialize;
+  } finally {
+    delete g.__codeRxSchemaReadyPromise;
   }
-
-  g.__codeRxSchemaReady = true;
 }

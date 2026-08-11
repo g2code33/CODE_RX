@@ -198,8 +198,8 @@ export const db = {
       }
       return URL.createObjectURL(await response.blob());
     },
-    documents: async (section: string) => {
-      const result = await apiCall<{ data: any[] }>(`/api/vault/documents?section=${encodeURIComponent(section)}`);
+    documents: async (section: string, archived = false) => {
+      const result = await apiCall<{ data: any[] }>(`/api/vault/documents?section=${encodeURIComponent(section)}${archived ? '&archived=1' : ''}`);
       return result.data || [];
     },
     document: async (id: number) => {
@@ -210,11 +210,12 @@ export const db = {
     updateDocument: (id: number, data: any) =>
       apiCall<{ data: any }>(`/api/vault/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     archiveDocument: (id: number) => apiCall('/api/vault/documents/' + id, { method: 'DELETE' }),
+    unarchiveDocument: (id: number) => apiCall('/api/vault/documents/' + id + '/unarchive', { method: 'POST' }),
     documentVersions: async (id: number) => (await apiCall<{ data: any[] }>(`/api/vault/documents/${id}/versions`)).data || [],
     documentVersion: async (id: number, version: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${id}/versions/${version}`)).data,
     restoreDocumentVersion: (id: number, version: number) => apiCall<{ data: any }>(`/api/vault/documents/${id}/restore/${version}`, { method: 'POST' }),
-    projects: async () => {
-      const result = await apiCall<{ data: any[] }>('/api/vault/projects');
+    projects: async (archived = false) => {
+      const result = await apiCall<{ data: any[] }>(`/api/vault/projects${archived ? '?archived=1' : ''}`);
       return result.data || [];
     },
     createProject: (data: any) => apiCall('/api/vault/projects', { method: 'POST', body: JSON.stringify(data) }),

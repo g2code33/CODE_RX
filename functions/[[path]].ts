@@ -1231,11 +1231,12 @@ app.get('/api/vault/sections', requireAuth, async (c) => {
 
 app.get('/api/vault/documents', requireAuth, async (c) => {
   const slug = cleanStr(c.req.query('section'), 1, 60);
+  const archived = c.req.query('archived') === '1';
   if (!slug) return c.json({ success: false, error: 'Vault section is required' }, 400);
-  const access = await vaultAccess(c, slug, 'view');
+  const access = await vaultAccess(c, slug, archived ? 'manage' : 'view');
   if (access.response) return access.response;
   const documents = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.id, d.title, d.status, d.visibility, d.file_key, d.tags_json, d.related_project_id, d.word_count, d.created_at, d.updated_at,
+    `SELECT d.id, d.title, d.status, d.visibility, d.file_key, d.tags_json, d.related_project_id, d.word_count, d.archived_from_status, d.archived_at, d.created_at, d.updated_at,
             creator.member_code AS created_by_member_id, creator_user.name AS created_by_name,
             updater.member_code AS updated_by_member_id, updater_user.name AS updated_by_name,
             p.title AS related_project_title
@@ -1245,9 +1246,9 @@ app.get('/api/vault/documents', requireAuth, async (c) => {
      LEFT JOIN member_profiles updater ON updater.id = d.updated_by_member_profile_id
      LEFT JOIN users updater_user ON updater_user.id = updater.user_id
      LEFT JOIN vault_projects p ON p.id = d.related_project_id
-     WHERE d.section_id = ? AND d.is_archived = 0 ORDER BY d.updated_at DESC, d.id DESC`
-  ).bind(access.section.id));
-  return c.json({ success: true, data: documents });
+     WHERE d.section_id = ? AND d.is_archived = ? ORDER BY d.updated_at DESC, d.id DESC`
+  ).bind(access.section.id, archived ? 1 : 0));
+  return c.json({ success: true, data: documents, archived });
 });
 
 app.get('/api/vault/documents/:id', requireAuth, async (c) => {
@@ -1378,9 +1379,25 @@ app.delete('/api/vault/documents/:id', requireAuth, async (c) => {
   if (!document) return c.json({ success: false, error: 'Document not found' }, 404);
   const access = await vaultAccess(c, document.section_slug, 'delete');
   if (access.response) return access.response;
-  await c.env.DB.prepare("UPDATE vault_documents SET is_archived = 1, status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run();
+  await c.env.DB.prepare("UPDATE vault_documents SET is_archived = 1, archived_from_status = CASE WHEN status = 'archived' THEN archived_from_status ELSE status END, archived_at = CURRENT_TIMESTAMP, status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run();
   await recordVaultActivity(c.env.DB, access.actor, 'document.archived', document.section_id, id, { section: document.section_slug });
   return c.json({ success: true, message: 'Document archived. Its history remains preserved.' });
+});
+
+app.post('/api/vault/documents/:id/unarchive', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.id, d.section_id, d.is_archived, d.archived_from_status, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+  ).bind(id));
+  const document = rows[0];
+  if (!document || !document.is_archived) return c.json({ success: false, error: 'Archived document not found' }, 404);
+  const access = await vaultAccess(c, document.section_slug, 'manage');
+  if (access.response) return access.response;
+  const restoredStatus = document.archived_from_status && document.archived_from_status !== 'archived' ? document.archived_from_status : 'draft';
+  await c.env.DB.prepare("UPDATE vault_documents SET is_archived = 0, status = ?, archived_from_status = NULL, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(restoredStatus, id).run();
+  await recordVaultActivity(c.env.DB, access.actor, 'document.unarchived', document.section_id, id, { section: document.section_slug, restoredStatus });
+  return c.json({ success: true, message: 'Document restored from archive.', data: { status: restoredStatus } });
 });
 
 app.get('/api/vault/documents/:id/versions', requireAuth, async (c) => {
@@ -1448,16 +1465,17 @@ app.post('/api/vault/documents/:id/restore/:version', requireAuth, async (c) => 
 });
 
 app.get('/api/vault/projects', requireAuth, async (c) => {
-  const access = await vaultAccess(c, 'projects', 'view');
+  const archived = c.req.query('archived') === '1';
+  const access = await vaultAccess(c, 'projects', archived ? 'manage' : 'view');
   if (access.response) return access.response;
   const projects = await dbRows<any>(c.env.DB.prepare(
     `SELECT p.*, mp.member_code AS lead_member_id, u.name AS lead_name
      FROM vault_projects p
      LEFT JOIN member_profiles mp ON mp.id = p.lead_member_profile_id
      LEFT JOIN users u ON u.id = mp.user_id
-     WHERE p.is_archived = 0 ORDER BY p.updated_at DESC`
-  ));
-  return c.json({ success: true, data: projects });
+     WHERE p.is_archived = ? ORDER BY p.updated_at DESC`
+  ).bind(archived ? 1 : 0));
+  return c.json({ success: true, data: projects, archived });
 });
 
 app.post('/api/vault/projects', requireAuth, async (c) => {
@@ -1492,9 +1510,16 @@ app.patch('/api/vault/projects/:id', requireAuth, async (c) => {
   if (access.response) return access.response;
   const actor = access.actor!;
   const body = await c.req.json().catch(() => ({}));
-  const currentRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM vault_projects WHERE id = ? AND is_archived = 0').bind(id));
+  const currentRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM vault_projects WHERE id = ?').bind(id));
   const current = currentRows[0];
   if (!current) return c.json({ success: false, error: 'Project not found' }, 404);
+  if (body.archive !== undefined) {
+    if (!await hasVaultPermission(c.env.DB, actor, 'projects', 'manage')) return c.json({ success: false, error: 'Only a Projects manager can archive or unarchive projects.' }, 403);
+    await c.env.DB.prepare('UPDATE vault_projects SET is_archived = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(body.archive ? 1 : 0, id).run();
+    await audit(c.env.DB, actor, body.archive ? 'vault.project.archived' : 'vault.project.unarchived', 'vault_project', id, { title: current.title });
+    return c.json({ success: true, message: body.archive ? 'Project archived.' : 'Project restored from archive.' });
+  }
+  if (current.is_archived) return c.json({ success: false, error: 'Restore this project before editing it.' }, 409);
   const title = body.title === undefined ? current.title : cleanStr(body.title, 2, 180);
   if (!title) return c.json({ success: false, error: 'A valid project title is required' }, 400);
   await c.env.DB.prepare(

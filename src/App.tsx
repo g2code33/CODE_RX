@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { Dashboard } from './components/Dashboard';
+import { Vault } from './components/Vault';
 import { ResetPassword } from './components/ResetPassword';
 import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
@@ -13,6 +14,7 @@ import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
 
 function App() {
   const [isDashboard, setIsDashboard] = useState(false);
+  const [isMemberVault, setIsMemberVault] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault'>('controller');
   const [user, setUser] = useState<AuthUser | null>(auth.getUser());
@@ -69,9 +71,11 @@ function App() {
       if (isAdminUser(authenticatedUser)) {
         setIsAdmin(true);
         setIsDashboard(false);
+        setIsMemberVault(false);
         setAdminWorkspace('controller');
       } else {
         setIsDashboard(true);
+        setIsMemberVault(false);
         setIsAdmin(false);
       }
     });
@@ -127,6 +131,7 @@ function App() {
     auth.logout();
     setUser(null);
     setIsDashboard(false);
+    setIsMemberVault(false);
     setIsAdmin(false);
     setAdminWorkspace('controller');
   };
@@ -137,9 +142,11 @@ function App() {
     if (isAdminUser(authenticatedUser)) {
       setIsAdmin(true);
       setIsDashboard(false);
+      setIsMemberVault(false);
       setAdminWorkspace('controller');
     } else {
       setIsDashboard(true);
+      setIsMemberVault(false);
       setIsAdmin(false);
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -169,16 +176,18 @@ function App() {
     />;
   }
 
-  const inImmersiveAdminWorkspace = isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault');
+  const inImmersiveWorkspace = (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault')) || (!isAdmin && isDashboard && isMemberVault);
   const mainContent = isAdmin
     ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
     : isDashboard
-      ? <Dashboard user={user} />
+      ? isMemberVault
+        ? <Vault workspaceMode="member" onBack={() => setIsMemberVault(false)} />
+        : <Dashboard user={user} onOpenVault={() => setIsMemberVault(true)} />
       : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;
 
   const shell = (
     <div className="brand-app min-h-screen">
-      {!inImmersiveAdminWorkspace && <Navbar onDashboardToggle={toggleDashboard} isDashboard={isDashboard} activeTab={activeTab} setActiveTab={handleTabChange} copy={siteContent.copy} media={siteContent.media} />}
+      {!inImmersiveWorkspace && <Navbar onDashboardToggle={toggleDashboard} isDashboard={isDashboard} activeTab={activeTab} setActiveTab={handleTabChange} copy={siteContent.copy} media={siteContent.media} />}
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
