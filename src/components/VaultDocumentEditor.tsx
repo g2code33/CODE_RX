@@ -3,10 +3,11 @@ import {
   Archive, Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy,
   FileText, Heading1, Heading2, History, ImagePlus, Italic, Link2,
   List, LoaderCircle, Maximize2, Minimize2, Minus, MoreHorizontal,
-  Paperclip, Plus, Quote, Redo2, Save, Search, Strikethrough, Table2,
+  Paperclip, Plus, Quote, Redo2, Save, Search, Share2, Strikethrough, Table2,
   Underline, Undo2, X,
 } from 'lucide-react';
 import { db } from '../lib/cloudflare';
+import { VaultShareDialog } from './VaultShareDialog';
 import {
   newBlock, parseDocumentContent, plainTextFromBlocks, safeVaultResourceUrl, sanitizeVaultRichText as sanitizeHtml,
   slashCommands, templateCatalog, type VaultBlock, type VaultBlockType,
@@ -34,6 +35,7 @@ interface VaultDocumentEditorProps {
   canEdit: boolean;
   canManage: boolean;
   canArchive?: boolean;
+  canShare?: boolean;
   onArchive?: (id: number) => void | Promise<void>;
   onClose: () => void;
   onSaved: (document: any) => void;
@@ -54,7 +56,7 @@ const initialDraft = (document: any | null): VaultDocumentDraft => ({
 
 const draftStorageKey = (documentId: number | null, sectionSlug: string) => `codeRx_vault_draft_${documentId || `new_${sectionSlug}`}`;
 
-export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, onArchive, onClose, onSaved }: VaultDocumentEditorProps) => {
+export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, canShare = false, onArchive, onClose, onSaved }: VaultDocumentEditorProps) => {
   const [documentId, setDocumentId] = useState<number | null>(document?.id || null);
   const [draft, setDraft] = useState<VaultDocumentDraft>(() => initialDraft(document));
   const [saveState, setSaveState] = useState<SaveState>('saved');
@@ -64,6 +66,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   const [showPalette, setShowPalette] = useState(false);
   const [showTemplates, setShowTemplates] = useState(!document);
   const [showHistory, setShowHistory] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [versions, setVersions] = useState<any[]>([]);
   const [focusMode, setFocusMode] = useState(false);
   const [showOutline, setShowOutline] = useState(false);
@@ -354,9 +357,10 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   }, [slash]);
   const headings = draft.blocks.filter((block) => block.type === 'heading' && block.content?.replace(/<[^>]+>/g, '').trim());
   const words = wordCount(draft.blocks);
+  const canPublicShare = canShare && !section?.is_sensitive && draft.visibility !== 'restricted';
   const shellClass = focusMode ? 'vault-editor vault-editor--focus' : 'vault-editor';
 
-  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canArchive && documentId && <button onClick={() => { if (window.confirm('Archive this document? Its history will remain available for PHANTOM to restore.')) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
+  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canPublicShare && documentId && <button onClick={() => setShowShare(true)} className="editor-icon-button text-emerald-700 hover:!text-emerald-900" title="Share document"><Share2 className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={() => { if (window.confirm('Archive this document? Its history will remain available for PHANTOM to restore.')) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
     <div className={`vault-editor__layout ${showOutline && !focusMode ? 'has-outline' : ''}`}><section className="vault-editor__document"><div className="vault-editor__titlebar">
         <input
           disabled={!canEdit}
@@ -396,14 +400,14 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
           </select>
           <TagInput tags={draft.tags} disabled={!canEdit} onChange={(tags) => { updateDraft((current) => ({ ...current, tags })); markDirty(); }} />
         </div>
-        {document && <p className="vault-editor__byline">Author: {document.created_by_name || 'Code Rx member'} · Last modified by {document.updated_by_name || document.created_by_name || 'Code Rx member'}</p>}
+        {document && <p className="vault-editor__byline">{document.document_code ? `${document.document_code} · ` : ''}Author: {document.created_by_name || 'Code Rx member'} · Created {document.created_at ? new Date(document.created_at).toLocaleDateString() : 'today'} · Last modified by {document.updated_by_name || document.created_by_name || 'Code Rx member'}{document.updated_at ? ` · ${new Date(document.updated_at).toLocaleString()}` : ''}</p>}
       </div>
       {canEdit && <EditorToolbar onFormat={executeFormat} onInsert={(type: VaultBlockType, patch?: Partial<VaultBlock>) => insertAfter(activeBlockId, type, patch)} onPalette={() => setShowPalette(true)} onUndo={() => { const previous = undo[undo.length - 1]; if (previous) { setRedo((future) => [...future, draftRef.current.blocks]); setBlocks(previous, false); setUndo((history) => history.slice(0, -1)); } }} onRedo={() => { const next = redo[redo.length - 1]; if (next) { setUndo((history) => [...history, draftRef.current.blocks]); setBlocks(next, false); setRedo((future) => future.slice(0, -1)); } }} canUndo={Boolean(undo.length)} canRedo={Boolean(redo.length)} onUpload={() => fileInput.current?.click()} />}
       <input ref={fileInput} className="sr-only" type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAttachment(file); event.target.value = ''; }} />
       <div className="vault-editor__writing" onDragOver={(event) => { if (canEdit) event.preventDefault(); }} onDrop={(event) => { if (!canEdit) return; event.preventDefault(); const file = event.dataTransfer.files?.[0]; if (file) void uploadAttachment(file); }}><div className="vault-editor__writing-inner">{showTemplates && canEdit && <TemplatePicker onChoose={applyTemplate} onClose={() => setShowTemplates(false)} />}{draft.blocks.map((block) => <DocumentBlockEditor key={block.id} block={block} canEdit={canEdit} active={activeBlockId === block.id} onFocus={() => setActiveBlockId(block.id)} onChange={(patch) => updateBlock(block.id, patch)} onSlash={(query) => setSlash({ blockId: block.id, query })} onInsert={(type) => insertAfter(block.id, type)} onRemove={() => removeBlock(block.id)} onMove={(direction) => moveBlock(block.id, direction)} onUpload={() => fileInput.current?.click()} />)}{canEdit && <button onClick={() => insertAfter(draft.blocks[draft.blocks.length - 1]?.id || null, 'paragraph')} className="vault-editor__add-block"><Plus className="h-4 w-4" />Add block</button>}</div></div>
-      <div className="vault-editor__footer"><span>{words.toLocaleString()} words · {draft.blocks.length} blocks</span><span>{uploading ? 'Uploading attachment…' : saveState === 'offline' ? 'Local draft protected' : 'Ctrl/Cmd + K commands · Ctrl/Cmd + S save'}</span></div></section>
+      <div className="vault-editor__footer"><span>{words.toLocaleString()} words · {draft.blocks.length} blocks{words < 25 ? ` · ${25 - words} more words for the substantive-document score rule when enabled` : ''}</span><span>{uploading ? 'Uploading attachment…' : saveState === 'offline' ? 'Local draft protected' : 'Autosave on · Ctrl/Cmd + K commands · Ctrl/Cmd + S save'}</span></div></section>
       {showOutline && !focusMode && <aside className="vault-editor__outline"><div className="vault-editor__outline-head"><strong>Document Outline</strong><button onClick={() => setShowOutline(false)}><X className="h-4 w-4" /></button></div><div className="mt-3 space-y-1">{headings.map((heading) => <button key={heading.id} onClick={() => window.document.getElementById(`vault-block-${heading.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className={`vault-editor__outline-item ${heading.level === 3 ? 'is-h3' : heading.level === 2 ? 'is-h2' : ''}`}>{stripHtml(heading.content || '')}</button>)}{!headings.length && <p className="text-xs leading-5 text-slate-400">Headings create a navigable outline automatically.</p>}</div></aside>}</div>
-      {slash && <SlashMenu commands={filteredCommands} onSelect={applyCommand} onClose={() => setSlash(null)} />}{showPalette && <CommandPalette commands={slashCommands} onSelect={applyCommand} onClose={() => setShowPalette(false)} onNewDocument={() => { setBlocks([newBlock('paragraph')], true); setShowPalette(false); }} />}{showHistory && <HistoryPanel documentId={documentId} versions={versions} canRestore={canManage} onClose={() => setShowHistory(false)} onRestore={async (version) => { if (!documentId) return; const result = await db.vault.restoreDocumentVersion(documentId, version); const refreshed = await db.vault.document(documentId); replaceDraft(initialDraft(refreshed)); revisionRef.current = 0; onSaved(refreshed); setSaveState('saved'); setSaveMessage(`Restored version ${version} as v${result.data.version}`); setShowHistory(false); }} />}</div>;
+      {showShare && documentId && <VaultShareDialog document={{ id: documentId, title: draft.title || 'Untitled document', document_code: document?.document_code || null }} onClose={() => setShowShare(false)} />}{slash && <SlashMenu commands={filteredCommands} onSelect={applyCommand} onClose={() => setSlash(null)} />}{showPalette && <CommandPalette commands={slashCommands} onSelect={applyCommand} onClose={() => setShowPalette(false)} onNewDocument={() => { setBlocks([newBlock('paragraph')], true); setShowPalette(false); }} />}{showHistory && <HistoryPanel documentId={documentId} versions={versions} canRestore={canManage} onClose={() => setShowHistory(false)} onRestore={async (version) => { if (!documentId) return; const result = await db.vault.restoreDocumentVersion(documentId, version); const refreshed = await db.vault.document(documentId); replaceDraft(initialDraft(refreshed)); revisionRef.current = 0; onSaved(refreshed); setSaveState('saved'); setSaveMessage(`Restored version ${version} as v${result.data.version}`); setShowHistory(false); }} />}</div>;
 
 };
 

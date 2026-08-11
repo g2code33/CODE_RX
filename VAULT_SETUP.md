@@ -40,11 +40,15 @@ The Vault is a standalone full-page workspace:
 ## Vault capabilities
 
 - Structured document blocks, templates, rich text, code, lists, tables, callouts, formulas, files, images, and linked resources.
+- Every new document receives a permanent automatic reference such as `CRX-DOC-0001`; author, created date, last editor, and update date remain visible in the workspace.
 - Slash commands, command palette, outline, focus mode, code preview, tags, related projects, and version history.
 - Server-side structured-content sanitization before rendering.
 - Protected R2 attachments served only after Vault permission checks.
-- Autosave with local-draft recovery and serialized saves to avoid overwriting rapid edits.
+- Visible autosave with local-draft recovery and serialized saves to avoid overwriting rapid edits.
+- PHANTOM-controlled document sharing: one global master switch plus a per-member Share-button permission. Links are random, read-only, time-limited, revocable, and never expose protected attachments or sensitive/restricted documents.
 - Section-level `view`, `create`, `edit`, `delete`, and `manage` permissions, plus member-specific overrides.
+- A live points system with automatic rule awards, PHANTOM add/deduct/set controls, score history, member balance, and a real active-member leaderboard.
+- Durable in-app notifications: PHANTOM can broadcast to all active members, a responsibility profile, or selected members, and can delegate trusted members to send notices. Recipients receive an unread badge and auto-refreshing inbox.
 - Role history, audit logs, Website Admin delegation, and PHANTOM-only organization controls.
 - Archive/restore workflows for members, documents, sections, and projects.
 

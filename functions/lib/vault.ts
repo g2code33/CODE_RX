@@ -73,6 +73,27 @@ export const allocateMemberCode = async (db: D1Database): Promise<string> => {
   return padMemberCode(sequence);
 };
 
+const padDocumentCode = (sequence: number) => `CRX-DOC-${String(sequence).padStart(4, '0')}`;
+
+/** Allocates a permanent readable reference for every Vault document. */
+export const allocateDocumentCode = async (db: D1Database): Promise<string> => {
+  await db.prepare('INSERT OR IGNORE INTO vault_document_sequences (id, next_value) VALUES (1, 1)').run();
+  try {
+    const rows = await asRows<{ sequence: number }>(
+      db.prepare('UPDATE vault_document_sequences SET next_value = next_value + 1 WHERE id = 1 RETURNING next_value - 1 AS sequence')
+    );
+    const sequence = Number(rows[0]?.sequence);
+    if (Number.isInteger(sequence) && sequence > 0) return padDocumentCode(sequence);
+  } catch (error) {
+    console.warn('[code-rx] document sequence RETURNING fallback:', error);
+  }
+
+  const rows = await asRows<{ next_value: number }>(db.prepare('SELECT next_value FROM vault_document_sequences WHERE id = 1'));
+  const sequence = Math.max(1, Number(rows[0]?.next_value || 1));
+  await db.prepare('UPDATE vault_document_sequences SET next_value = ? WHERE id = 1').bind(sequence + 1).run();
+  return padDocumentCode(sequence);
+};
+
 const memberRoleId = async (db: D1Database, roleCode = 'member') => {
   const rows = await asRows<{ id: number }>(db.prepare('SELECT id FROM roles WHERE code = ?').bind(roleCode));
   return Number(rows[0]?.id || 0) || null;

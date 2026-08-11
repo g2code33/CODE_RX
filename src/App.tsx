@@ -4,6 +4,7 @@ import { AuthModal } from './components/AuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { Dashboard } from './components/Dashboard';
 import { Vault } from './components/Vault';
+import { VaultSharedDocument } from './components/VaultSharedDocument';
 import { ResetPassword } from './components/ResetPassword';
 import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
@@ -23,6 +24,7 @@ function App() {
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
   const [isActivationView, setIsActivationView] = useState(() => window.location.hash.startsWith('#activate'));
+  const [isSharedVaultView, setIsSharedVaultView] = useState(() => window.location.hash.startsWith('#vault-share'));
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
   useEffect(() => {
@@ -87,18 +89,27 @@ function App() {
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
+      if (window.location.hash.startsWith('#vault-share')) {
+        setIsSharedVaultView(true);
+        setIsActivationView(false);
+        setIsResetView(false);
+        return;
+      }
       if (window.location.hash.startsWith('#activate')) {
         setIsActivationView(true);
         setIsResetView(false);
+        setIsSharedVaultView(false);
         return;
       }
       if (window.location.hash.startsWith('#reset')) {
         setIsResetView(true);
         setIsActivationView(false);
+        setIsSharedVaultView(false);
         return;
       }
       setIsResetView(false);
       setIsActivationView(false);
+      setIsSharedVaultView(false);
       const id = idFromHash();
       const section = SECTION_MAP[id];
       const tab = section ? section.tab : 'home';
@@ -164,6 +175,10 @@ function App() {
       setTimeout(() => document.getElementById(tabId)?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 80);
     }
   };
+
+  if (isSharedVaultView) {
+    return <VaultSharedDocument onClose={() => { window.location.hash = ''; setIsSharedVaultView(false); window.scrollTo({ top: 0, behavior: 'instant' }); }} />;
+  }
 
   if (isResetView) {
     return <ResetPassword onDone={() => { window.location.hash = ''; setIsResetView(false); window.scrollTo({ top: 0, behavior: 'instant' }); }} />;
