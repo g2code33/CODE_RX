@@ -6,9 +6,9 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Env } from './env';
 import { ensureSchema } from './lib/schema';
-import { hashPassword, verifyPassword, signToken, requireAuth, requireAdmin, JwtPayload } from './lib/auth';
+import { hashPassword, verifyPassword, signToken, requireAuth, JwtPayload } from './lib/auth';
 import {
-  actorFromContext, allocateMemberCode, audit, getActor, hasVaultPermission,
+  actorFromContext, allocateDocumentCode, allocateMemberCode, audit, getActor, hasVaultPermission,
   normalizeCodename, randomToken, requirePhantom,
   requireWebsitePermission, sha256Hex, VAULT_ACTIONS, VAULT_SECTION_SEEDS, VaultAction,
 } from './lib/vault';
@@ -16,6 +16,8 @@ import { cleanStr, cleanEmail, cleanOptionalStr } from './lib/validate';
 import { checkRateLimit } from './lib/rate-limit';
 import { sendEmail } from './lib/email';
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
+import { adjustMemberScore, awardScoreRule, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
+import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 
 type AppEnv = { Bindings: Env; Variables: { user: JwtPayload; actor: Awaited<ReturnType<typeof getActor>> } };
 
@@ -44,13 +46,26 @@ const dbRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
   return result.results || [];
 };
 
+// Never derive security links from an incoming Host header. A configured
+// SITE_URL is preferred; the known Pages URL is the safe fallback.
+const publicSiteUrl = (env: Env) => {
+  const configured = String(env.SITE_URL || '').trim().replace(/\/+$/, '');
+  return /^https?:\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(configured)
+    ? configured
+    : 'https://coderxsociety.pages.dev';
+};
+
 type FounderActor = NonNullable<Awaited<ReturnType<typeof getActor>>>;
 
 type CodenamePath = 'member' | 'custom_founding' | 'direct_founding';
 
 const codenamePathFrom = (value: unknown, roleCode: string): CodenamePath => {
-  if (value === 'custom_founding' || value === 'direct_founding' || value === 'member') return value;
-  return roleCode === 'custom' ? 'custom_founding' : 'member';
+  // A Custom responsibility always receives the founding ballot. The client
+  // is never trusted to put an ordinary member into that limited identity pool.
+  if (roleCode === 'custom') return 'custom_founding';
+  // Direct founding assignment is an explicit PHANTOM-only creation path.
+  if (value === 'direct_founding') return 'direct_founding';
+  return 'member';
 };
 
 const poolForPath = (path: CodenamePath) => path === 'custom_founding' || path === 'direct_founding' ? 'founding' : 'member';
@@ -65,7 +80,6 @@ const createMemberAccount = async ({
   codenamePath,
   foundingCodenameId,
   applicationId,
-  requestHost,
 }: {
   env: Env;
   actor: FounderActor;
@@ -76,13 +90,15 @@ const createMemberAccount = async ({
   codenamePath?: CodenamePath;
   foundingCodenameId?: number | null;
   applicationId?: number;
-  requestHost?: string;
 }) => {
   const db = env.DB;
   if (roleCode === 'phantom') throw new Error('PHANTOM identity cannot be assigned through member creation.');
   const roleRows = await dbRows<{ id: number; code: string; name: string }>(db.prepare('SELECT id, code, name FROM roles WHERE code = ?').bind(roleCode));
   const role = roleRows[0];
   if (!role) throw new Error('Choose a valid initial responsibility role.');
+  if (codenamePath === 'custom_founding' && role.code !== 'custom') {
+    throw new Error('Custom Founding Ballot is available only for the Custom responsibility profile.');
+  }
   const effectiveCodenamePath = codenamePathFrom(codenamePath, role.code);
   if (effectiveCodenamePath === 'direct_founding' && (!Number.isInteger(foundingCodenameId) || Number(foundingCodenameId) < 1)) {
     throw new Error('Select one available founding codename for direct assignment.');
@@ -162,7 +178,7 @@ const createMemberAccount = async ({
       ).bind(profileId, actor.userId, applicationId).run();
     }
 
-    const baseUrl = env.SITE_URL || `https://${requestHost || 'coderxsociety.pages.dev'}`;
+    const baseUrl = publicSiteUrl(env);
     const activationUrl = `${baseUrl}/#activate?token=${rawToken}&email=${encodeURIComponent(email)}`;
     await audit(db, actor, 'member.created', 'member_profile', profileId, {
       memberCode,
@@ -203,6 +219,12 @@ const createMemberAccount = async ({
   }
 };
 
+const memberCreationErrorStatus = (message: string) => {
+  if (/already exists|profile already exists/i.test(message)) return 409;
+  if (/valid|choose|select|custom founding|cannot be assigned/i.test(message)) return 400;
+  return 500;
+};
+
 const ballotPoolFor = (actor: FounderActor) => actor.codenamePath === 'custom_founding' ? 'founding' : 'member';
 const ballotModeFor = (actor: FounderActor) => actor.codenamePath === 'custom_founding' ? 'custom_founding' : 'member';
 const ballotLabelFor = (pool: 'member' | 'founding') => pool === 'founding' ? 'Founding Codename Ballot' : 'Member Codename Ballot';
@@ -211,6 +233,14 @@ const getCodenameSession = async (db: D1Database, profileId: number, pool: 'memb
   let rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
   if (!rows[0]) {
     await db.prepare("INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used) VALUES (?, 'open', ?, 'ballot', 0)").bind(profileId, pool).run();
+    rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
+  } else if (rows[0].status === 'open' && (rows[0].pool !== pool || rows[0].assignment_source !== 'ballot')) {
+    // A PHANTOM role change can legitimately move an unclaimed member between
+    // the member and founding ballots. Resetting only an open session keeps
+    // completed identities permanent while preventing mixed-pool attempts.
+    await db.prepare(
+      "UPDATE codename_selection_sessions SET pool = ?, assignment_source = 'ballot', passes_used = 0, claimed_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL WHERE id = ?"
+    ).bind(pool, rows[0].id).run();
     rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
   }
   return rows[0] || null;
@@ -230,6 +260,20 @@ const requireActiveActor = async (c: any) => {
   return { actor, response: null };
 };
 
+/**
+ * Legacy Admin Core endpoints predate delegated Website Admin permissions.
+ * Keep their established admin-only behavior, but always resolve the current
+ * profile so a locked or archived legacy admin cannot continue using a JWT
+ * issued before PHANTOM changed the account status.
+ */
+const requireActiveLegacyAdmin = async (c: any, next: () => Promise<void>) => {
+  const actor = await actorFromContext(c);
+  if (!actor || !actor.profileId) return c.json({ success: false, error: 'Account not found' }, 404);
+  if (actor.memberStatus !== 'active') return c.json({ success: false, error: 'This administrator account is not active' }, 403);
+  if (!actor.isPhantom && actor.userRole !== 'admin') return c.json({ success: false, error: 'Admin access required' }, 403);
+  await next();
+};
+
 const vaultAccess = async (c: any, slug: string, action: VaultAction) => {
   const access = await requireActiveActor(c);
   if (access.response) return { actor: null, section: null, response: access.response };
@@ -242,11 +286,28 @@ const vaultAccess = async (c: any, slug: string, action: VaultAction) => {
 };
 
 const DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active', 'archived']);
+const ACTIVE_DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active']);
 const documentStatus = (value: unknown, fallback = 'draft') => {
   const status = cleanOptionalStr(value, 30)?.toLowerCase().replace(/\s+/g, '_');
   return status && DOCUMENT_STATUSES.has(status) ? status : fallback;
 };
+const requestedDocumentStatus = (value: unknown) => cleanOptionalStr(value, 30)?.toLowerCase().replace(/\s+/g, '_') || null;
 const documentProjectId = (value: unknown) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+
+/** A document, task, or meeting may only link to an active Project the actor can view. */
+const validateActiveProjectReference = async (db: D1Database, actor: FounderActor, projectId: number | null) => {
+  if (!projectId) return null;
+  if (!await hasVaultPermission(db, actor, 'projects', 'view')) {
+    return { status: 403, error: 'Projects view permission is required before linking a project.' };
+  }
+  const rows = await dbRows<{ id: number; is_archived: number }>(
+    db.prepare('SELECT id, is_archived FROM vault_projects WHERE id = ?').bind(projectId)
+  );
+  if (!rows[0]) return { status: 404, error: 'Linked Vault project was not found.' };
+  if (Number(rows[0].is_archived) === 1) return { status: 409, error: 'Restore the linked Vault project before using it.' };
+  return null;
+};
+
 const documentTags = async (db: D1Database, documentId: number) => {
   const tags = await dbRows<any>(db.prepare(
     `SELECT t.id, t.normalized_name, t.display_name FROM vault_tags t
@@ -257,6 +318,67 @@ const documentTags = async (db: D1Database, documentId: number) => {
 const documentAttachments = async (db: D1Database, documentId: number) => dbRows<any>(db.prepare(
   'SELECT id, name, file_key, mime_type, size_bytes, created_at FROM vault_attachments WHERE document_id = ? ORDER BY created_at DESC'
 ).bind(documentId));
+
+const settingValue = async (db: D1Database, key: string, fallback = '') => {
+  const rows = await dbRows<{ setting_value: string }>(db.prepare('SELECT setting_value FROM system_settings WHERE setting_key = ?').bind(key));
+  return rows[0]?.setting_value ?? fallback;
+};
+
+const sharingCapability = async (db: D1Database, actor: FounderActor) => {
+  const globalEnabled = (await settingValue(db, 'vault_sharing_enabled', '0')) === '1';
+  if (actor.isPhantom) return { globalEnabled, memberEnabled: true, canShare: globalEnabled };
+  if (!actor.profileId || actor.memberStatus !== 'active') return { globalEnabled, memberEnabled: false, canShare: false };
+  const rows = await dbRows<{ can_share: number }>(db.prepare(
+    'SELECT can_share FROM member_share_permissions WHERE member_profile_id = ?'
+  ).bind(actor.profileId));
+  const memberEnabled = Number(rows[0]?.can_share || 0) === 1;
+  return { globalEnabled, memberEnabled, canShare: globalEnabled && memberEnabled };
+};
+
+const awardAutomaticScore = async ({
+  db,
+  memberProfileId,
+  ruleKey,
+  referenceType,
+  referenceId,
+  actor,
+  reason,
+  metadata,
+}: {
+  db: D1Database;
+  memberProfileId: number | null | undefined;
+  ruleKey: ScoreRuleKey;
+  referenceType: string;
+  referenceId: string | number;
+  actor: FounderActor | null;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+}) => {
+  try {
+    const result = await awardScoreRule(db, { memberProfileId, ruleKey, referenceType, referenceId, actor, reason, metadata });
+    if (!result) return null;
+    await notifyMember(
+      db,
+      result.memberProfileId,
+      'Code Rx points earned',
+      `You earned ${result.delta} points for ${result.label}. Your balance is now ${result.balance}.`,
+      actor,
+    );
+    await audit(db, actor, 'member.score.automatic_award', 'member_profile', result.memberProfileId, {
+      ruleKey,
+      referenceType,
+      referenceId,
+      delta: result.delta,
+      balance: result.balance,
+    });
+    return result;
+  } catch (error) {
+    // Scoring and its notification enrich an already-completed action. Never
+    // turn a successful activation, document, or project operation into a false error.
+    console.error('[code-rx] automatic score award error:', error);
+    return null;
+  }
+};
 
 // ---------- CORS (same-origin is the norm; allow local dev + pages.dev) ----------
 app.use('/api/*', cors({
@@ -414,6 +536,15 @@ app.post('/api/auth/activate', async (c) => {
     const actor = await getActor(c.env.DB, Number(activation.user_id));
     if (!actor) return c.json({ success: false, error: 'Activation completed but the account profile could not be loaded.' }, 500);
     await audit(c.env.DB, actor, 'member.activated', 'member_profile', activation.profile_id, { email });
+    await awardAutomaticScore({
+      db: c.env.DB,
+      memberProfileId: actor.profileId,
+      ruleKey: 'member.activated',
+      referenceType: 'member_activation',
+      referenceId: activation.id,
+      actor,
+      metadata: { email },
+    });
     const jwtSecret = String(c.env.JWT_SECRET || '').trim();
     if (!jwtSecret) return c.json({ success: false, error: 'Authentication is not configured. Please contact PHANTOM.' }, 503);
     const jwt = await signToken({ sub: String(actor.userId), email: actor.email, role: tokenRole(actor.userRole) }, jwtSecret);
@@ -454,7 +585,7 @@ app.post('/api/auth/forgot-password', async (c) => {
       .bind(email, await sha256Hex(token), expiresAt)
       .run();
 
-    const base = c.env.SITE_URL || `https://${c.req.header('host') || 'coderxsociety.pages.dev'}`;
+    const base = publicSiteUrl(c.env);
     const resetLink = `${base}/#reset?token=${token}&email=${encodeURIComponent(email)}`;
 
     const sent = await sendEmail(c.env, c.env.EMAILJS_TEMPLATE_ID_RESET || '', {
@@ -479,10 +610,10 @@ app.post('/api/auth/reset-password', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const email = cleanEmail(body.email);
     const token = cleanStr(body.token, 32, 128);
-    const newPassword = cleanStr(body.newPassword, 6, 128);
+    const newPassword = cleanStr(body.newPassword, 8, 128);
 
     if (!email || !token || !newPassword) {
-      return c.json({ success: false, error: 'Email, token, and a new password (min 6 characters) are required' }, 400);
+      return c.json({ success: false, error: 'Email, token, and a new password (min 8 characters) are required' }, 400);
     }
 
     const tokenHash = await sha256Hex(token);
@@ -523,9 +654,9 @@ app.post('/api/auth/change-password', requireAuth, async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
     const current = cleanStr(body.currentPassword, 1, 128);
-    const next = cleanStr(body.newPassword, 6, 128);
+    const next = cleanStr(body.newPassword, 8, 128);
     if (!current || !next) {
-      return c.json({ success: false, error: 'Current and new password (min 6 characters) are required' }, 400);
+      return c.json({ success: false, error: 'Current and new password (min 8 characters) are required' }, 400);
     }
 
     const { results } = await c.env.DB
@@ -645,7 +776,7 @@ app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
 // 📧 SUBSCRIBERS
 // ============================================
 
-app.get('/api/subscribers', requireAdmin, async (c) => {
+app.get('/api/subscribers', requireAuth, requireActiveLegacyAdmin, async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM subscribers ORDER BY date DESC, id DESC').all();
   return c.json({ success: true, data: results });
 });
@@ -678,7 +809,7 @@ app.post('/api/subscribers', async (c) => {
 // ✉️ CONTACT MESSAGES
 // ============================================
 
-app.get('/api/contacts', requireAdmin, async (c) => {
+app.get('/api/contacts', requireAuth, requireActiveLegacyAdmin, async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM contacts ORDER BY date DESC, id DESC').all();
   return c.json({ success: true, data: results });
 });
@@ -720,7 +851,7 @@ app.post('/api/contacts', async (c) => {
   }
 });
 
-app.patch('/api/contacts/:id', requireAdmin, async (c) => {
+app.patch('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
   try {
     const id = Number(c.req.param('id'));
     if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid id' }, 400);
@@ -801,14 +932,13 @@ app.post('/api/members', requireAuth, requirePhantom, async (c) => {
       email,
       phone: cleanOptionalStr(body.phone, 30),
       roleCode: cleanStr(body.role, 2, 50) || 'member',
-      codenamePath: codenamePathFrom(body.codenamePath, cleanStr(body.role, 2, 50) || 'member'),
+      codenamePath: body.codenamePath as CodenamePath | undefined,
       foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
-      requestHost: c.req.header('host'),
     });
     return c.json({ success: true, message: 'Member created and awaiting activation', id: created.memberRecordId, data: created });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to create member';
-    return c.json({ success: false, error: message }, /already|valid/i.test(message) ? 409 : 500);
+    return c.json({ success: false, error: message }, memberCreationErrorStatus(message));
   }
 });
 
@@ -820,9 +950,10 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
 
     const fields: string[] = [];
     const values: any[] = [];
-    if (body.points !== undefined && Number.isFinite(Number(body.points))) {
-      fields.push('points = ?');
-      values.push(Number(body.points));
+    const hasScoreUpdate = body.points !== undefined;
+    const requestedScore = Number(body.points);
+    if (hasScoreUpdate && (!Number.isInteger(requestedScore) || requestedScore < 0 || requestedScore > 1_000_000)) {
+      return c.json({ success: false, error: 'Score must be a whole number from 0 to 1,000,000.' }, 400);
     }
     if (body.level !== undefined) {
       const level = cleanOptionalStr(body.level, 100);
@@ -834,10 +965,36 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
       fields.push('is_active = ?');
       values.push(body.is_active ? 1 : 0);
     }
-    if (fields.length === 0) return c.json({ success: false, error: 'Nothing to update' }, 400);
+    if (fields.length === 0 && !hasScoreUpdate) return c.json({ success: false, error: 'Nothing to update' }, 400);
+    if (body.is_active !== undefined) {
+      const protectedProfileRows = await dbRows<any>(c.env.DB.prepare(
+        `SELECT mp.id, r.code AS role_code FROM member_profiles mp
+         LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.member_record_id = ?`
+      ).bind(id));
+      if (protectedProfileRows[0]?.role_code === 'phantom') {
+        return c.json({ success: false, error: 'The PHANTOM founder profile cannot be locked through the legacy member action.' }, 403);
+      }
+    }
 
-    values.push(id);
-    await c.env.DB.prepare(`UPDATE members SET ${fields.join(', ')} WHERE id = ?`).bind(...values).run();
+    if (fields.length) {
+      values.push(id);
+      await c.env.DB.prepare(`UPDATE members SET ${fields.join(', ')} WHERE id = ?`).bind(...values).run();
+    }
+    if (hasScoreUpdate) {
+      const profileRows = await dbRows<any>(c.env.DB.prepare('SELECT id FROM member_profiles WHERE member_record_id = ?').bind(id));
+      const actor = await actorFromContext(c);
+      if (profileRows[0]) {
+        const reason = cleanOptionalStr(body.scoreReason, 500) || 'Score balance updated from Admin Core';
+        const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileRows[0].id, action: 'set', points: requestedScore, reason, actor });
+        if (result) {
+          await notifyMember(c.env.DB, profileRows[0].id, 'Code Rx points updated', `Your score balance is now ${result.balance}.`, actor);
+          await audit(c.env.DB, actor, 'member.score.legacy_set', 'member_profile', profileRows[0].id, { balance: result.balance, reason });
+        }
+      } else {
+        // Preserve an older member record that has not yet received a profile.
+        await c.env.DB.prepare('UPDATE members SET points = ? WHERE id = ?').bind(requestedScore, id).run();
+      }
+    }
     if (body.is_active !== undefined) {
       const profileRows = await dbRows<any>(c.env.DB.prepare('SELECT id, member_code, status FROM member_profiles WHERE member_record_id = ?').bind(id));
       const profile = profileRows[0];
@@ -867,7 +1024,13 @@ app.delete('/api/members/:id', requireAuth, requirePhantom, async (c) => {
     const memberRecordId = Number(c.req.param('id'));
     if (!Number.isInteger(memberRecordId) || memberRecordId < 1) return c.json({ success: false, error: 'Invalid member id' }, 400);
     const actor = await actorFromContext(c);
-    const profileRows = await dbRows<any>(c.env.DB.prepare('SELECT id, member_code FROM member_profiles WHERE member_record_id = ?').bind(memberRecordId));
+    const profileRows = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, mp.member_code, r.code AS role_code FROM member_profiles mp
+       LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.member_record_id = ?`
+    ).bind(memberRecordId));
+    if (profileRows[0]?.role_code === 'phantom') {
+      return c.json({ success: false, error: 'The PHANTOM founder profile cannot be archived through the legacy member action.' }, 403);
+    }
     await c.env.DB.prepare('UPDATE members SET is_active = 0 WHERE id = ?').bind(memberRecordId).run();
     if (profileRows[0]) {
       await c.env.DB.prepare("UPDATE member_profiles SET status = 'archived', archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -934,12 +1097,22 @@ app.get('/api/member/me', requireAuth, async (c) => {
     `SELECT section_slug, can_view, can_create, can_edit, can_delete, can_manage
      FROM role_permissions WHERE role_id = ? ORDER BY section_slug`
   ).bind(actor.primaryRoleId || 0));
+  const [memberRows, canSend] = await Promise.all([
+    dbRows<{ points: number; level: string }>(c.env.DB.prepare(
+      `SELECT m.points, m.level FROM members m
+       JOIN member_profiles mp ON mp.member_record_id = m.id WHERE mp.id = ?`
+    ).bind(actor.profileId)),
+    canSendNotifications(c.env.DB, actor),
+  ]);
   return c.json({
     success: true,
     data: {
       ...publicActor(actor),
       role: roleRows[0] || null,
       permissions,
+      points: Number(memberRows[0]?.points || 0),
+      level: memberRows[0]?.level || 'Code Rx Member',
+      canSendNotifications: canSend,
       codenameSession: session ? {
         status: session.status,
         pool: session.pool || pool,
@@ -950,6 +1123,166 @@ app.get('/api/member/me', requireAuth, async (c) => {
       } : null,
     },
   });
+});
+
+app.get('/api/members/leaderboard', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const limit = Math.min(25, Math.max(3, Number(c.req.query('limit') || 10)));
+  const members = await dbRows<any>(c.env.DB.prepare(
+    `SELECT mp.id AS member_profile_id, mp.member_code, m.points, m.level,
+       COALESCE(c.display_name, u.name, mp.member_code) AS display_name
+     FROM member_profiles mp
+     JOIN members m ON m.id = mp.member_record_id
+     LEFT JOIN users u ON u.id = mp.user_id
+     LEFT JOIN roles r ON r.id = mp.primary_role_id
+     LEFT JOIN codenames c ON c.claimed_by_member_profile_id = mp.id AND c.status = 'claimed'
+     WHERE mp.status = 'active' AND COALESCE(r.code, '') != 'phantom'
+     ORDER BY m.points DESC, mp.created_at ASC, mp.id ASC LIMIT ?`
+  ).bind(limit));
+  return c.json({ success: true, data: members.map((member, index) => ({
+    ...member,
+    rank: index + 1,
+    points: Number(member.points || 0),
+  })) });
+});
+
+// ============================================
+// 🔔 IN-APP NOTIFICATIONS
+// ============================================
+
+app.get('/api/notifications', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') || 40)));
+  const [items, unreadRows, canSend] = await Promise.all([
+    dbRows<any>(c.env.DB.prepare(
+      `SELECT n.id, n.title, n.message, n.audience_type, n.audience_label, n.sent_at, n.created_at,
+       nr.status, nr.delivered_at, nr.read_at, sender.name AS sender_name, sender_profile.member_code AS sender_member_code
+       FROM notification_recipients nr
+       JOIN notifications n ON n.id = nr.notification_id
+       LEFT JOIN member_profiles sender_profile ON sender_profile.id = n.created_by_member_profile_id
+       LEFT JOIN users sender ON sender.id = sender_profile.user_id
+       WHERE nr.member_profile_id = ?
+       ORDER BY nr.delivered_at DESC, n.id DESC LIMIT ?`
+    ).bind(actor.profileId, limit)),
+    dbRows<{ count: number }>(c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM notification_recipients WHERE member_profile_id = ? AND status = 'unread'"
+    ).bind(actor.profileId)),
+    canSendNotifications(c.env.DB, actor),
+  ]);
+  return c.json({ success: true, data: {
+    items,
+    unreadCount: Number(unreadRows[0]?.count || 0),
+    canSend,
+  } });
+});
+
+app.get('/api/notifications/audience', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  if (!await canSendNotifications(c.env.DB, access.actor!)) {
+    return c.json({ success: false, error: 'Notification sender access is required.' }, 403);
+  }
+  const [members, roles] = await Promise.all([
+    dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, mp.member_code, u.name, r.code AS role_code, r.name AS role_name
+       FROM member_profiles mp JOIN users u ON u.id = mp.user_id
+       LEFT JOIN roles r ON r.id = mp.primary_role_id
+       WHERE mp.status = 'active' ORDER BY u.name COLLATE NOCASE`
+    )),
+    dbRows<any>(c.env.DB.prepare("SELECT code, name FROM roles WHERE code != 'phantom' ORDER BY name")),
+  ]);
+  return c.json({ success: true, data: { members, roles } });
+});
+
+app.post('/api/notifications/:id/read', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const result = await c.env.DB.prepare(
+    "UPDATE notification_recipients SET status = 'read', read_at = CURRENT_TIMESTAMP WHERE notification_id = ? AND member_profile_id = ?"
+  ).bind(id, access.actor!.profileId).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Notification not found.' }, 404);
+  return c.json({ success: true, message: 'Notification marked as read.' });
+});
+
+app.post('/api/notifications/send', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 10, 60)) return c.json({ success: false, error: 'Too many notification broadcasts. Please wait a minute.' }, 429);
+  try {
+    const access = await requireActiveActor(c);
+    if (access.response) return access.response;
+    const actor = access.actor!;
+    if (!await canSendNotifications(c.env.DB, actor)) {
+      return c.json({ success: false, error: 'PHANTOM has not assigned notification sending permission to this account.' }, 403);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const title = cleanStr(body.title, 2, 180);
+    const message = cleanStr(body.message, 2, 5000);
+    const audience = body.audience === 'all' || body.audience === 'selected' || body.audience === 'role' ? body.audience : null;
+    if (!title || !message || !audience) {
+      return c.json({ success: false, error: 'Title, message, and audience are required.' }, 400);
+    }
+    const selectedProfileIds = Array.isArray(body.memberProfileIds)
+      ? body.memberProfileIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)
+      : [];
+    const roleCode = audience === 'role' ? cleanStr(body.roleCode, 2, 50)?.toLowerCase() : undefined;
+    if (audience === 'selected' && !selectedProfileIds.length) return c.json({ success: false, error: 'Choose at least one active member.' }, 400);
+    if (audience === 'role' && !roleCode) return c.json({ success: false, error: 'Choose a responsibility profile.' }, 400);
+    const recipients = await activeNotificationRecipients(c.env.DB, audience, { selectedProfileIds, roleCode });
+    if (!recipients.length) return c.json({ success: false, error: 'No active recipients matched this notification audience.' }, 409);
+    let audienceLabel = audience === 'all' ? 'All active members' : audience === 'selected' ? `${recipients.length} selected member${recipients.length === 1 ? '' : 's'}` : roleCode || '';
+    if (audience === 'role') {
+      const roleRows = await dbRows<{ name: string }>(c.env.DB.prepare('SELECT name FROM roles WHERE code = ?').bind(roleCode));
+      audienceLabel = roleRows[0]?.name || roleCode || '';
+    }
+    const sent = await createNotification(c.env.DB, {
+      title,
+      message,
+      audience,
+      audienceLabel,
+      recipientProfileIds: recipients,
+      actor,
+    });
+    await audit(c.env.DB, actor, 'notification.sent', 'notification', sent.id, { audience, audienceLabel, recipientCount: sent.recipientCount });
+    return c.json({ success: true, data: sent, message: `Notification broadcast to ${sent.recipientCount} active recipient${sent.recipientCount === 1 ? '' : 's'}.` }, 201);
+  } catch (error) {
+    console.error('[code-rx] notification send error:', error);
+    return c.json({ success: false, error: 'Could not send this notification.' }, 500);
+  }
+});
+
+app.get('/api/phantom/notification-delegates', requireAuth, requirePhantom, async (c) => {
+  const delegates = await dbRows<any>(c.env.DB.prepare(
+    `SELECT nd.*, mp.member_code, mp.status AS member_status, u.name, u.email, r.code AS role_code, r.name AS role_name
+     FROM notification_delegates nd
+     JOIN member_profiles mp ON mp.id = nd.member_profile_id
+     JOIN users u ON u.id = mp.user_id
+     LEFT JOIN roles r ON r.id = mp.primary_role_id
+     ORDER BY nd.can_send DESC, u.name COLLATE NOCASE`
+  ));
+  return c.json({ success: true, data: delegates });
+});
+
+app.put('/api/phantom/notification-delegates/:id', requireAuth, requirePhantom, async (c) => {
+  const profileId = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  if (!Number.isInteger(profileId) || profileId < 1 || typeof body.canSend !== 'boolean') {
+    return c.json({ success: false, error: 'Choose a member and a true/false notification permission.' }, 400);
+  }
+  const target = await dbRows<any>(c.env.DB.prepare('SELECT id, status FROM member_profiles WHERE id = ?').bind(profileId));
+  if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+  if (target[0].status !== 'active') return c.json({ success: false, error: 'Only active members can receive notification-sender access.' }, 409);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO notification_delegates (member_profile_id, can_send, assigned_by_user_id, assigned_at, updated_at)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(member_profile_id) DO UPDATE SET can_send = excluded.can_send, assigned_by_user_id = excluded.assigned_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(profileId, body.canSend ? 1 : 0, actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, body.canSend ? 'notification.delegate.enabled' : 'notification.delegate.disabled', 'member_profile', profileId);
+  return c.json({ success: true, message: body.canSend ? 'Notification sending enabled for this member.' : 'Notification sending disabled for this member.' });
 });
 
 app.get('/api/codenames/ballot', requireAuth, async (c) => {
@@ -1073,6 +1406,15 @@ app.post('/api/codenames/claim', requireAuth, async (c) => {
       .bind(codenameId, actor.profileId, actor.userId, `Claimed from ${pool} ballot on successful selection ${attemptsUsed}/3`),
   ]);
   await audit(c.env.DB, actor, 'codename.claimed', 'codename', codenameId, { codename, pool, attemptsUsed });
+  await awardAutomaticScore({
+    db: c.env.DB,
+    memberProfileId: actor.profileId,
+    ruleKey: 'member.codename_claimed',
+    referenceType: 'codename',
+    referenceId: codenameId,
+    actor,
+    metadata: { codename, pool },
+  });
   return c.json({ success: true, data: { codename, pool, attemptsUsed, maxAttempts: 3, message: `${codename} is now your permanent Code Rx identity.` } });
 });
 
@@ -1123,7 +1465,7 @@ app.get('/api/vault/home', requireAuth, async (c) => {
   }
   const visibleIds = new Set(sections.map((section) => section.id));
   const latestRows = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.id, d.section_id, d.title, d.status, d.tags_json, d.word_count, d.updated_at, d.created_at,
+    `SELECT d.id, d.document_code, d.section_id, d.title, d.status, d.tags_json, d.word_count, d.updated_at, d.created_at,
             d.created_by_member_profile_id, d.updated_by_member_profile_id,
             s.slug AS section_slug, s.title AS section_title, u.name AS updated_by_name
      FROM vault_documents d
@@ -1175,20 +1517,26 @@ app.get('/api/vault/search', requireAuth, async (c) => {
   if (access.response) return access.response;
   const actor = access.actor!;
   const wildcard = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+  const canViewProjects = await hasVaultPermission(c.env.DB, actor, 'projects', 'view');
+  const projectSearchClause = canViewProjects ? " OR p.title LIKE ? ESCAPE '\\' COLLATE NOCASE" : '';
+  const searchValues = canViewProjects
+    ? [wildcard, wildcard, wildcard, wildcard, wildcard, wildcard, wildcard]
+    : [wildcard, wildcard, wildcard, wildcard, wildcard, wildcard];
   const rows = await dbRows<any>(c.env.DB.prepare(
-    `SELECT DISTINCT d.id, d.section_id, d.title, d.content, d.tags_json, d.status, d.updated_at,
-       s.slug AS section_slug, s.title AS section_title, u.name AS author_name, p.title AS project_title
+    `SELECT DISTINCT d.id, d.document_code, d.section_id, d.title, d.content, d.tags_json, d.status, d.updated_at,
+       s.slug AS section_slug, s.title AS section_title, u.name AS author_name,
+       ${canViewProjects ? 'p.title' : 'NULL'} AS project_title
      FROM vault_documents d
      JOIN vault_sections s ON s.id = d.section_id
      LEFT JOIN member_profiles author_profile ON author_profile.id = d.created_by_member_profile_id
      LEFT JOIN users u ON u.id = author_profile.user_id
      LEFT JOIN vault_projects p ON p.id = d.related_project_id
      WHERE d.is_archived = 0 AND (
-       d.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR d.content LIKE ? ESCAPE '\\' COLLATE NOCASE OR
-       d.tags_json LIKE ? ESCAPE '\\' COLLATE NOCASE OR u.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR
-       p.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR s.title LIKE ? ESCAPE '\\' COLLATE NOCASE
+       d.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR d.document_code LIKE ? ESCAPE '\\' COLLATE NOCASE OR
+       d.content LIKE ? ESCAPE '\\' COLLATE NOCASE OR d.tags_json LIKE ? ESCAPE '\\' COLLATE NOCASE OR u.name LIKE ? ESCAPE '\\' COLLATE NOCASE${projectSearchClause}
+       OR s.title LIKE ? ESCAPE '\\' COLLATE NOCASE
      ) ORDER BY d.updated_at DESC LIMIT 80`
-  ).bind(wildcard, wildcard, wildcard, wildcard, wildcard, wildcard));
+  ).bind(...searchValues));
   const results: any[] = [];
   for (const row of rows) {
     if (await hasVaultPermission(c.env.DB, actor, row.section_slug, 'view')) results.push(row);
@@ -1199,43 +1547,44 @@ app.get('/api/vault/search', requireAuth, async (c) => {
 app.get('/api/vault/tags', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
-  const tags = await dbRows<any>(c.env.DB.prepare(
-    `SELECT t.id, t.normalized_name, t.display_name, COUNT(dt.document_id) AS document_count
-     FROM vault_tags t LEFT JOIN vault_document_tags dt ON dt.tag_id = t.id
-     GROUP BY t.id ORDER BY document_count DESC, t.display_name`
-  ));
-  return c.json({ success: true, data: tags });
-});
-
-app.get('/api/vault/sections', requireAuth, async (c) => {
-  const access = await requireActiveActor(c);
-  if (access.response) return access.response;
   const actor = access.actor!;
-  const sections = await dbRows<any>(c.env.DB.prepare(
-    'SELECT id, slug, title, description, is_sensitive, sort_order FROM vault_sections WHERE is_archived = 0 ORDER BY sort_order, title'
+  // Tags can expose sensitive document topics, so only aggregate tags from
+  // sections that this actor can actually open. Orphaned/archived tags are
+  // deliberately excluded from the member-facing index as well.
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT t.id, t.normalized_name, t.display_name, s.slug AS section_slug,
+            COUNT(DISTINCT d.id) AS document_count
+     FROM vault_tags t
+     JOIN vault_document_tags dt ON dt.tag_id = t.id
+     JOIN vault_documents d ON d.id = dt.document_id AND d.is_archived = 0
+     JOIN vault_sections s ON s.id = d.section_id AND s.is_archived = 0
+     GROUP BY t.id, s.slug ORDER BY t.display_name`
   ));
-  const visible = [] as any[];
-  for (const section of sections) {
-    if (await hasVaultPermission(c.env.DB, actor, section.slug, 'view')) {
-      visible.push({ ...section, permissions: {
-        view: true,
-        create: await hasVaultPermission(c.env.DB, actor, section.slug, 'create'),
-        edit: await hasVaultPermission(c.env.DB, actor, section.slug, 'edit'),
-        delete: await hasVaultPermission(c.env.DB, actor, section.slug, 'delete'),
-        manage: await hasVaultPermission(c.env.DB, actor, section.slug, 'manage'),
-      } });
-    }
+  const visible = new Map<number, { id: number; normalized_name: string; display_name: string; document_count: number }>();
+  for (const row of rows) {
+    if (!await hasVaultPermission(c.env.DB, actor, row.section_slug, 'view')) continue;
+    const current = visible.get(Number(row.id));
+    if (current) current.document_count += Number(row.document_count || 0);
+    else visible.set(Number(row.id), {
+      id: Number(row.id),
+      normalized_name: row.normalized_name,
+      display_name: row.display_name,
+      document_count: Number(row.document_count || 0),
+    });
   }
-  return c.json({ success: true, data: visible });
+  const tags = [...visible.values()].sort((a, b) => b.document_count - a.document_count || a.display_name.localeCompare(b.display_name));
+  return c.json({ success: true, data: tags });
 });
 
 app.get('/api/vault/documents', requireAuth, async (c) => {
   const slug = cleanStr(c.req.query('section'), 1, 60);
+  const archived = c.req.query('archived') === '1';
   if (!slug) return c.json({ success: false, error: 'Vault section is required' }, 400);
-  const access = await vaultAccess(c, slug, 'view');
+  const access = await vaultAccess(c, slug, archived ? 'manage' : 'view');
   if (access.response) return access.response;
+  const canViewProjects = await hasVaultPermission(c.env.DB, access.actor!, 'projects', 'view');
   const documents = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.id, d.title, d.status, d.visibility, d.file_key, d.tags_json, d.related_project_id, d.word_count, d.created_at, d.updated_at,
+    `SELECT d.id, d.document_code, d.title, d.status, d.visibility, d.file_key, d.tags_json, d.related_project_id, d.word_count, d.archived_from_status, d.archived_at, d.created_at, d.updated_at,
             creator.member_code AS created_by_member_id, creator_user.name AS created_by_name,
             updater.member_code AS updated_by_member_id, updater_user.name AS updated_by_name,
             p.title AS related_project_title
@@ -1245,9 +1594,14 @@ app.get('/api/vault/documents', requireAuth, async (c) => {
      LEFT JOIN member_profiles updater ON updater.id = d.updated_by_member_profile_id
      LEFT JOIN users updater_user ON updater_user.id = updater.user_id
      LEFT JOIN vault_projects p ON p.id = d.related_project_id
-     WHERE d.section_id = ? AND d.is_archived = 0 ORDER BY d.updated_at DESC, d.id DESC`
-  ).bind(access.section.id));
-  return c.json({ success: true, data: documents });
+     WHERE d.section_id = ? AND d.is_archived = ? ORDER BY d.updated_at DESC, d.id DESC`
+  ).bind(access.section.id, archived ? 1 : 0));
+  const visibleDocuments = canViewProjects ? documents : documents.map((document) => ({
+    ...document,
+    related_project_id: null,
+    related_project_title: null,
+  }));
+  return c.json({ success: true, data: visibleDocuments, archived });
 });
 
 app.get('/api/vault/documents/:id', requireAuth, async (c) => {
@@ -1270,9 +1624,11 @@ app.get('/api/vault/documents/:id', requireAuth, async (c) => {
   if (!document || document.is_archived) return c.json({ success: false, error: 'Document not found' }, 404);
   const access = await vaultAccess(c, document.section_slug, 'view');
   if (access.response) return access.response;
+  const canViewProjects = await hasVaultPermission(c.env.DB, access.actor!, 'projects', 'view');
   const parsed = parseStoredDocumentContent(document.content_json, document.content || '');
   return c.json({ success: true, data: {
     ...document,
+    ...(canViewProjects ? {} : { related_project_id: null, related_project_title: null }),
     contentJson: { version: 1, blocks: parsed.blocks },
     tags: await documentTags(c.env.DB, id),
     attachments: await documentAttachments(c.env.DB, id),
@@ -1292,15 +1648,28 @@ app.post('/api/vault/documents', requireAuth, async (c) => {
     const actor = access.actor!;
     const content = normalizeDocumentContent(body.contentJson ?? body.content, cleanOptionalStr(body.content, 100_000) || '');
     const tags = normalizeTags(body.tags);
+    const suppliedStatus = body.status === undefined ? null : requestedDocumentStatus(body.status);
+    if (body.status !== undefined && (!suppliedStatus || !DOCUMENT_STATUSES.has(suppliedStatus))) {
+      return c.json({ success: false, error: 'Choose a valid document status.' }, 400);
+    }
     const status = documentStatus(body.status, 'draft');
+    if (status === 'archived') {
+      return c.json({ success: false, error: 'Use the archive action to archive a document so it can be restored safely.' }, 400);
+    }
     if (status !== 'draft' && status !== 'in_review' && !await hasVaultPermission(c.env.DB, actor, slug, 'manage')) {
       return c.json({ success: false, error: 'Only a section manager can create an approved or active document.' }, 403);
     }
     const relatedProjectId = documentProjectId(body.relatedProjectId);
+    if (body.relatedProjectId !== undefined && body.relatedProjectId !== null && !relatedProjectId) {
+      return c.json({ success: false, error: 'Choose a valid related Vault project.' }, 400);
+    }
+    const projectIssue = await validateActiveProjectReference(c.env.DB, actor, relatedProjectId);
+    if (projectIssue) return c.json({ success: false, error: projectIssue.error }, projectIssue.status);
+    const documentCode = await allocateDocumentCode(c.env.DB);
     const created = await c.env.DB.prepare(
-      `INSERT INTO vault_documents (section_id, title, content, content_json, content_format, status, tags_json, related_project_id, word_count, last_saved_at, visibility, file_key, created_by_member_profile_id, updated_by_member_profile_id)
-       VALUES (?, ?, ?, ?, 'blocks', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)`
-    ).bind(access.section.id, title, content.plainText, content.contentJson, status, JSON.stringify(tags), relatedProjectId, content.wordCount, visibility, fileKey, actor.profileId, actor.profileId).run();
+      `INSERT INTO vault_documents (document_code, section_id, title, content, content_json, content_format, status, tags_json, related_project_id, word_count, last_saved_at, visibility, file_key, created_by_member_profile_id, updated_by_member_profile_id)
+       VALUES (?, ?, ?, ?, ?, 'blocks', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)`
+    ).bind(documentCode, access.section.id, title, content.plainText, content.contentJson, status, JSON.stringify(tags), relatedProjectId, content.wordCount, visibility, fileKey, actor.profileId, actor.profileId).run();
     const documentId = Number(created.meta.last_row_id);
     for (const attachmentId of attachmentIdsFromBlocks(content.blocks)) {
       await c.env.DB.prepare('UPDATE vault_attachments SET document_id = ? WHERE id = ? AND section_id = ?').bind(documentId, attachmentId, access.section.id).run();
@@ -1310,8 +1679,19 @@ app.post('/api/vault/documents', requireAuth, async (c) => {
       `INSERT INTO document_versions (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
        VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(documentId, title, content.plainText, content.contentJson, status, JSON.stringify(tags), relatedProjectId, content.wordCount, fileKey, actor.profileId, 'Initial version').run();
-    await recordVaultActivity(c.env.DB, actor, 'document.created', access.section.id, documentId, { section: slug, title, status, tags });
-    return c.json({ success: true, data: { id: documentId, version: 1 }, message: 'Vault document created' });
+    await recordVaultActivity(c.env.DB, actor, 'document.created', access.section.id, documentId, { section: slug, title, documentCode, status, tags });
+    if (content.wordCount >= 25) {
+      await awardAutomaticScore({
+        db: c.env.DB,
+        memberProfileId: actor.profileId,
+        ruleKey: 'vault.document_created',
+        referenceType: 'vault_document',
+        referenceId: documentId,
+        actor,
+        metadata: { documentCode, wordCount: content.wordCount, section: slug },
+      });
+    }
+    return c.json({ success: true, data: { id: documentId, documentCode, version: 1 }, message: 'Vault document created' });
   } catch (error) {
     console.error('[code-rx] create vault document error:', error);
     return c.json({ success: false, error: 'Could not create the Vault document' }, 500);
@@ -1337,12 +1717,26 @@ app.patch('/api/vault/documents/:id', requireAuth, async (c) => {
     const changedContent = body.contentJson !== undefined || body.content !== undefined;
     const content = changedContent ? normalizeDocumentContent(body.contentJson ?? body.content, cleanOptionalStr(body.content, 100_000) || '') : currentContent;
     const tags = body.tags === undefined ? normalizeTags(document.tags_json) : normalizeTags(body.tags);
+    const suppliedStatus = body.status === undefined ? null : requestedDocumentStatus(body.status);
+    if (body.status !== undefined && (!suppliedStatus || !DOCUMENT_STATUSES.has(suppliedStatus))) {
+      return c.json({ success: false, error: 'Choose a valid document status.' }, 400);
+    }
     const status = body.status === undefined ? document.status : documentStatus(body.status, document.status || 'draft');
-    if (status !== document.status && ['approved', 'active', 'archived'].includes(status) && !await hasVaultPermission(c.env.DB, actor, document.section_slug, 'manage')) {
-      return c.json({ success: false, error: 'Only a section manager can change this document to approved, active, or archived.' }, 403);
+    if (status === 'archived') {
+      return c.json({ success: false, error: 'Use the archive action to archive a document so it can be restored safely.' }, 400);
+    }
+    if (status !== document.status && ['approved', 'active'].includes(status) && !await hasVaultPermission(c.env.DB, actor, document.section_slug, 'manage')) {
+      return c.json({ success: false, error: 'Only a section manager can change this document to approved or active.' }, 403);
     }
     const visibility = body.visibility === undefined ? document.visibility : (body.visibility === 'members' || body.visibility === 'restricted' ? body.visibility : 'section');
     const relatedProjectId = body.relatedProjectId === undefined ? document.related_project_id : documentProjectId(body.relatedProjectId);
+    if (body.relatedProjectId !== undefined && body.relatedProjectId !== null && !relatedProjectId) {
+      return c.json({ success: false, error: 'Choose a valid related Vault project.' }, 400);
+    }
+    if (body.relatedProjectId !== undefined) {
+      const projectIssue = await validateActiveProjectReference(c.env.DB, actor, relatedProjectId);
+      if (projectIssue) return c.json({ success: false, error: projectIssue.error }, projectIssue.status);
+    }
     const fileKey = body.fileKey === undefined ? document.file_key : cleanOptionalStr(body.fileKey, 500);
     const note = cleanOptionalStr(body.changeNote, 1000) || (body.autosave ? 'Autosaved document update' : 'Updated document');
     const versionRows = await dbRows<any>(c.env.DB.prepare('SELECT MAX(version_number) AS version FROM document_versions WHERE document_id = ?').bind(id));
@@ -1361,6 +1755,17 @@ app.patch('/api/vault/documents/:id', requireAuth, async (c) => {
     }
     await syncDocumentTags(c.env.DB, id, tags);
     await recordVaultActivity(c.env.DB, actor, body.autosave ? 'document.autosaved' : 'document.edited', access.section.id, id, { section: document.section_slug, version, note, status, tags });
+    if (status !== document.status && (status === 'approved' || status === 'active')) {
+      await awardAutomaticScore({
+        db: c.env.DB,
+        memberProfileId: document.created_by_member_profile_id || actor.profileId,
+        ruleKey: 'vault.document_approved',
+        referenceType: 'vault_document',
+        referenceId: id,
+        actor,
+        metadata: { status, version, section: document.section_slug },
+      });
+    }
     return c.json({ success: true, message: body.autosave ? 'Autosaved' : 'Vault document updated', data: { version, wordCount: content.wordCount } });
   } catch (error) {
     console.error('[code-rx] update vault document error:', error);
@@ -1372,15 +1777,42 @@ app.delete('/api/vault/documents/:id', requireAuth, async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id' }, 400);
   const rows = await dbRows<any>(c.env.DB.prepare(
-    `SELECT d.id, d.section_id, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+    `SELECT d.id, d.section_id, d.is_archived, d.status, d.archived_from_status, s.slug AS section_slug
+     FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
   ).bind(id));
   const document = rows[0];
-  if (!document) return c.json({ success: false, error: 'Document not found' }, 404);
+  if (!document || document.is_archived) return c.json({ success: false, error: 'Active document not found' }, 404);
   const access = await vaultAccess(c, document.section_slug, 'delete');
   if (access.response) return access.response;
-  await c.env.DB.prepare("UPDATE vault_documents SET is_archived = 1, status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run();
+  await c.env.DB.prepare(
+    `UPDATE vault_documents
+     SET is_archived = 1,
+         archived_from_status = CASE
+           WHEN status IN ('draft', 'in_review', 'approved', 'active') THEN status
+           WHEN archived_from_status IN ('draft', 'in_review', 'approved', 'active') THEN archived_from_status
+           ELSE 'draft'
+         END,
+         archived_at = CURRENT_TIMESTAMP, status = 'archived', updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(id).run();
   await recordVaultActivity(c.env.DB, access.actor, 'document.archived', document.section_id, id, { section: document.section_slug });
   return c.json({ success: true, message: 'Document archived. Its history remains preserved.' });
+});
+
+app.post('/api/vault/documents/:id/unarchive', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.id, d.section_id, d.is_archived, d.archived_from_status, s.slug AS section_slug FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+  ).bind(id));
+  const document = rows[0];
+  if (!document || !document.is_archived) return c.json({ success: false, error: 'Archived document not found' }, 404);
+  const access = await vaultAccess(c, document.section_slug, 'manage');
+  if (access.response) return access.response;
+  const restoredStatus = document.archived_from_status && document.archived_from_status !== 'archived' ? document.archived_from_status : 'draft';
+  await c.env.DB.prepare("UPDATE vault_documents SET is_archived = 0, status = ?, archived_from_status = NULL, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(restoredStatus, id).run();
+  await recordVaultActivity(c.env.DB, access.actor, 'document.unarchived', document.section_id, id, { section: document.section_slug, restoredStatus });
+  return c.json({ success: true, message: 'Document restored from archive.', data: { status: restoredStatus } });
 });
 
 app.get('/api/vault/documents/:id/versions', requireAuth, async (c) => {
@@ -1423,6 +1855,7 @@ app.post('/api/vault/documents/:id/restore/:version', requireAuth, async (c) => 
   ).bind(id));
   const current = currentRows[0];
   if (!current) return c.json({ success: false, error: 'Document not found.' }, 404);
+  if (current.is_archived) return c.json({ success: false, error: 'Unarchive this document before restoring a version.' }, 409);
   const access = await vaultAccess(c, current.section_slug, 'manage');
   if (access.response) return access.response;
   const snapshotRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM document_versions WHERE document_id = ? AND version_number = ?').bind(id, version));
@@ -1431,33 +1864,221 @@ app.post('/api/vault/documents/:id/restore/:version', requireAuth, async (c) => 
   const actor = access.actor!;
   const content = parseStoredDocumentContent(snapshot.content_json, snapshot.content || '');
   const tags = normalizeTags(snapshot.tags_json);
+  const restoredStatus = ACTIVE_DOCUMENT_STATUSES.has(snapshot.status) ? snapshot.status : 'draft';
   const versionRows = await dbRows<any>(c.env.DB.prepare('SELECT MAX(version_number) AS version FROM document_versions WHERE document_id = ?').bind(id));
   const restoredVersion = Number(versionRows[0]?.version || 0) + 1;
   await c.env.DB.batch([
     c.env.DB.prepare(
       `UPDATE vault_documents SET title = ?, content = ?, content_json = ?, content_format = 'blocks', status = ?, tags_json = ?, related_project_id = ?, word_count = ?, file_key = ?, updated_by_member_profile_id = ?, last_saved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).bind(snapshot.title, content.plainText, content.contentJson, snapshot.status || 'draft', JSON.stringify(tags), snapshot.related_project_id ?? null, Number(snapshot.word_count || content.wordCount), snapshot.file_key ?? null, actor.profileId, id),
+    ).bind(snapshot.title, content.plainText, content.contentJson, restoredStatus, JSON.stringify(tags), snapshot.related_project_id ?? null, Number(snapshot.word_count || content.wordCount), snapshot.file_key ?? null, actor.profileId, id),
     c.env.DB.prepare(
       `INSERT INTO document_versions (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, restoredVersion, snapshot.title, content.plainText, content.contentJson, snapshot.status || 'draft', JSON.stringify(tags), snapshot.related_project_id ?? null, Number(snapshot.word_count || content.wordCount), snapshot.file_key ?? null, actor.profileId, `Restored from version ${version}`),
+    ).bind(id, restoredVersion, snapshot.title, content.plainText, content.contentJson, restoredStatus, JSON.stringify(tags), snapshot.related_project_id ?? null, Number(snapshot.word_count || content.wordCount), snapshot.file_key ?? null, actor.profileId, `Restored from version ${version}`),
   ]);
   await syncDocumentTags(c.env.DB, id, tags);
   await recordVaultActivity(c.env.DB, actor, 'document.restored', current.section_id, id, { fromVersion: version, restoredVersion });
   return c.json({ success: true, data: { version: restoredVersion }, message: `Restored version ${version} as version ${restoredVersion}.` });
 });
 
+// ============================================
+// 🔗 VAULT DOCUMENT SHARING
+// ============================================
+
+app.get('/api/vault/sharing/status', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  return c.json({ success: true, data: await sharingCapability(c.env.DB, access.actor!) });
+});
+
+app.get('/api/phantom/sharing', requireAuth, requirePhantom, async (c) => {
+  const globalEnabled = (await settingValue(c.env.DB, 'vault_sharing_enabled', '0')) === '1';
+  const permissions = await dbRows<any>(c.env.DB.prepare(
+    `SELECT msp.member_profile_id, msp.can_share, msp.updated_at, mp.member_code, mp.status AS member_status,
+       u.name, u.email, r.code AS role_code, r.name AS role_name
+     FROM member_share_permissions msp
+     JOIN member_profiles mp ON mp.id = msp.member_profile_id
+     JOIN users u ON u.id = mp.user_id
+     LEFT JOIN roles r ON r.id = mp.primary_role_id
+     ORDER BY u.name COLLATE NOCASE`
+  ));
+  return c.json({ success: true, data: { globalEnabled, permissions } });
+});
+
+app.put('/api/phantom/sharing/global', requireAuth, requirePhantom, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body.enabled !== 'boolean') return c.json({ success: false, error: 'Sharing enabled must be true or false.' }, 400);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO system_settings (setting_key, setting_value, updated_by_user_id, updated_at)
+     VALUES ('vault_sharing_enabled', ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(body.enabled ? '1' : '0', actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, body.enabled ? 'vault.sharing.global_enabled' : 'vault.sharing.global_disabled', 'system_setting', 'vault_sharing_enabled');
+  return c.json({ success: true, message: body.enabled ? 'Vault sharing is enabled globally.' : 'Vault sharing is disabled globally. Existing public links are paused.' });
+});
+
+app.put('/api/phantom/members/:id/sharing', requireAuth, requirePhantom, async (c) => {
+  const profileId = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  if (!Number.isInteger(profileId) || profileId < 1 || typeof body.canShare !== 'boolean') {
+    return c.json({ success: false, error: 'Choose a member and a true/false share permission.' }, 400);
+  }
+  const target = await dbRows<any>(c.env.DB.prepare(
+    `SELECT mp.id, mp.status, r.code AS role_code FROM member_profiles mp
+     LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+  ).bind(profileId));
+  if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+  if (target[0].role_code === 'phantom') return c.json({ success: false, error: 'PHANTOM sharing is controlled by the global master switch.' }, 403);
+  if (target[0].status !== 'active') return c.json({ success: false, error: 'Only active members can receive document-sharing access.' }, 409);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO member_share_permissions (member_profile_id, can_share, updated_by_user_id, updated_at)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(member_profile_id) DO UPDATE SET can_share = excluded.can_share, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(profileId, body.canShare ? 1 : 0, actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, body.canShare ? 'vault.sharing.member_enabled' : 'vault.sharing.member_disabled', 'member_profile', profileId);
+  return c.json({ success: true, message: body.canShare ? 'Document sharing enabled for this member.' : 'Document sharing disabled for this member. Their existing links are paused.' });
+});
+
+const shareableDocumentAccess = async (c: any, documentId: number) => {
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.*, s.slug AS section_slug, s.is_sensitive, s.is_archived AS section_archived, s.title AS section_title
+     FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+  ).bind(documentId));
+  const document = rows[0];
+  if (!document || document.is_archived || document.section_archived) return { document: null, actor: null, response: c.json({ success: false, error: 'Active document not found.' }, 404) };
+  const access = await vaultAccess(c, document.section_slug, 'edit');
+  if (access.response) return { document: null, actor: null, response: access.response };
+  return { document, actor: access.actor!, response: null };
+};
+
+app.get('/api/vault/documents/:id/shares', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id.' }, 400);
+  const access = await shareableDocumentAccess(c, id);
+  if (access.response) return access.response;
+  const capability = await sharingCapability(c.env.DB, access.actor!);
+  const shares = await dbRows<any>(c.env.DB.prepare(
+    `SELECT id, status, expires_at, last_accessed_at, created_at, created_by_member_profile_id
+     FROM vault_shares WHERE document_id = ? ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}
+     ORDER BY created_at DESC`
+  ).bind(...(access.actor!.isPhantom ? [id] : [id, access.actor!.profileId])));
+  return c.json({ success: true, data: { capability, shares } });
+});
+
+app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 20, 60)) return c.json({ success: false, error: 'Too many share-link requests. Please wait a minute.' }, 429);
+  try {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id.' }, 400);
+    const access = await shareableDocumentAccess(c, id);
+    if (access.response) return access.response;
+    const capability = await sharingCapability(c.env.DB, access.actor!);
+    if (!capability.canShare) return c.json({ success: false, error: 'PHANTOM has not enabled Vault sharing for this account.' }, 403);
+    if (access.document!.is_sensitive || access.document!.visibility === 'restricted') {
+      return c.json({ success: false, error: 'Sensitive or restricted Vault documents cannot be shared publicly.' }, 409);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const expiresInDays = body.expiresInDays === undefined ? 7 : Number(body.expiresInDays);
+    if (!Number.isInteger(expiresInDays) || ![1, 7, 30, 90].includes(expiresInDays)) {
+      return c.json({ success: false, error: 'Choose a share expiry of 1, 7, 30, or 90 days.' }, 400);
+    }
+    const token = randomToken();
+    const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+    const created = await c.env.DB.prepare(
+      `INSERT INTO vault_shares (document_id, token_hash, created_by_member_profile_id, status, expires_at)
+       VALUES (?, ?, ?, 'active', ?)`
+    ).bind(id, await sha256Hex(token), access.actor!.profileId, expiresAt).run();
+    const shareId = Number(created.meta.last_row_id);
+    const shareUrl = `${publicSiteUrl(c.env)}/#vault-share?token=${token}`;
+    await audit(c.env.DB, access.actor, 'vault.document.shared', 'vault_document', id, {
+      shareId,
+      documentCode: access.document!.document_code || null,
+      expiresAt,
+    });
+    return c.json({ success: true, data: { id: shareId, shareUrl, expiresAt }, message: 'Read-only share link created.' }, 201);
+  } catch (error) {
+    console.error('[code-rx] create Vault share error:', error);
+    return c.json({ success: false, error: 'Could not create this share link.' }, 500);
+  }
+});
+
+app.post('/api/vault/documents/:id/shares/:shareId/revoke', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  const shareId = Number(c.req.param('shareId'));
+  if (!Number.isInteger(id) || !Number.isInteger(shareId) || id < 1 || shareId < 1) {
+    return c.json({ success: false, error: 'Invalid document or share id.' }, 400);
+  }
+  const access = await shareableDocumentAccess(c, id);
+  if (access.response) return access.response;
+  const result = await c.env.DB.prepare(
+    `UPDATE vault_shares SET status = 'revoked'
+     WHERE id = ? AND document_id = ? ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'} AND status = 'active'`
+  ).bind(...(access.actor!.isPhantom ? [shareId, id] : [shareId, id, access.actor!.profileId])).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Active share link not found.' }, 404);
+  await audit(c.env.DB, access.actor, 'vault.document.share_revoked', 'vault_document', id, { shareId });
+  return c.json({ success: true, message: 'Share link revoked.' });
+});
+
+// Public, read-only share endpoint. It returns no attachment keys, protected
+// file URLs, private member details, or sensitive/restricted documents.
+app.get('/api/vault/shares/:token', async (c) => {
+  if (!checkRateLimit(c, 60, 60)) return c.json({ success: false, error: 'Too many share-link requests. Please wait a minute.' }, 429);
+  const token = cleanStr(c.req.param('token'), 32, 128);
+  if (!token) return c.json({ success: false, error: 'Share link is invalid.' }, 404);
+  if ((await settingValue(c.env.DB, 'vault_sharing_enabled', '0')) !== '1') {
+    return c.json({ success: false, error: 'Vault sharing is currently paused.' }, 404);
+  }
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT vs.id AS share_id, vs.status AS share_status, vs.expires_at, vs.created_by_member_profile_id,
+       d.id AS document_id, d.document_code, d.title, d.content, d.content_json, d.created_at, d.updated_at,
+       d.is_archived, d.visibility, s.title AS section_title, s.is_sensitive, s.is_archived AS section_archived,
+       creator.status AS creator_status, creator_role.code AS creator_role_code, msp.can_share
+     FROM vault_shares vs
+     JOIN vault_documents d ON d.id = vs.document_id
+     JOIN vault_sections s ON s.id = d.section_id
+     JOIN member_profiles creator ON creator.id = vs.created_by_member_profile_id
+     LEFT JOIN roles creator_role ON creator_role.id = creator.primary_role_id
+     LEFT JOIN member_share_permissions msp ON msp.member_profile_id = creator.id
+     WHERE vs.token_hash = ? AND vs.status = 'active'`
+  ).bind(await sha256Hex(token)));
+  const share = rows[0];
+  if (!share || share.is_archived || share.section_archived || share.is_sensitive || share.visibility === 'restricted') {
+    return c.json({ success: false, error: 'Shared document is unavailable.' }, 404);
+  }
+  if (share.expires_at && new Date(share.expires_at).getTime() <= Date.now()) {
+    return c.json({ success: false, error: 'This share link has expired.' }, 410);
+  }
+  const creatorCanShare = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_share || 0) === 1);
+  if (!creatorCanShare) return c.json({ success: false, error: 'Shared document is unavailable.' }, 404);
+  const parsed = parseStoredDocumentContent(share.content_json, share.content || '');
+  const blocks = parsed.blocks
+    .filter((block) => block.type !== 'image' && block.type !== 'file')
+    .map((block) => block.type === 'embed' && block.url?.startsWith('/api/vault-files/') ? { ...block, url: '' } : block);
+  await c.env.DB.prepare('UPDATE vault_shares SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?').bind(share.share_id).run();
+  return c.json({ success: true, data: {
+    documentCode: share.document_code || null,
+    title: share.title,
+    sectionTitle: share.section_title,
+    createdAt: share.created_at,
+    updatedAt: share.updated_at,
+    contentJson: { version: 1, blocks },
+  } }, 200, { 'Cache-Control': 'private, no-store' });
+});
+
 app.get('/api/vault/projects', requireAuth, async (c) => {
-  const access = await vaultAccess(c, 'projects', 'view');
+  const archived = c.req.query('archived') === '1';
+  const access = await vaultAccess(c, 'projects', archived ? 'manage' : 'view');
   if (access.response) return access.response;
   const projects = await dbRows<any>(c.env.DB.prepare(
     `SELECT p.*, mp.member_code AS lead_member_id, u.name AS lead_name
      FROM vault_projects p
      LEFT JOIN member_profiles mp ON mp.id = p.lead_member_profile_id
      LEFT JOIN users u ON u.id = mp.user_id
-     WHERE p.is_archived = 0 ORDER BY p.updated_at DESC`
-  ));
-  return c.json({ success: true, data: projects });
+     WHERE p.is_archived = ? ORDER BY p.updated_at DESC`
+  ).bind(archived ? 1 : 0));
+  return c.json({ success: true, data: projects, archived });
 });
 
 app.post('/api/vault/projects', requireAuth, async (c) => {
@@ -1482,6 +2103,15 @@ app.post('/api/vault/projects', requireAuth, async (c) => {
   ).run();
   const id = Number(result.meta.last_row_id);
   await audit(c.env.DB, actor, 'vault.project.created', 'vault_project', id, { title });
+  await awardAutomaticScore({
+    db: c.env.DB,
+    memberProfileId: actor.profileId,
+    ruleKey: 'vault.project_created',
+    referenceType: 'vault_project',
+    referenceId: id,
+    actor,
+    metadata: { title },
+  });
   return c.json({ success: true, data: { id }, message: 'Vault project created' });
 });
 
@@ -1492,9 +2122,17 @@ app.patch('/api/vault/projects/:id', requireAuth, async (c) => {
   if (access.response) return access.response;
   const actor = access.actor!;
   const body = await c.req.json().catch(() => ({}));
-  const currentRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM vault_projects WHERE id = ? AND is_archived = 0').bind(id));
+  const currentRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM vault_projects WHERE id = ?').bind(id));
   const current = currentRows[0];
   if (!current) return c.json({ success: false, error: 'Project not found' }, 404);
+  if (body.archive !== undefined) {
+    if (typeof body.archive !== 'boolean') return c.json({ success: false, error: 'Project archive must be true or false.' }, 400);
+    if (!await hasVaultPermission(c.env.DB, actor, 'projects', 'manage')) return c.json({ success: false, error: 'Only a Projects manager can archive or unarchive projects.' }, 403);
+    await c.env.DB.prepare('UPDATE vault_projects SET is_archived = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(body.archive ? 1 : 0, id).run();
+    await audit(c.env.DB, actor, body.archive ? 'vault.project.archived' : 'vault.project.unarchived', 'vault_project', id, { title: current.title });
+    return c.json({ success: true, message: body.archive ? 'Project archived.' : 'Project restored from archive.' });
+  }
+  if (current.is_archived) return c.json({ success: false, error: 'Restore this project before editing it.' }, 409);
   const title = body.title === undefined ? current.title : cleanStr(body.title, 2, 180);
   if (!title) return c.json({ success: false, error: 'A valid project title is required' }, 400);
   await c.env.DB.prepare(
@@ -1541,6 +2179,9 @@ app.post('/api/vault/projects/:id/tasks', requireAuth, async (c) => {
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid project id' }, 400);
   const access = await vaultAccess(c, 'projects', 'create');
   if (access.response) return access.response;
+  const projectRows = await dbRows<any>(c.env.DB.prepare('SELECT id, is_archived FROM vault_projects WHERE id = ?').bind(id));
+  if (!projectRows[0]) return c.json({ success: false, error: 'Project not found' }, 404);
+  if (projectRows[0].is_archived) return c.json({ success: false, error: 'Restore this project before adding tasks.' }, 409);
   const body = await c.req.json().catch(() => ({}));
   const title = cleanStr(body.title, 2, 180);
   if (!title) return c.json({ success: false, error: 'Task title is required' }, 400);
@@ -1570,10 +2211,16 @@ app.post('/api/vault/meetings', requireAuth, async (c) => {
   const title = cleanStr(body.title, 2, 180);
   const heldAt = cleanStr(body.heldAt, 8, 80);
   if (!title || !heldAt) return c.json({ success: false, error: 'Meeting title and date are required' }, 400);
+  const projectId = documentProjectId(body.projectId);
+  if (body.projectId !== undefined && body.projectId !== null && !projectId) {
+    return c.json({ success: false, error: 'Choose a valid linked Vault project.' }, 400);
+  }
+  const projectIssue = await validateActiveProjectReference(c.env.DB, access.actor!, projectId);
+  if (projectIssue) return c.json({ success: false, error: projectIssue.error }, projectIssue.status);
   const sectionRows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM vault_sections WHERE slug = 'meetings'"));
   const result = await c.env.DB.prepare(
     'INSERT INTO meetings (section_id, project_id, title, held_at, agenda, notes, visibility, created_by_member_profile_id, updated_by_member_profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).bind(sectionRows[0]?.id || null, Number.isInteger(Number(body.projectId)) ? Number(body.projectId) : null, title, heldAt,
+  ).bind(sectionRows[0]?.id || null, projectId, title, heldAt,
     cleanOptionalStr(body.agenda, 10_000) || '', cleanOptionalStr(body.notes, 50_000) || '', body.visibility === 'restricted' ? 'restricted' : 'members', access.actor!.profileId, access.actor!.profileId).run();
   const meetingId = Number(result.meta.last_row_id);
   await audit(c.env.DB, access.actor, 'vault.meeting.created', 'meeting', meetingId, { title, projectId: body.projectId || null });
@@ -1644,16 +2291,15 @@ app.post('/api/phantom/applications/:id/create-member', requireAuth, requirePhan
       email: cleanEmail(body.email) || application.email,
       phone: cleanOptionalStr(body.phone, 30) || application.phone || null,
       roleCode: cleanStr(body.roleCode, 2, 50) || 'member',
-      codenamePath: codenamePathFrom(body.codenamePath, cleanStr(body.roleCode, 2, 50) || 'member'),
+      codenamePath: body.codenamePath as CodenamePath | undefined,
       foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
       applicationId,
-      requestHost: c.req.header('host'),
     });
     return c.json({ success: true, data: member, message: 'Member created. Send the activation link securely to the applicant.' }, 201);
   } catch (error) {
     console.error('[code-rx] create member from application error:', error);
     const message = error instanceof Error ? error.message : 'Could not create member';
-    return c.json({ success: false, error: message }, /already|valid|PHANTOM/i.test(message) ? 409 : 500);
+    return c.json({ success: false, error: message }, memberCreationErrorStatus(message));
   }
 });
 
@@ -1669,14 +2315,13 @@ app.post('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
       env: c.env, actor, name, email,
       phone: cleanOptionalStr(body.phone, 30),
       roleCode: cleanStr(body.roleCode, 2, 50) || 'member',
-      codenamePath: codenamePathFrom(body.codenamePath, cleanStr(body.roleCode, 2, 50) || 'member'),
+      codenamePath: body.codenamePath as CodenamePath | undefined,
       foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
-      requestHost: c.req.header('host'),
     });
     return c.json({ success: true, data: member, message: 'Member created. Activation is required before the account becomes active.' }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not create member';
-    return c.json({ success: false, error: message }, /already|valid|PHANTOM/i.test(message) ? 409 : 500);
+    return c.json({ success: false, error: message }, memberCreationErrorStatus(message));
   }
 });
 
@@ -1689,7 +2334,7 @@ app.get('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
     values.push(status);
   }
   const members = await dbRows<any>(c.env.DB.prepare(
-    `SELECT mp.*, u.name, u.email, m.phone, r.code AS role_code, r.name AS role_name, c.display_name AS codename
+    `SELECT mp.*, u.name, u.email, m.phone, m.points, m.level, r.code AS role_code, r.name AS role_name, c.display_name AS codename
      FROM member_profiles mp
      LEFT JOIN users u ON u.id = mp.user_id
      LEFT JOIN members m ON m.id = mp.member_record_id
@@ -1708,11 +2353,12 @@ app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => 
     const body = await c.req.json().catch(() => ({}));
     const actor = await actorFromContext(c);
     const profileRows = await dbRows<any>(c.env.DB.prepare(
-      `SELECT mp.*, r.code AS role_code FROM member_profiles mp LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+      `SELECT mp.*, r.code AS role_code, r.name AS role_name
+       FROM member_profiles mp LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
     ).bind(profileId));
     const profile = profileRows[0];
     if (!profile) return c.json({ success: false, error: 'Member profile not found' }, 404);
-    if (profile.role_code === 'phantom' && actor?.profileId !== profileId) {
+    if (profile.role_code === 'phantom') {
       return c.json({ success: false, error: 'The PHANTOM founder profile cannot be changed from this action.' }, 403);
     }
     const action = body.action;
@@ -1728,15 +2374,42 @@ app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => 
     }
     if (body.roleCode !== undefined) {
       const roleCode = cleanStr(body.roleCode, 2, 50);
-      const roleRows = roleCode ? await dbRows<any>(c.env.DB.prepare('SELECT id, code FROM roles WHERE code = ?').bind(roleCode)) : [];
+      const roleRows = roleCode ? await dbRows<any>(c.env.DB.prepare('SELECT id, code, name FROM roles WHERE code = ?').bind(roleCode)) : [];
       const role = roleRows[0];
       if (!role || role.code === 'phantom') return c.json({ success: false, error: 'Choose a valid non-PHANTOM role.' }, 400);
-      await c.env.DB.batch([
-        c.env.DB.prepare('UPDATE member_profiles SET primary_role_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(role.id, profileId),
+      const claimedRows = await dbRows<any>(c.env.DB.prepare(
+        "SELECT id FROM codenames WHERE claimed_by_member_profile_id = ? AND status = 'claimed'"
+      ).bind(profileId));
+      const hasPermanentCodename = Boolean(claimedRows[0]);
+      // Keep an already-earned identity path immutable. Before a codename is
+      // claimed, switching to/from Custom must also switch its ballot pool.
+      const nextCodenamePath: CodenamePath = hasPermanentCodename || profile.codename_path === 'direct_founding'
+        ? (profile.codename_path || 'member')
+        : role.code === 'custom' ? 'custom_founding' : 'member';
+      const resetBallot = !hasPermanentCodename && profile.codename_path !== 'direct_founding' && nextCodenamePath !== profile.codename_path;
+      const statements: D1PreparedStatement[] = [
+        c.env.DB.prepare('UPDATE member_profiles SET primary_role_id = ?, codename_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .bind(role.id, nextCodenamePath, profileId),
+        c.env.DB.prepare('UPDATE members SET role = ?, level = ? WHERE id = ?')
+          .bind(role.code, role.name, profile.member_record_id),
         c.env.DB.prepare('INSERT INTO member_role_history (member_profile_id, previous_role_id, new_role_id, changed_by_user_id, reason) VALUES (?, ?, ?, ?, ?)')
           .bind(profileId, profile.primary_role_id, role.id, actor?.userId ?? null, cleanOptionalStr(body.reason, 1000)),
-      ]);
-      await audit(c.env.DB, actor, 'member.role.reassigned', 'member_profile', profileId, { from: profile.role_code, to: role.code });
+      ];
+      if (resetBallot) {
+        statements.push(c.env.DB.prepare(
+          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, started_at, completed_at)
+           VALUES (?, 'open', ?, 'ballot', 0, NULL, CURRENT_TIMESTAMP, NULL)
+           ON CONFLICT(member_profile_id) DO UPDATE SET status = 'open', pool = excluded.pool, assignment_source = 'ballot',
+             passes_used = 0, claimed_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL`
+        ).bind(profileId, poolForPath(nextCodenamePath)));
+      }
+      await c.env.DB.batch(statements);
+      await audit(c.env.DB, actor, 'member.role.reassigned', 'member_profile', profileId, {
+        from: profile.role_code,
+        to: role.code,
+        codenamePath: nextCodenamePath,
+        ballotReset: resetBallot,
+      });
       return c.json({ success: true, message: 'Role reassigned and history preserved.' });
     }
     return c.json({ success: false, error: 'Choose a member action or role reassignment.' }, 400);
@@ -1763,6 +2436,94 @@ app.get('/api/phantom/members/:id/history', requireAuth, requirePhantom, async (
   return c.json({ success: true, data: { roles, codenames, activity } });
 });
 
+app.get('/api/phantom/members/:id/score-history', requireAuth, requirePhantom, async (c) => {
+  const profileId = Number(c.req.param('id'));
+  if (!Number.isInteger(profileId) || profileId < 1) return c.json({ success: false, error: 'Invalid member profile id.' }, 400);
+  const events = await dbRows<any>(c.env.DB.prepare(
+    `SELECT e.*, u.name AS changed_by_name
+     FROM member_score_events e
+     LEFT JOIN users u ON u.id = e.created_by_user_id
+     WHERE e.member_profile_id = ? ORDER BY e.created_at DESC, e.id DESC LIMIT 200`
+  ).bind(profileId));
+  return c.json({ success: true, data: events.map((event) => ({
+    ...event,
+    points_delta: Number(event.points_delta || 0),
+    balance_after: Number(event.balance_after || 0),
+  })) });
+});
+
+app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c) => {
+  try {
+    const profileId = Number(c.req.param('id'));
+    if (!Number.isInteger(profileId) || profileId < 1) return c.json({ success: false, error: 'Invalid member profile id.' }, 400);
+    const body = await c.req.json().catch(() => ({}));
+    const action = body.action as ScoreAdjustmentAction;
+    const points = Number(body.points);
+    const reason = cleanStr(body.reason, 2, 500);
+    if (!['add', 'deduct', 'set'].includes(action) || !Number.isInteger(points) || points < 0 || points > 1_000_000 || !reason) {
+      return c.json({ success: false, error: 'Choose add, deduct, or set; provide a whole point value and a clear reason.' }, 400);
+    }
+    if ((action === 'add' || action === 'deduct') && points < 1) {
+      return c.json({ success: false, error: 'Add and deduct actions require at least one point.' }, 400);
+    }
+    const target = await dbRows<any>(c.env.DB.prepare('SELECT id, status FROM member_profiles WHERE id = ?').bind(profileId));
+    if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+    if (target[0].status === 'archived') return c.json({ success: false, error: 'Restore this member before changing their score.' }, 409);
+    const actor = await actorFromContext(c);
+    const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileId, action, points, reason, actor });
+    if (!result) return c.json({ success: false, error: 'Member score could not be updated.' }, 404);
+    await notifyMember(
+      c.env.DB,
+      profileId,
+      'Code Rx points updated',
+      `${result.delta >= 0 ? '+' : ''}${result.delta} points: ${reason}. Your balance is now ${result.balance}.`,
+      actor,
+    );
+    await audit(c.env.DB, actor, 'member.score.manual_adjustment', 'member_profile', profileId, {
+      action,
+      requestedPoints: points,
+      delta: result.delta,
+      balance: result.balance,
+      reason,
+    });
+    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId }, message: 'Member score updated.' });
+  } catch (error) {
+    console.error('[code-rx] manual score adjustment error:', error);
+    return c.json({ success: false, error: 'Could not update this member score.' }, 500);
+  }
+});
+
+app.get('/api/phantom/score-rules', requireAuth, requirePhantom, async (c) => {
+  const rules = await dbRows<any>(c.env.DB.prepare('SELECT * FROM score_rules ORDER BY rule_key'));
+  return c.json({ success: true, data: rules.map((rule) => ({ ...rule, points: Number(rule.points || 0), enabled: Number(rule.enabled || 0) === 1 })) });
+});
+
+app.put('/api/phantom/score-rules/:key', requireAuth, requirePhantom, async (c) => {
+  const key = cleanStr(c.req.param('key'), 2, 100);
+  const body = await c.req.json().catch(() => ({}));
+  if (!key) return c.json({ success: false, error: 'Invalid score rule.' }, 400);
+  const current = await dbRows<any>(c.env.DB.prepare('SELECT * FROM score_rules WHERE rule_key = ?').bind(key));
+  if (!current[0]) return c.json({ success: false, error: 'Score rule not found.' }, 404);
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') return c.json({ success: false, error: 'Rule enabled must be true or false.' }, 400);
+    fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0);
+  }
+  if (body.points !== undefined) {
+    const points = Number(body.points);
+    if (!Number.isInteger(points) || points < 0 || points > 10_000) return c.json({ success: false, error: 'Automatic rule points must be a whole number from 0 to 10,000.' }, 400);
+    fields.push('points = ?'); values.push(points);
+  }
+  if (!fields.length) return c.json({ success: false, error: 'No score-rule change supplied.' }, 400);
+  fields.push('updated_at = CURRENT_TIMESTAMP');
+  const actor = await actorFromContext(c);
+  values.push(actor?.userId ?? null, key);
+  await c.env.DB.prepare(`UPDATE score_rules SET ${fields.join(', ')}, updated_by_user_id = ? WHERE rule_key = ?`).bind(...values).run();
+  await audit(c.env.DB, actor, 'score.rule.updated', 'score_rule', key, { fields: fields.slice(0, -1) });
+  return c.json({ success: true, message: 'Automatic score rule updated.' });
+});
+
 app.get('/api/phantom/roles', requireAuth, requirePhantom, async (c) => {
   const roles = await dbRows<any>(c.env.DB.prepare(`SELECT * FROM roles ORDER BY CASE code WHEN 'phantom' THEN 0 ELSE 1 END, name`));
   const permissions = await dbRows<any>(c.env.DB.prepare('SELECT * FROM role_permissions ORDER BY role_id, section_slug'));
@@ -1779,9 +2540,11 @@ app.post('/api/phantom/roles', requireAuth, requirePhantom, async (c) => {
     if (!code || !name || code === 'phantom') return c.json({ success: false, error: 'A valid custom role code and name are required.' }, 400);
     const result = await c.env.DB.prepare('INSERT INTO roles (code, name, description, is_system) VALUES (?, ?, ?, 0)').bind(code, name, description).run();
     const roleId = Number(result.meta.last_row_id);
-    for (const [slug] of VAULT_SECTION_SEEDS) {
-      await c.env.DB.prepare('INSERT INTO role_permissions (role_id, section_slug) VALUES (?, ?)').bind(roleId, slug).run();
-    }
+    // Include PHANTOM-created sections too, not only the original seed list.
+    const sections = await dbRows<{ slug: string }>(c.env.DB.prepare('SELECT slug FROM vault_sections WHERE is_archived = 0'));
+    if (sections.length) await c.env.DB.batch(sections.map((section) =>
+      c.env.DB.prepare('INSERT INTO role_permissions (role_id, section_slug) VALUES (?, ?)').bind(roleId, section.slug)
+    ));
     await audit(c.env.DB, await actorFromContext(c), 'role.created', 'role', roleId, { code, name });
     return c.json({ success: true, data: { id: roleId, code, name } }, 201);
   } catch (error: any) {
@@ -1796,6 +2559,8 @@ app.put('/api/phantom/roles/:id/permissions', requireAuth, requirePhantom, async
     if (!Number.isInteger(roleId) || roleId < 1) return c.json({ success: false, error: 'Invalid role id' }, 400);
     const body = await c.req.json().catch(() => ({}));
     if (!Array.isArray(body.permissions)) return c.json({ success: false, error: 'A permission matrix is required.' }, 400);
+    const targetRoleRows = await dbRows<{ id: number }>(c.env.DB.prepare('SELECT id FROM roles WHERE id = ?').bind(roleId));
+    if (!targetRoleRows[0]) return c.json({ success: false, error: 'Role not found.' }, 404);
     const validSections = new Set((await dbRows<any>(c.env.DB.prepare('SELECT slug FROM vault_sections WHERE is_archived = 0'))).map((section) => section.slug));
     for (const row of body.permissions) {
       const slug = cleanStr(row.sectionSlug, 1, 60);
@@ -1822,6 +2587,14 @@ app.put('/api/phantom/members/:id/permissions', requireAuth, requirePhantom, asy
     const body = await c.req.json().catch(() => ({}));
     if (!Number.isInteger(profileId) || profileId < 1 || !Array.isArray(body.permissions)) {
       return c.json({ success: false, error: 'A member and permission matrix are required.' }, 400);
+    }
+    const targetProfileRows = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, r.code AS role_code FROM member_profiles mp
+       LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+    ).bind(profileId));
+    if (!targetProfileRows[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+    if (targetProfileRows[0].role_code === 'phantom') {
+      return c.json({ success: false, error: 'PHANTOM permissions are fixed at the server level.' }, 403);
     }
     const validSections = new Set((await dbRows<any>(c.env.DB.prepare('SELECT slug FROM vault_sections WHERE is_archived = 0'))).map((section) => section.slug));
     for (const row of body.permissions) {
@@ -1961,7 +2734,10 @@ app.patch('/api/phantom/vault-sections/:id', requireAuth, requirePhantom, async 
   if (body.description !== undefined) { fields.push('description = ?'); values.push(cleanOptionalStr(body.description, 1000) || ''); }
   if (body.isSensitive !== undefined) { fields.push('is_sensitive = ?'); values.push(body.isSensitive ? 1 : 0); }
   if (body.sortOrder !== undefined && Number.isFinite(Number(body.sortOrder))) { fields.push('sort_order = ?'); values.push(Number(body.sortOrder)); }
-  if (body.archive !== undefined) { fields.push('is_archived = ?'); values.push(body.archive ? 1 : 0); }
+  if (body.archive !== undefined) {
+    if (typeof body.archive !== 'boolean') return c.json({ success: false, error: 'Vault section archive must be true or false.' }, 400);
+    fields.push('is_archived = ?'); values.push(body.archive ? 1 : 0);
+  }
   if (!fields.length) return c.json({ success: false, error: 'No Vault section changes supplied.' }, 400);
   fields.push('updated_at = CURRENT_TIMESTAMP');
   values.push(id);
@@ -2070,13 +2846,44 @@ app.post('/api/phantom/codenames/:id/release', requireAuth, requirePhantom, asyn
   const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM codenames WHERE id = ?').bind(id));
   const codename = rows[0];
   if (!codename || codename.status !== 'claimed') return c.json({ success: false, error: 'Only a claimed codename can be explicitly released.' }, 409);
+  const ownerRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT mp.id, mp.codename_path, r.code AS role_code
+     FROM member_profiles mp LEFT JOIN roles r ON r.id = mp.primary_role_id
+     WHERE mp.id = ?`
+  ).bind(codename.claimed_by_member_profile_id));
+  const owner = ownerRows[0];
+  if (codename.normalized_name === 'phantom' || owner?.role_code === 'phantom') {
+    return c.json({ success: false, error: 'The PHANTOM founder identity cannot be released.' }, 403);
+  }
   const actor = await actorFromContext(c);
-  await c.env.DB.batch([
+  const statements: D1PreparedStatement[] = [
     c.env.DB.prepare('UPDATE codenames SET status = ?, claimed_by_member_profile_id = NULL, claimed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(mode, id),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'released', ?, ?)")
       .bind(id, codename.claimed_by_member_profile_id, actor?.userId ?? null, mode === 'available' ? 'Explicitly released back to ballot by PHANTOM' : 'Explicitly released and retired by PHANTOM'),
-  ]);
-  await audit(c.env.DB, actor, 'codename.released', 'codename', id, { mode, name: codename.display_name });
+  ];
+  if (owner?.codename_path === 'member' || owner?.codename_path === 'custom_founding') {
+    // The release removes a permanent identity only after the session is made
+    // usable again, so an active member is never stranded without a ballot.
+    statements.push(c.env.DB.prepare(
+      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, started_at, completed_at)
+       VALUES (?, 'open', ?, 'ballot', 0, NULL, CURRENT_TIMESTAMP, NULL)
+       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'open', pool = excluded.pool, assignment_source = 'ballot',
+         passes_used = 0, claimed_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL`
+    ).bind(owner.id, owner.codename_path === 'custom_founding' ? 'founding' : 'member'));
+  } else if (owner?.codename_path === 'direct_founding') {
+    // Direct-assignment members must wait for PHANTOM to choose their next
+    // founding identity; they must not silently gain access to a ballot.
+    statements.push(c.env.DB.prepare(
+      "UPDATE codename_selection_sessions SET status = 'expired', claimed_codename_id = NULL, completed_at = NULL WHERE member_profile_id = ?"
+    ).bind(owner.id));
+  }
+  await c.env.DB.batch(statements);
+  await audit(c.env.DB, actor, 'codename.released', 'codename', id, {
+    mode,
+    name: codename.display_name,
+    memberProfileId: owner?.id || null,
+    replacementBallotOpened: owner?.codename_path === 'member' || owner?.codename_path === 'custom_founding',
+  });
   return c.json({ success: true, message: mode === 'available' ? 'Codename explicitly returned to the ballot.' : 'Codename released and retired.' });
 });
 
@@ -2125,7 +2932,20 @@ app.put('/api/phantom/settings/:key', requireAuth, requirePhantom, async (c) => 
 // ============================================
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
-const ALLOWED_MIME_PREFIXES = ['image/', 'application/pdf', 'text/', 'application/zip', 'application/json'];
+const SAFE_UPLOAD_MIME_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif',
+  'application/pdf', 'application/zip', 'application/json',
+  'text/plain', 'text/csv', 'text/markdown',
+]);
+const isSafeUploadMime = (mime: string) => SAFE_UPLOAD_MIME_TYPES.has(mime.toLowerCase());
+
+const publicUploadFolder = (value: unknown) => {
+  const raw = cleanOptionalStr(value, 100) || 'uploads';
+  const folder = raw.trim().replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*(?:\/[A-Za-z0-9][A-Za-z0-9_-]*)*$/.test(folder)) return null;
+  if (folder.toLowerCase() === 'vault' || folder.toLowerCase().startsWith('vault/')) return null;
+  return folder;
+};
 
 app.post('/api/vault/upload', requireAuth, async (c) => {
   try {
@@ -2145,7 +2965,7 @@ app.post('/api/vault/upload', requireAuth, async (c) => {
     if (!(file instanceof File)) return c.json({ success: false, error: 'No file provided.' }, 400);
     if (file.size > MAX_UPLOAD_BYTES) return c.json({ success: false, error: 'File too large (max 10 MB).' }, 413);
     const mime = file.type || 'application/octet-stream';
-    if (!ALLOWED_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) return c.json({ success: false, error: `File type "${mime}" is not allowed.` }, 415);
+    if (!isSafeUploadMime(mime)) return c.json({ success: false, error: `File type "${mime}" is not allowed.` }, 415);
     const safeName = (file.name || 'vault-file').replace(/[^\w.\-() ]/g, '_').slice(-100);
     const key = `vault/${section}/${access.actor!.profileId}/${Date.now()}-${safeName}`;
     await c.env.BUCKET.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: mime } });
@@ -2172,7 +2992,11 @@ app.get('/api/vault-files/*', requireAuth, async (c) => {
     if (access.response) return access.response;
     const object = await c.env.BUCKET.get(key);
     if (!object) return c.json({ success: false, error: 'File not found.' }, 404);
-    return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'private, no-store' } });
+    return new Response(object.body, { headers: {
+      'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    } });
   } catch (error) {
     console.error('[code-rx] vault file read error:', error);
     return c.json({ success: false, error: 'Could not read Vault file.' }, 500);
@@ -2189,11 +3013,12 @@ app.post('/api/upload', requireAuth, requireWebsitePermission('media.upload'), a
       return c.json({ success: false, error: 'File too large (max 10 MB)' }, 413);
     }
     const mime = file.type || 'application/octet-stream';
-    if (!ALLOWED_MIME_PREFIXES.some((p) => mime.startsWith(p))) {
+    if (!isSafeUploadMime(mime)) {
       return c.json({ success: false, error: `File type "${mime}" is not allowed` }, 415);
     }
 
-    const folder = cleanOptionalStr(formData.get('folder') || '', 100) ?? 'uploads';
+    const folder = publicUploadFolder(formData.get('folder') || '');
+    if (!folder) return c.json({ success: false, error: 'Use a safe public media folder name.' }, 400);
     const safeName = (file.name || 'file').replace(/[^\w.\-() ]/g, '_').slice(-100);
     const key = `${folder}/${Date.now()}-${safeName}`;
 
@@ -2224,6 +3049,7 @@ app.get('/api/files/*', async (c) => {
       headers: {
         'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
         'Cache-Control': 'public, max-age=3600',
+        'X-Content-Type-Options': 'nosniff',
       },
     });
   } catch (e) {

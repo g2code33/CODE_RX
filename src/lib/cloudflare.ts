@@ -149,6 +149,15 @@ export const db = {
       const result = await apiCall<{ data: any }>('/api/member/me');
       return result.data;
     },
+    leaderboard: async (limit = 10) => (await apiCall<{ data: any[] }>(`/api/members/leaderboard?limit=${limit}`)).data || [],
+  },
+
+  notifications: {
+    inbox: async (limit = 40) => (await apiCall<{ data: any }>(`/api/notifications?limit=${limit}`)).data,
+    audience: async () => (await apiCall<{ data: any }>('/api/notifications/audience')).data,
+    markRead: (id: number) => apiCall(`/api/notifications/${id}/read`, { method: 'POST' }),
+    send: (data: { title: string; message: string; audience: 'all' | 'selected' | 'role'; memberProfileIds?: number[]; roleCode?: string }) =>
+      apiCall<{ data: any; message?: string }>('/api/notifications/send', { method: 'POST', body: JSON.stringify(data) }),
   },
 
   codenames: {
@@ -175,6 +184,11 @@ export const db = {
     activity: async (limit = 30) => (await apiCall<{ data: any[] }>(`/api/vault/activity?limit=${limit}`)).data || [],
     search: async (query: string) => (await apiCall<{ data: any[] }>(`/api/vault/search?q=${encodeURIComponent(query)}`)).data || [],
     tags: async () => (await apiCall<{ data: any[] }>('/api/vault/tags')).data || [],
+    sharingStatus: async () => (await apiCall<{ data: any }>('/api/vault/sharing/status')).data,
+    shares: async (documentId: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`)).data,
+    createShare: (documentId: number, expiresInDays = 7) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, { method: 'POST', body: JSON.stringify({ expiresInDays }) }),
+    revokeShare: (documentId: number, shareId: number) => apiCall(`/api/vault/documents/${documentId}/shares/${shareId}/revoke`, { method: 'POST' }),
+    publicShare: async (token: string) => (await apiCall<{ data: any }>(`/api/vault/shares/${encodeURIComponent(token)}`)).data,
     sections: async () => {
       const result = await apiCall<{ data: any[] }>('/api/vault/sections');
       return result.data || [];
@@ -198,8 +212,8 @@ export const db = {
       }
       return URL.createObjectURL(await response.blob());
     },
-    documents: async (section: string) => {
-      const result = await apiCall<{ data: any[] }>(`/api/vault/documents?section=${encodeURIComponent(section)}`);
+    documents: async (section: string, archived = false) => {
+      const result = await apiCall<{ data: any[] }>(`/api/vault/documents?section=${encodeURIComponent(section)}${archived ? '&archived=1' : ''}`);
       return result.data || [];
     },
     document: async (id: number) => {
@@ -210,11 +224,12 @@ export const db = {
     updateDocument: (id: number, data: any) =>
       apiCall<{ data: any }>(`/api/vault/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     archiveDocument: (id: number) => apiCall('/api/vault/documents/' + id, { method: 'DELETE' }),
+    unarchiveDocument: (id: number) => apiCall('/api/vault/documents/' + id + '/unarchive', { method: 'POST' }),
     documentVersions: async (id: number) => (await apiCall<{ data: any[] }>(`/api/vault/documents/${id}/versions`)).data || [],
     documentVersion: async (id: number, version: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${id}/versions/${version}`)).data,
     restoreDocumentVersion: (id: number, version: number) => apiCall<{ data: any }>(`/api/vault/documents/${id}/restore/${version}`, { method: 'POST' }),
-    projects: async () => {
-      const result = await apiCall<{ data: any[] }>('/api/vault/projects');
+    projects: async (archived = false) => {
+      const result = await apiCall<{ data: any[] }>(`/api/vault/projects${archived ? '?archived=1' : ''}`);
       return result.data || [];
     },
     createProject: (data: any) => apiCall('/api/vault/projects', { method: 'POST', body: JSON.stringify(data) }),
@@ -236,6 +251,17 @@ export const db = {
     members: async (status?: string) => (await apiCall<{ data: any[] }>(`/api/phantom/members${status ? `?status=${encodeURIComponent(status)}` : ''}`)).data || [],
     updateMember: (id: number, data: any) => apiCall(`/api/phantom/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     memberHistory: async (id: number) => (await apiCall<{ data: any }>(`/api/phantom/members/${id}/history`)).data,
+    scoreHistory: async (id: number) => (await apiCall<{ data: any[] }>(`/api/phantom/members/${id}/score-history`)).data || [],
+    adjustScore: (id: number, data: { action: 'add' | 'deduct' | 'set'; points: number; reason: string }) =>
+      apiCall<{ data: any }>(`/api/phantom/members/${id}/score`, { method: 'POST', body: JSON.stringify(data) }),
+    scoreRules: async () => (await apiCall<{ data: any[] }>('/api/phantom/score-rules')).data || [],
+    updateScoreRule: (key: string, data: { enabled?: boolean; points?: number }) =>
+      apiCall(`/api/phantom/score-rules/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(data) }),
+    sharing: async () => (await apiCall<{ data: any }>('/api/phantom/sharing')).data,
+    setGlobalSharing: (enabled: boolean) => apiCall('/api/phantom/sharing/global', { method: 'PUT', body: JSON.stringify({ enabled }) }),
+    setMemberSharing: (id: number, canShare: boolean) => apiCall(`/api/phantom/members/${id}/sharing`, { method: 'PUT', body: JSON.stringify({ canShare }) }),
+    notificationDelegates: async () => (await apiCall<{ data: any[] }>('/api/phantom/notification-delegates')).data || [],
+    setNotificationDelegate: (id: number, canSend: boolean) => apiCall(`/api/phantom/notification-delegates/${id}`, { method: 'PUT', body: JSON.stringify({ canSend }) }),
     roles: async () => (await apiCall<{ data: any }>('/api/phantom/roles')).data,
     createRole: (data: any) => apiCall('/api/phantom/roles', { method: 'POST', body: JSON.stringify(data) }),
     updateRolePermissions: (id: number, permissions: any[]) => apiCall(`/api/phantom/roles/${id}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) }),

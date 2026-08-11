@@ -26,7 +26,7 @@ export interface VaultDocumentDraft {
   title: string;
   blocks: VaultBlock[];
   tags: string[];
-  status: 'draft' | 'in_review' | 'approved' | 'active' | 'archived';
+  status: 'draft' | 'in_review' | 'approved' | 'active';
   visibility: 'section' | 'members' | 'restricted';
   relatedProjectId: number | null;
 }
@@ -45,6 +45,96 @@ export const newBlock = (type: VaultBlockType = 'paragraph'): VaultBlock => {
   return { id, type, content: '' };
 };
 
+const RICH_TEXT_TAGS = new Set(['strong', 'b', 'em', 'i', 'u', 's', 'strike', 'mark', 'a', 'code', 'br', 'span']);
+const VALID_BLOCK_TYPES = new Set<VaultBlockType>([
+  'paragraph', 'heading', 'bulletList', 'numberedList', 'checklist', 'quote', 'callout',
+  'code', 'divider', 'table', 'image', 'file', 'formula', 'embed',
+]);
+
+const decodeHtmlEntities = (value: string) => value
+  .replace(/&#(x[0-9a-f]+|\d+);?/gi, (_match, entity: string) => {
+    const codePoint = entity.toLowerCase().startsWith('x') ? parseInt(entity.slice(1), 16) : parseInt(entity, 10);
+    return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : '';
+  })
+  .replace(/&(amp|quot|apos|lt|gt|colon|tab|newline|nbsp);?/gi, (_match, entity: string) => ({
+    amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', colon: ':', tab: '\t', newline: '\n', nbsp: ' ',
+  }[entity.toLowerCase()] || ''));
+
+const escapeHtmlAttribute = (value: string) => value
+  .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const attributeValue = (attributes: string, name: string) => {
+  const expression = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`, 'i');
+  const match = attributes.match(expression);
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? '';
+};
+
+const safeRichLink = (value: string) => {
+  const href = Array.from(decodeHtmlEntities(value).trim())
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code > 0x20 && (code < 0x7f || code > 0x9f);
+    })
+    .join('');
+  return /^(?:https?:\/\/|mailto:|#|\/(?!\/))/i.test(href) ? href : '';
+};
+
+const safeSpanStyle = (attributes: string) => {
+  const style = decodeHtmlEntities(attributeValue(attributes, 'style')).trim().replace(/\s+/g, ' ');
+  return /^background-color:\s*(?:#[0-9a-f]{3,8}|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|0?\.\d+|1))?\s*\)|[a-z]{3,20})\s*;?$/i.test(style)
+    ? style
+    : '';
+};
+
+/** Mirrors the Worker-side allow-list before any stored or local draft HTML is rendered. */
+export const sanitizeVaultRichText = (value: unknown) => {
+  let html = typeof value === 'string' ? value.slice(0, 30_000).replace(/\0/g, '') : '';
+  html = html.replace(/<!--[\s\S]*?-->/g, '');
+  html = html.replace(/<(script|style|iframe|object|embed|svg|math|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  return html.replace(/<\s*(\/?)([a-z0-9:-]+)([^>]*)>/gi, (_full, slash: string, rawTag: string, attributes: string) => {
+    const tag = rawTag.toLowerCase();
+    if (!RICH_TEXT_TAGS.has(tag)) return '';
+    if (slash) return tag === 'br' ? '' : `</${tag}>`;
+    if (tag === 'a') {
+      const href = safeRichLink(attributeValue(attributes, 'href'));
+      return href ? `<a href="${escapeHtmlAttribute(href)}" rel="noopener noreferrer">` : '<a>';
+    }
+    if (tag === 'span') {
+      const style = safeSpanStyle(attributes);
+      return style ? `<span style="${escapeHtmlAttribute(style)}">` : '<span>';
+    }
+    return `<${tag}>`;
+  });
+};
+
+export const safeVaultResourceUrl = (value: unknown) => {
+  const url = typeof value === 'string' ? value.trim().slice(0, 1_000) : '';
+  return /^(?:https?:\/\/|\/api\/vault-files\/)/i.test(url) ? url : '';
+};
+
+const normalizeClientBlock = (value: any): VaultBlock => {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const type = VALID_BLOCK_TYPES.has(raw.type as VaultBlockType) ? raw.type as VaultBlockType : 'paragraph';
+  const block = { ...newBlock(type), ...raw, id: typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 100) : newId(), type } as VaultBlock;
+  if (type !== 'divider') {
+    block.content = type === 'code' || type === 'formula'
+      ? (typeof raw.content === 'string' ? raw.content.slice(0, 100_000) : '')
+      : sanitizeVaultRichText(raw.content);
+  }
+  if (typeof raw.caption === 'string') block.caption = sanitizeVaultRichText(raw.caption);
+  if (type === 'image' || type === 'file' || type === 'embed') block.url = safeVaultResourceUrl(raw.url);
+  if (Array.isArray(raw.items)) block.items = raw.items.slice(0, 200).map((item: any) => ({
+    id: typeof item?.id === 'string' && item.id ? item.id.slice(0, 100) : newId(),
+    text: sanitizeVaultRichText(item?.text),
+    ...(type === 'checklist' ? { checked: Boolean(item?.checked) } : {}),
+  }));
+  if (Array.isArray(raw.rows)) block.rows = raw.rows.slice(0, 50).map((row: unknown) => Array.isArray(row)
+    ? row.slice(0, 20).map((cell) => sanitizeVaultRichText(cell))
+    : ['']
+  );
+  return block;
+};
+
 export const emptyDocument = (): VaultDocumentDraft => ({
   title: '',
   blocks: [newBlock('paragraph')],
@@ -60,9 +150,9 @@ export const parseDocumentContent = (value: unknown, fallback = ''): VaultBlock[
     const blocks = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
       ? (candidate as { blocks?: unknown }).blocks
       : null;
-    if (Array.isArray(blocks) && blocks.length) return blocks.map((block: any) => ({ ...newBlock(block.type || 'paragraph'), ...block, id: block.id || newId() }));
+    if (Array.isArray(blocks) && blocks.length) return blocks.slice(0, 500).map(normalizeClientBlock);
   } catch { /* legacy plain text fallback */ }
-  return [{ id: newId(), type: 'paragraph', content: fallback }];
+  return [{ id: newId(), type: 'paragraph', content: sanitizeVaultRichText(fallback) }];
 };
 
 export const plainTextFromBlocks = (blocks: VaultBlock[]) => blocks.map((block) => {

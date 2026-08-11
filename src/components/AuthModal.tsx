@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle } from 'lucide-react';
+import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle, Eye, EyeOff, LoaderCircle } from 'lucide-react';
 import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
 
 type Mode = 'join' | 'login' | 'forgot';
@@ -23,6 +23,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [forgotResult, setForgotResult] = useState<{ message: string } | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   // Each time the modal opens, honour the mode requested by the caller.
   // Without this, a previously opened Join form could remain active when the
@@ -33,6 +34,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
     setIsApplied(false);
     setError('');
     setForgotResult(null);
+    setShowPassword(false);
     setFormData({ name: '', email: '', phone: '', password: '' });
   }, [isOpen, defaultMode]);
 
@@ -189,14 +191,14 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                     <input
-                      type="password"
+                      type={showPassword ? "text" : "password"}
                       placeholder="Password"
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                      className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
+                      className="auth-modal-field w-full pl-12 pr-12 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
                       required
-                      minLength={6}
                     />
+                    <button type="button" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? 'Hide password' : 'Show password'} className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-emerald-600">{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button>
                   </div>
                 )}
 
@@ -251,7 +253,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                   className="auth-modal-submit w-full py-3 bg-emerald-600 text-white font-black rounded-2xl hover:bg-emerald-500 shadow-lg shadow-emerald-200 transition-all flex items-center justify-center gap-2 group disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSubmitting ? (
-                    'Please wait...'
+                    <><LoaderCircle className="w-4 h-4 animate-spin" />{mode === 'login' ? 'Signing in securely...' : 'Please wait...'}</>
                   ) : (
                     <>
                       {mode === 'join' ? 'SEND APPLICATION' : mode === 'forgot' ? 'SEND RESET LINK' : 'SIGN IN'}

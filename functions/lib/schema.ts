@@ -5,6 +5,7 @@
 import type { Env } from '../env';
 import { hashPassword } from './auth';
 import { allocateMemberCode, FOUNDING_CODENAMES, VAULT_SECTION_SEEDS } from './vault';
+import { SCORE_RULE_SEEDS } from './score';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS applications (
@@ -247,6 +248,7 @@ CREATE TABLE IF NOT EXISTS vault_sections (
 
 CREATE TABLE IF NOT EXISTS vault_documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_code TEXT UNIQUE,
   section_id INTEGER NOT NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL DEFAULT '',
@@ -262,9 +264,37 @@ CREATE TABLE IF NOT EXISTS vault_documents (
   created_by_member_profile_id INTEGER,
   updated_by_member_profile_id INTEGER,
   is_archived INTEGER NOT NULL DEFAULT 0,
+  archived_from_status TEXT,
+  archived_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(section_id) REFERENCES vault_sections(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_document_sequences (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  next_value INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS member_share_permissions (
+  member_profile_id INTEGER PRIMARY KEY,
+  can_share INTEGER NOT NULL DEFAULT 0,
+  updated_by_user_id INTEGER,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_by_member_profile_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  expires_at DATETIME,
+  last_accessed_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(document_id) REFERENCES vault_documents(id),
+  FOREIGN KEY(created_by_member_profile_id) REFERENCES member_profiles(id)
 );
 
 CREATE TABLE IF NOT EXISTS document_versions (
@@ -420,6 +450,68 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS score_rules (
+  rule_key TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  points INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_by_user_id INTEGER,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS member_score_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_profile_id INTEGER NOT NULL,
+  member_record_id INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  rule_key TEXT,
+  reference_type TEXT,
+  reference_id TEXT,
+  points_delta INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by_user_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(member_profile_id, rule_key, reference_type, reference_id),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id),
+  FOREIGN KEY(member_record_id) REFERENCES members(id)
+);
+
+CREATE TABLE IF NOT EXISTS notification_delegates (
+  member_profile_id INTEGER PRIMARY KEY,
+  can_send INTEGER NOT NULL DEFAULT 0,
+  assigned_by_user_id INTEGER,
+  assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  audience_type TEXT NOT NULL CHECK (audience_type IN ('all','selected','role','system')),
+  audience_label TEXT,
+  created_by_member_profile_id INTEGER,
+  created_by_user_id INTEGER,
+  sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(created_by_member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS notification_recipients (
+  notification_id INTEGER NOT NULL,
+  member_profile_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'unread' CHECK (status IN ('unread','read')),
+  delivered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  read_at DATETIME,
+  PRIMARY KEY(notification_id, member_profile_id),
+  FOREIGN KEY(notification_id) REFERENCES notifications(id),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
 CREATE TABLE IF NOT EXISTS system_settings (
   setting_key TEXT PRIMARY KEY,
   setting_value TEXT NOT NULL,
@@ -437,6 +529,11 @@ CREATE INDEX IF NOT EXISTS idx_codenames_pool_status ON codenames(pool, status);
 CREATE INDEX IF NOT EXISTS idx_codename_events_session ON codename_selection_events(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_documents_section ON vault_documents(section_id, is_archived, updated_at);
 CREATE INDEX IF NOT EXISTS idx_vault_documents_status ON vault_documents(status, is_archived, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_documents_code ON vault_documents(document_code);
+CREATE INDEX IF NOT EXISTS idx_vault_shares_document ON vault_shares(document_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_score_events_member ON member_score_events(member_profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_recipients_member ON notification_recipients(member_profile_id, status, delivered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_sent ON notifications(sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_projects_status ON vault_projects(status, is_archived);
@@ -456,6 +553,7 @@ const SAFE_MIGRATIONS = [
   { table: 'applications', column: 'member_profile_id', sql: 'ALTER TABLE applications ADD COLUMN member_profile_id INTEGER' },
   { table: 'applications', column: 'updated_at', sql: 'ALTER TABLE applications ADD COLUMN updated_at TEXT' },
   { table: 'meetings', column: 'project_id', sql: 'ALTER TABLE meetings ADD COLUMN project_id INTEGER' },
+  { table: 'vault_documents', column: 'document_code', sql: 'ALTER TABLE vault_documents ADD COLUMN document_code TEXT' },
   { table: 'vault_documents', column: 'content_json', sql: 'ALTER TABLE vault_documents ADD COLUMN content_json TEXT' },
   { table: 'vault_documents', column: 'content_format', sql: "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'" },
   { table: 'vault_documents', column: 'status', sql: "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
@@ -463,6 +561,8 @@ const SAFE_MIGRATIONS = [
   { table: 'vault_documents', column: 'related_project_id', sql: 'ALTER TABLE vault_documents ADD COLUMN related_project_id INTEGER' },
   { table: 'vault_documents', column: 'word_count', sql: 'ALTER TABLE vault_documents ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_documents', column: 'last_saved_at', sql: 'ALTER TABLE vault_documents ADD COLUMN last_saved_at TEXT' },
+  { table: 'vault_documents', column: 'archived_from_status', sql: 'ALTER TABLE vault_documents ADD COLUMN archived_from_status TEXT' },
+  { table: 'vault_documents', column: 'archived_at', sql: 'ALTER TABLE vault_documents ADD COLUMN archived_at TEXT' },
   { table: 'document_versions', column: 'content_json', sql: 'ALTER TABLE document_versions ADD COLUMN content_json TEXT' },
   { table: 'document_versions', column: 'status', sql: "ALTER TABLE document_versions ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
   { table: 'document_versions', column: 'tags_json', sql: "ALTER TABLE document_versions ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'" },
@@ -474,7 +574,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-11-codename-pools-1';
+const VAULT_SCHEMA_VERSION = '2026-08-11-vault-share-score-notifications-3';
 
 
 const ROLE_SEEDS = [
@@ -517,6 +617,70 @@ const runSafeMigrations = async (db: D1Database) => {
   if (missing.length) await runBatchInChunks(db, missing.map((migration) => db.prepare(migration.sql)), 25);
 };
 
+
+/**
+ * Older Vault builds could set a document's status to `archived` without
+ * moving it into the actual archive. Normalize those rows once so archive
+ * navigation, restoration, and status counts stay in agreement.
+ */
+const normalizeDocumentArchiveState = async (db: D1Database) => {
+  await db.prepare(
+    `UPDATE vault_documents
+     SET is_archived = 1,
+         archived_from_status = CASE
+           WHEN archived_from_status IN ('draft', 'in_review', 'approved', 'active') THEN archived_from_status
+           ELSE 'draft'
+         END,
+         archived_at = COALESCE(archived_at, updated_at, created_at, CURRENT_TIMESTAMP)
+     WHERE status = 'archived' AND is_archived = 0`
+  ).run();
+};
+
+const documentCode = (sequence: number) => `CRX-DOC-${String(sequence).padStart(4, '0')}`;
+
+/** Assign permanent, readable codes to legacy Vault documents without changing their IDs. */
+const backfillDocumentCodes = async (db: D1Database) => {
+  await db.prepare('INSERT OR IGNORE INTO vault_document_sequences (id, next_value) VALUES (1, 1)').run();
+  const existingRows = await asRows<{ document_code: string | null }>(db.prepare('SELECT document_code FROM vault_documents WHERE document_code IS NOT NULL'));
+  const used = new Set(existingRows.map((row) => row.document_code).filter((code): code is string => Boolean(code)));
+  let highest = 0;
+  for (const code of used) {
+    const match = /^CRX-DOC-(\d+)$/i.exec(code);
+    if (match) highest = Math.max(highest, Number(match[1]));
+  }
+  const missing = await asRows<{ id: number }>(db.prepare("SELECT id FROM vault_documents WHERE document_code IS NULL OR document_code = '' ORDER BY id"));
+  const statements: D1PreparedStatement[] = [];
+  for (const document of missing) {
+    do { highest += 1; } while (used.has(documentCode(highest)));
+    const code = documentCode(highest);
+    used.add(code);
+    statements.push(db.prepare('UPDATE vault_documents SET document_code = ? WHERE id = ?').bind(code, document.id));
+  }
+  if (statements.length) await runBatchInChunks(db, statements, 25);
+  const currentRows = await asRows<{ next_value: number }>(db.prepare('SELECT next_value FROM vault_document_sequences WHERE id = 1'));
+  const nextValue = Math.max(Number(currentRows[0]?.next_value || 1), highest + 1);
+  await db.prepare('UPDATE vault_document_sequences SET next_value = ? WHERE id = 1').bind(nextValue).run();
+};
+
+const seedScoreRules = async (db: D1Database) => {
+  const statements = SCORE_RULE_SEEDS.flatMap((rule) => [
+    db.prepare(
+      `INSERT OR IGNORE INTO score_rules (rule_key, label, description, points, enabled)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(rule.key, rule.label, rule.description, rule.points, rule.enabled),
+    // Preserve PHANTOM's configured points/enabled choice while keeping the
+    // human-facing labels and eligibility descriptions accurate on upgrades.
+    db.prepare('UPDATE score_rules SET label = ?, description = ? WHERE rule_key = ?')
+      .bind(rule.label, rule.description, rule.key),
+  ]);
+  await runBatchInChunks(db, statements);
+};
+
+const seedFeatureSettings = async (db: D1Database) => {
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_sharing_enabled', '0', CURRENT_TIMESTAMP)"),
+  ]);
+};
 
 const migrateFoundingRoleCodes = async (db: D1Database) => {
   // Earlier development builds used operational labels as founding role codes.
@@ -657,30 +821,46 @@ const ensurePhantom = async (env: Env) => {
  */
 export async function ensureSchema(env: Env): Promise<void> {
   if (g.__codeRxSchemaReady) return;
-  const db = env.DB;
-  const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
-  // One D1 batch avoids dozens of sequential network round trips on a cold
-  // login. Indexes wait until ALTER migrations add their referenced columns.
-  const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
-  const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
-  await runBatchInChunks(db, schemaStatements.map((statement) => db.prepare(statement)));
-  await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
-  await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
+  const inFlight = g.__codeRxSchemaReadyPromise as Promise<void> | undefined;
+  if (inFlight) return inFlight;
 
-  const versionRows = await asRows<{ setting_value: string }>(db.prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'"));
-  if (versionRows[0]?.setting_value !== VAULT_SCHEMA_VERSION) {
-    await runSafeMigrations(db);
-    await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
-    await migrateFoundingRoleCodes(db);
-    await seedRolesAndPermissions(db);
-    await seedVaultSections(db);
-    await ensurePhantom(env);
-    await db.prepare(
-      `INSERT INTO system_settings (setting_key, setting_value, updated_at)
-       VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`
-    ).bind(VAULT_SCHEMA_VERSION).run();
+  const initialize = (async () => {
+    const db = env.DB;
+    const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
+    // One D1 batch avoids dozens of sequential network round trips on a cold
+    // login. Indexes wait until ALTER migrations add their referenced columns.
+    const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
+    const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
+    await runBatchInChunks(db, schemaStatements.map((statement) => db.prepare(statement)));
+    await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
+    await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();
+    await db.prepare('INSERT OR IGNORE INTO vault_document_sequences (id, next_value) VALUES (1, 1)').run();
+
+    const versionRows = await asRows<{ setting_value: string }>(db.prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'"));
+    if (versionRows[0]?.setting_value !== VAULT_SCHEMA_VERSION) {
+      await runSafeMigrations(db);
+      await normalizeDocumentArchiveState(db);
+      await backfillDocumentCodes(db);
+      await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
+      await migrateFoundingRoleCodes(db);
+      await seedRolesAndPermissions(db);
+      await seedVaultSections(db);
+      await seedScoreRules(db);
+      await seedFeatureSettings(db);
+      await ensurePhantom(env);
+      await db.prepare(
+        `INSERT INTO system_settings (setting_key, setting_value, updated_at)
+         VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`
+      ).bind(VAULT_SCHEMA_VERSION).run();
+    }
+    g.__codeRxSchemaReady = true;
+  })();
+
+  g.__codeRxSchemaReadyPromise = initialize;
+  try {
+    await initialize;
+  } finally {
+    delete g.__codeRxSchemaReadyPromise;
   }
-
-  g.__codeRxSchemaReady = true;
 }

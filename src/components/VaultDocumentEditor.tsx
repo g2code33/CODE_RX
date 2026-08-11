@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy,
+  Archive, Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy,
   FileText, Heading1, Heading2, History, ImagePlus, Italic, Link2,
   List, LoaderCircle, Maximize2, Minimize2, Minus, MoreHorizontal,
-  Paperclip, Plus, Quote, Redo2, Save, Search, Strikethrough, Table2,
+  Paperclip, Plus, Quote, Redo2, Save, Search, Share2, Strikethrough, Table2,
   Underline, Undo2, X,
 } from 'lucide-react';
 import { db } from '../lib/cloudflare';
+import { VaultShareDialog } from './VaultShareDialog';
 import {
-  newBlock, parseDocumentContent, plainTextFromBlocks,
+  newBlock, parseDocumentContent, plainTextFromBlocks, safeVaultResourceUrl, sanitizeVaultRichText as sanitizeHtml,
   slashCommands, templateCatalog, type VaultBlock, type VaultBlockType,
   type VaultDocumentDraft, wordCount,
 } from '../data/vaultEditor';
@@ -33,15 +34,12 @@ interface VaultDocumentEditorProps {
   projects: any[];
   canEdit: boolean;
   canManage: boolean;
+  canArchive?: boolean;
+  canShare?: boolean;
+  onArchive?: (id: number) => void | Promise<void>;
   onClose: () => void;
   onSaved: (document: any) => void;
 }
-
-const sanitizeHtml = (value: string) => value
-  .replace(/<\/?(script|style|iframe|object|embed|svg|math)[^>]*>/gi, '')
-  .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-  .replace(/(href|src)\s*=\s*("|')?\s*javascript:[^\s>"']*("|')?/gi, '')
-  .replace(/<(?!\/?(?:strong|b|em|i|u|s|strike|mark|a|code|br|span)\b)[^>]*>/gi, '');
 
 const initialDraft = (document: any | null): VaultDocumentDraft => ({
   title: document?.title || '',
@@ -49,14 +47,16 @@ const initialDraft = (document: any | null): VaultDocumentDraft => ({
   tags: Array.isArray(document?.tags) ? document.tags : (() => {
     try { return JSON.parse(document?.tags_json || '[]'); } catch { return []; }
   })(),
-  status: document?.status || 'draft',
+  status: ['draft', 'in_review', 'approved', 'active'].includes(document?.status)
+    ? document.status as VaultDocumentDraft['status']
+    : 'draft',
   visibility: document?.visibility || 'section',
   relatedProjectId: document?.related_project_id || document?.relatedProjectId || null,
 });
 
 const draftStorageKey = (documentId: number | null, sectionSlug: string) => `codeRx_vault_draft_${documentId || `new_${sectionSlug}`}`;
 
-export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, onClose, onSaved }: VaultDocumentEditorProps) => {
+export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, canShare = false, onArchive, onClose, onSaved }: VaultDocumentEditorProps) => {
   const [documentId, setDocumentId] = useState<number | null>(document?.id || null);
   const [draft, setDraft] = useState<VaultDocumentDraft>(() => initialDraft(document));
   const [saveState, setSaveState] = useState<SaveState>('saved');
@@ -66,6 +66,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   const [showPalette, setShowPalette] = useState(false);
   const [showTemplates, setShowTemplates] = useState(!document);
   const [showHistory, setShowHistory] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [versions, setVersions] = useState<any[]>([]);
   const [focusMode, setFocusMode] = useState(false);
   const [showOutline, setShowOutline] = useState(false);
@@ -73,49 +74,95 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   const [redo, setRedo] = useState<VaultBlock[][]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const draftRef = useRef(draft);
+  const documentIdRef = useRef<number | null>(document?.id || null);
+  const sourceDocumentIdRef = useRef<number | null>(document?.id || null);
+  const revisionRef = useRef(0);
+  const saveInFlightRef = useRef(false);
+  const saveQueuedRef = useRef(false);
+  const pendingManualSaveRef = useRef(false);
+
+  const replaceDraft = (next: VaultDocumentDraft) => {
+    draftRef.current = next;
+    setDraft(next);
+  };
+
+  const updateDraft = (update: (current: VaultDocumentDraft) => VaultDocumentDraft) => {
+    setDraft((current) => {
+      const next = update(current);
+      draftRef.current = next;
+      return next;
+    });
+  };
+
+  const markDirty = () => {
+    revisionRef.current += 1;
+    const online = navigator.onLine;
+    setSaveState(online ? 'unsaved' : 'offline');
+    setSaveMessage(online ? 'Unsaved changes' : 'Offline — draft protected locally');
+  };
 
   useEffect(() => {
+    const incomingId = document?.id || null;
+    // After creating a new document, the parent supplies its first server
+    // snapshot. Do not reset the editor here: edits made while that first save
+    // was in flight must remain in the writing canvas and be queued safely.
+    if (incomingId && documentIdRef.current === incomingId && sourceDocumentIdRef.current === null) {
+      sourceDocumentIdRef.current = incomingId;
+      return;
+    }
+
     const next = initialDraft(document);
-    const key = draftStorageKey(document?.id || null, section?.slug || 'vault');
+    const key = draftStorageKey(incomingId, section?.slug || 'vault');
+    let restored = next;
+    let recovered = false;
     try {
       const stored = localStorage.getItem(key);
       if (stored) {
         const parsed = JSON.parse(stored);
         if (parsed?.draft?.title || parsed?.draft?.blocks?.length) {
-          setDraft({ ...next, ...parsed.draft, blocks: parseDocumentContent({ blocks: parsed.draft.blocks }, '') });
-          setSaveState('offline');
-          setSaveMessage('Recovered local draft');
-        } else setDraft(next);
-      } else setDraft(next);
-    } catch { setDraft(next); }
-    setDocumentId(document?.id || null);
+          restored = { ...next, ...parsed.draft, blocks: parseDocumentContent({ blocks: parsed.draft.blocks }, '') };
+          recovered = true;
+        }
+      }
+    } catch { /* start with the server draft when local storage is unavailable */ }
+
+    replaceDraft(restored);
+    documentIdRef.current = incomingId;
+    sourceDocumentIdRef.current = incomingId;
+    setDocumentId(incomingId);
+    revisionRef.current = recovered ? 1 : 0;
+    saveInFlightRef.current = false;
+    saveQueuedRef.current = false;
+    pendingManualSaveRef.current = false;
+    setSaveState(recovered && navigator.onLine ? 'unsaved' : recovered ? 'offline' : 'saved');
+    setSaveMessage(recovered ? 'Recovered local draft' : 'Saved');
     setUndo([]); setRedo([]); setActiveBlockId(null); setSlash(null); setShowTemplates(!document);
   }, [document?.id, section?.slug]);
 
   const setBlocks = (next: VaultBlock[], remember = false) => {
     if (remember) {
-      setUndo((history) => [...history, draft.blocks].slice(-60));
+      setUndo((history) => [...history, draftRef.current.blocks].slice(-60));
       setRedo([]);
     }
-    setDraft((current) => ({ ...current, blocks: next }));
-    setSaveState(navigator.onLine ? 'unsaved' : 'offline');
-    setSaveMessage(navigator.onLine ? 'Unsaved changes' : 'Offline — draft protected locally');
+    updateDraft((current) => ({ ...current, blocks: next }));
+    markDirty();
   };
 
   const updateBlock = (id: string, patch: Partial<VaultBlock>, remember = false) => {
     if (remember) {
-      setUndo((history) => [...history, draft.blocks].slice(-60));
+      setUndo((history) => [...history, draftRef.current.blocks].slice(-60));
       setRedo([]);
     }
-    setDraft((current) => ({ ...current, blocks: current.blocks.map((block) => block.id === id ? { ...block, ...patch } : block) }));
-    setSaveState(navigator.onLine ? 'unsaved' : 'offline');
-    setSaveMessage(navigator.onLine ? 'Unsaved changes' : 'Offline — draft protected locally');
+    updateDraft((current) => ({ ...current, blocks: current.blocks.map((block) => block.id === id ? { ...block, ...patch } : block) }));
+    markDirty();
   };
 
   const insertAfter = (afterId: string | null, type: VaultBlockType, patch: Partial<VaultBlock> = {}) => {
     const block = { ...newBlock(type), ...patch };
-    const index = afterId ? draft.blocks.findIndex((item) => item.id === afterId) : draft.blocks.length - 1;
-    const next = [...draft.blocks];
+    const currentBlocks = draftRef.current.blocks;
+    const index = afterId ? currentBlocks.findIndex((item) => item.id === afterId) : currentBlocks.length - 1;
+    const next = [...currentBlocks];
     next.splice(Math.max(0, index + 1), 0, block);
     setBlocks(next, true);
     setActiveBlockId(block.id);
@@ -123,15 +170,16 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   };
 
   const removeBlock = (id: string) => {
-    const next = draft.blocks.filter((block) => block.id !== id);
+    const next = draftRef.current.blocks.filter((block) => block.id !== id);
     setBlocks(next.length ? next : [newBlock('paragraph')], true);
   };
 
   const moveBlock = (id: string, direction: -1 | 1) => {
-    const index = draft.blocks.findIndex((block) => block.id === id);
+    const currentBlocks = draftRef.current.blocks;
+    const index = currentBlocks.findIndex((block) => block.id === id);
     const nextIndex = index + direction;
-    if (index < 0 || nextIndex < 0 || nextIndex >= draft.blocks.length) return;
-    const next = [...draft.blocks];
+    if (index < 0 || nextIndex < 0 || nextIndex >= currentBlocks.length) return;
+    const next = [...currentBlocks];
     [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
     setBlocks(next, true);
   };
@@ -152,7 +200,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
       return;
     }
     if (currentId && command.type !== 'divider') {
-      const current = draft.blocks.find((block) => block.id === currentId);
+      const current = draftRef.current.blocks.find((block) => block.id === currentId);
       const currentText = (current?.content || '').replace(/<[^>]*>/g, '').trim();
       if (current && current.type === 'paragraph' && (!currentText || currentText.startsWith('/'))) {
         updateBlock(currentId, { ...newBlock(command.type), id: currentId, language: command.language }, true);
@@ -170,46 +218,89 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
     if (target) updateBlock(currentId, { content: sanitizeHtml(target.innerHTML) });
   };
 
-  const payload = () => ({
-    title: draft.title.trim() || 'Untitled document',
-    contentJson: { version: 1, blocks: draft.blocks },
-    content: plainTextFromBlocks(draft.blocks),
-    tags: draft.tags,
-    status: draft.status,
-    visibility: draft.visibility,
-    relatedProjectId: draft.relatedProjectId,
+  const payloadFor = (current: VaultDocumentDraft) => ({
+    title: current.title.trim() || 'Untitled document',
+    contentJson: { version: 1, blocks: current.blocks },
+    content: plainTextFromBlocks(current.blocks),
+    tags: current.tags,
+    status: current.status,
+    visibility: current.visibility,
+    relatedProjectId: current.relatedProjectId,
     autosave: true,
   });
 
-  const protectLocalDraft = () => {
-    try { localStorage.setItem(draftStorageKey(documentId, section.slug), JSON.stringify({ savedAt: new Date().toISOString(), draft })); } catch { /* local storage unavailable */ }
+  const protectLocalDraft = (currentId = documentIdRef.current, currentDraft = draftRef.current) => {
+    try {
+      localStorage.setItem(draftStorageKey(currentId, section.slug), JSON.stringify({ savedAt: new Date().toISOString(), draft: currentDraft }));
+    } catch { /* local storage unavailable */ }
+  };
+
+  const clearLocalDrafts = (currentId: number) => {
+    try {
+      localStorage.removeItem(draftStorageKey(currentId, section.slug));
+      localStorage.removeItem(draftStorageKey(null, section.slug));
+    } catch { /* local storage unavailable */ }
   };
 
   const persist = async (manual = false) => {
-    if (!canEdit || !draft.title.trim()) return;
-    protectLocalDraft();
+    const snapshot = draftRef.current;
+    if (!canEdit || !snapshot.title.trim()) return;
+    protectLocalDraft(documentIdRef.current, snapshot);
     if (!navigator.onLine) {
       setSaveState('offline'); setSaveMessage('Offline — draft protected locally');
       return;
     }
+    if (saveInFlightRef.current) {
+      saveQueuedRef.current = true;
+      pendingManualSaveRef.current ||= manual;
+      return;
+    }
+
+    const startingRevision = revisionRef.current;
+    saveInFlightRef.current = true;
     setSaveState('saving'); setSaveMessage('Saving…');
+    let shouldFollowUp = false;
     try {
-      let currentId = documentId;
+      let currentId = documentIdRef.current;
       if (!currentId) {
-        const result = await db.vault.createDocument({ section: section.slug, ...payload(), autosave: !manual });
+        const result = await db.vault.createDocument({ section: section.slug, ...payloadFor(snapshot), autosave: !manual });
         currentId = result.data.id;
+        documentIdRef.current = currentId;
         setDocumentId(currentId);
       } else {
-        await db.vault.updateDocument(currentId, { ...payload(), autosave: !manual, changeNote: manual ? 'Saved from Code Rx Vault editor' : 'Autosaved document update' });
+        await db.vault.updateDocument(currentId, {
+          ...payloadFor(snapshot),
+          autosave: !manual,
+          changeNote: manual ? 'Saved from Code Rx Vault editor' : 'Autosaved document update',
+        });
       }
       if (!currentId) throw new Error('Document could not be initialized.');
       const saved = await db.vault.document(currentId);
-      localStorage.removeItem(draftStorageKey(currentId, section.slug));
-      setSaveState('saved'); setSaveMessage(manual ? 'Saved just now' : 'Saved');
+      shouldFollowUp = revisionRef.current !== startingRevision || saveQueuedRef.current;
+      if (shouldFollowUp) {
+        setSaveState('unsaved');
+        setSaveMessage('Unsaved changes');
+      } else {
+        clearLocalDrafts(currentId);
+        setSaveState('saved');
+        setSaveMessage(manual ? 'Saved just now' : 'Saved');
+      }
       onSaved(saved);
     } catch (error: any) {
-      protectLocalDraft();
-      setSaveState('error'); setSaveMessage(error?.message || "Couldn't save your changes. Retry when ready.");
+      protectLocalDraft(documentIdRef.current, draftRef.current);
+      setSaveState('error');
+      setSaveMessage(error?.message || "Couldn't save your changes. Retry when ready.");
+    } finally {
+      saveInFlightRef.current = false;
+      if (shouldFollowUp) {
+        const queuedManual = pendingManualSaveRef.current;
+        saveQueuedRef.current = false;
+        pendingManualSaveRef.current = false;
+        window.setTimeout(() => { void persist(queuedManual); }, 0);
+      } else {
+        saveQueuedRef.current = false;
+        pendingManualSaveRef.current = false;
+      }
     }
   };
 
@@ -218,7 +309,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
     protectLocalDraft();
     const timer = window.setTimeout(() => { void persist(false); }, 1400);
     return () => window.clearTimeout(timer);
-  }, [draft.title, JSON.stringify(draft.blocks), JSON.stringify(draft.tags), draft.status, draft.relatedProjectId, saveState, canEdit]);
+  }, [draft.title, JSON.stringify(draft.blocks), JSON.stringify(draft.tags), draft.status, draft.visibility, draft.relatedProjectId, saveState, canEdit]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -234,7 +325,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
         event.preventDefault();
         setUndo((history) => {
           const previous = history[history.length - 1]; if (!previous) return history;
-          setRedo((future) => [...future, draft.blocks]); setBlocks(previous, false);
+          setRedo((future) => [...future, draftRef.current.blocks]); setBlocks(previous, false);
           return history.slice(0, -1);
         });
       }
@@ -246,7 +337,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   const uploadAttachment = async (file: File) => {
     setUploading(true);
     try {
-      const result = await db.vault.uploadFile(file, section.slug, documentId || undefined);
+      const result = await db.vault.uploadFile(file, section.slug, documentIdRef.current || undefined);
       const isImage = file.type.startsWith('image/');
       insertAfter(activeBlockId, isImage ? 'image' : 'file', {
         fileKey: result.fileKey,
@@ -255,7 +346,6 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
         caption: file.name,
         content: file.name,
       });
-      setSaveState('unsaved');
     } catch (error: any) {
       setSaveState('error'); setSaveMessage(error?.message || 'Attachment upload failed. Retry when connected.');
     } finally { setUploading(false); }
@@ -267,16 +357,57 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   }, [slash]);
   const headings = draft.blocks.filter((block) => block.type === 'heading' && block.content?.replace(/<[^>]+>/g, '').trim());
   const words = wordCount(draft.blocks);
+  const canPublicShare = canShare && !section?.is_sensitive && draft.visibility !== 'restricted';
   const shellClass = focusMode ? 'vault-editor vault-editor--focus' : 'vault-editor';
 
-  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
-    <div className={`vault-editor__layout ${showOutline && !focusMode ? 'has-outline' : ''}`}><section className="vault-editor__document"><div className="vault-editor__titlebar"><input disabled={!canEdit} value={draft.title} onChange={(event) => { setDraft((current) => ({ ...current, title: event.target.value })); setSaveState('unsaved'); }} placeholder="Untitled document" className="vault-editor__title" /><div className="vault-editor__metadata"><select disabled={!canEdit} value={draft.status} onChange={(event) => { setDraft((current) => ({ ...current, status: event.target.value as VaultDocumentDraft['status'] })); setSaveState('unsaved'); }}><option value="draft">DRAFT</option><option value="in_review">IN REVIEW</option><option value="approved">APPROVED</option><option value="active">ACTIVE</option><option value="archived">ARCHIVED</option></select><select disabled={!canEdit} value={draft.visibility} onChange={(event) => { setDraft((current) => ({ ...current, visibility: event.target.value as VaultDocumentDraft['visibility'] })); setSaveState('unsaved'); }}><option value="section">SECTION</option><option value="members">MEMBERS</option><option value="restricted">RESTRICTED</option></select><select disabled={!canEdit} value={draft.relatedProjectId || ''} onChange={(event) => { setDraft((current) => ({ ...current, relatedProjectId: event.target.value ? Number(event.target.value) : null })); setSaveState('unsaved'); }}><option value="">No related project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select><TagInput tags={draft.tags} disabled={!canEdit} onChange={(tags) => { setDraft((current) => ({ ...current, tags })); setSaveState('unsaved'); }} /></div>{document && <p className="vault-editor__byline">Author: {document.created_by_name || 'Code Rx member'} · Last modified by {document.updated_by_name || document.created_by_name || 'Code Rx member'}</p>}</div>
-      {canEdit && <EditorToolbar onFormat={executeFormat} onInsert={(type: VaultBlockType, patch?: Partial<VaultBlock>) => insertAfter(activeBlockId, type, patch)} onPalette={() => setShowPalette(true)} onUndo={() => { const previous = undo[undo.length - 1]; if (previous) { setRedo((future) => [...future, draft.blocks]); setBlocks(previous, false); setUndo((history) => history.slice(0, -1)); } }} onRedo={() => { const next = redo[redo.length - 1]; if (next) { setUndo((history) => [...history, draft.blocks]); setBlocks(next, false); setRedo((future) => future.slice(0, -1)); } }} canUndo={Boolean(undo.length)} canRedo={Boolean(redo.length)} onUpload={() => fileInput.current?.click()} />}
+  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canPublicShare && documentId && <button onClick={() => setShowShare(true)} className="editor-icon-button text-emerald-700 hover:!text-emerald-900" title="Share document"><Share2 className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={() => { if (window.confirm('Archive this document? Its history will remain available for PHANTOM to restore.')) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
+    <div className={`vault-editor__layout ${showOutline && !focusMode ? 'has-outline' : ''}`}><section className="vault-editor__document"><div className="vault-editor__titlebar">
+        <input
+          disabled={!canEdit}
+          value={draft.title}
+          onChange={(event) => { updateDraft((current) => ({ ...current, title: event.target.value })); markDirty(); }}
+          placeholder="Untitled document"
+          className="vault-editor__title"
+        />
+        <div className="vault-editor__metadata">
+          <select
+            disabled={!canEdit}
+            value={draft.status}
+            onChange={(event) => { updateDraft((current) => ({ ...current, status: event.target.value as VaultDocumentDraft['status'] })); markDirty(); }}
+            title={canManage ? 'Document status' : 'Only a section manager can approve or activate a document'}
+          >
+            <option value="draft">DRAFT</option>
+            <option value="in_review">IN REVIEW</option>
+            <option value="approved" disabled={!canManage}>APPROVED</option>
+            <option value="active" disabled={!canManage}>ACTIVE</option>
+          </select>
+          <select
+            disabled={!canEdit}
+            value={draft.visibility}
+            onChange={(event) => { updateDraft((current) => ({ ...current, visibility: event.target.value as VaultDocumentDraft['visibility'] })); markDirty(); }}
+          >
+            <option value="section">SECTION</option>
+            <option value="members">MEMBERS</option>
+            <option value="restricted">RESTRICTED</option>
+          </select>
+          <select
+            disabled={!canEdit}
+            value={draft.relatedProjectId || ''}
+            onChange={(event) => { updateDraft((current) => ({ ...current, relatedProjectId: event.target.value ? Number(event.target.value) : null })); markDirty(); }}
+          >
+            <option value="">No related project</option>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
+          </select>
+          <TagInput tags={draft.tags} disabled={!canEdit} onChange={(tags) => { updateDraft((current) => ({ ...current, tags })); markDirty(); }} />
+        </div>
+        {document && <p className="vault-editor__byline">{document.document_code ? `${document.document_code} · ` : ''}Author: {document.created_by_name || 'Code Rx member'} · Created {document.created_at ? new Date(document.created_at).toLocaleDateString() : 'today'} · Last modified by {document.updated_by_name || document.created_by_name || 'Code Rx member'}{document.updated_at ? ` · ${new Date(document.updated_at).toLocaleString()}` : ''}</p>}
+      </div>
+      {canEdit && <EditorToolbar onFormat={executeFormat} onInsert={(type: VaultBlockType, patch?: Partial<VaultBlock>) => insertAfter(activeBlockId, type, patch)} onPalette={() => setShowPalette(true)} onUndo={() => { const previous = undo[undo.length - 1]; if (previous) { setRedo((future) => [...future, draftRef.current.blocks]); setBlocks(previous, false); setUndo((history) => history.slice(0, -1)); } }} onRedo={() => { const next = redo[redo.length - 1]; if (next) { setUndo((history) => [...history, draftRef.current.blocks]); setBlocks(next, false); setRedo((future) => future.slice(0, -1)); } }} canUndo={Boolean(undo.length)} canRedo={Boolean(redo.length)} onUpload={() => fileInput.current?.click()} />}
       <input ref={fileInput} className="sr-only" type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAttachment(file); event.target.value = ''; }} />
       <div className="vault-editor__writing" onDragOver={(event) => { if (canEdit) event.preventDefault(); }} onDrop={(event) => { if (!canEdit) return; event.preventDefault(); const file = event.dataTransfer.files?.[0]; if (file) void uploadAttachment(file); }}><div className="vault-editor__writing-inner">{showTemplates && canEdit && <TemplatePicker onChoose={applyTemplate} onClose={() => setShowTemplates(false)} />}{draft.blocks.map((block) => <DocumentBlockEditor key={block.id} block={block} canEdit={canEdit} active={activeBlockId === block.id} onFocus={() => setActiveBlockId(block.id)} onChange={(patch) => updateBlock(block.id, patch)} onSlash={(query) => setSlash({ blockId: block.id, query })} onInsert={(type) => insertAfter(block.id, type)} onRemove={() => removeBlock(block.id)} onMove={(direction) => moveBlock(block.id, direction)} onUpload={() => fileInput.current?.click()} />)}{canEdit && <button onClick={() => insertAfter(draft.blocks[draft.blocks.length - 1]?.id || null, 'paragraph')} className="vault-editor__add-block"><Plus className="h-4 w-4" />Add block</button>}</div></div>
-      <div className="vault-editor__footer"><span>{words.toLocaleString()} words · {draft.blocks.length} blocks</span><span>{uploading ? 'Uploading attachment…' : saveState === 'offline' ? 'Local draft protected' : 'Ctrl/Cmd + K commands · Ctrl/Cmd + S save'}</span></div></section>
+      <div className="vault-editor__footer"><span>{words.toLocaleString()} words · {draft.blocks.length} blocks{words < 25 ? ` · ${25 - words} more words for the substantive-document score rule when enabled` : ''}</span><span>{uploading ? 'Uploading attachment…' : saveState === 'offline' ? 'Local draft protected' : 'Autosave on · Ctrl/Cmd + K commands · Ctrl/Cmd + S save'}</span></div></section>
       {showOutline && !focusMode && <aside className="vault-editor__outline"><div className="vault-editor__outline-head"><strong>Document Outline</strong><button onClick={() => setShowOutline(false)}><X className="h-4 w-4" /></button></div><div className="mt-3 space-y-1">{headings.map((heading) => <button key={heading.id} onClick={() => window.document.getElementById(`vault-block-${heading.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className={`vault-editor__outline-item ${heading.level === 3 ? 'is-h3' : heading.level === 2 ? 'is-h2' : ''}`}>{stripHtml(heading.content || '')}</button>)}{!headings.length && <p className="text-xs leading-5 text-slate-400">Headings create a navigable outline automatically.</p>}</div></aside>}</div>
-      {slash && <SlashMenu commands={filteredCommands} onSelect={applyCommand} onClose={() => setSlash(null)} />}{showPalette && <CommandPalette commands={slashCommands} onSelect={applyCommand} onClose={() => setShowPalette(false)} onNewDocument={() => { setBlocks([newBlock('paragraph')], true); setShowPalette(false); }} />}{showHistory && <HistoryPanel documentId={documentId} versions={versions} canRestore={canManage} onClose={() => setShowHistory(false)} onRestore={async (version) => { if (!documentId) return; const result = await db.vault.restoreDocumentVersion(documentId, version); const refreshed = await db.vault.document(documentId); setDraft(initialDraft(refreshed)); onSaved(refreshed); setSaveState('saved'); setSaveMessage(`Restored version ${version} as v${result.data.version}`); setShowHistory(false); }} />}</div>;
+      {showShare && documentId && <VaultShareDialog document={{ id: documentId, title: draft.title || 'Untitled document', document_code: document?.document_code || null }} onClose={() => setShowShare(false)} />}{slash && <SlashMenu commands={filteredCommands} onSelect={applyCommand} onClose={() => setSlash(null)} />}{showPalette && <CommandPalette commands={slashCommands} onSelect={applyCommand} onClose={() => setShowPalette(false)} onNewDocument={() => { setBlocks([newBlock('paragraph')], true); setShowPalette(false); }} />}{showHistory && <HistoryPanel documentId={documentId} versions={versions} canRestore={canManage} onClose={() => setShowHistory(false)} onRestore={async (version) => { if (!documentId) return; const result = await db.vault.restoreDocumentVersion(documentId, version); const refreshed = await db.vault.document(documentId); replaceDraft(initialDraft(refreshed)); revisionRef.current = 0; onSaved(refreshed); setSaveState('saved'); setSaveMessage(`Restored version ${version} as v${result.data.version}`); setShowHistory(false); }} />}</div>;
 
 };
 
@@ -353,7 +484,17 @@ const AttachmentBlock = ({ block, shell, controls, canEdit, onChange, onFocus, o
   return <div id={`vault-block-${block.id}`} className={`${shell} rounded-xl border border-slate-200 bg-slate-50 p-4`}>{controls}{image && url ? <img src={url} alt={stripHtml(block.caption || '') || 'Vault attachment'} className="max-h-[34rem] w-full rounded-lg object-contain" /> : <div className="flex flex-wrap items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-lg bg-emerald-100 text-emerald-700">{image ? <ImagePlus className="h-5 w-5" /> : <Paperclip className="h-5 w-5" />}</div><div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-800">{stripHtml(block.caption || block.content || '') || (image ? 'Image attachment' : 'File attachment')}</p><p className="mt-1 text-xs text-slate-500">{block.fileKey ? 'Protected Vault attachment' : 'Attach a file or image'}</p></div>{block.fileKey && <button onClick={open} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700">{loading ? 'Opening…' : 'Open'}</button>}{canEdit && <button onClick={onUpload} className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">Replace</button>}</div>}{canEdit && <input value={block.caption || ''} onFocus={onFocus} onChange={(event) => onChange({ caption: event.target.value, content: event.target.value })} placeholder="Attachment caption" className="mt-3 w-full border-0 bg-transparent text-sm text-slate-600 outline-none" />}</div>;
 };
 
-const EmbedBlock = ({ block, shell, controls, canEdit, onChange, onFocus }: any) => <div id={`vault-block-${block.id}`} className={`${shell} rounded-xl border border-slate-200 bg-slate-50 p-4`}>{controls}<div className="flex items-center gap-2 text-emerald-700"><Link2 className="h-4 w-4" /><span className="text-xs font-black uppercase tracking-wider">Linked resource</span></div>{canEdit ? <><input value={block.content || ''} onFocus={onFocus} onChange={(event) => onChange({ content: event.target.value })} placeholder="Link title — project, meeting, document, GitHub…" className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /><input value={block.url || ''} onChange={(event) => onChange({ url: event.target.value })} placeholder="https://… or Vault reference" className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" /></> : <a href={block.url || '#'} target="_blank" rel="noreferrer" className="mt-3 block text-sm font-bold text-emerald-700 hover:underline">{stripHtml(block.content || block.url || 'Linked resource')}</a>}</div>;
+const EmbedBlock = ({ block, shell, controls, canEdit, onChange, onFocus }: any) => {
+  const href = safeVaultResourceUrl(block.url) || '#';
+  return <div id={`vault-block-${block.id}`} className={`${shell} rounded-xl border border-slate-200 bg-slate-50 p-4`}>
+    {controls}
+    <div className="flex items-center gap-2 text-emerald-700"><Link2 className="h-4 w-4" /><span className="text-xs font-black uppercase tracking-wider">Linked resource</span></div>
+    {canEdit ? <>
+      <input value={block.content || ''} onFocus={onFocus} onChange={(event) => onChange({ content: event.target.value })} placeholder="Link title — project, meeting, document, GitHub…" className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" />
+      <input value={block.url || ''} onChange={(event) => onChange({ url: event.target.value })} placeholder="https://… or Vault reference" className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" />
+    </> : <a href={href} target="_blank" rel="noopener noreferrer" className="mt-3 block text-sm font-bold text-emerald-700 hover:underline">{stripHtml(block.content || block.url || 'Linked resource')}</a>}
+  </div>;
+};
 
 const EditorToolbar = ({ onFormat, onInsert, onPalette, onUndo, onRedo, canUndo, canRedo, onUpload }: any) => {
   const [moreOpen, setMoreOpen] = useState(false);

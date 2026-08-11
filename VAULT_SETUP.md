@@ -1,83 +1,89 @@
-# Code Rx Vault, Membership & Founder Control System
+# Code Rx Vault, Membership & PHANTOM Control
 
-## What was extended
+## What this extension preserves
 
-This implementation extends the existing React/Vite site, existing Cloudflare Pages Function API, existing JWT login, existing `applications`, `members`, `users`, D1 database, R2 bucket, Admin Core, and JOIN CODE Rx form. It does not create a second website or second login system.
+Code Rx Vault extends the existing Code Rx Society application. It keeps the existing React/Vite site, Pages Functions API, D1 database, R2 bucket, authentication, Join flow, Admin Core, and Member Portal.
 
-### Existing architecture retained
+It does **not** create a second public website, account store, login system, database, or storage bucket.
 
-- **Frontend:** React + Vite + Tailwind, routed in `src/App.tsx` by authenticated state.
-- **Authentication:** existing PBKDF2 password hashes and HMAC JWTs in `functions/lib/auth.ts`.
-- **Join flow:** existing `applications` table and `/api/applications` endpoint.
-- **Admin Core:** existing `AdminPanel`, content controller, and Live Website Builder.
-- **Storage:** existing D1 binding `DB` and R2 binding `BUCKET`.
+## Workspace architecture
 
-### New native extensions
+```text
+PHANTOM CONTROL CENTER                 MEMBER PORTAL
+          │                                   │
+          └────────── Open Vault ─────────────┘
+                              │
+                    FULL VAULT WORKSPACE
+```
 
-- Additive D1 schema in `functions/lib/schema.ts` for member profiles, permanent IDs, activation links, roles, permissions, codenames, Vault records, website admins, and audit logs.
-- `PHANTOM` is seeded from `PHANTOM_EMAIL` (or `ADMIN_EMAIL`) with the founder role and full server-side access.
-- Public self-registration is disabled. Existing accounts remain valid and are lazily migrated into a member profile on authentication.
-- Approved members receive an account activation link and choose their own password. No administrator needs to know a member password.
-- The Code Rx Vault lives inside the existing member dashboard.
-- The PHANTOM Control Center lives inside the existing Admin Core.
-- The six founding identities are `PHANTOM`, `NEXUS`, `GHOST`, `FALCON`, `QUANTUM`, and `MATRIX`. PHANTOM is claimed for the founder; the other founding identities are reserved in the database until PHANTOM assigns them.
-- Vault documents use structured blocks, document templates, code blocks, metadata, tags, autosave/local-draft protection, version history, protected attachments, search, and activity records — not a plain textarea.
+The Vault is a standalone full-page workspace:
 
-## Safe migration behavior
+- PHANTOM sees **Back to Phantom Control**.
+- A member sees **Back to Member Portal**.
+- There is one Vault navigation sidebar, not a persistent Admin/PHANTOM sidebar beside the editor.
+- Focus mode hides surrounding navigation for writing.
+- Mobile navigation uses the Vault drawer rather than squeezing desktop columns onto a phone.
 
-The schema is applied automatically on the first API request after deployment.
+## Membership and codename rules
 
-- Existing tables are **not dropped**.
-- Existing `applications`, `members`, `users`, and `site_content` data are retained.
-- New columns for review metadata are added only when missing.
-- New tables are additive.
-- Existing authenticated accounts receive a profile and permanent `CRX-####` ID only when they next authenticate, preserving prior accounts.
-- Member IDs are allocated from a monotonic sequence and never reused.
+- Public self-registration is disabled. New accounts come from a reviewed Join application or PHANTOM’s direct member creation flow.
+- Each member receives a permanent `CRX-####` member ID and creates their own password through a one-time activation link.
+- Passwords are never exposed to PHANTOM and new/changed passwords require at least 8 characters.
+- The founding identities are `PHANTOM`, `NEXUS`, `GHOST`, `FALCON`, `QUANTUM`, and `MATRIX`.
+- `PHANTOM` is permanently claimed by the founder.
+- `NEXUS`, `GHOST`, `FALCON`, `QUANTUM`, and `MATRIX` are available only in the **Founding Codename Pool** for PHANTOM direct assignment or a Custom Founding Ballot.
+- Standard members ballot only from the separate **Member Codename Pool**.
+- A Custom responsibility always uses the Founding Codename Pool.
+- Direct founding assignment atomically claims one available founding codename and prevents any later ballot.
+- Releasing a non-founder member codename safely reopens the correct ballot when appropriate; the PHANTOM identity cannot be released.
 
-Back up the D1 database before production deployment as a normal operational precaution:
+## Vault capabilities
+
+- Structured document blocks, templates, rich text, code, lists, tables, callouts, formulas, files, images, and linked resources.
+- Every new document receives a permanent automatic reference such as `CRX-DOC-0001`; author, created date, last editor, and update date remain visible in the workspace.
+- Slash commands, command palette, outline, focus mode, code preview, tags, related projects, and version history.
+- Server-side structured-content sanitization before rendering.
+- Protected R2 attachments served only after Vault permission checks.
+- Visible autosave with local-draft recovery and serialized saves to avoid overwriting rapid edits.
+- PHANTOM-controlled document sharing: one global master switch plus a per-member Share-button permission. Links are random, read-only, time-limited, revocable, and never expose protected attachments or sensitive/restricted documents.
+- Section-level `view`, `create`, `edit`, `delete`, and `manage` permissions, plus member-specific overrides.
+- A live points system with automatic rule awards, PHANTOM add/deduct/set controls, score history, member balance, and a real active-member leaderboard.
+- Durable in-app notifications: PHANTOM can broadcast to all active members, a responsibility profile, or selected members, and can delegate trusted members to send notices. Recipients receive an unread badge and auto-refreshing inbox.
+- Role history, audit logs, Website Admin delegation, and PHANTOM-only organization controls.
+- Archive/restore workflows for members, documents, sections, and projects.
+
+## Safe migrations
+
+The schema is applied automatically on the first API request after a deployment.
+
+- Tables and columns are added non-destructively.
+- Existing applications, members, users, site content, documents, and attachments are retained.
+- Member IDs are monotonic and never reused.
+- Historic document rows marked `archived` are normalized into the actual document archive so archive lists and restoration remain consistent.
+
+Before a major production change, take a normal D1 export:
 
 ```bash
 npx wrangler d1 export code-rx-db --remote --output=code-rx-before-vault.sql
 ```
 
-## Required Cloudflare secrets
+## Required production bindings
 
-Do **not** commit secrets into `wrangler.toml`, frontend variables, Git, or chat.
-
-For a fresh deployment, configure these encrypted Cloudflare secrets in the Pages project/Worker environment:
-
-```bash
-npx wrangler pages secret put JWT_SECRET --project-name coderxsociety
-npx wrangler pages secret put ADMIN_PASSWORD --project-name coderxsociety
+```text
+D1: code-rx-db        binding DB
+R2: code-rx-storage   binding BUCKET
 ```
 
-Optional environment variables:
+Set `JWT_SECRET` and `ADMIN_PASSWORD` only as encrypted Cloudflare secrets. `PHANTOM_EMAIL` defaults to `ADMIN_EMAIL` when it is not set.
 
-- `PHANTOM_EMAIL` — founder identity; defaults to `ADMIN_EMAIL`.
-- `SITE_URL` — production website URL used in activation/reset links.
-- `EMAILJS_TEMPLATE_ID_ACTIVATION` — activation email template if EmailJS is configured.
-
-The old repository configuration contained sensitive seed values. Rotate the old JWT secret and admin password in Cloudflare before production deployment.
-
-## Authorization model
-
-Frontend controls only visibility. Every protected operation is checked again by the Cloudflare Worker.
-
-- **PHANTOM:** full organization and website access.
-- **Role permissions:** `view`, `create`, `edit`, `delete`, `manage` per Vault section.
-- **Member overrides:** PHANTOM can set more specific section-level overrides.
-- **Website Admins:** separate from Vault administration; website permissions are stored in `website_admin_permissions`.
-- **Vault files:** stored under `vault/` in R2, recorded as attachment metadata, and served only through `/api/vault-files/*` after a server-side Vault permission check.
-- Vault documents are stored as sanitized structured block JSON plus a plain-text search index. Each save creates a version snapshot; PHANTOM/section managers restore history as a new audited version.
-- The document editor supports slash commands, Ctrl/Cmd+K commands, templates, rich writing blocks, code blocks, callouts, checklists, tables, protected attachments, metadata, outline navigation, focus mode, autosave, and protected local-draft recovery.
-
-## Deployment check
-
-Run these before deploying:
+## Validation
 
 ```bash
 npm ci
 npx tsc --noEmit
-npm run build
 npx wrangler pages functions build functions --outfile /tmp/code-rx-functions.js
+npm run build
+npm audit
 ```
+
+For deployment and live verification, see `PRODUCTION_SETUP.md` and `CLOUDFLARE_SETUP.md`.
