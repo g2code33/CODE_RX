@@ -526,6 +526,17 @@ CREATE TABLE IF NOT EXISTS notification_recipients (
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
 );
 
+CREATE TABLE IF NOT EXISTS recycle_bin_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  deleted_by_user_id INTEGER,
+  deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(deleted_by_user_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS system_settings (
   setting_key TEXT PRIMARY KEY,
   setting_value TEXT NOT NULL,
@@ -549,6 +560,7 @@ CREATE INDEX IF NOT EXISTS idx_score_events_member ON member_score_events(member
 CREATE INDEX IF NOT EXISTS idx_notification_recipients_member ON notification_recipients(member_profile_id, status, delivered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_sent ON notifications(sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_status_sent ON notifications(status, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_recycle_bin_deleted_at ON recycle_bin_items(deleted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_projects_status ON vault_projects(status, is_archived);
@@ -597,7 +609,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-wide-three-choice-ballot-8';
+const VAULT_SCHEMA_VERSION = '2026-08-12-custom-founding-recycle-bin-11';
 
 
 const ROLE_SEEDS = [
@@ -794,6 +806,23 @@ const ensureFoundingCodenames = async (db: D1Database, phantomProfileId: number)
   }
 };
 
+/**
+ * NEXUS, GHOST, FALCON, QUANTUM and MATRIX are the shared founding ballot
+ * choices for Custom members. Older live databases may still mark them as
+ * reserved from an earlier model; an unclaimed default founding identity must
+ * be selectable by a Custom ballot.
+ */
+const normalizeCustomFoundingAvailability = async (db: D1Database) => {
+  const names = FOUNDING_CODENAMES.filter((name) => name !== 'PHANTOM').map((name) => name.toLowerCase());
+  await db.prepare(
+    `UPDATE codenames
+     SET pool = 'founding', status = 'available', reserved_note = 'Founding identity available for Custom ballot', updated_at = CURRENT_TIMESTAMP
+     WHERE normalized_name IN (${names.map(() => '?').join(',')})
+       AND claimed_by_member_profile_id IS NULL
+       AND status IN ('available', 'reserved')`
+  ).bind(...names).run();
+};
+
 const ensurePhantom = async (env: Env) => {
   const db = env.DB;
   const email = String(env.PHANTOM_EMAIL || env.ADMIN_EMAIL || '').trim().toLowerCase();
@@ -874,6 +903,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       await seedScoreRules(db);
       await seedFeatureSettings(db);
       await ensurePhantom(env);
+      await normalizeCustomFoundingAvailability(db);
       await db.prepare(
         `INSERT INTO system_settings (setting_key, setting_value, updated_at)
          VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
