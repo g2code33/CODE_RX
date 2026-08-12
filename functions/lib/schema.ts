@@ -187,10 +187,12 @@ CREATE TABLE IF NOT EXISTS codename_selection_sessions (
   assignment_source TEXT NOT NULL DEFAULT 'ballot' CHECK (assignment_source IN ('ballot','phantom_direct')),
   passes_used INTEGER NOT NULL DEFAULT 0 CHECK (passes_used BETWEEN 0 AND 2),
   claimed_codename_id INTEGER,
+  current_codename_id INTEGER,
   started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   completed_at DATETIME,
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id),
-  FOREIGN KEY(claimed_codename_id) REFERENCES codenames(id)
+  FOREIGN KEY(claimed_codename_id) REFERENCES codenames(id),
+  FOREIGN KEY(current_codename_id) REFERENCES codenames(id)
 );
 
 CREATE TABLE IF NOT EXISTS codename_selection_events (
@@ -576,9 +578,10 @@ const SAFE_MIGRATIONS = [
   { table: 'codenames', column: 'pool', sql: "ALTER TABLE codenames ADD COLUMN pool TEXT NOT NULL DEFAULT 'member'" },
   { table: 'codename_selection_sessions', column: 'pool', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN pool TEXT NOT NULL DEFAULT 'member'" },
   { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
+  { table: 'codename_selection_sessions', column: 'current_codename_id', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN current_codename_id INTEGER' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-vault-download-light-ui-4';
+const VAULT_SCHEMA_VERSION = '2026-08-12-covered-ballot-full-vault-5';
 
 
 const ROLE_SEEDS = [

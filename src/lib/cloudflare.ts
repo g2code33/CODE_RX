@@ -165,6 +165,10 @@ export const db = {
       const result = await apiCall<{ data: any }>('/api/codenames/ballot');
       return result.data;
     },
+    reveal: async () => {
+      const result = await apiCall<{ data: any }>('/api/codenames/reveal', { method: 'POST' });
+      return result.data;
+    },
     check: async (codenameId: number) => {
       const result = await apiCall<{ data: any }>('/api/codenames/check', { method: 'POST', body: JSON.stringify({ codenameId }) });
       return result.data;

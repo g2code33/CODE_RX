@@ -77,7 +77,7 @@ function App() {
         setAdminWorkspace('controller');
       } else {
         setIsDashboard(true);
-        setIsMemberVault(false);
+        setIsMemberVault(window.location.hash.startsWith('#member-vault'));
         setIsAdmin(false);
       }
     });
@@ -91,6 +91,13 @@ function App() {
     const applyHash = () => {
       if (window.location.hash.startsWith('#vault-share')) {
         setIsSharedVaultView(true);
+        setIsActivationView(false);
+        setIsResetView(false);
+        return;
+      }
+      if (window.location.hash.startsWith('#member-vault')) {
+        setIsMemberVault(true);
+        setIsSharedVaultView(false);
         setIsActivationView(false);
         setIsResetView(false);
         return;
@@ -110,6 +117,7 @@ function App() {
       setIsResetView(false);
       setIsActivationView(false);
       setIsSharedVaultView(false);
+      setIsMemberVault(false);
       const id = idFromHash();
       const section = SECTION_MAP[id];
       const tab = section ? section.tab : 'home';
@@ -191,13 +199,23 @@ function App() {
     />;
   }
 
+  // Member Vault is deliberately returned outside the public/dashboard shell.
+  // No dashboard sidebar, public navbar, or constrained parent remains mounted.
+  if (!isAdmin && isDashboard && isMemberVault) {
+    return <Vault workspaceMode="member" onBack={() => { setIsMemberVault(false); if (window.location.hash.startsWith('#member-vault')) window.location.hash = ''; }} />;
+  }
+
+  // PHANTOM Vault already returns its standalone workspace from AdminPanel;
+  // returning it directly here likewise removes the Admin shell completely.
+  if (isAdmin && adminWorkspace === 'vault') {
+    return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />;
+  }
+
   const inImmersiveWorkspace = (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault')) || (!isAdmin && isDashboard && isMemberVault);
   const mainContent = isAdmin
     ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
     : isDashboard
-      ? isMemberVault
-        ? <Vault workspaceMode="member" onBack={() => setIsMemberVault(false)} />
-        : <Dashboard user={user} onOpenVault={() => setIsMemberVault(true)} />
+      ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} />
       : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;
 
   const shell = (
