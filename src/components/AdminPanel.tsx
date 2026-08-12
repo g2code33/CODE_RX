@@ -30,6 +30,7 @@ import { db, auth, AuthUser } from '../lib/cloudflare';
 import { PhantomControlCenter } from './PhantomControlCenter';
 import { VisualEditor } from './VisualEditor';
 import { Vault } from './Vault';
+import { RecentItems } from './RecentItems';
 
 const STORAGE_KEY = 'codeRx_siteContent';
 const PENDING_PUBLISH_KEY = 'codeRx_pendingSiteContent';
@@ -85,6 +86,16 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
     }
   };
 
+  const handleDelete = async (application: any) => {
+    if (!window.confirm(`Delete the application from ${application.name}?`)) return;
+    try {
+      await db.applications.remove(application.id);
+      setApplications((current) => current.filter((item) => item.id !== application.id));
+    } catch (error: any) {
+      alert(error?.message || 'Could not delete this application.');
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -131,6 +142,12 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
                 >
                   Reject
                 </button>
+                {!app.member_profile_id && <button
+                  onClick={() => void handleDelete(app)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-white border border-red-100 text-red-600 font-bold rounded-xl hover:bg-red-50 transition-all text-xs uppercase tracking-wide"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Delete
+                </button>}
               </div>
             </div>
           ))}
@@ -156,103 +173,56 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
 const SubscribersList = () => {
   const [subscribers, setSubscribers] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    loadSubscribers();
-  }, []);
+  const [showAll, setShowAll] = useState(false);
+  const [removingId, setRemovingId] = useState<number | null>(null);
 
   const loadSubscribers = async () => {
-    try {
-      const data = await db.subscribers.getAll();
-      setSubscribers(data || []);
-    } catch (error) {
-      console.error('Failed to load subscribers:', error);
-      setSubscribers([]);
-    } finally {
-      setIsLoading(false);
-    }
+    try { setSubscribers(await db.subscribers.getAll()); }
+    catch (error) { console.error('Failed to load subscribers:', error); setSubscribers([]); }
+    finally { setIsLoading(false); }
+  };
+  useEffect(() => { void loadSubscribers(); }, []);
+
+  const remove = async (subscriber: any) => {
+    if (!window.confirm(`Remove ${subscriber.email} from the newsletter list?`)) return;
+    setRemovingId(subscriber.id);
+    try { await db.subscribers.remove(subscriber.id); setSubscribers((current) => current.filter((item) => item.id !== subscriber.id)); }
+    catch (error) { console.error('Failed to remove subscriber:', error); }
+    finally { setRemovingId(null); }
   };
 
-  if (isLoading) {
-    return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading subscribers…</div>;
-  }
+  if (isLoading) return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading subscribers…</div>;
+  if (!subscribers.length) return <p className="text-sm text-slate-500">No subscribers yet</p>;
+  const visible = showAll ? subscribers : subscribers.slice(0, 3);
 
-  if (subscribers.length === 0) {
-    return <p className="text-slate-500 text-sm">No subscribers yet</p>;
-  }
-
-  return (
-    <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
-      <table className="w-full">
-        <thead className="bg-slate-50">
-          <tr>
-            <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Name</th>
-            <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Email</th>
-            <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Phone</th>
-            <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-50">
-          {subscribers.map((sub) => (
-            <tr key={sub.id}>
-              <td className="px-6 py-4 text-sm font-bold text-slate-900">{sub.name}</td>
-              <td className="px-6 py-4 text-sm text-slate-600">{sub.email}</td>
-              <td className="px-6 py-4 text-sm text-slate-600">{sub.phone || '-'}</td>
-              <td className="px-6 py-4 text-sm text-slate-400">{sub.date}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+  return <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white"><table className="w-full min-w-[620px]"><thead className="bg-slate-50"><tr><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Name</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Email</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Phone</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Date</th><th className="px-6 py-3 text-right text-[10px] font-black uppercase tracking-widest text-slate-400">Action</th></tr></thead><tbody className="divide-y divide-slate-50">{visible.map((sub) => <tr key={sub.id}><td className="px-6 py-4 text-sm font-bold text-slate-900">{sub.name || '—'}</td><td className="px-6 py-4 text-sm text-slate-600">{sub.email}</td><td className="px-6 py-4 text-sm text-slate-600">{sub.phone || '—'}</td><td className="px-6 py-4 text-sm text-slate-400">{sub.date}</td><td className="px-6 py-4 text-right"><button disabled={removingId === sub.id} onClick={() => void remove(sub)} className="inline-flex items-center gap-1.5 rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-black text-red-600 transition hover:bg-red-100 disabled:opacity-60"><Trash2 className="h-3.5 w-3.5" />{removingId === sub.id ? 'Removing…' : 'Delete'}</button></td></tr>)}</tbody></table>{subscribers.length > 3 && <div className="border-t border-slate-100 px-5 py-3"><button onClick={() => setShowAll((current) => !current)} className="text-xs font-black text-emerald-700 hover:underline">{showAll ? 'Show recent 3 only' : `Show ${subscribers.length - 3} more subscribers`}</button></div>}</div>;
 };
 
 // Contact Messages List Component
 const ContactMessagesList = () => {
   const [contacts, setContacts] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    loadContacts();
-  }, []);
+  const [removingId, setRemovingId] = useState<number | null>(null);
 
   const loadContacts = async () => {
-    try {
-      const data = await db.contacts.getAll();
-      setContacts(data || []);
-    } catch (error) {
-      console.error('Failed to load contacts:', error);
-      setContacts([]);
-    } finally {
-      setIsLoading(false);
-    }
+    try { setContacts(await db.contacts.getAll()); }
+    catch (error) { console.error('Failed to load contacts:', error); setContacts([]); }
+    finally { setIsLoading(false); }
+  };
+  useEffect(() => { void loadContacts(); }, []);
+
+  const remove = async (contact: any) => {
+    if (!window.confirm(`Delete the message from ${contact.name}? This cannot be restored.`)) return;
+    setRemovingId(contact.id);
+    try { await db.contacts.remove(contact.id); setContacts((current) => current.filter((item) => item.id !== contact.id)); }
+    catch (error) { console.error('Failed to delete contact message:', error); }
+    finally { setRemovingId(null); }
   };
 
-  if (isLoading) {
-    return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading contact messages…</div>;
-  }
+  if (isLoading) return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading contact messages…</div>;
+  if (!contacts.length) return <p className="text-sm text-slate-500">No contact messages yet</p>;
 
-  if (contacts.length === 0) {
-    return <p className="text-slate-500 text-sm">No contact messages yet</p>;
-  }
-
-  return (
-    <div className="space-y-4">
-      {contacts.map((contact) => (
-        <div key={contact.id} className="bg-white p-6 rounded-2xl border border-slate-100">
-          <div className="flex justify-between items-start mb-4">
-            <div>
-              <p className="font-black text-slate-900">{contact.name}</p>
-              <p className="text-sm text-slate-500">{contact.email}</p>
-            </div>
-            <span className="text-[10px] text-slate-400">{contact.date}</span>
-          </div>
-          <p className="font-bold text-slate-700 mb-2">{contact.subject}</p>
-          <p className="text-slate-600 text-sm leading-relaxed">{contact.message}</p>
-        </div>
-      ))}
-    </div>
-  );
+  return <div className="space-y-4"><RecentItems items={contacts} label="contact messages" render={(contact) => <article key={contact.id} className="rounded-2xl border border-slate-100 bg-white p-6"><div className="flex items-start justify-between gap-4"><div><p className="font-black text-slate-900">{contact.name}</p><p className="text-sm text-slate-500">{contact.email}</p></div><div className="flex items-center gap-3"><span className="text-[10px] text-slate-400">{contact.date}</span><button disabled={removingId === contact.id} onClick={() => void remove(contact)} aria-label={`Delete message from ${contact.name}`} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50 disabled:opacity-60"><Trash2 className="h-4 w-4" /></button></div></div><p className="mt-4 font-bold text-slate-700">{contact.subject}</p><p className="mt-2 text-sm leading-relaxed text-slate-600">{contact.message}</p></article>} /></div>;
 };
 
 interface AdminStats {
@@ -729,6 +699,7 @@ export const AdminPanel = ({
   const [pendingCount, setPendingCount] = useState(0);
   const [hasPendingPublish, setHasPendingPublish] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
 
   // Defensive: never trust external payloads to have the full schema.
   const projectsList = Array.isArray(siteContent.projects) ? siteContent.projects : [];
@@ -911,6 +882,57 @@ export const AdminPanel = ({
   const handleRemoveTeamMember = (index: number) => {
     const newTeam = siteContent.about.team.filter((_, i) => i !== index);
     handleUpdateAbout({ team: newTeam });
+  };
+
+  const updatePortfolioProject = (id: string, updates: Record<string, unknown>) => {
+    setSiteContent((current) => ({
+      ...current,
+      projects: (current.projects || []).map((project) => project.id === id ? { ...project, ...updates } : project),
+    }));
+    setHasUnsavedChanges(true);
+  };
+
+  const addPortfolioProject = () => {
+    const project = {
+      id: `project-${Date.now()}`,
+      category: 'Pharmacy Tech' as const,
+      title: 'New Project',
+      description: 'Add a short project summary.',
+      problem: '',
+      solution: '',
+      technology: [],
+      team: [],
+      status: '🚧 Development' as const,
+      progress: 0,
+    };
+    setSiteContent((current) => ({ ...current, projects: [...(current.projects || []), project] }));
+    setHasUnsavedChanges(true);
+  };
+
+  const removePortfolioProject = (project: { id: string; title: string }) => {
+    if (!window.confirm(`Remove “${project.title}” from the public project portfolio?`)) return;
+    setSiteContent((current) => ({ ...current, projects: (current.projects || []).filter((item) => item.id !== project.id) }));
+    setHasUnsavedChanges(true);
+  };
+
+  const addTermsSection = () => {
+    const existing = siteContent.terms.sections;
+    const highest = existing.reduce((current, section) => Math.max(current, Number.parseInt(section.id, 10) || 0), 0);
+    setSiteContent((current) => ({
+      ...current,
+      terms: { ...current.terms, sections: [...current.terms.sections, { id: String(highest + 1).padStart(2, '0'), title: 'NEW SECTION', content: 'Add the section content here.' }] },
+    }));
+    setHasUnsavedChanges(true);
+  };
+
+  const removeTermsSection = (section: { id: string; title: string }) => {
+    if (siteContent.terms.sections.length <= 1) {
+      window.alert('Keep at least one Terms section in the public document.');
+      return;
+    }
+    if (!window.confirm(`Remove “${section.title}” from the Terms document?`)) return;
+    setSiteContent((current) => ({ ...current, terms: { ...current.terms, sections: current.terms.sections.filter((item) => item.id !== section.id) } }));
+    setHasUnsavedChanges(true);
   };
 
   if (workspace === 'vault') {
@@ -1410,42 +1432,16 @@ export const AdminPanel = ({
 
             {activeView === 'projects' && (
               <div className="space-y-6">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-2xl font-black text-slate-900 tracking-tight">Project Portfolio Manager</h3>
-                  <button className="flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-sm">
-                    <Plus className="w-4 h-4" /> Add Project
-                  </button>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div><h3 className="text-2xl font-black tracking-tight text-slate-900">Project Portfolio Manager</h3><p className="mt-1 text-sm text-slate-500">Add, edit, or remove public portfolio cards. Changes save in the background.</p></div>
+                  <button onClick={addPortfolioProject} className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-bold text-white transition-all hover:bg-emerald-600"><Plus className="h-4 w-4" />Add Project</button>
                 </div>
-                
                 <div className="space-y-4">
-                  {projectsList.map((proj) => (
-                    <div key={proj.id} className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
-                      <div className="flex items-start justify-between mb-4">
-                        <div>
-                          <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{proj.category}</p>
-                          <h4 className="font-black text-slate-900 text-lg">{proj.title}</h4>
-                        </div>
-                        <div className="flex gap-2">
-                          <button className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all">
-                            <Edit3 className="w-5 h-5" />
-                          </button>
-                          <button className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-all">
-                            <Trash2 className="w-5 h-5" />
-                          </button>
-                        </div>
-                      </div>
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-1 mb-1 block">Description</label>
-                          <input type="text" value={proj.description} readOnly className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-600" />
-                        </div>
-                        <div>
-                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-1 mb-1 block">Status</label>
-                          <input type="text" value={proj.status} readOnly className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-600" />
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                  {projectsList.map((proj) => {
+                    const editing = editingProjectId === proj.id;
+                    return <div key={proj.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-6"><div className="mb-4 flex items-start justify-between gap-4"><div className="min-w-0 flex-1">{editing ? <><select value={proj.category} onChange={(event) => updatePortfolioProject(proj.id, { category: event.target.value })} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700"><option value="Pharmacy Tech">Pharmacy Tech</option><option value="AI Lab">AI Lab</option><option value="Software Engineering">Software Engineering</option><option value="Competitions">Competitions</option></select><input value={proj.title} onChange={(event) => updatePortfolioProject(proj.id, { title: event.target.value })} className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-lg font-black text-slate-900" placeholder="Project title" /></> : <><p className="text-xs font-bold uppercase tracking-widest text-emerald-600">{proj.category}</p><h4 className="mt-1 text-lg font-black text-slate-900">{proj.title}</h4></>}</div><div className="flex shrink-0 gap-2">{editing ? <><button onClick={() => setEditingProjectId(null)} className="p-2 text-emerald-600 transition hover:bg-emerald-50" title="Finish editing"><CheckCircle className="h-5 w-5" /></button><button onClick={() => setEditingProjectId(null)} className="p-2 text-slate-500 transition hover:bg-slate-100" title="Close editor"><X className="h-5 w-5" /></button></> : <button onClick={() => setEditingProjectId(proj.id)} className="p-2 text-emerald-600 transition hover:bg-emerald-50" title="Edit project"><Edit3 className="h-5 w-5" /></button>}<button onClick={() => removePortfolioProject(proj)} className="p-2 text-red-500 transition hover:bg-red-50" title="Remove project"><Trash2 className="h-5 w-5" /></button></div></div><div className="grid gap-4 md:grid-cols-2"><div><label className="mb-1 block px-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Description</label>{editing ? <textarea rows={3} value={proj.description} onChange={(event) => updatePortfolioProject(proj.id, { description: event.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600" /> : <p className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">{proj.description || 'No description yet.'}</p>}</div><div><label className="mb-1 block px-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Status</label>{editing ? <select value={proj.status} onChange={(event) => updatePortfolioProject(proj.id, { status: event.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600"><option value="🟢 Active">🟢 Active</option><option value="🚧 Development">🚧 Development</option><option value="🧪 Research">🧪 Research</option><option value="✅ Completed">✅ Completed</option></select> : <p className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">{proj.status}</p>}</div></div></div>;
+                  })}
+                  {!projectsList.length && <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">No public projects yet. Add the first project above.</div>}
                 </div>
               </div>
             )}
@@ -1557,11 +1553,12 @@ export const AdminPanel = ({
 
             {activeView === 'terms' && (
               <div className="space-y-6">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <h3 className="text-2xl font-black text-slate-900 tracking-tight">Terms & Conditions Master Control</h3>
-                  <div className="flex gap-2">
-                    <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">32 Sections</span>
+                  <div className="flex flex-wrap gap-2">
+                    <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">{siteContent.terms.sections.length} Sections</span>
                     <span className="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-xs font-bold">v{siteContent.terms.version}</span>
+                    <button onClick={addTermsSection} className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-black text-white transition hover:bg-emerald-700"><Plus className="h-3.5 w-3.5" />Add Section</button>
                   </div>
                 </div>
                 
@@ -1583,7 +1580,7 @@ export const AdminPanel = ({
                             className="bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-black uppercase tracking-tight flex-1"
                           />
                         </div>
-                        <Trash2 className="w-4 h-4 text-red-500 cursor-pointer hover:text-red-600 transition-colors" />
+                        <button onClick={() => removeTermsSection(section)} aria-label={`Remove ${section.title}`} title="Remove section" className="rounded-lg p-2 text-red-500 transition hover:bg-red-50 hover:text-red-600"><Trash2 className="h-4 w-4" /></button>
                       </div>
                       <textarea 
                         rows={4}

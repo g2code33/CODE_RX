@@ -867,6 +867,22 @@ app.post('/api/applications', async (c) => {
   }
 });
 
+app.delete('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid application id.' }, 400);
+  const rows = await dbRows<{ id: number; email: string; member_profile_id: number | null }>(c.env.DB.prepare(
+    'SELECT id, email, member_profile_id FROM applications WHERE id = ?'
+  ).bind(id));
+  const application = rows[0];
+  if (!application) return c.json({ success: false, error: 'Application not found.' }, 404);
+  if (application.member_profile_id) {
+    return c.json({ success: false, error: 'This application is connected to a member record and is kept as part of that member history.' }, 409);
+  }
+  await c.env.DB.prepare('DELETE FROM applications WHERE id = ?').bind(id).run();
+  await audit(c.env.DB, await actorFromContext(c), 'application.deleted', 'application', id, { email: application.email });
+  return c.json({ success: true, message: 'Application deleted.' });
+});
+
 app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
   try {
     const id = Number(c.req.param('id'));
@@ -911,6 +927,15 @@ app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
 app.get('/api/subscribers', requireAuth, requireActiveLegacyAdmin, async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM subscribers ORDER BY date DESC, id DESC').all();
   return c.json({ success: true, data: results });
+});
+
+app.delete('/api/subscribers/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid subscriber id.' }, 400);
+  const result = await c.env.DB.prepare('DELETE FROM subscribers WHERE id = ?').bind(id).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Subscriber not found.' }, 404);
+  await audit(c.env.DB, await actorFromContext(c), 'subscriber.deleted', 'subscriber', id);
+  return c.json({ success: true, message: 'Subscriber removed.' });
 });
 
 app.post('/api/subscribers', async (c) => {
@@ -997,6 +1022,15 @@ app.patch('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) 
     console.error('[code-rx] update contact error:', e);
     return c.json({ success: false, error: 'Failed to update contact' }, 500);
   }
+});
+
+app.delete('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid contact id.' }, 400);
+  const result = await c.env.DB.prepare('DELETE FROM contacts WHERE id = ?').bind(id).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Contact message not found.' }, 404);
+  await audit(c.env.DB, await actorFromContext(c), 'contact.deleted', 'contact', id);
+  return c.json({ success: true, message: 'Contact message deleted.' });
 });
 
 // ============================================
@@ -1339,6 +1373,22 @@ app.post('/api/notifications/:id/read', requireAuth, async (c) => {
   ).bind(id, access.actor!.profileId).run();
   if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Notification not found.' }, 404);
   return c.json({ success: true, message: 'Notification marked as read.' });
+});
+
+// A member may clear an item from their own inbox. The broadcast and its
+// organization audit trail remain intact for PHANTOM; only this recipient's
+// personal inbox row is removed.
+app.delete('/api/notifications/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const result = await c.env.DB.prepare(
+    'DELETE FROM notification_recipients WHERE notification_id = ? AND member_profile_id = ?'
+  ).bind(id, access.actor!.profileId).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Notification not found.' }, 404);
+  await audit(c.env.DB, access.actor, 'notification.inbox_dismissed', 'notification', id);
+  return c.json({ success: true, message: 'Notification removed from your inbox.' });
 });
 
 app.post('/api/notifications/send', requireAuth, async (c) => {
