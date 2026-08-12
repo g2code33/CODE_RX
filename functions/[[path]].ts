@@ -325,14 +325,41 @@ const settingValue = async (db: D1Database, key: string, fallback = '') => {
 };
 
 const sharingCapability = async (db: D1Database, actor: FounderActor) => {
-  const globalEnabled = (await settingValue(db, 'vault_sharing_enabled', '0')) === '1';
-  if (actor.isPhantom) return { globalEnabled, memberEnabled: true, canShare: globalEnabled };
-  if (!actor.profileId || actor.memberStatus !== 'active') return { globalEnabled, memberEnabled: false, canShare: false };
-  const rows = await dbRows<{ can_share: number }>(db.prepare(
-    'SELECT can_share FROM member_share_permissions WHERE member_profile_id = ?'
+  const [sharingSetting, downloadSetting] = await Promise.all([
+    settingValue(db, 'vault_sharing_enabled', '0'),
+    settingValue(db, 'vault_downloads_enabled', '0'),
+  ]);
+  const globalEnabled = sharingSetting === '1';
+  const downloadsGloballyEnabled = downloadSetting === '1';
+  if (actor.isPhantom) return {
+    globalEnabled,
+    memberEnabled: true,
+    canShare: globalEnabled,
+    downloadsGloballyEnabled,
+    memberDownloadEnabled: true,
+    canDownload: downloadsGloballyEnabled,
+  };
+  if (!actor.profileId || actor.memberStatus !== 'active') return {
+    globalEnabled,
+    memberEnabled: false,
+    canShare: false,
+    downloadsGloballyEnabled,
+    memberDownloadEnabled: false,
+    canDownload: false,
+  };
+  const rows = await dbRows<{ can_share: number; can_download: number }>(db.prepare(
+    'SELECT can_share, can_download FROM member_share_permissions WHERE member_profile_id = ?'
   ).bind(actor.profileId));
   const memberEnabled = Number(rows[0]?.can_share || 0) === 1;
-  return { globalEnabled, memberEnabled, canShare: globalEnabled && memberEnabled };
+  const memberDownloadEnabled = Number(rows[0]?.can_download || 0) === 1;
+  return {
+    globalEnabled,
+    memberEnabled,
+    canShare: globalEnabled && memberEnabled,
+    downloadsGloballyEnabled,
+    memberDownloadEnabled,
+    canDownload: downloadsGloballyEnabled && memberDownloadEnabled,
+  };
 };
 
 const awardAutomaticScore = async ({
@@ -379,6 +406,56 @@ const awardAutomaticScore = async ({
     return null;
   }
 };
+
+const escapeExportHtml = (value: unknown) => String(value ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+const printableDocumentHtml = (document: any, sectionTitle = 'Code Rx Vault') => {
+  const parsed = parseStoredDocumentContent(document.content_json, document.content || '');
+  const blocks = parsed.blocks.map((block: any) => {
+    const rich = block.content || '';
+    if (block.type === 'heading') {
+      const level = [1, 2, 3].includes(Number(block.level)) ? Number(block.level) : 2;
+      return `<h${level}>${rich}</h${level}>`;
+    }
+    if (block.type === 'paragraph') return `<p>${rich}</p>`;
+    if (block.type === 'quote') return `<blockquote>${rich}</blockquote>`;
+    if (block.type === 'callout') return `<aside class="callout">${rich}</aside>`;
+    if (block.type === 'bulletList' || block.type === 'numberedList' || block.type === 'checklist') {
+      const tag = block.type === 'numberedList' ? 'ol' : 'ul';
+      const items = (block.items || []).map((item: any) => `<li${item.checked ? ' class="checked"' : ''}>${item.text || ''}</li>`).join('');
+      return `<${tag}>${items}</${tag}>`;
+    }
+    if (block.type === 'code') return `<pre><code>${escapeExportHtml(block.content || '')}</code></pre>`;
+    if (block.type === 'table') return `<table>${(block.rows || []).map((row: string[]) => `<tr>${row.map((cell) => `<td>${cell || ''}</td>`).join('')}</tr>`).join('')}</table>`;
+    if (block.type === 'divider') return '<hr />';
+    if (block.type === 'formula') return `<pre class="formula">${escapeExportHtml(block.content || '')}</pre>`;
+    if (block.type === 'embed') return rich ? `<p>${rich}</p>` : '';
+    // Attachments are intentionally excluded from document exports. They stay
+    // behind their own Vault authorization flow.
+    return '';
+  }).join('\n');
+  const created = document.created_at ? new Date(document.created_at).toLocaleString() : '—';
+  const updated = document.updated_at ? new Date(document.updated_at).toLocaleString() : '—';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeExportHtml(document.document_code || document.title || 'Code Rx Vault document')}</title><style>
+    :root{color-scheme:light} body{margin:0;background:#f6faf7;color:#173128;font:16px/1.7 Inter,Arial,sans-serif} main{max-width:900px;margin:0 auto;background:#fff;padding:54px 64px;box-shadow:0 8px 32px rgba(15,50,35,.08)} .kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#16834e;font-weight:800}.meta{color:#62756b;font-size:13px;border-bottom:1px solid #dcebe1;padding-bottom:20px;margin-bottom:32px} h1{font-size:34px;line-height:1.2;margin:10px 0 18px;color:#173128} h2{margin-top:34px;color:#173128} h3{margin-top:26px;color:#235c40} p{margin:14px 0} blockquote{margin:22px 0;border-left:4px solid #48ae76;background:#edf9f1;padding:14px 18px;color:#24523d}.callout{margin:22px 0;border:1px solid #bfe7cd;background:#f4fcf6;padding:16px 18px;border-radius:10px} pre{overflow:auto;background:#f1f6f3;border:1px solid #d9e9df;padding:16px;border-radius:10px;color:#173128}.formula{background:#f7f4ff;border-color:#e6ddff} table{width:100%;border-collapse:collapse;margin:22px 0} td{border:1px solid #d9e9df;padding:10px;vertical-align:top} li.checked{text-decoration:line-through;color:#7d8d84}@media print{body{background:#fff}main{box-shadow:none;max-width:none;padding:28px} }
+  </style></head><body><main><p class="kicker">Code Rx Vault · ${escapeExportHtml(sectionTitle)}</p><h1>${escapeExportHtml(document.title || 'Untitled document')}</h1><p class="meta">${escapeExportHtml(document.document_code || 'Vault document')} · Created ${escapeExportHtml(created)} · Updated ${escapeExportHtml(updated)}</p>${blocks}</main></body></html>`;
+};
+
+const downloadFilename = (document: any) => {
+  const base = String(document.document_code || document.title || 'code-rx-vault-document').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'code-rx-vault-document';
+  return `${base}.html`;
+};
+
+const documentDownloadResponse = (document: any, sectionTitle?: string) => new Response(printableDocumentHtml(document, sectionTitle), {
+  headers: {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${downloadFilename(document)}"`,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+  },
+});
+
 
 // ---------- CORS (same-origin is the norm; allow local dev + pages.dev) ----------
 app.use('/api/*', cors({
@@ -1641,6 +1718,24 @@ app.get('/api/vault/documents/:id', requireAuth, async (c) => {
   } });
 });
 
+app.get('/api/vault/documents/:id/download', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id.' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.*, s.slug AS section_slug, s.title AS section_title
+     FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+  ).bind(id));
+  const document = rows[0];
+  if (!document || document.is_archived) return c.json({ success: false, error: 'Document not found.' }, 404);
+  const access = await vaultAccess(c, document.section_slug, 'view');
+  if (access.response) return access.response;
+  const capability = await sharingCapability(c.env.DB, access.actor!);
+  if (!capability.canDownload) {
+    return c.json({ success: false, error: 'PHANTOM has not enabled document downloads for this account.' }, 403);
+  }
+  return documentDownloadResponse(document, document.section_title);
+});
+
 app.post('/api/vault/documents', requireAuth, async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -1899,8 +1994,9 @@ app.get('/api/vault/sharing/status', requireAuth, async (c) => {
 
 app.get('/api/phantom/sharing', requireAuth, requirePhantom, async (c) => {
   const globalEnabled = (await settingValue(c.env.DB, 'vault_sharing_enabled', '0')) === '1';
+  const downloadsGloballyEnabled = (await settingValue(c.env.DB, 'vault_downloads_enabled', '0')) === '1';
   const permissions = await dbRows<any>(c.env.DB.prepare(
-    `SELECT msp.member_profile_id, msp.can_share, msp.updated_at, mp.member_code, mp.status AS member_status,
+    `SELECT msp.member_profile_id, msp.can_share, msp.can_download, msp.updated_at, mp.member_code, mp.status AS member_status,
        u.name, u.email, r.code AS role_code, r.name AS role_name
      FROM member_share_permissions msp
      JOIN member_profiles mp ON mp.id = msp.member_profile_id
@@ -1908,7 +2004,7 @@ app.get('/api/phantom/sharing', requireAuth, requirePhantom, async (c) => {
      LEFT JOIN roles r ON r.id = mp.primary_role_id
      ORDER BY u.name COLLATE NOCASE`
   ));
-  return c.json({ success: true, data: { globalEnabled, permissions } });
+  return c.json({ success: true, data: { globalEnabled, downloadsGloballyEnabled, permissions } });
 });
 
 app.put('/api/phantom/sharing/global', requireAuth, requirePhantom, async (c) => {
@@ -1922,6 +2018,19 @@ app.put('/api/phantom/sharing/global', requireAuth, requirePhantom, async (c) =>
   ).bind(body.enabled ? '1' : '0', actor?.userId ?? null).run();
   await audit(c.env.DB, actor, body.enabled ? 'vault.sharing.global_enabled' : 'vault.sharing.global_disabled', 'system_setting', 'vault_sharing_enabled');
   return c.json({ success: true, message: body.enabled ? 'Vault sharing is enabled globally.' : 'Vault sharing is disabled globally. Existing public links are paused.' });
+});
+
+app.put('/api/phantom/downloads/global', requireAuth, requirePhantom, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body.enabled !== 'boolean') return c.json({ success: false, error: 'Downloads enabled must be true or false.' }, 400);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO system_settings (setting_key, setting_value, updated_by_user_id, updated_at)
+     VALUES ('vault_downloads_enabled', ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(body.enabled ? '1' : '0', actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, body.enabled ? 'vault.downloads.global_enabled' : 'vault.downloads.global_disabled', 'system_setting', 'vault_downloads_enabled');
+  return c.json({ success: true, message: body.enabled ? 'Vault downloads are enabled globally.' : 'Vault downloads are disabled globally. Existing share links remain view-only.' });
 });
 
 app.put('/api/phantom/members/:id/sharing', requireAuth, requirePhantom, async (c) => {
@@ -1947,6 +2056,29 @@ app.put('/api/phantom/members/:id/sharing', requireAuth, requirePhantom, async (
   return c.json({ success: true, message: body.canShare ? 'Document sharing enabled for this member.' : 'Document sharing disabled for this member. Their existing links are paused.' });
 });
 
+app.put('/api/phantom/members/:id/downloads', requireAuth, requirePhantom, async (c) => {
+  const profileId = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  if (!Number.isInteger(profileId) || profileId < 1 || typeof body.canDownload !== 'boolean') {
+    return c.json({ success: false, error: 'Choose a member and a true/false download permission.' }, 400);
+  }
+  const target = await dbRows<any>(c.env.DB.prepare(
+    `SELECT mp.id, mp.status, r.code AS role_code FROM member_profiles mp
+     LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+  ).bind(profileId));
+  if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+  if (target[0].role_code === 'phantom') return c.json({ success: false, error: 'PHANTOM downloads are controlled by the global master switch.' }, 403);
+  if (target[0].status !== 'active') return c.json({ success: false, error: 'Only active members can receive document-download access.' }, 409);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO member_share_permissions (member_profile_id, can_share, can_download, updated_by_user_id, updated_at)
+     VALUES (?, 0, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(member_profile_id) DO UPDATE SET can_download = excluded.can_download, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(profileId, body.canDownload ? 1 : 0, actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, body.canDownload ? 'vault.downloads.member_enabled' : 'vault.downloads.member_disabled', 'member_profile', profileId);
+  return c.json({ success: true, message: body.canDownload ? 'Document downloads enabled for this member.' : 'Document downloads disabled for this member.' });
+});
+
 const shareableDocumentAccess = async (c: any, documentId: number) => {
   const rows = await dbRows<any>(c.env.DB.prepare(
     `SELECT d.*, s.slug AS section_slug, s.is_sensitive, s.is_archived AS section_archived, s.title AS section_title
@@ -1966,7 +2098,7 @@ app.get('/api/vault/documents/:id/shares', requireAuth, async (c) => {
   if (access.response) return access.response;
   const capability = await sharingCapability(c.env.DB, access.actor!);
   const shares = await dbRows<any>(c.env.DB.prepare(
-    `SELECT id, status, expires_at, last_accessed_at, created_at, created_by_member_profile_id
+    `SELECT id, status, allow_download, expires_at, last_accessed_at, created_at, created_by_member_profile_id
      FROM vault_shares WHERE document_id = ? ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}
      ORDER BY created_at DESC`
   ).bind(...(access.actor!.isPhantom ? [id] : [id, access.actor!.profileId])));
@@ -1986,24 +2118,20 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Sensitive or restricted Vault documents cannot be shared publicly.' }, 409);
     }
     const body = await c.req.json().catch(() => ({}));
-    const expiresInDays = body.expiresInDays === undefined ? 7 : Number(body.expiresInDays);
-    if (!Number.isInteger(expiresInDays) || ![1, 7, 30, 90].includes(expiresInDays)) {
-      return c.json({ success: false, error: 'Choose a share expiry of 1, 7, 30, or 90 days.' }, 400);
-    }
+    const allowDownload = body.allowDownload === true;
     const token = randomToken();
-    const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
     const created = await c.env.DB.prepare(
-      `INSERT INTO vault_shares (document_id, token_hash, created_by_member_profile_id, status, expires_at)
-       VALUES (?, ?, ?, 'active', ?)`
-    ).bind(id, await sha256Hex(token), access.actor!.profileId, expiresAt).run();
+      `INSERT INTO vault_shares (document_id, token_hash, created_by_member_profile_id, status, allow_download, expires_at)
+       VALUES (?, ?, ?, 'active', ?, NULL)`
+    ).bind(id, await sha256Hex(token), access.actor!.profileId, allowDownload ? 1 : 0).run();
     const shareId = Number(created.meta.last_row_id);
     const shareUrl = `${publicSiteUrl(c.env)}/#vault-share?token=${token}`;
     await audit(c.env.DB, access.actor, 'vault.document.shared', 'vault_document', id, {
       shareId,
       documentCode: access.document!.document_code || null,
-      expiresAt,
+      allowDownload,
     });
-    return c.json({ success: true, data: { id: shareId, shareUrl, expiresAt }, message: 'Read-only share link created.' }, 201);
+    return c.json({ success: true, data: { id: shareId, shareUrl, allowDownload }, message: 'Read-only share link created. It remains active until you revoke it.' }, 201);
   } catch (error) {
     console.error('[code-rx] create Vault share error:', error);
     return c.json({ success: false, error: 'Could not create this share link.' }, 500);
@@ -2037,10 +2165,10 @@ app.get('/api/vault/shares/:token', async (c) => {
     return c.json({ success: false, error: 'Vault sharing is currently paused.' }, 404);
   }
   const rows = await dbRows<any>(c.env.DB.prepare(
-    `SELECT vs.id AS share_id, vs.status AS share_status, vs.expires_at, vs.created_by_member_profile_id,
+    `SELECT vs.id AS share_id, vs.status AS share_status, vs.allow_download, vs.expires_at, vs.created_by_member_profile_id,
        d.id AS document_id, d.document_code, d.title, d.content, d.content_json, d.created_at, d.updated_at,
        d.is_archived, d.visibility, s.title AS section_title, s.is_sensitive, s.is_archived AS section_archived,
-       creator.status AS creator_status, creator_role.code AS creator_role_code, msp.can_share
+       creator.status AS creator_status, creator_role.code AS creator_role_code, msp.can_share, msp.can_download
      FROM vault_shares vs
      JOIN vault_documents d ON d.id = vs.document_id
      JOIN vault_sections s ON s.id = d.section_id
@@ -2058,6 +2186,9 @@ app.get('/api/vault/shares/:token', async (c) => {
   }
   const creatorCanShare = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_share || 0) === 1);
   if (!creatorCanShare) return c.json({ success: false, error: 'Shared document is unavailable.' }, 404);
+  const downloadsGloballyEnabled = (await settingValue(c.env.DB, 'vault_downloads_enabled', '0')) === '1';
+  const creatorCanDownload = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_download || 0) === 1);
+  const canDownload = downloadsGloballyEnabled && creatorCanDownload && Number(share.allow_download || 0) === 1;
   const parsed = parseStoredDocumentContent(share.content_json, share.content || '');
   const blocks = parsed.blocks
     .filter((block) => block.type !== 'image' && block.type !== 'file')
@@ -2069,8 +2200,44 @@ app.get('/api/vault/shares/:token', async (c) => {
     sectionTitle: share.section_title,
     createdAt: share.created_at,
     updatedAt: share.updated_at,
+    canDownload,
     contentJson: { version: 1, blocks },
   } }, 200, { 'Cache-Control': 'private, no-store' });
+});
+
+app.get('/api/vault/shares/:token/download', async (c) => {
+  if (!checkRateLimit(c, 30, 60)) return c.json({ success: false, error: 'Too many download requests. Please wait a minute.' }, 429);
+  const token = cleanStr(c.req.param('token'), 32, 128);
+  if (!token) return c.json({ success: false, error: 'Shared document is unavailable.' }, 404);
+  const [sharingEnabled, downloadsEnabled] = await Promise.all([
+    settingValue(c.env.DB, 'vault_sharing_enabled', '0'),
+    settingValue(c.env.DB, 'vault_downloads_enabled', '0'),
+  ]);
+  if (sharingEnabled !== '1' || downloadsEnabled !== '1') return c.json({ success: false, error: 'Shared document downloads are unavailable.' }, 404);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT vs.id AS share_id, vs.status AS share_status, vs.allow_download, vs.expires_at,
+       d.id AS document_id, d.document_code, d.title, d.content, d.content_json, d.created_at, d.updated_at,
+       d.is_archived, d.visibility, s.title AS section_title, s.is_sensitive, s.is_archived AS section_archived,
+       creator.status AS creator_status, creator_role.code AS creator_role_code, msp.can_share, msp.can_download
+     FROM vault_shares vs
+     JOIN vault_documents d ON d.id = vs.document_id
+     JOIN vault_sections s ON s.id = d.section_id
+     JOIN member_profiles creator ON creator.id = vs.created_by_member_profile_id
+     LEFT JOIN roles creator_role ON creator_role.id = creator.primary_role_id
+     LEFT JOIN member_share_permissions msp ON msp.member_profile_id = creator.id
+     WHERE vs.token_hash = ? AND vs.status = 'active'`
+  ).bind(await sha256Hex(token)));
+  const share = rows[0];
+  if (!share || !Number(share.allow_download || 0) || share.is_archived || share.section_archived || share.is_sensitive || share.visibility === 'restricted') {
+    return c.json({ success: false, error: 'Shared document download is unavailable.' }, 404);
+  }
+  if (share.expires_at && new Date(share.expires_at).getTime() <= Date.now()) {
+    return c.json({ success: false, error: 'This share link has expired.' }, 410);
+  }
+  const creatorCanShare = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_share || 0) === 1);
+  const creatorCanDownload = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_download || 0) === 1);
+  if (!creatorCanShare || !creatorCanDownload) return c.json({ success: false, error: 'Shared document download is unavailable.' }, 404);
+  return documentDownloadResponse(share, share.section_title);
 });
 
 app.get('/api/vault/projects', requireAuth, async (c) => {
