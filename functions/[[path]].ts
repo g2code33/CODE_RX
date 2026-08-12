@@ -18,6 +18,7 @@ import { sendEmail } from './lib/email';
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
 import { adjustMemberScore, awardScoreRule, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
+import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 
 type AppEnv = { Bindings: Env; Variables: { user: JwtPayload; actor: Awaited<ReturnType<typeof getActor>> } };
 
@@ -53,6 +54,31 @@ const publicSiteUrl = (env: Env) => {
   return /^https?:\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(configured)
     ? configured
     : 'https://coderxsociety.pages.dev';
+};
+
+const publicVaultShareUrl = (env: Env, token: string) => `${publicSiteUrl(env)}/#vault-share?token=${encodeURIComponent(token)}`;
+
+/**
+ * Share tokens are hashed for public lookup. New links also retain an
+ * encrypted copy so an authorized document owner can copy the exact link from
+ * the Existing links list. Old rows created before this upgrade are one-way
+ * hashes only and deliberately require an explicit replacement link.
+ */
+const recoverVaultShareUrl = async (env: Env, share: { id: number; token_hash: string; token_ciphertext?: string | null }) => {
+  if (!share.token_ciphertext) return null;
+  try {
+    const token = await decryptVaultShareToken(share.token_ciphertext, env.JWT_SECRET);
+    if (!/^[a-f0-9]{64}$/i.test(token) || await sha256Hex(token) !== share.token_hash) {
+      console.warn('[code-rx] Vault share token recovery integrity check failed for share', share.id);
+      return null;
+    }
+    return publicVaultShareUrl(env, token);
+  } catch (error) {
+    // Do not expose a cryptographic/key-rotation detail to clients. The owner
+    // can intentionally replace the link, which invalidates the old token.
+    console.warn('[code-rx] Vault share token recovery failed for share', share.id, error);
+    return null;
+  }
 };
 
 type FounderActor = NonNullable<Awaited<ReturnType<typeof getActor>>>;
@@ -157,8 +183,8 @@ const createMemberAccount = async ({
       const codeRows = await dbRows<any>(db.prepare('SELECT display_name FROM codenames WHERE id = ?').bind(foundingCodenameId));
       await db.batch([
         db.prepare(
-          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, completed_at)
-           VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, CURRENT_TIMESTAMP)`
+          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, completed_at)
+           VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, NULL, CURRENT_TIMESTAMP)`
         ).bind(profileId, foundingCodenameId),
         db.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
           .bind(foundingCodenameId, profileId, actor.userId, 'Direct founding codename assignment by PHANTOM'),
@@ -239,7 +265,7 @@ const getCodenameSession = async (db: D1Database, profileId: number, pool: 'memb
     // the member and founding ballots. Resetting only an open session keeps
     // completed identities permanent while preventing mixed-pool attempts.
     await db.prepare(
-      "UPDATE codename_selection_sessions SET pool = ?, assignment_source = 'ballot', passes_used = 0, claimed_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL WHERE id = ?"
+      "UPDATE codename_selection_sessions SET pool = ?, assignment_source = 'ballot', passes_used = 0, claimed_codename_id = NULL, current_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL WHERE id = ?"
     ).bind(pool, rows[0].id).run();
     rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
   }
@@ -338,6 +364,7 @@ const sharingCapability = async (db: D1Database, actor: FounderActor) => {
     downloadsGloballyEnabled,
     memberDownloadEnabled: true,
     canDownload: downloadsGloballyEnabled,
+    canManageGlobalDownloads: true,
   };
   if (!actor.profileId || actor.memberStatus !== 'active') return {
     globalEnabled,
@@ -346,6 +373,7 @@ const sharingCapability = async (db: D1Database, actor: FounderActor) => {
     downloadsGloballyEnabled,
     memberDownloadEnabled: false,
     canDownload: false,
+    canManageGlobalDownloads: false,
   };
   const rows = await dbRows<{ can_share: number; can_download: number }>(db.prepare(
     'SELECT can_share, can_download FROM member_share_permissions WHERE member_profile_id = ?'
@@ -359,7 +387,25 @@ const sharingCapability = async (db: D1Database, actor: FounderActor) => {
     downloadsGloballyEnabled,
     memberDownloadEnabled,
     canDownload: downloadsGloballyEnabled && memberDownloadEnabled,
+    canManageGlobalDownloads: false,
   };
+};
+
+type ShareDownloadStatus = 'available' | 'link_disabled' | 'global_paused' | 'creator_permission_disabled';
+
+const shareDownloadStatus = (share: { allow_download?: number | boolean | null; creator_role_code?: string | null; creator_status?: string | null; can_download?: number | boolean | null }, downloadsGloballyEnabled: boolean): ShareDownloadStatus => {
+  if (Number(share.allow_download || 0) !== 1) return 'link_disabled';
+  if (!downloadsGloballyEnabled) return 'global_paused';
+  const creatorCanDownload = share.creator_role_code === 'phantom'
+    || (share.creator_status === 'active' && Number(share.can_download || 0) === 1);
+  return creatorCanDownload ? 'available' : 'creator_permission_disabled';
+};
+
+const sharedDownloadMessage = (status: ShareDownloadStatus) => {
+  if (status === 'link_disabled') return 'This document was shared for reading only. Download and print were not enabled for this link.';
+  if (status === 'global_paused') return 'Download and print are temporarily unavailable. Ask the document owner to enable them.';
+  if (status === 'creator_permission_disabled') return 'Download and print are temporarily unavailable for this shared document.';
+  return '';
 };
 
 const awardAutomaticScore = async ({
@@ -1377,33 +1423,103 @@ app.get('/api/codenames/ballot', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is no longer open for this account.' }, 409);
-  const choices = await dbRows<any>(c.env.DB.prepare(
-    `SELECT c.id, c.display_name, c.pool
-     FROM codenames c
+  const remainingRows = await dbRows<{ count: number }>(c.env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM codenames c
      WHERE c.pool = ? AND c.status = 'available'
        AND NOT EXISTS (
          SELECT 1 FROM codename_selection_events e
          WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
-       )
-     ORDER BY c.display_name COLLATE NOCASE`
+       )`
   ).bind(pool, session.id));
-  const exhausted = choices.length === 0;
+  const exhausted = Number(remainingRows[0]?.count || 0) === 0;
   return c.json({ success: true, data: {
     completed: false,
+    covered: true,
+    hasRevealedSelection: Boolean(session.current_codename_id),
     pool,
     ballotTitle: ballotLabelFor(pool),
     passesUsed: Number(session.passes_used || 0),
     maxAttempts: 3,
-    choices,
+    choices: [],
     exhausted,
     exhaustedPrompt: exhausted
       ? pool === 'founding'
-        ? 'All founding codenames are claimed, reserved, or passed. PHANTOM can add a custom founding codename or explicitly release one.'
+        ? 'All founding codenames are claimed, reserved, or already passed. PHANTOM can add a custom founding codename or explicitly release one.'
         : 'No member codenames are currently available. PHANTOM needs to add more codenames to the Member Ballot Pool.'
       : null,
   } });
 });
 
+// The server draws one codename at a time. A client never receives the full
+// pool, and repeated review requests return the same covered selection until
+// the member claims it or spends a successful selection to review another.
+app.post('/api/codenames/reveal', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  if (actor.codename || actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account cannot open another codename ballot.' }, 409);
+  const pool = ballotPoolFor(actor);
+  const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
+  if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
+
+  let revealed: any | null = null;
+  if (session.current_codename_id) {
+    const currentRows = await dbRows<any>(c.env.DB.prepare(
+      `SELECT c.id, c.display_name, c.pool, c.status
+       FROM codenames c WHERE c.id = ? AND c.pool = ?`
+    ).bind(session.current_codename_id, pool));
+    const current = currentRows[0];
+    const passed = current ? await dbRows<any>(c.env.DB.prepare(
+      "SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'"
+    ).bind(session.id, current.id)) : [];
+    if (current && current.status === 'available' && !passed[0]) revealed = current;
+    else await c.env.DB.prepare('UPDATE codename_selection_sessions SET current_codename_id = NULL WHERE id = ?').bind(session.id).run();
+  }
+
+  if (!revealed) {
+    const candidates = await dbRows<any>(c.env.DB.prepare(
+      `SELECT c.id, c.display_name, c.pool
+       FROM codenames c
+       WHERE c.pool = ? AND c.status = 'available'
+         AND NOT EXISTS (
+           SELECT 1 FROM codename_selection_events e
+           WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
+         )
+       ORDER BY RANDOM() LIMIT 1`
+    ).bind(pool, session.id));
+    revealed = candidates[0] || null;
+    if (!revealed) return c.json({ success: true, data: {
+      covered: true,
+      exhausted: true,
+      pool,
+      passesUsed: Number(session.passes_used || 0),
+      maxAttempts: 3,
+      exhaustedPrompt: pool === 'founding'
+        ? 'No founding codenames remain for review. Ask PHANTOM to add or release one.'
+        : 'No member codenames remain for review. Ask PHANTOM to add more to the Member Pool.',
+    } });
+    await c.env.DB.batch([
+      c.env.DB.prepare('UPDATE codename_selection_sessions SET current_codename_id = ? WHERE id = ?').bind(revealed.id, session.id),
+      c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'available_check')").bind(session.id, revealed.id),
+    ]);
+  }
+
+  const reviewNumber = Number(session.passes_used || 0) + 1;
+  return c.json({ success: true, data: {
+    covered: false,
+    codename: { id: revealed.id, display_name: revealed.display_name },
+    pool,
+    reviewNumber,
+    maxAttempts: 3,
+    finalReview: reviewNumber >= 3,
+    message: reviewNumber >= 3
+      ? 'This is your final covered selection. Claim it to complete your Code Rx identity.'
+      : 'One protected codename has been revealed for review.',
+  } });
+});
+
+// Backward-compatible check route: it may inspect only the codename currently
+// revealed by the server, never an arbitrary pool entry.
 app.post('/api/codenames/check', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
@@ -1412,23 +1528,18 @@ app.post('/api/codenames/check', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
-  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Choose a valid codename.' }, 400);
+  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Review the covered ballot before checking a codename.' }, 400);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
+  if (Number(session.current_codename_id || 0) !== codenameId) return c.json({ success: false, error: 'This codename is not the current covered selection.' }, 409);
   const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, pool, status FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0];
-  if (!codename || codename.pool !== pool) return c.json({ success: false, error: 'This codename is not available in your ballot pool.' }, 404);
-  const passed = await dbRows<any>(c.env.DB.prepare(
-    "SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'"
-  ).bind(session.id, codenameId));
-  const available = codename.status === 'available' && !passed[0];
-  await c.env.DB.prepare('INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, ?)')
-    .bind(session.id, codenameId, available ? 'available_check' : 'unavailable_check').run();
+  const available = Boolean(codename && codename.pool === pool && codename.status === 'available');
   return c.json({ success: true, data: {
     available,
-    codename: codename.display_name,
+    codename: codename?.display_name || 'Codename',
     pool,
-    message: available ? 'AVAILABLE' : passed[0] ? 'This codename was passed and cannot be selected again.' : 'Unavailable.',
+    message: available ? 'AVAILABLE' : 'This revealed codename is no longer available. Review the covered ballot again.',
     attemptsUsed: Number(session.passes_used || 0),
     maxAttempts: 3,
   } });
@@ -1442,22 +1553,21 @@ app.post('/api/codenames/pass', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
-  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Choose a valid codename.' }, 400);
+  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Review the covered ballot before choosing another codename.' }, 400);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  if (Number(session.passes_used || 0) >= 2) return c.json({ success: false, error: 'You have reached the final successful selection. Claim it to complete your Code Rx identity.' }, 409);
+  if (Number(session.current_codename_id || 0) !== codenameId) return c.json({ success: false, error: 'This codename is not the current covered selection.' }, 409);
+  if (Number(session.passes_used || 0) >= 2) return c.json({ success: false, error: 'You have reached the final successful selection. Claim the revealed codename to complete your Code Rx identity.' }, 409);
   const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, pool, status FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0];
   if (!codename || codename.pool !== pool || codename.status !== 'available') return c.json({ success: false, error: `This codename is no longer available. Attempts used: ${Number(session.passes_used || 0)}/3.` }, 409);
-  const previous = await dbRows<any>(c.env.DB.prepare("SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'").bind(session.id, codenameId));
-  if (previous[0]) return c.json({ success: false, error: 'You cannot return to a codename you already passed.' }, 409);
   await c.env.DB.batch([
     c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'passed')").bind(session.id, codenameId),
-    c.env.DB.prepare('UPDATE codename_selection_sessions SET passes_used = passes_used + 1 WHERE id = ? AND passes_used < 2').bind(session.id),
+    c.env.DB.prepare('UPDATE codename_selection_sessions SET passes_used = passes_used + 1, current_codename_id = NULL WHERE id = ? AND passes_used < 2').bind(session.id),
   ]);
   const attemptsUsed = Number(session.passes_used || 0) + 1;
   await audit(c.env.DB, actor, 'codename.passed', 'codename', codenameId, { codename: codename.display_name, pool, attemptsUsed });
-  return c.json({ success: true, data: { attemptsUsed, maxAttempts: 3, pool, message: `${codename.display_name} passed. It cannot be selected again.` } });
+  return c.json({ success: true, data: { attemptsUsed, maxAttempts: 3, pool, message: `${codename.display_name} passed. Tap Review ballot to reveal your next protected selection.` } });
 });
 
 app.post('/api/codenames/claim', requireAuth, async (c) => {
@@ -1468,22 +1578,21 @@ app.post('/api/codenames/claim', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
-  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Choose a valid codename.' }, 400);
+  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Review the covered ballot before claiming a codename.' }, 400);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  const passed = await dbRows<any>(c.env.DB.prepare("SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'").bind(session.id, codenameId));
-  if (passed[0]) return c.json({ success: false, error: 'You cannot return to a codename you already passed.' }, 409);
+  if (Number(session.current_codename_id || 0) !== codenameId) return c.json({ success: false, error: 'This codename is not the current covered selection.' }, 409);
   const result = await c.env.DB.prepare(
     `UPDATE codenames
      SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
      WHERE id = ? AND pool = ? AND status = 'available' AND claimed_by_member_profile_id IS NULL`
   ).bind(actor.profileId, codenameId, pool).run();
-  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'This codename was just claimed by another member. Please choose another.' }, 409);
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'This codename was just claimed by another member. Review the covered ballot again.' }, 409);
   const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT display_name FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0]?.display_name || 'Codename';
   const attemptsUsed = Number(session.passes_used || 0) + 1;
   await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE codename_selection_sessions SET status = 'completed', claimed_codename_id = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(codenameId, session.id),
+    c.env.DB.prepare("UPDATE codename_selection_sessions SET status = 'completed', claimed_codename_id = ?, current_codename_id = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(codenameId, session.id),
     c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'claimed')").bind(session.id, codenameId),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
       .bind(codenameId, actor.profileId, actor.userId, `Claimed from ${pool} ballot on successful selection ${attemptsUsed}/3`),
@@ -1500,6 +1609,7 @@ app.post('/api/codenames/claim', requireAuth, async (c) => {
   });
   return c.json({ success: true, data: { codename, pool, attemptsUsed, maxAttempts: 3, message: `${codename} is now your permanent Code Rx identity.` } });
 });
+
 
 // ============================================
 // 🗄️ CODE Rx VAULT
@@ -2097,11 +2207,36 @@ app.get('/api/vault/documents/:id/shares', requireAuth, async (c) => {
   const access = await shareableDocumentAccess(c, id);
   if (access.response) return access.response;
   const capability = await sharingCapability(c.env.DB, access.actor!);
-  const shares = await dbRows<any>(c.env.DB.prepare(
-    `SELECT id, status, allow_download, expires_at, last_accessed_at, created_at, created_by_member_profile_id
-     FROM vault_shares WHERE document_id = ? ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}
-     ORDER BY created_at DESC`
+  const rawShares = await dbRows<any>(c.env.DB.prepare(
+    `SELECT vs.id, vs.status, vs.allow_download, vs.expires_at, vs.last_accessed_at, vs.created_at,
+       vs.created_by_member_profile_id, vs.token_hash, vs.token_ciphertext,
+       creator.status AS creator_status, creator_role.code AS creator_role_code, msp.can_download
+     FROM vault_shares vs
+     LEFT JOIN member_profiles creator ON creator.id = vs.created_by_member_profile_id
+     LEFT JOIN roles creator_role ON creator_role.id = creator.primary_role_id
+     LEFT JOIN member_share_permissions msp ON msp.member_profile_id = creator.id
+     WHERE vs.document_id = ? ${access.actor!.isPhantom ? '' : 'AND vs.created_by_member_profile_id = ?'}
+     ORDER BY vs.created_at DESC`
   ).bind(...(access.actor!.isPhantom ? [id] : [id, access.actor!.profileId])));
+  const shares = await Promise.all(rawShares.map(async (share) => {
+    const shareUrl = share.status === 'active' ? await recoverVaultShareUrl(c.env, share) : null;
+    const downloadStatus = share.status === 'active'
+      ? shareDownloadStatus(share, capability.downloadsGloballyEnabled)
+      : 'link_disabled' as ShareDownloadStatus;
+    return {
+      id: share.id,
+      status: share.status,
+      allow_download: Number(share.allow_download || 0),
+      expires_at: share.expires_at || null,
+      last_accessed_at: share.last_accessed_at || null,
+      created_at: share.created_at,
+      created_by_member_profile_id: share.created_by_member_profile_id,
+      downloadStatus,
+      shareUrl,
+      copyAvailable: Boolean(shareUrl),
+      replacementRequired: share.status === 'active' && !shareUrl,
+    };
+  }));
   return c.json({ success: true, data: { capability, shares } });
 });
 
@@ -2120,12 +2255,13 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const allowDownload = body.allowDownload === true;
     const token = randomToken();
+    const tokenCiphertext = await encryptVaultShareToken(token, c.env.JWT_SECRET);
     const created = await c.env.DB.prepare(
-      `INSERT INTO vault_shares (document_id, token_hash, created_by_member_profile_id, status, allow_download, expires_at)
-       VALUES (?, ?, ?, 'active', ?, NULL)`
-    ).bind(id, await sha256Hex(token), access.actor!.profileId, allowDownload ? 1 : 0).run();
+      `INSERT INTO vault_shares (document_id, token_hash, token_ciphertext, created_by_member_profile_id, status, allow_download, expires_at)
+       VALUES (?, ?, ?, ?, 'active', ?, NULL)`
+    ).bind(id, await sha256Hex(token), tokenCiphertext, access.actor!.profileId, allowDownload ? 1 : 0).run();
     const shareId = Number(created.meta.last_row_id);
-    const shareUrl = `${publicSiteUrl(c.env)}/#vault-share?token=${token}`;
+    const shareUrl = publicVaultShareUrl(c.env, token);
     await audit(c.env.DB, access.actor, 'vault.document.shared', 'vault_document', id, {
       shareId,
       documentCode: access.document!.document_code || null,
@@ -2135,6 +2271,54 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
   } catch (error) {
     console.error('[code-rx] create Vault share error:', error);
     return c.json({ success: false, error: 'Could not create this share link.' }, 500);
+  }
+});
+
+// Links created before encrypted token recovery existed contain only a one-way
+// hash. An owner can explicitly replace one of those legacy links, preserving
+// its download and expiry policy while immediately invalidating the old URL.
+app.post('/api/vault/documents/:id/shares/:shareId/replace', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 10, 60)) return c.json({ success: false, error: 'Too many link replacement requests. Please wait a minute.' }, 429);
+  try {
+    const id = Number(c.req.param('id'));
+    const shareId = Number(c.req.param('shareId'));
+    if (!Number.isInteger(id) || !Number.isInteger(shareId) || id < 1 || shareId < 1) {
+      return c.json({ success: false, error: 'Invalid document or share id.' }, 400);
+    }
+    const access = await shareableDocumentAccess(c, id);
+    if (access.response) return access.response;
+    const shares = await dbRows<{ id: number; allow_download: number; expires_at: string | null }>(c.env.DB.prepare(
+      `SELECT id, allow_download, expires_at FROM vault_shares
+       WHERE id = ? AND document_id = ? AND status = 'active' ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}`
+    ).bind(...(access.actor!.isPhantom ? [shareId, id] : [shareId, id, access.actor!.profileId])));
+    const share = shares[0];
+    if (!share) return c.json({ success: false, error: 'Active share link not found.' }, 404);
+
+    const token = randomToken();
+    const tokenCiphertext = await encryptVaultShareToken(token, c.env.JWT_SECRET);
+    const result = await c.env.DB.prepare(
+      `UPDATE vault_shares SET token_hash = ?, token_ciphertext = ?, last_accessed_at = NULL
+       WHERE id = ? AND document_id = ? AND status = 'active' ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}`
+    ).bind(...(access.actor!.isPhantom
+      ? [await sha256Hex(token), tokenCiphertext, shareId, id]
+      : [await sha256Hex(token), tokenCiphertext, shareId, id, access.actor!.profileId]
+    )).run();
+    if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'The share link changed before it could be replaced. Refresh and try again.' }, 409);
+
+    await audit(c.env.DB, access.actor, 'vault.document.share_replaced', 'vault_document', id, {
+      shareId,
+      documentCode: access.document!.document_code || null,
+      allowDownload: Number(share.allow_download || 0) === 1,
+      expiresAt: share.expires_at || null,
+    });
+    return c.json({
+      success: true,
+      data: { id: shareId, shareUrl: publicVaultShareUrl(c.env, token), allowDownload: Number(share.allow_download || 0) === 1 },
+      message: 'A new copyable link is ready. The previous URL no longer works.',
+    });
+  } catch (error) {
+    console.error('[code-rx] replace Vault share error:', error);
+    return c.json({ success: false, error: 'Could not replace this share link.' }, 500);
   }
 });
 
@@ -2187,8 +2371,8 @@ app.get('/api/vault/shares/:token', async (c) => {
   const creatorCanShare = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_share || 0) === 1);
   if (!creatorCanShare) return c.json({ success: false, error: 'Shared document is unavailable.' }, 404);
   const downloadsGloballyEnabled = (await settingValue(c.env.DB, 'vault_downloads_enabled', '0')) === '1';
-  const creatorCanDownload = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_download || 0) === 1);
-  const canDownload = downloadsGloballyEnabled && creatorCanDownload && Number(share.allow_download || 0) === 1;
+  const downloadStatus = shareDownloadStatus(share, downloadsGloballyEnabled);
+  const canDownload = downloadStatus === 'available';
   const parsed = parseStoredDocumentContent(share.content_json, share.content || '');
   const blocks = parsed.blocks
     .filter((block) => block.type !== 'image' && block.type !== 'file')
@@ -2201,6 +2385,8 @@ app.get('/api/vault/shares/:token', async (c) => {
     createdAt: share.created_at,
     updatedAt: share.updated_at,
     canDownload,
+    downloadStatus,
+    downloadMessage: sharedDownloadMessage(downloadStatus),
     contentJson: { version: 1, blocks },
   } }, 200, { 'Cache-Control': 'private, no-store' });
 });
@@ -2570,10 +2756,10 @@ app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => 
       ];
       if (resetBallot) {
         statements.push(c.env.DB.prepare(
-          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, started_at, completed_at)
-           VALUES (?, 'open', ?, 'ballot', 0, NULL, CURRENT_TIMESTAMP, NULL)
+          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, started_at, completed_at)
+           VALUES (?, 'open', ?, 'ballot', 0, NULL, NULL, CURRENT_TIMESTAMP, NULL)
            ON CONFLICT(member_profile_id) DO UPDATE SET status = 'open', pool = excluded.pool, assignment_source = 'ballot',
-             passes_used = 0, claimed_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL`
+             passes_used = 0, claimed_codename_id = NULL, current_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL`
         ).bind(profileId, poolForPath(nextCodenamePath)));
       }
       await c.env.DB.batch(statements);
@@ -2978,9 +3164,9 @@ app.post('/api/phantom/codenames/:id/assign', requireAuth, requirePhantom, async
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE member_profiles SET codename_path = 'direct_founding', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(profileId),
     c.env.DB.prepare(
-      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, completed_at)
-       VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', pool = 'founding', assignment_source = 'phantom_direct', claimed_codename_id = excluded.claimed_codename_id, completed_at = CURRENT_TIMESTAMP`
+      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, completed_at)
+       VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, NULL, CURRENT_TIMESTAMP)
+       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', pool = 'founding', assignment_source = 'phantom_direct', claimed_codename_id = excluded.claimed_codename_id, current_codename_id = NULL, completed_at = CURRENT_TIMESTAMP`
     ).bind(profileId, id),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
       .bind(id, profileId, actor?.userId ?? null, 'Assigned by PHANTOM as a founding or reserved identity'),
@@ -3038,16 +3224,16 @@ app.post('/api/phantom/codenames/:id/release', requireAuth, requirePhantom, asyn
     // The release removes a permanent identity only after the session is made
     // usable again, so an active member is never stranded without a ballot.
     statements.push(c.env.DB.prepare(
-      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, started_at, completed_at)
-       VALUES (?, 'open', ?, 'ballot', 0, NULL, CURRENT_TIMESTAMP, NULL)
+      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, started_at, completed_at)
+       VALUES (?, 'open', ?, 'ballot', 0, NULL, NULL, CURRENT_TIMESTAMP, NULL)
        ON CONFLICT(member_profile_id) DO UPDATE SET status = 'open', pool = excluded.pool, assignment_source = 'ballot',
-         passes_used = 0, claimed_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL`
+         passes_used = 0, claimed_codename_id = NULL, current_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL`
     ).bind(owner.id, owner.codename_path === 'custom_founding' ? 'founding' : 'member'));
   } else if (owner?.codename_path === 'direct_founding') {
     // Direct-assignment members must wait for PHANTOM to choose their next
     // founding identity; they must not silently gain access to a ballot.
     statements.push(c.env.DB.prepare(
-      "UPDATE codename_selection_sessions SET status = 'expired', claimed_codename_id = NULL, completed_at = NULL WHERE member_profile_id = ?"
+      "UPDATE codename_selection_sessions SET status = 'expired', claimed_codename_id = NULL, current_codename_id = NULL, completed_at = NULL WHERE member_profile_id = ?"
     ).bind(owner.id));
   }
   await c.env.DB.batch(statements);

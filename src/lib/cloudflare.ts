@@ -165,6 +165,10 @@ export const db = {
       const result = await apiCall<{ data: any }>('/api/codenames/ballot');
       return result.data;
     },
+    reveal: async () => {
+      const result = await apiCall<{ data: any }>('/api/codenames/reveal', { method: 'POST' });
+      return result.data;
+    },
     check: async (codenameId: number) => {
       const result = await apiCall<{ data: any }>('/api/codenames/check', { method: 'POST', body: JSON.stringify({ codenameId }) });
       return result.data;
@@ -187,6 +191,7 @@ export const db = {
     sharingStatus: async () => (await apiCall<{ data: any }>('/api/vault/sharing/status')).data,
     shares: async (documentId: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`)).data,
     createShare: (documentId: number, allowDownload = false) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, { method: 'POST', body: JSON.stringify({ allowDownload }) }),
+    replaceShare: (documentId: number, shareId: number) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares/${shareId}/replace`, { method: 'POST' }),
     revokeShare: (documentId: number, shareId: number) => apiCall(`/api/vault/documents/${documentId}/shares/${shareId}/revoke`, { method: 'POST' }),
     downloadDocument: async (documentId: number) => {
       const token = getToken();

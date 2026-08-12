@@ -187,10 +187,12 @@ CREATE TABLE IF NOT EXISTS codename_selection_sessions (
   assignment_source TEXT NOT NULL DEFAULT 'ballot' CHECK (assignment_source IN ('ballot','phantom_direct')),
   passes_used INTEGER NOT NULL DEFAULT 0 CHECK (passes_used BETWEEN 0 AND 2),
   claimed_codename_id INTEGER,
+  current_codename_id INTEGER,
   started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   completed_at DATETIME,
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id),
-  FOREIGN KEY(claimed_codename_id) REFERENCES codenames(id)
+  FOREIGN KEY(claimed_codename_id) REFERENCES codenames(id),
+  FOREIGN KEY(current_codename_id) REFERENCES codenames(id)
 );
 
 CREATE TABLE IF NOT EXISTS codename_selection_events (
@@ -289,6 +291,10 @@ CREATE TABLE IF NOT EXISTS vault_shares (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id INTEGER NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
+  -- Encrypted with the deployment secret. This lets an authorized creator
+  -- recopy a previously-created link without storing the bearer token in
+  -- plaintext or exposing it from the public endpoint.
+  token_ciphertext TEXT,
   created_by_member_profile_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
   allow_download INTEGER NOT NULL DEFAULT 0,
@@ -558,6 +564,7 @@ const SAFE_MIGRATIONS = [
   { table: 'vault_documents', column: 'document_code', sql: 'ALTER TABLE vault_documents ADD COLUMN document_code TEXT' },
   { table: 'member_share_permissions', column: 'can_download', sql: 'ALTER TABLE member_share_permissions ADD COLUMN can_download INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_shares', column: 'allow_download', sql: 'ALTER TABLE vault_shares ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0' },
+  { table: 'vault_shares', column: 'token_ciphertext', sql: 'ALTER TABLE vault_shares ADD COLUMN token_ciphertext TEXT' },
   { table: 'vault_documents', column: 'content_json', sql: 'ALTER TABLE vault_documents ADD COLUMN content_json TEXT' },
   { table: 'vault_documents', column: 'content_format', sql: "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'" },
   { table: 'vault_documents', column: 'status', sql: "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
@@ -576,9 +583,10 @@ const SAFE_MIGRATIONS = [
   { table: 'codenames', column: 'pool', sql: "ALTER TABLE codenames ADD COLUMN pool TEXT NOT NULL DEFAULT 'member'" },
   { table: 'codename_selection_sessions', column: 'pool', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN pool TEXT NOT NULL DEFAULT 'member'" },
   { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
+  { table: 'codename_selection_sessions', column: 'current_codename_id', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN current_codename_id INTEGER' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-vault-download-light-ui-4';
+const VAULT_SCHEMA_VERSION = '2026-08-12-share-link-recopy-and-download-status-6';
 
 
 const ROLE_SEEDS = [
