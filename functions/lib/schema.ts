@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS vault_document_sequences (
 CREATE TABLE IF NOT EXISTS member_share_permissions (
   member_profile_id INTEGER PRIMARY KEY,
   can_share INTEGER NOT NULL DEFAULT 0,
+  can_download INTEGER NOT NULL DEFAULT 0,
   updated_by_user_id INTEGER,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
@@ -290,6 +291,7 @@ CREATE TABLE IF NOT EXISTS vault_shares (
   token_hash TEXT NOT NULL UNIQUE,
   created_by_member_profile_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  allow_download INTEGER NOT NULL DEFAULT 0,
   expires_at DATETIME,
   last_accessed_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -554,6 +556,8 @@ const SAFE_MIGRATIONS = [
   { table: 'applications', column: 'updated_at', sql: 'ALTER TABLE applications ADD COLUMN updated_at TEXT' },
   { table: 'meetings', column: 'project_id', sql: 'ALTER TABLE meetings ADD COLUMN project_id INTEGER' },
   { table: 'vault_documents', column: 'document_code', sql: 'ALTER TABLE vault_documents ADD COLUMN document_code TEXT' },
+  { table: 'member_share_permissions', column: 'can_download', sql: 'ALTER TABLE member_share_permissions ADD COLUMN can_download INTEGER NOT NULL DEFAULT 0' },
+  { table: 'vault_shares', column: 'allow_download', sql: 'ALTER TABLE vault_shares ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_documents', column: 'content_json', sql: 'ALTER TABLE vault_documents ADD COLUMN content_json TEXT' },
   { table: 'vault_documents', column: 'content_format', sql: "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'" },
   { table: 'vault_documents', column: 'status', sql: "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
@@ -574,7 +578,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'assignment_source', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN assignment_source TEXT NOT NULL DEFAULT 'ballot'" },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-11-vault-share-score-notifications-3';
+const VAULT_SCHEMA_VERSION = '2026-08-12-vault-download-light-ui-4';
 
 
 const ROLE_SEEDS = [
@@ -679,6 +683,7 @@ const seedScoreRules = async (db: D1Database) => {
 const seedFeatureSettings = async (db: D1Database) => {
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_sharing_enabled', '0', CURRENT_TIMESTAMP)"),
+    db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_downloads_enabled', '0', CURRENT_TIMESTAMP)"),
   ]);
 };
 

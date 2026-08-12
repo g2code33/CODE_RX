@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy,
+  Archive, Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy, Download,
   FileText, Heading1, Heading2, History, ImagePlus, Italic, Link2,
-  List, LoaderCircle, Maximize2, Minimize2, Minus, MoreHorizontal,
+  List, Maximize2, Minimize2, Minus, MoreHorizontal,
   Paperclip, Plus, Quote, Redo2, Save, Search, Share2, Strikethrough, Table2,
   Underline, Undo2, X,
 } from 'lucide-react';
@@ -36,6 +36,7 @@ interface VaultDocumentEditorProps {
   canManage: boolean;
   canArchive?: boolean;
   canShare?: boolean;
+  canDownload?: boolean;
   onArchive?: (id: number) => void | Promise<void>;
   onClose: () => void;
   onSaved: (document: any) => void;
@@ -56,7 +57,7 @@ const initialDraft = (document: any | null): VaultDocumentDraft => ({
 
 const draftStorageKey = (documentId: number | null, sectionSlug: string) => `codeRx_vault_draft_${documentId || `new_${sectionSlug}`}`;
 
-export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, canShare = false, onArchive, onClose, onSaved }: VaultDocumentEditorProps) => {
+export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, canShare = false, canDownload = false, onArchive, onClose, onSaved }: VaultDocumentEditorProps) => {
   const [documentId, setDocumentId] = useState<number | null>(document?.id || null);
   const [draft, setDraft] = useState<VaultDocumentDraft>(() => initialDraft(document));
   const [saveState, setSaveState] = useState<SaveState>('saved');
@@ -351,6 +352,27 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
     } finally { setUploading(false); }
   };
 
+  const downloadDocument = async () => {
+    if (!documentId) return;
+    setSaveState('saving');
+    setSaveMessage('Preparing download…');
+    try {
+      const result = await db.vault.downloadDocument(documentId);
+      const anchor = window.document.createElement('a');
+      anchor.href = result.url;
+      anchor.download = result.filename;
+      window.document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(result.url), 30_000);
+      setSaveState('saved');
+      setSaveMessage('Download ready');
+    } catch (error: any) {
+      setSaveState('error');
+      setSaveMessage(error?.message || 'Could not download this document.');
+    }
+  };
+
   const filteredCommands = useMemo(() => {
     const query = slash?.query?.toLowerCase().replace(/^\//, '') || '';
     return slashCommands.filter((command) => !query || `${command.label} ${command.hint}`.toLowerCase().includes(query));
@@ -360,7 +382,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   const canPublicShare = canShare && !section?.is_sensitive && draft.visibility !== 'restricted';
   const shellClass = focusMode ? 'vault-editor vault-editor--focus' : 'vault-editor';
 
-  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canPublicShare && documentId && <button onClick={() => setShowShare(true)} className="editor-icon-button text-emerald-700 hover:!text-emerald-900" title="Share document"><Share2 className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={() => { if (window.confirm('Archive this document? Its history will remain available for PHANTOM to restore.')) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
+  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canPublicShare && documentId && <button onClick={() => setShowShare(true)} className="editor-icon-button text-emerald-700 hover:!text-emerald-900" title="Share document"><Share2 className="h-4 w-4" /></button>}{canDownload && documentId && <button onClick={() => void downloadDocument()} className="editor-icon-button text-sky-700 hover:!text-sky-900" title="Download document"><Download className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={() => { if (window.confirm('Archive this document? Its history will remain available for PHANTOM to restore.')) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
     <div className={`vault-editor__layout ${showOutline && !focusMode ? 'has-outline' : ''}`}><section className="vault-editor__document"><div className="vault-editor__titlebar">
         <input
           disabled={!canEdit}
@@ -462,7 +484,7 @@ const ListBlock = ({ block, shell, controls, canEdit, onChange, onFocus }: any) 
 const CodeBlock = ({ block, shell, controls, canEdit, onChange, onFocus }: any) => {
   const [editing, setEditing] = useState(!(block.content || ''));
   const copy = async () => { try { await navigator.clipboard.writeText(block.content || ''); } catch { /* clipboard unavailable */ } };
-  return <div id={`vault-block-${block.id}`} className={`${shell} overflow-hidden rounded-xl border border-slate-800 bg-[#0c1512] text-slate-100`}>{controls}<div className="flex items-center justify-between border-b border-white/10 px-3 py-2"><div className="flex items-center gap-2"><Code2 className="h-4 w-4 text-emerald-300" /><select disabled={!canEdit} value={block.language || 'plaintext'} onChange={(event) => onChange({ language: event.target.value })} className="bg-transparent text-xs font-bold text-emerald-200 outline-none">{CODE_LANGUAGES.map((language) => <option className="bg-slate-900" key={language} value={language}>{language}</option>)}</select></div><div className="flex gap-2"><button onClick={() => setEditing((value) => !value)} className="rounded px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-300 hover:bg-white/10">{editing ? 'Preview' : 'Edit'}</button><button onClick={copy} className="rounded px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-300 hover:bg-white/10"><Copy className="h-3.5 w-3.5" /></button></div></div>{editing && canEdit ? <textarea value={block.content || ''} onFocus={onFocus} onChange={(event) => onChange({ content: event.target.value })} spellCheck={false} className="min-h-40 w-full resize-y bg-transparent p-4 font-mono text-[13px] leading-6 text-slate-100 outline-none" placeholder="Write code…" /> : <pre className="max-h-[34rem] overflow-auto p-4 font-mono text-[13px] leading-6"><code>{highlightCode(block.content || '', block.language || 'plaintext')}</code></pre>}</div>;
+  return <div id={`vault-block-${block.id}`} className={`${shell} overflow-hidden rounded-xl border border-slate-200 bg-[#f8fbf9] text-slate-800`}>{controls}<div className="flex items-center justify-between border-b border-slate-200 bg-[#f1f8f3] px-3 py-2"><div className="flex items-center gap-2"><Code2 className="h-4 w-4 text-emerald-700" /><select disabled={!canEdit} value={block.language || 'plaintext'} onChange={(event) => onChange({ language: event.target.value })} className="bg-transparent text-xs font-bold text-emerald-800 outline-none">{CODE_LANGUAGES.map((language) => <option className="bg-white text-slate-800" key={language} value={language}>{language}</option>)}</select></div><div className="flex gap-2"><button onClick={() => setEditing((value) => !value)} className="rounded px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600 hover:bg-emerald-100">{editing ? 'Preview' : 'Edit'}</button><button onClick={copy} className="rounded px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600 hover:bg-emerald-100"><Copy className="h-3.5 w-3.5" /></button></div></div>{editing && canEdit ? <textarea value={block.content || ''} onFocus={onFocus} onChange={(event) => onChange({ content: event.target.value })} spellCheck={false} className="min-h-40 w-full resize-y bg-transparent p-4 font-mono text-[13px] leading-6 text-slate-800 outline-none" placeholder="Write code…" /> : <pre className="max-h-[34rem] overflow-auto p-4 font-mono text-[13px] leading-6"><code>{highlightCode(block.content || '', block.language || 'plaintext')}</code></pre>}</div>;
 };
 
 const TableBlock = ({ block, shell, controls, canEdit, onChange, onFocus }: any) => {
@@ -513,7 +535,7 @@ const TemplatePicker = ({ onChoose, onClose }: { onChoose: (id: string) => void;
 
 const HistoryPanel = ({ documentId, versions, canRestore, onClose, onRestore }: { documentId: number | null; versions: any[]; canRestore: boolean; onClose: () => void; onRestore: (version: number) => void }) => <div className="fixed inset-0 z-[145] flex justify-end bg-slate-950/30" onClick={onClose}><aside className="h-full w-full max-w-md overflow-y-auto bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Document history</p><h3 className="mt-1 text-xl font-black text-slate-900">Version timeline</h3></div><button onClick={onClose}><X className="h-5 w-5 text-slate-400" /></button></div><div className="mt-6 space-y-3">{versions.map((version) => <article key={version.version_number} className="rounded-xl border border-slate-100 p-4"><div className="flex items-center justify-between"><strong className="text-sm text-slate-800">v{version.version_number}</strong><span className="text-[10px] font-black uppercase text-emerald-600">{version.status || 'draft'}</span></div><p className="mt-2 text-xs text-slate-500">{version.change_note || 'Saved version'} · {version.created_at}</p>{canRestore && documentId && <button onClick={() => onRestore(version.version_number)} className="mt-3 text-xs font-black text-emerald-700 hover:underline">Restore this version</button>}</article>)}{!versions.length && <p className="text-sm text-slate-500">No saved versions yet.</p>}</div></aside></div>;
 
-const SaveIndicator = ({ state, message }: { state: SaveState; message: string }) => <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${state === 'saved' ? 'bg-emerald-50 text-emerald-700' : state === 'saving' ? 'bg-sky-50 text-sky-700' : state === 'error' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-700'}`}>{state === 'saving' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : state === 'saved' ? <Check className="h-3.5 w-3.5" /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}{message}</span>;
+const SaveIndicator = ({ state, message }: { state: SaveState; message: string }) => <span role="status" aria-live="polite" className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${state === 'saved' ? 'bg-emerald-50 text-emerald-700' : state === 'saving' ? 'border border-sky-100 bg-sky-50 text-sky-700' : state === 'error' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-700'}`}>{state === 'saved' ? <Check className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${state === 'saving' ? 'bg-sky-500' : 'bg-current'}`} />}{message}</span>;
 
 const stripHtml = (value: string) => value.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
-const highlightCode = (code: string, language: string) => code.split(/(\/\/[^\n]*|#[^\n]*|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\b(?:const|let|var|function|return|if|else|for|while|class|import|from|export|async|await|def|SELECT|FROM|WHERE|INSERT|UPDATE|CREATE|true|false|null)\b|\b\d+(?:\.\d+)?\b)/g).map((part, index) => { const cls = /^(\/\/|#)/.test(part) ? 'text-slate-500' : /^['"]/.test(part) ? 'text-amber-300' : /^\d/.test(part) ? 'text-cyan-300' : /^(const|let|var|function|return|if|else|for|while|class|import|from|export|async|await|def|SELECT|FROM|WHERE|INSERT|UPDATE|CREATE|true|false|null)$/.test(part) ? 'text-fuchsia-300' : ''; return <span key={`${language}-${index}`} className={cls}>{part}</span>; });
+const highlightCode = (code: string, language: string) => code.split(/(\/\/[^\n]*|#[^\n]*|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\b(?:const|let|var|function|return|if|else|for|while|class|import|from|export|async|await|def|SELECT|FROM|WHERE|INSERT|UPDATE|CREATE|true|false|null)\b|\b\d+(?:\.\d+)?\b)/g).map((part, index) => { const cls = /^(\/\/|#)/.test(part) ? 'text-slate-500' : /^['"]/.test(part) ? 'text-amber-700' : /^\d/.test(part) ? 'text-sky-700' : /^(const|let|var|function|return|if|else|for|while|class|import|from|export|async|await|def|SELECT|FROM|WHERE|INSERT|UPDATE|CREATE|true|false|null)$/.test(part) ? 'text-violet-700' : ''; return <span key={`${language}-${index}`} className={cls}>{part}</span>; });

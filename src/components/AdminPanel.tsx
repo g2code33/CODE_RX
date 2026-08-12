@@ -96,8 +96,7 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
       
       {isLoading ? (
         <div className="text-center py-20">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-emerald-500 mx-auto"></div>
-          <p className="text-slate-500 mt-4">Loading applications...</p>
+          <p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading applications…</p>
         </div>
       ) : applications.length === 0 ? (
         <div className="text-center py-20">
@@ -175,7 +174,7 @@ const SubscribersList = () => {
   };
 
   if (isLoading) {
-    return <div className="text-center py-10"><div className="animate-spin rounded-full h-6 w-6 border-b-2 border-emerald-500 mx-auto"></div></div>;
+    return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading subscribers…</div>;
   }
 
   if (subscribers.length === 0) {
@@ -230,7 +229,7 @@ const ContactMessagesList = () => {
   };
 
   if (isLoading) {
-    return <div className="text-center py-10"><div className="animate-spin rounded-full h-6 w-6 border-b-2 border-emerald-500 mx-auto"></div></div>;
+    return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading contact messages…</div>;
   }
 
   if (contacts.length === 0) {
@@ -407,8 +406,7 @@ const MembersSection = () => {
 
       {isLoading ? (
         <div className="text-center py-16">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-emerald-500 mx-auto"></div>
-          <p className="text-slate-500 mt-4">Loading members...</p>
+          <p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading members…</p>
         </div>
       ) : members.length === 0 ? (
         <div className="text-center py-16">
@@ -875,6 +873,14 @@ export const AdminPanel = ({
 
   const handlePublishAll = async () => persistContent(siteContent, false);
 
+  // Controller edits save quietly after a brief pause. Failed saves remain
+  // protected locally and use the existing retry state instead of retrying forever.
+  useEffect(() => {
+    if (!hasUnsavedChanges || isPublishing || hasPendingPublish) return;
+    const timer = window.setTimeout(() => { void persistContent(siteContent, false); }, 800);
+    return () => window.clearTimeout(timer);
+  }, [siteContent, hasUnsavedChanges, isPublishing, hasPendingPublish]);
+
   const handleUpdateHome = (updates: Partial<SiteContent['home']>) => {
     setSiteContent(prev => ({
       ...prev,
@@ -931,11 +937,11 @@ export const AdminPanel = ({
     <div className="min-h-screen bg-slate-50 pt-20">
       {/* Success Toast */}
       {showSuccess && (
-        <div className="fixed top-24 right-8 z-50 bg-emerald-500 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-right">
-          <CheckCircle className="w-6 h-6" />
+        <div className="fixed top-24 right-8 z-50 flex items-center gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-6 py-4 text-emerald-800 shadow-xl shadow-emerald-950/5 animate-in slide-in-from-right">
+          <CheckCircle className="w-6 h-6 text-emerald-600" />
           <div>
             <p className="font-bold">Changes saved successfully!</p>
-            <p className="text-xs opacity-80">Saved to the Cloudflare D1 database</p>
+            <p className="text-xs text-emerald-700">Saved to the Cloudflare D1 database</p>
           </div>
         </div>
       )}
@@ -953,9 +959,7 @@ export const AdminPanel = ({
         <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 bg-yellow-400 text-black px-6 py-3 rounded-full shadow-xl flex items-center gap-3">
           <Edit3 className="w-5 h-5" />
           <span className="font-bold text-sm">Unsaved changes</span>
-          <button onClick={handleSave} className="bg-black text-white px-4 py-1.5 rounded-full text-xs font-bold hover:bg-slate-800 transition-all">
-            SAVE NOW
-          </button>
+          <span className="rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-black text-amber-700">Saving in background…</span>
         </div>
       )}
 
@@ -963,11 +967,11 @@ export const AdminPanel = ({
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Admin Sidebar */}
           <aside className="lg:w-72 space-y-1 shrink-0">
-            <div className="p-8 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-3xl text-white mb-6 shadow-xl shadow-emerald-200">
+            <div className="mb-6 rounded-3xl border border-emerald-100 bg-gradient-to-br from-[#fbfffc] via-[#effaf3] to-[#e0f5e8] p-8 text-slate-800 shadow-lg shadow-emerald-950/5">
               <h3 className="text-2xl font-black tracking-tight uppercase leading-none">Admin Core</h3>
-              <p className="text-[10px] font-bold opacity-70 uppercase tracking-[0.2em] mt-2">Global Controller</p>
+              <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-700">Global Controller</p>
               {savedToStorage && (
-                <div className="mt-3 flex items-center gap-2 text-xs bg-white/20 px-3 py-1.5 rounded-full">
+                <div className="mt-3 flex w-fit items-center gap-2 rounded-full border border-emerald-100 bg-white px-3 py-1.5 text-xs text-emerald-700">
                   <CheckCircle className="w-3 h-3" />
                   <span>Saved</span>
                 </div>
@@ -1019,7 +1023,7 @@ export const AdminPanel = ({
                    onClick={() => setActiveView(item.id as any)}
                    className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all ${
                      activeView === item.id 
-                     ? 'bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-200' 
+                     ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 font-bold shadow-sm shadow-emerald-100'
                      : 'text-slate-600 hover:bg-slate-100'
                    }`}
                  >
@@ -1047,7 +1051,7 @@ export const AdminPanel = ({
                    onClick={() => setActiveView(item.id as any)}
                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
                      activeView === item.id 
-                     ? 'bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-200' 
+                     ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 font-bold shadow-sm shadow-emerald-100'
                      : 'text-slate-600 hover:bg-slate-100'
                    }`}
                  >

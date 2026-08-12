@@ -186,9 +186,16 @@ export const db = {
     tags: async () => (await apiCall<{ data: any[] }>('/api/vault/tags')).data || [],
     sharingStatus: async () => (await apiCall<{ data: any }>('/api/vault/sharing/status')).data,
     shares: async (documentId: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`)).data,
-    createShare: (documentId: number, expiresInDays = 7) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, { method: 'POST', body: JSON.stringify({ expiresInDays }) }),
+    createShare: (documentId: number, allowDownload = false) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, { method: 'POST', body: JSON.stringify({ allowDownload }) }),
     revokeShare: (documentId: number, shareId: number) => apiCall(`/api/vault/documents/${documentId}/shares/${shareId}/revoke`, { method: 'POST' }),
+    downloadDocument: async (documentId: number) => {
+      const token = getToken();
+      const response = await fetch(`${API_BASE}/api/vault/documents/${documentId}/download`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!response.ok) { let data: any = null; try { data = await response.json(); } catch { /* ignore */ } throw new ApiError(data?.error || 'Could not download this document.', response.status); }
+      return { url: URL.createObjectURL(await response.blob()), filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)/i)?.[1] || 'code-rx-vault-document.html' };
+    },
     publicShare: async (token: string) => (await apiCall<{ data: any }>(`/api/vault/shares/${encodeURIComponent(token)}`)).data,
+    publicDownloadUrl: (token: string) => `${API_BASE}/api/vault/shares/${encodeURIComponent(token)}/download`,
     sections: async () => {
       const result = await apiCall<{ data: any[] }>('/api/vault/sections');
       return result.data || [];
@@ -259,7 +266,9 @@ export const db = {
       apiCall(`/api/phantom/score-rules/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(data) }),
     sharing: async () => (await apiCall<{ data: any }>('/api/phantom/sharing')).data,
     setGlobalSharing: (enabled: boolean) => apiCall('/api/phantom/sharing/global', { method: 'PUT', body: JSON.stringify({ enabled }) }),
+    setGlobalDownloads: (enabled: boolean) => apiCall('/api/phantom/downloads/global', { method: 'PUT', body: JSON.stringify({ enabled }) }),
     setMemberSharing: (id: number, canShare: boolean) => apiCall(`/api/phantom/members/${id}/sharing`, { method: 'PUT', body: JSON.stringify({ canShare }) }),
+    setMemberDownloads: (id: number, canDownload: boolean) => apiCall(`/api/phantom/members/${id}/downloads`, { method: 'PUT', body: JSON.stringify({ canDownload }) }),
     notificationDelegates: async () => (await apiCall<{ data: any[] }>('/api/phantom/notification-delegates')).data || [],
     setNotificationDelegate: (id: number, canSend: boolean) => apiCall(`/api/phantom/notification-delegates/${id}`, { method: 'PUT', body: JSON.stringify({ canSend }) }),
     roles: async () => (await apiCall<{ data: any }>('/api/phantom/roles')).data,
