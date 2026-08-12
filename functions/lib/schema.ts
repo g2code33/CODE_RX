@@ -291,6 +291,10 @@ CREATE TABLE IF NOT EXISTS vault_shares (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id INTEGER NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
+  -- Encrypted with the deployment secret. This lets an authorized creator
+  -- recopy a previously-created link without storing the bearer token in
+  -- plaintext or exposing it from the public endpoint.
+  token_ciphertext TEXT,
   created_by_member_profile_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
   allow_download INTEGER NOT NULL DEFAULT 0,
@@ -560,6 +564,7 @@ const SAFE_MIGRATIONS = [
   { table: 'vault_documents', column: 'document_code', sql: 'ALTER TABLE vault_documents ADD COLUMN document_code TEXT' },
   { table: 'member_share_permissions', column: 'can_download', sql: 'ALTER TABLE member_share_permissions ADD COLUMN can_download INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_shares', column: 'allow_download', sql: 'ALTER TABLE vault_shares ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0' },
+  { table: 'vault_shares', column: 'token_ciphertext', sql: 'ALTER TABLE vault_shares ADD COLUMN token_ciphertext TEXT' },
   { table: 'vault_documents', column: 'content_json', sql: 'ALTER TABLE vault_documents ADD COLUMN content_json TEXT' },
   { table: 'vault_documents', column: 'content_format', sql: "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'" },
   { table: 'vault_documents', column: 'status', sql: "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
@@ -581,7 +586,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'current_codename_id', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN current_codename_id INTEGER' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-covered-ballot-full-vault-5';
+const VAULT_SCHEMA_VERSION = '2026-08-12-share-link-recopy-and-download-status-6';
 
 
 const ROLE_SEEDS = [

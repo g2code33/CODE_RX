@@ -33,7 +33,7 @@ Existing accounts remain available and are safely migrated into a member profile
 - Document archive uses the archive action, not a document status selector. PHANTOM/section managers can open **Archived Documents** and unarchive a document to its prior active status.
 - PHANTOM can also restore archived members, Vault sections, and projects from their dedicated archive controls.
 - Archiving keeps historical rows and version history; it never deletes records.
-- Public document sharing and downloads are disabled by default. PHANTOM enables separate global master switches and then turns member-specific Share and Download buttons on only for trusted active members. Share links are read-only, do not expire until revoked, can independently allow shared-page download/print, and exclude attachments and sensitive/restricted documents.
+- Public document sharing and downloads are disabled by default. PHANTOM enables separate global master switches and then turns member-specific Share and Download buttons on only for trusted active members. A shared page shows **Download** and **Print** only when the global download switch, the creator’s account permission, and that link’s **Allow download and print** setting are all enabled. Share links are read-only, do not expire until revoked, can independently allow shared-page download/print, and exclude attachments and sensitive/restricted documents. Authorized owners can copy active links again from the Existing links list.
 - Scores are live: configurable automatic rules, PHANTOM manual adjustments with reasons/history, dashboard balances, and a real member leaderboard are all backed by D1.
 - Notifications are durable in-app broadcasts. PHANTOM can target all active members, a responsibility profile, or selected members, and can enable designated active members as notification senders.
 
@@ -109,7 +109,7 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
    - Direct Founding Assignment claims exactly one available founding codename and opens no ballot.
 6. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
 7. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
-8. Enable global sharing and downloads, enable one member's Share and Download buttons, create and revoke a non-expiring link, test the optional shared-page download/print toggle, then verify that a sensitive/restricted document cannot be shared.
+8. Enable global sharing and downloads, enable one member's Share and Download buttons, create a non-expiring link, copy it again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke it, then verify that a sensitive/restricted document cannot be shared.
 9. Verify one automatic score award, one PHANTOM manual adjustment, the member score history, and the live leaderboard.
 10. Send a notification to a selected test member, confirm the unread badge/inbox, then enable a delegated sender and test their broadcaster access.
 11. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.

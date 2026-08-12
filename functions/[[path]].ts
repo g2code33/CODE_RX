@@ -18,6 +18,7 @@ import { sendEmail } from './lib/email';
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
 import { adjustMemberScore, awardScoreRule, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
+import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 
 type AppEnv = { Bindings: Env; Variables: { user: JwtPayload; actor: Awaited<ReturnType<typeof getActor>> } };
 
@@ -53,6 +54,31 @@ const publicSiteUrl = (env: Env) => {
   return /^https?:\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(configured)
     ? configured
     : 'https://coderxsociety.pages.dev';
+};
+
+const publicVaultShareUrl = (env: Env, token: string) => `${publicSiteUrl(env)}/#vault-share?token=${encodeURIComponent(token)}`;
+
+/**
+ * Share tokens are hashed for public lookup. New links also retain an
+ * encrypted copy so an authorized document owner can copy the exact link from
+ * the Existing links list. Old rows created before this upgrade are one-way
+ * hashes only and deliberately require an explicit replacement link.
+ */
+const recoverVaultShareUrl = async (env: Env, share: { id: number; token_hash: string; token_ciphertext?: string | null }) => {
+  if (!share.token_ciphertext) return null;
+  try {
+    const token = await decryptVaultShareToken(share.token_ciphertext, env.JWT_SECRET);
+    if (!/^[a-f0-9]{64}$/i.test(token) || await sha256Hex(token) !== share.token_hash) {
+      console.warn('[code-rx] Vault share token recovery integrity check failed for share', share.id);
+      return null;
+    }
+    return publicVaultShareUrl(env, token);
+  } catch (error) {
+    // Do not expose a cryptographic/key-rotation detail to clients. The owner
+    // can intentionally replace the link, which invalidates the old token.
+    console.warn('[code-rx] Vault share token recovery failed for share', share.id, error);
+    return null;
+  }
 };
 
 type FounderActor = NonNullable<Awaited<ReturnType<typeof getActor>>>;
@@ -338,6 +364,7 @@ const sharingCapability = async (db: D1Database, actor: FounderActor) => {
     downloadsGloballyEnabled,
     memberDownloadEnabled: true,
     canDownload: downloadsGloballyEnabled,
+    canManageGlobalDownloads: true,
   };
   if (!actor.profileId || actor.memberStatus !== 'active') return {
     globalEnabled,
@@ -346,6 +373,7 @@ const sharingCapability = async (db: D1Database, actor: FounderActor) => {
     downloadsGloballyEnabled,
     memberDownloadEnabled: false,
     canDownload: false,
+    canManageGlobalDownloads: false,
   };
   const rows = await dbRows<{ can_share: number; can_download: number }>(db.prepare(
     'SELECT can_share, can_download FROM member_share_permissions WHERE member_profile_id = ?'
@@ -359,7 +387,25 @@ const sharingCapability = async (db: D1Database, actor: FounderActor) => {
     downloadsGloballyEnabled,
     memberDownloadEnabled,
     canDownload: downloadsGloballyEnabled && memberDownloadEnabled,
+    canManageGlobalDownloads: false,
   };
+};
+
+type ShareDownloadStatus = 'available' | 'link_disabled' | 'global_paused' | 'creator_permission_disabled';
+
+const shareDownloadStatus = (share: { allow_download?: number | boolean | null; creator_role_code?: string | null; creator_status?: string | null; can_download?: number | boolean | null }, downloadsGloballyEnabled: boolean): ShareDownloadStatus => {
+  if (Number(share.allow_download || 0) !== 1) return 'link_disabled';
+  if (!downloadsGloballyEnabled) return 'global_paused';
+  const creatorCanDownload = share.creator_role_code === 'phantom'
+    || (share.creator_status === 'active' && Number(share.can_download || 0) === 1);
+  return creatorCanDownload ? 'available' : 'creator_permission_disabled';
+};
+
+const sharedDownloadMessage = (status: ShareDownloadStatus) => {
+  if (status === 'link_disabled') return 'This document was shared for reading only. Download and print were not enabled for this link.';
+  if (status === 'global_paused') return 'Download and print are temporarily unavailable. Ask the document owner to enable them.';
+  if (status === 'creator_permission_disabled') return 'Download and print are temporarily unavailable for this shared document.';
+  return '';
 };
 
 const awardAutomaticScore = async ({
@@ -2161,11 +2207,36 @@ app.get('/api/vault/documents/:id/shares', requireAuth, async (c) => {
   const access = await shareableDocumentAccess(c, id);
   if (access.response) return access.response;
   const capability = await sharingCapability(c.env.DB, access.actor!);
-  const shares = await dbRows<any>(c.env.DB.prepare(
-    `SELECT id, status, allow_download, expires_at, last_accessed_at, created_at, created_by_member_profile_id
-     FROM vault_shares WHERE document_id = ? ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}
-     ORDER BY created_at DESC`
+  const rawShares = await dbRows<any>(c.env.DB.prepare(
+    `SELECT vs.id, vs.status, vs.allow_download, vs.expires_at, vs.last_accessed_at, vs.created_at,
+       vs.created_by_member_profile_id, vs.token_hash, vs.token_ciphertext,
+       creator.status AS creator_status, creator_role.code AS creator_role_code, msp.can_download
+     FROM vault_shares vs
+     LEFT JOIN member_profiles creator ON creator.id = vs.created_by_member_profile_id
+     LEFT JOIN roles creator_role ON creator_role.id = creator.primary_role_id
+     LEFT JOIN member_share_permissions msp ON msp.member_profile_id = creator.id
+     WHERE vs.document_id = ? ${access.actor!.isPhantom ? '' : 'AND vs.created_by_member_profile_id = ?'}
+     ORDER BY vs.created_at DESC`
   ).bind(...(access.actor!.isPhantom ? [id] : [id, access.actor!.profileId])));
+  const shares = await Promise.all(rawShares.map(async (share) => {
+    const shareUrl = share.status === 'active' ? await recoverVaultShareUrl(c.env, share) : null;
+    const downloadStatus = share.status === 'active'
+      ? shareDownloadStatus(share, capability.downloadsGloballyEnabled)
+      : 'link_disabled' as ShareDownloadStatus;
+    return {
+      id: share.id,
+      status: share.status,
+      allow_download: Number(share.allow_download || 0),
+      expires_at: share.expires_at || null,
+      last_accessed_at: share.last_accessed_at || null,
+      created_at: share.created_at,
+      created_by_member_profile_id: share.created_by_member_profile_id,
+      downloadStatus,
+      shareUrl,
+      copyAvailable: Boolean(shareUrl),
+      replacementRequired: share.status === 'active' && !shareUrl,
+    };
+  }));
   return c.json({ success: true, data: { capability, shares } });
 });
 
@@ -2184,12 +2255,13 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const allowDownload = body.allowDownload === true;
     const token = randomToken();
+    const tokenCiphertext = await encryptVaultShareToken(token, c.env.JWT_SECRET);
     const created = await c.env.DB.prepare(
-      `INSERT INTO vault_shares (document_id, token_hash, created_by_member_profile_id, status, allow_download, expires_at)
-       VALUES (?, ?, ?, 'active', ?, NULL)`
-    ).bind(id, await sha256Hex(token), access.actor!.profileId, allowDownload ? 1 : 0).run();
+      `INSERT INTO vault_shares (document_id, token_hash, token_ciphertext, created_by_member_profile_id, status, allow_download, expires_at)
+       VALUES (?, ?, ?, ?, 'active', ?, NULL)`
+    ).bind(id, await sha256Hex(token), tokenCiphertext, access.actor!.profileId, allowDownload ? 1 : 0).run();
     const shareId = Number(created.meta.last_row_id);
-    const shareUrl = `${publicSiteUrl(c.env)}/#vault-share?token=${token}`;
+    const shareUrl = publicVaultShareUrl(c.env, token);
     await audit(c.env.DB, access.actor, 'vault.document.shared', 'vault_document', id, {
       shareId,
       documentCode: access.document!.document_code || null,
@@ -2199,6 +2271,54 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
   } catch (error) {
     console.error('[code-rx] create Vault share error:', error);
     return c.json({ success: false, error: 'Could not create this share link.' }, 500);
+  }
+});
+
+// Links created before encrypted token recovery existed contain only a one-way
+// hash. An owner can explicitly replace one of those legacy links, preserving
+// its download and expiry policy while immediately invalidating the old URL.
+app.post('/api/vault/documents/:id/shares/:shareId/replace', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 10, 60)) return c.json({ success: false, error: 'Too many link replacement requests. Please wait a minute.' }, 429);
+  try {
+    const id = Number(c.req.param('id'));
+    const shareId = Number(c.req.param('shareId'));
+    if (!Number.isInteger(id) || !Number.isInteger(shareId) || id < 1 || shareId < 1) {
+      return c.json({ success: false, error: 'Invalid document or share id.' }, 400);
+    }
+    const access = await shareableDocumentAccess(c, id);
+    if (access.response) return access.response;
+    const shares = await dbRows<{ id: number; allow_download: number; expires_at: string | null }>(c.env.DB.prepare(
+      `SELECT id, allow_download, expires_at FROM vault_shares
+       WHERE id = ? AND document_id = ? AND status = 'active' ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}`
+    ).bind(...(access.actor!.isPhantom ? [shareId, id] : [shareId, id, access.actor!.profileId])));
+    const share = shares[0];
+    if (!share) return c.json({ success: false, error: 'Active share link not found.' }, 404);
+
+    const token = randomToken();
+    const tokenCiphertext = await encryptVaultShareToken(token, c.env.JWT_SECRET);
+    const result = await c.env.DB.prepare(
+      `UPDATE vault_shares SET token_hash = ?, token_ciphertext = ?, last_accessed_at = NULL
+       WHERE id = ? AND document_id = ? AND status = 'active' ${access.actor!.isPhantom ? '' : 'AND created_by_member_profile_id = ?'}`
+    ).bind(...(access.actor!.isPhantom
+      ? [await sha256Hex(token), tokenCiphertext, shareId, id]
+      : [await sha256Hex(token), tokenCiphertext, shareId, id, access.actor!.profileId]
+    )).run();
+    if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'The share link changed before it could be replaced. Refresh and try again.' }, 409);
+
+    await audit(c.env.DB, access.actor, 'vault.document.share_replaced', 'vault_document', id, {
+      shareId,
+      documentCode: access.document!.document_code || null,
+      allowDownload: Number(share.allow_download || 0) === 1,
+      expiresAt: share.expires_at || null,
+    });
+    return c.json({
+      success: true,
+      data: { id: shareId, shareUrl: publicVaultShareUrl(c.env, token), allowDownload: Number(share.allow_download || 0) === 1 },
+      message: 'A new copyable link is ready. The previous URL no longer works.',
+    });
+  } catch (error) {
+    console.error('[code-rx] replace Vault share error:', error);
+    return c.json({ success: false, error: 'Could not replace this share link.' }, 500);
   }
 });
 
@@ -2251,8 +2371,8 @@ app.get('/api/vault/shares/:token', async (c) => {
   const creatorCanShare = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_share || 0) === 1);
   if (!creatorCanShare) return c.json({ success: false, error: 'Shared document is unavailable.' }, 404);
   const downloadsGloballyEnabled = (await settingValue(c.env.DB, 'vault_downloads_enabled', '0')) === '1';
-  const creatorCanDownload = share.creator_role_code === 'phantom' || (share.creator_status === 'active' && Number(share.can_download || 0) === 1);
-  const canDownload = downloadsGloballyEnabled && creatorCanDownload && Number(share.allow_download || 0) === 1;
+  const downloadStatus = shareDownloadStatus(share, downloadsGloballyEnabled);
+  const canDownload = downloadStatus === 'available';
   const parsed = parseStoredDocumentContent(share.content_json, share.content || '');
   const blocks = parsed.blocks
     .filter((block) => block.type !== 'image' && block.type !== 'file')
@@ -2265,6 +2385,8 @@ app.get('/api/vault/shares/:token', async (c) => {
     createdAt: share.created_at,
     updatedAt: share.updated_at,
     canDownload,
+    downloadStatus,
+    downloadMessage: sharedDownloadMessage(downloadStatus),
     contentJson: { version: 1, blocks },
   } }, 200, { 'Cache-Control': 'private, no-store' });
 });
