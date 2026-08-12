@@ -190,7 +190,10 @@ export const db = {
     tags: async () => (await apiCall<{ data: any[] }>('/api/vault/tags')).data || [],
     sharingStatus: async () => (await apiCall<{ data: any }>('/api/vault/sharing/status')).data,
     shares: async (documentId: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`)).data,
-    createShare: (documentId: number, allowDownload = false) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, { method: 'POST', body: JSON.stringify({ allowDownload }) }),
+    createShare: (documentId: number, options: { allowDownload?: boolean; expiresInDays?: number | null } = {}) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, {
+      method: 'POST',
+      body: JSON.stringify({ allowDownload: options.allowDownload === true, expiresInDays: options.expiresInDays ?? null }),
+    }),
     replaceShare: (documentId: number, shareId: number) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares/${shareId}/replace`, { method: 'POST' }),
     revokeShare: (documentId: number, shareId: number) => apiCall(`/api/vault/documents/${documentId}/shares/${shareId}/revoke`, { method: 'POST' }),
     downloadDocument: async (documentId: number) => {

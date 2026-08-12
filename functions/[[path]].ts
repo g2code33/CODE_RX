@@ -313,6 +313,7 @@ const vaultAccess = async (c: any, slug: string, action: VaultAction) => {
 
 const DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active', 'archived']);
 const ACTIVE_DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active']);
+const SHARE_EXPIRY_DAYS = new Set([1, 7, 30, 90]);
 const documentStatus = (value: unknown, fallback = 'draft') => {
   const status = cleanOptionalStr(value, 30)?.toLowerCase().replace(/\s+/g, '_');
   return status && DOCUMENT_STATUSES.has(status) ? status : fallback;
@@ -526,9 +527,11 @@ app.use('/api/*', async (c, next) => {
     console.error('[code-rx] ensureSchema failed:', { d1BindingPresent, error: e });
     return c.json({
       success: false,
+      // Keep operational detail in the server log. Members receive a clear
+      // next step rather than database or deployment terminology.
       error: d1BindingPresent
-        ? 'The D1 database is connected, but its safe schema upgrade did not complete. Retry after the latest deployment; if it persists, PHANTOM should inspect the Pages Function real-time logs.'
-        : 'Database is not configured. Attach the D1 binding "DB" in the Pages project settings.',
+        ? 'Code Rx is temporarily preparing your secure workspace. Please try again in a moment.'
+        : 'Code Rx is temporarily unavailable. Please try again shortly.',
     }, 500);
   }
   await next();
@@ -2254,20 +2257,48 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
     }
     const body = await c.req.json().catch(() => ({}));
     const allowDownload = body.allowDownload === true;
+    const requestedExpiry = body.expiresInDays;
+    const noExpiry = requestedExpiry === undefined || requestedExpiry === null || requestedExpiry === ''
+      || requestedExpiry === 0 || requestedExpiry === '0' || requestedExpiry === 'never';
+    let expiresAt: string | null = null;
+    if (!noExpiry) {
+      const expiresInDays = Number(requestedExpiry);
+      if (!Number.isInteger(expiresInDays) || !SHARE_EXPIRY_DAYS.has(expiresInDays)) {
+        return c.json({ success: false, error: 'Choose No expiry, 1 day, 7 days, 30 days, or 90 days.' }, 400);
+      }
+      expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    // A PHANTOM choosing "Allow download and print" expects that choice to
+    // work immediately. Turn on the master switch for that deliberate action;
+    // PHANTOM can still pause every public download later from Document Sharing.
+    if (allowDownload && !capability.canDownload) {
+      if (!access.actor!.isPhantom) {
+        return c.json({ success: false, error: 'Download and print have not been enabled for this account. Ask PHANTOM to enable download access first.' }, 403);
+      }
+      await c.env.DB.prepare(
+        `INSERT INTO system_settings (setting_key, setting_value, updated_by_user_id, updated_at)
+         VALUES ('vault_downloads_enabled', '1', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+      ).bind(access.actor!.userId).run();
+      await audit(c.env.DB, access.actor, 'vault.downloads.global_enabled', 'system_setting', 'vault_downloads_enabled', { source: 'share_link_download_enabled' });
+    }
+
     const token = randomToken();
     const tokenCiphertext = await encryptVaultShareToken(token, c.env.JWT_SECRET);
     const created = await c.env.DB.prepare(
       `INSERT INTO vault_shares (document_id, token_hash, token_ciphertext, created_by_member_profile_id, status, allow_download, expires_at)
-       VALUES (?, ?, ?, ?, 'active', ?, NULL)`
-    ).bind(id, await sha256Hex(token), tokenCiphertext, access.actor!.profileId, allowDownload ? 1 : 0).run();
+       VALUES (?, ?, ?, ?, 'active', ?, ?)`
+    ).bind(id, await sha256Hex(token), tokenCiphertext, access.actor!.profileId, allowDownload ? 1 : 0, expiresAt).run();
     const shareId = Number(created.meta.last_row_id);
     const shareUrl = publicVaultShareUrl(c.env, token);
     await audit(c.env.DB, access.actor, 'vault.document.shared', 'vault_document', id, {
       shareId,
       documentCode: access.document!.document_code || null,
       allowDownload,
+      expiresAt,
     });
-    return c.json({ success: true, data: { id: shareId, shareUrl, allowDownload }, message: 'Read-only share link created. It remains active until you revoke it.' }, 201);
+    return c.json({ success: true, data: { id: shareId, shareUrl, allowDownload, expiresAt }, message: 'Read-only share link created. You can revoke it whenever access should end.' }, 201);
   } catch (error) {
     console.error('[code-rx] create Vault share error:', error);
     return c.json({ success: false, error: 'Could not create this share link.' }, 500);
