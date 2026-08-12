@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Users, 
   Trophy, 
@@ -393,7 +393,7 @@ const MembersSection = () => {
               <tr>
                 <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Member</th>
                 <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Level</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Points</th>
+                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Calcitonins (CAL)</th>
                 <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
                 <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
                 <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
@@ -468,7 +468,7 @@ const MemberRow = ({
             className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-24"
           />
         ) : (
-          <span className="text-sm font-black text-emerald-600">{member.points ?? 0}</span>
+          <span className="text-sm font-black text-emerald-600">{member.points ?? 0} CAL</span>
         )}
       </td>
       <td className="px-6 py-4">
@@ -508,7 +508,7 @@ const MemberRow = ({
             <button
               onClick={() => setEditing(true)}
               className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg transition-all"
-              title="Edit level & points"
+              title="Edit level & Calcitonins"
             >
               <Edit3 className="w-4 h-4" />
             </button>
@@ -682,8 +682,8 @@ export const AdminPanel = ({
 }: { 
   siteContent: SiteContent, 
   setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>>;
-  workspace: 'controller' | 'builder' | 'vault';
-  onWorkspaceChange: (workspace: 'controller' | 'builder' | 'vault') => void;
+  workspace: 'controller' | 'builder' | 'vault' | 'phantom';
+  onWorkspaceChange: (workspace: 'controller' | 'builder' | 'vault' | 'phantom') => void;
   activeTab: string;
   onNavigate: (id: string) => void;
   onJoin?: () => void;
@@ -693,8 +693,9 @@ export const AdminPanel = ({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [contentHistory, setContentHistory] = useState<SiteContent[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [showSuccess, setShowSuccess] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [savedToStorage, setSavedToStorage] = useState(false);
+  const saveFeedbackTimer = useRef<number | null>(null);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [hasPendingPublish, setHasPendingPublish] = useState(false);
@@ -799,21 +800,31 @@ export const AdminPanel = ({
     }
   };
 
+  const showSaveFeedback = (state: 'saving' | 'saved' | 'error') => {
+    if (saveFeedbackTimer.current) window.clearTimeout(saveFeedbackTimer.current);
+    setSaveFeedback(state);
+    if (state === 'saved') {
+      saveFeedbackTimer.current = window.setTimeout(() => setSaveFeedback('idle'), 2600);
+    }
+  };
+
+  useEffect(() => () => { if (saveFeedbackTimer.current) window.clearTimeout(saveFeedbackTimer.current); }, []);
+
   /** Persist a supplied snapshot. Visual-editor saves call this immediately;
    * controller saves call it with the current draft. A failure is never treated
    * as published and is kept locally for Publish all to retry. */
   const persistContent = async (contentToPublish: SiteContent, showFailureAlert = false): Promise<boolean> => {
     setIsPublishing(true);
+    showSaveFeedback('saving');
     try {
       const normalized = normalizeSiteContent(contentToPublish);
       await db.siteContent.update(normalized);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
       localStorage.removeItem(PENDING_PUBLISH_KEY);
-      setShowSuccess(true);
       setSavedToStorage(true);
       setHasPendingPublish(false);
       setHasUnsavedChanges(false);
-      setTimeout(() => setShowSuccess(false), 3000);
+      showSaveFeedback('saved');
       window.dispatchEvent(new CustomEvent('siteContentUpdated', { detail: normalized }));
       return true;
     } catch (error) {
@@ -822,6 +833,7 @@ export const AdminPanel = ({
       // the live canvas recover exactly after a page refresh or connection loss.
       localStorage.setItem(PENDING_PUBLISH_KEY, JSON.stringify(contentToPublish));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(contentToPublish));
+      showSaveFeedback('error');
       setHasPendingPublish(true);
       setHasUnsavedChanges(true);
       if (showFailureAlert) alert('Could not publish to the database. Your changes are protected locally; use Publish all to retry.');
@@ -936,7 +948,11 @@ export const AdminPanel = ({
   };
 
   if (workspace === 'vault') {
-    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('controller')} />;
+    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('phantom')} />;
+  }
+
+  if (workspace === 'phantom') {
+    return <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onBack={() => onWorkspaceChange('controller')} />;
   }
 
   if (workspace === 'builder') {
@@ -957,33 +973,11 @@ export const AdminPanel = ({
 
   return (
     <div className="min-h-screen bg-slate-50 pt-20">
-      {/* Success Toast */}
-      {showSuccess && (
-        <div className="fixed top-24 right-8 z-50 flex items-center gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-6 py-4 text-emerald-800 shadow-xl shadow-emerald-950/5 animate-in slide-in-from-right">
-          <CheckCircle className="w-6 h-6 text-emerald-600" />
-          <div>
-            <p className="font-bold">Changes saved successfully!</p>
-            <p className="text-xs text-emerald-700">Saved to the Cloudflare D1 database</p>
-          </div>
-        </div>
-      )}
-
-      {/* Saved Indicator */}
-      {savedToStorage && !hasUnsavedChanges && (
-        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 bg-emerald-100 text-emerald-700 px-6 py-3 rounded-full shadow-lg flex items-center gap-3">
-          <CheckCircle className="w-5 h-5" />
-          <span className="font-bold text-sm">All changes saved</span>
-        </div>
-      )}
-
-      {/* Unsaved Changes Warning */}
-      {hasUnsavedChanges && (
-        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 bg-yellow-400 text-black px-6 py-3 rounded-full shadow-xl flex items-center gap-3">
-          <Edit3 className="w-5 h-5" />
-          <span className="font-bold text-sm">Unsaved changes</span>
-          <span className="rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-black text-amber-700">Saving in background…</span>
-        </div>
-      )}
+      {/* A compact status prompt confirms background saving without replacing or blocking the workspace. */}
+      {(saveFeedback !== 'idle' || (hasUnsavedChanges && !isPublishing && !hasPendingPublish)) && <div role="status" aria-live="polite" className={`fixed top-24 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-black shadow-lg ${saveFeedback === 'error' ? 'border-red-100 bg-red-50 text-red-700' : saveFeedback === 'saved' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : saveFeedback === 'saving' ? 'border-sky-100 bg-sky-50 text-sky-700' : 'border-amber-100 bg-amber-50 text-amber-800'}`}>
+        {saveFeedback === 'saved' ? <CheckCircle className="h-4 w-4" /> : saveFeedback === 'error' ? <X className="h-4 w-4" /> : <Edit3 className="h-4 w-4" />}
+        <span>{saveFeedback === 'saved' ? 'Saved' : saveFeedback === 'error' ? 'Saved locally — retry is ready' : saveFeedback === 'saving' ? 'Saving…' : 'Unsaved changes'}</span>
+      </div>}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
         <div className="flex flex-col lg:flex-row gap-8">
@@ -1013,9 +1007,10 @@ export const AdminPanel = ({
             <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm mb-4 space-y-2">
               <button 
                 onClick={handleSave}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-sm"
+                disabled={isPublishing}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-sm disabled:opacity-60"
               >
-                <Save className="w-4 h-4" /> Save Changes
+                <Save className="w-4 h-4" /> {isPublishing ? 'Saving…' : 'Save Changes'}
               </button>
               <button 
                 onClick={handleUndo}
@@ -1042,7 +1037,7 @@ export const AdminPanel = ({
                ].map((item) => (
                  <button
                    key={item.id}
-                   onClick={() => setActiveView(item.id as any)}
+                   onClick={() => item.id === 'phantom' ? onWorkspaceChange('phantom') : setActiveView(item.id as any)}
                    className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all ${
                      activeView === item.id 
                      ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 font-bold shadow-sm shadow-emerald-100'

@@ -265,11 +265,118 @@ const getCodenameSession = async (db: D1Database, profileId: number, pool: 'memb
     // the member and founding ballots. Resetting only an open session keeps
     // completed identities permanent while preventing mixed-pool attempts.
     await db.prepare(
-      "UPDATE codename_selection_sessions SET pool = ?, assignment_source = 'ballot', passes_used = 0, claimed_codename_id = NULL, current_codename_id = NULL, started_at = CURRENT_TIMESTAMP, completed_at = NULL WHERE id = ?"
+      "UPDATE codename_selection_sessions SET pool = ?, assignment_source = 'ballot', passes_used = 0, claimed_codename_id = NULL, current_codename_id = NULL, ballot_slots_json = '[]', revealed_codenames_json = '[]', review_target_count = 3, started_at = CURRENT_TIMESTAMP, completed_at = NULL WHERE id = ?"
     ).bind(pool, rows[0].id).run();
     rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
   }
   return rows[0] || null;
+};
+
+const parseSessionCodenameIds = (value: unknown): number[] => {
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0))];
+  } catch { return []; }
+};
+
+const parseBallotSlots = (value: unknown): Array<number | null> => {
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => {
+      const id = Number(item);
+      return Number.isInteger(id) && id > 0 ? id : null;
+    });
+  } catch { return []; }
+};
+
+const eligibleBallotCodenames = async (db: D1Database, sessionId: number, pool: 'member' | 'founding') => dbRows<any>(db.prepare(
+  `SELECT c.id, c.display_name, c.pool, c.status
+   FROM codenames c
+   WHERE c.pool = ? AND c.status = 'available'
+     AND NOT EXISTS (
+       SELECT 1 FROM codename_selection_events e
+       WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
+     )
+   ORDER BY RANDOM()`
+).bind(pool, sessionId));
+
+/**
+ * Creates stable, covered card positions for an open ballot. The browser is
+ * given only position numbers; the codename IDs stay in D1 until a card is
+ * deliberately opened. Existing old one-at-a-time sessions migrate naturally:
+ * their current selection becomes the first revealed comparison choice.
+ */
+const ensureWideBallotSession = async (db: D1Database, session: any, pool: 'member' | 'founding') => {
+  let slots = parseBallotSlots(session.ballot_slots_json);
+  let revealed = parseSessionCodenameIds(session.revealed_codenames_json);
+  const legacyCurrent = Number(session.current_codename_id || 0);
+  if (legacyCurrent > 0 && !revealed.includes(legacyCurrent)) revealed = [legacyCurrent, ...revealed];
+
+  if (!slots.length) {
+    const candidates = await eligibleBallotCodenames(db, Number(session.id), pool);
+    slots = candidates.map((candidate) => Number(candidate.id));
+    if (legacyCurrent > 0 && !slots.includes(legacyCurrent)) slots.unshift(legacyCurrent);
+  }
+  const slotSet = new Set(slots.filter((id): id is number => Boolean(id)));
+  revealed = revealed.filter((id) => slotSet.has(id));
+  const target = Math.min(3, slots.filter((id): id is number => Boolean(id)).length);
+  const changed = String(session.ballot_slots_json || '[]') !== JSON.stringify(slots)
+    || String(session.revealed_codenames_json || '[]') !== JSON.stringify(revealed)
+    || Number(session.review_target_count || 3) !== target
+    || legacyCurrent > 0;
+  if (changed) {
+    await db.prepare(
+      "UPDATE codename_selection_sessions SET ballot_slots_json = ?, revealed_codenames_json = ?, review_target_count = ?, current_codename_id = NULL WHERE id = ?"
+    ).bind(JSON.stringify(slots), JSON.stringify(revealed), target, session.id).run();
+  }
+  return { ...session, ballot_slots_json: JSON.stringify(slots), revealed_codenames_json: JSON.stringify(revealed), review_target_count: target, current_codename_id: null };
+};
+
+const wideBallotPresentation = async (db: D1Database, session: any, pool: 'member' | 'founding') => {
+  const prepared = await ensureWideBallotSession(db, session, pool);
+  const slots = parseBallotSlots(prepared.ballot_slots_json);
+  let revealedIds = parseSessionCodenameIds(prepared.revealed_codenames_json);
+  const ids = [...new Set(slots.filter((id): id is number => Boolean(id)))];
+  const rows = ids.length ? await dbRows<any>(db.prepare(
+    `SELECT id, display_name, pool, status FROM codenames WHERE id IN (${ids.map(() => '?').join(',')})`
+  ).bind(...ids)) : [];
+  const byId = new Map(rows.map((row) => [Number(row.id), row]));
+  // A concurrently claimed codename cannot stay in a member's comparison
+  // group. Its card becomes covered/unavailable so another visible card can be
+  // reviewed before the final choice.
+  const activeRevealed = revealedIds.filter((id) => {
+    const row = byId.get(id);
+    return row?.pool === pool && row?.status === 'available';
+  });
+  if (activeRevealed.length !== revealedIds.length) {
+    revealedIds = activeRevealed;
+    await db.prepare('UPDATE codename_selection_sessions SET revealed_codenames_json = ? WHERE id = ?')
+      .bind(JSON.stringify(revealedIds), prepared.id).run();
+  }
+  const availableSlots = slots.filter((id) => {
+    const row = id ? byId.get(id) : null;
+    return Boolean(row && row.pool === pool && row.status === 'available');
+  }).length;
+  const reviewTarget = Math.min(Number(prepared.review_target_count || 0), availableSlots);
+  const slotsView = slots.map((id, index) => {
+    const row = id ? byId.get(id) : null;
+    const available = Boolean(row && row.pool === pool && row.status === 'available');
+    if (!available) return { slot: index + 1, state: 'unavailable' as const };
+    if (revealedIds.includes(id!)) return { slot: index + 1, state: 'revealed' as const, codename: { id: row.id, display_name: row.display_name } };
+    return { slot: index + 1, state: 'covered' as const };
+  });
+  const revealedChoices = slotsView.filter((slot) => slot.state === 'revealed').map((slot: any) => slot.codename);
+  const exhausted = reviewTarget === 0;
+  return {
+    session: { ...prepared, revealed_codenames_json: JSON.stringify(revealedIds), review_target_count: reviewTarget },
+    slots: slotsView,
+    revealedChoices,
+    reviewTarget,
+    exhausted,
+    readyToChoose: reviewTarget > 0 && revealedChoices.length >= reviewTarget,
+  };
 };
 
 const vaultSection = async (db: D1Database, slug: string) => {
@@ -434,8 +541,8 @@ const awardAutomaticScore = async ({
     await notifyMember(
       db,
       result.memberProfileId,
-      'Code Rx points earned',
-      `You earned ${result.delta} points for ${result.label}. Your balance is now ${result.balance}.`,
+      'Calcitonins earned',
+      `You earned ${result.delta} CAL for ${result.label}. Your Calcitonin balance is now ${result.balance} CAL.`,
       actor,
     );
     await audit(db, actor, 'member.score.automatic_award', 'member_profile', result.memberProfileId, {
@@ -1119,7 +1226,7 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
     const hasScoreUpdate = body.points !== undefined;
     const requestedScore = Number(body.points);
     if (hasScoreUpdate && (!Number.isInteger(requestedScore) || requestedScore < 0 || requestedScore > 1_000_000)) {
-      return c.json({ success: false, error: 'Score must be a whole number from 0 to 1,000,000.' }, 400);
+      return c.json({ success: false, error: 'Calcitonins must be a whole number from 0 to 1,000,000 CAL.' }, 400);
     }
     if (body.level !== undefined) {
       const level = cleanOptionalStr(body.level, 100);
@@ -1150,10 +1257,10 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
       const profileRows = await dbRows<any>(c.env.DB.prepare('SELECT id FROM member_profiles WHERE member_record_id = ?').bind(id));
       const actor = await actorFromContext(c);
       if (profileRows[0]) {
-        const reason = cleanOptionalStr(body.scoreReason, 500) || 'Score balance updated from Admin Core';
+        const reason = cleanOptionalStr(body.scoreReason, 500) || 'Calcitonin balance updated from Admin Core';
         const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileRows[0].id, action: 'set', points: requestedScore, reason, actor });
         if (result) {
-          await notifyMember(c.env.DB, profileRows[0].id, 'Code Rx points updated', `Your score balance is now ${result.balance}.`, actor);
+          await notifyMember(c.env.DB, profileRows[0].id, 'Calcitonins updated', `Your Calcitonin balance is now ${result.balance} CAL.`, actor);
           await audit(c.env.DB, actor, 'member.score.legacy_set', 'member_profile', profileRows[0].id, { balance: result.balance, reason });
         }
       } else {
@@ -1284,7 +1391,9 @@ app.get('/api/member/me', requireAuth, async (c) => {
         pool: session.pool || pool,
         assignmentSource: session.assignment_source || 'ballot',
         passesUsed: Number(session.passes_used || 0),
-        attemptsRemaining: session.status === 'completed' ? 0 : 3 - Number(session.passes_used || 0),
+        revealedCount: parseSessionCodenameIds(session.revealed_codenames_json).length,
+        reviewTarget: Number(session.review_target_count || 3),
+        attemptsRemaining: session.status === 'completed' ? 0 : Math.max(0, Number(session.review_target_count || 3) - parseSessionCodenameIds(session.revealed_codenames_json).length),
         claimedCodenameId: session.claimed_codename_id || null,
       } : null,
     },
@@ -1330,7 +1439,7 @@ app.get('/api/notifications', requireAuth, async (c) => {
        JOIN notifications n ON n.id = nr.notification_id
        LEFT JOIN member_profiles sender_profile ON sender_profile.id = n.created_by_member_profile_id
        LEFT JOIN users sender ON sender.id = sender_profile.user_id
-       WHERE nr.member_profile_id = ?
+       WHERE nr.member_profile_id = ? AND n.status = 'active'
        ORDER BY nr.delivered_at DESC, n.id DESC LIMIT ?`
     ).bind(actor.profileId, limit)),
     dbRows<{ count: number }>(c.env.DB.prepare(
@@ -1361,6 +1470,85 @@ app.get('/api/notifications/audience', requireAuth, async (c) => {
     dbRows<any>(c.env.DB.prepare("SELECT code, name FROM roles WHERE code != 'phantom' ORDER BY name")),
   ]);
   return c.json({ success: true, data: { members, roles } });
+});
+
+// Sent-notice management is available to PHANTOM and to a delegated sender for
+// notices they created. Editing updates the delivered notice for every current
+// recipient; deleting withdraws it from inboxes while retaining an audit trail.
+app.get('/api/notifications/sent', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  if (!await canSendNotifications(c.env.DB, actor)) return c.json({ success: false, error: 'Notification sender access is required.' }, 403);
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') || 40)));
+  const records = await dbRows<any>(c.env.DB.prepare(
+    `SELECT n.id, n.title, n.message, n.audience_type, n.audience_label, n.status, n.sent_at, n.created_at,
+       sender.name AS sender_name, sender_profile.member_code AS sender_member_code,
+       COUNT(nr.member_profile_id) AS recipient_count,
+       SUM(CASE WHEN nr.status = 'read' THEN 1 ELSE 0 END) AS read_count
+     FROM notifications n
+     LEFT JOIN notification_recipients nr ON nr.notification_id = n.id
+     LEFT JOIN member_profiles sender_profile ON sender_profile.id = n.created_by_member_profile_id
+     LEFT JOIN users sender ON sender.id = sender_profile.user_id
+     WHERE n.status = 'active' ${actor.isPhantom ? '' : 'AND n.created_by_member_profile_id = ?'}
+     GROUP BY n.id
+     ORDER BY n.sent_at DESC, n.id DESC LIMIT ?`
+  ).bind(...(actor.isPhantom ? [limit] : [actor.profileId, limit])));
+  return c.json({ success: true, data: records.map((record) => ({
+    ...record,
+    recipient_count: Number(record.recipient_count || 0),
+    read_count: Number(record.read_count || 0),
+  })) });
+});
+
+const editableSentNotification = async (c: any, id: number) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return { access, notification: null };
+  const actor = access.actor!;
+  if (!await canSendNotifications(c.env.DB, actor)) return { access, notification: null, forbidden: true };
+  const notifications = await dbRows<any>(c.env.DB.prepare(
+    "SELECT id, title, message, created_by_member_profile_id FROM notifications WHERE id = ? AND status = 'active'"
+  ).bind(id));
+  const notification = notifications[0];
+  if (!notification) return { access, notification: null };
+  if (!actor.isPhantom && Number(notification.created_by_member_profile_id || 0) !== Number(actor.profileId || 0)) {
+    return { access, notification: null, forbidden: true };
+  }
+  return { access, notification, forbidden: false };
+};
+
+app.patch('/api/notifications/sent/:id', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const editable = await editableSentNotification(c, id);
+  if (editable.access.response) return editable.access.response;
+  if (editable.forbidden) return c.json({ success: false, error: 'You can edit only notifications you are authorized to manage.' }, 403);
+  if (!editable.notification) return c.json({ success: false, error: 'Active notification not found.' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const hasTitle = body.title !== undefined;
+  const hasMessage = body.message !== undefined;
+  if (!hasTitle && !hasMessage) return c.json({ success: false, error: 'Change the title or message before saving.' }, 400);
+  const title = hasTitle ? cleanStr(body.title, 2, 180) : editable.notification.title;
+  const message = hasMessage ? cleanStr(body.message, 2, 5000) : editable.notification.message;
+  if (!title || !message) return c.json({ success: false, error: 'Use a title and message with at least two characters each.' }, 400);
+  await c.env.DB.prepare('UPDATE notifications SET title = ?, message = ? WHERE id = ?').bind(title, message, id).run();
+  await audit(c.env.DB, editable.access.actor, 'notification.edited', 'notification', id, { titleChanged: hasTitle, messageChanged: hasMessage });
+  return c.json({ success: true, data: { id, title, message }, message: 'Sent notification updated for its recipients.' });
+});
+
+app.delete('/api/notifications/sent/:id', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const editable = await editableSentNotification(c, id);
+  if (editable.access.response) return editable.access.response;
+  if (editable.forbidden) return c.json({ success: false, error: 'You can delete only notifications you are authorized to manage.' }, 403);
+  if (!editable.notification) return c.json({ success: false, error: 'Active notification not found.' }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE notifications SET status = 'deleted' WHERE id = ?").bind(id),
+    c.env.DB.prepare('DELETE FROM notification_recipients WHERE notification_id = ?').bind(id),
+  ]);
+  await audit(c.env.DB, editable.access.actor, 'notification.deleted', 'notification', id, { withdrawnFromInboxes: true });
+  return c.json({ success: true, message: 'Notification withdrawn from recipient inboxes.' });
 });
 
 app.post('/api/notifications/:id/read', requireAuth, async (c) => {
@@ -1471,41 +1659,38 @@ app.get('/api/codenames/ballot', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const actor = access.actor!;
-  if (actor.codename) return c.json({ success: true, data: { completed: true, codename: actor.codename, choices: [], pool: actor.codenamePath === 'direct_founding' ? 'founding' : ballotPoolFor(actor) } });
+  if (actor.codename) return c.json({ success: true, data: { completed: true, codename: actor.codename, choices: [], slots: [], pool: actor.codenamePath === 'direct_founding' ? 'founding' : ballotPoolFor(actor) } });
   if (actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account is awaiting a direct PHANTOM founding-codename assignment.' }, 409);
   const pool = ballotPoolFor(actor);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is no longer open for this account.' }, 409);
-  const remainingRows = await dbRows<{ count: number }>(c.env.DB.prepare(
-    `SELECT COUNT(*) AS count FROM codenames c
-     WHERE c.pool = ? AND c.status = 'available'
-       AND NOT EXISTS (
-         SELECT 1 FROM codename_selection_events e
-         WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
-       )`
-  ).bind(pool, session.id));
-  const exhausted = Number(remainingRows[0]?.count || 0) === 0;
+  const presentation = await wideBallotPresentation(c.env.DB, session, pool);
+  const exhaustedPrompt = presentation.exhausted
+    ? pool === 'founding'
+      ? 'No founding codenames are currently available. PHANTOM can add or release one before this ballot can continue.'
+      : 'No member codenames are currently available. PHANTOM needs to add more Member Pool codenames before this ballot can continue.'
+    : null;
   return c.json({ success: true, data: {
     completed: false,
     covered: true,
-    hasRevealedSelection: Boolean(session.current_codename_id),
     pool,
     ballotTitle: ballotLabelFor(pool),
-    passesUsed: Number(session.passes_used || 0),
-    maxAttempts: 3,
+    slots: presentation.slots,
+    revealedChoices: presentation.revealedChoices,
+    revealCount: presentation.revealedChoices.length,
+    reviewTarget: presentation.reviewTarget,
+    maxAttempts: presentation.reviewTarget,
+    readyToChoose: presentation.readyToChoose,
+    hasRevealedSelection: presentation.revealedChoices.length > 0,
     choices: [],
-    exhausted,
-    exhaustedPrompt: exhausted
-      ? pool === 'founding'
-        ? 'All founding codenames are claimed, reserved, or already passed. PHANTOM can add a custom founding codename or explicitly release one.'
-        : 'No member codenames are currently available. PHANTOM needs to add more codenames to the Member Ballot Pool.'
-      : null,
+    exhausted: presentation.exhausted,
+    exhaustedPrompt,
   } });
 });
 
-// The server draws one codename at a time. A client never receives the full
-// pool, and repeated review requests return the same covered selection until
-// the member claims it or spends a successful selection to review another.
+// The client receives only card positions for covered choices. Opening a card
+// reveals a server-mapped codename, and a member must reveal their complete
+// three-choice comparison group before any claim action is accepted.
 app.post('/api/codenames/reveal', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
@@ -1514,65 +1699,51 @@ app.post('/api/codenames/reveal', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
+  const before = await wideBallotPresentation(c.env.DB, session, pool);
+  if (before.exhausted) return c.json({ success: true, data: { covered: true, exhausted: true, pool, slots: before.slots, revealedChoices: [], revealCount: 0, reviewTarget: 0, readyToChoose: false, exhaustedPrompt: pool === 'founding' ? 'No founding codenames remain for review.' : 'No member codenames remain for review.' } });
+  if (before.readyToChoose) return c.json({ success: true, data: { covered: false, pool, slots: before.slots, revealedChoices: before.revealedChoices, revealCount: before.revealedChoices.length, reviewTarget: before.reviewTarget, readyToChoose: true, message: 'All comparison choices are revealed. Choose one codename to continue.' } });
 
-  let revealed: any | null = null;
-  if (session.current_codename_id) {
-    const currentRows = await dbRows<any>(c.env.DB.prepare(
-      `SELECT c.id, c.display_name, c.pool, c.status
-       FROM codenames c WHERE c.id = ? AND c.pool = ?`
-    ).bind(session.current_codename_id, pool));
-    const current = currentRows[0];
-    const passed = current ? await dbRows<any>(c.env.DB.prepare(
-      "SELECT id FROM codename_selection_events WHERE session_id = ? AND codename_id = ? AND action = 'passed'"
-    ).bind(session.id, current.id)) : [];
-    if (current && current.status === 'available' && !passed[0]) revealed = current;
-    else await c.env.DB.prepare('UPDATE codename_selection_sessions SET current_codename_id = NULL WHERE id = ?').bind(session.id).run();
+  const body = await c.req.json().catch(() => ({}));
+  const requestedSlot = Number(body.slot);
+  const coveredSlots = before.slots.filter((slot: any) => slot.state === 'covered');
+  const targetSlot = Number.isInteger(requestedSlot) && coveredSlots.some((slot: any) => slot.slot === requestedSlot)
+    ? requestedSlot
+    : coveredSlots[0]?.slot;
+  if (!targetSlot) return c.json({ success: false, error: 'No covered codename remains to reveal. Refresh the ballot and choose from the revealed choices.' }, 409);
+  const slots = parseBallotSlots(before.session.ballot_slots_json);
+  const codenameId = Number(slots[targetSlot - 1]);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    "SELECT id, display_name, pool, status FROM codenames WHERE id = ? AND pool = ?"
+  ).bind(codenameId, pool));
+  const codename = rows[0];
+  if (!codename || codename.status !== 'available') {
+    return c.json({ success: false, error: 'That covered choice is no longer available. Choose another covered card.' }, 409);
   }
-
-  if (!revealed) {
-    const candidates = await dbRows<any>(c.env.DB.prepare(
-      `SELECT c.id, c.display_name, c.pool
-       FROM codenames c
-       WHERE c.pool = ? AND c.status = 'available'
-         AND NOT EXISTS (
-           SELECT 1 FROM codename_selection_events e
-           WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
-         )
-       ORDER BY RANDOM() LIMIT 1`
-    ).bind(pool, session.id));
-    revealed = candidates[0] || null;
-    if (!revealed) return c.json({ success: true, data: {
-      covered: true,
-      exhausted: true,
-      pool,
-      passesUsed: Number(session.passes_used || 0),
-      maxAttempts: 3,
-      exhaustedPrompt: pool === 'founding'
-        ? 'No founding codenames remain for review. Ask PHANTOM to add or release one.'
-        : 'No member codenames remain for review. Ask PHANTOM to add more to the Member Pool.',
-    } });
-    await c.env.DB.batch([
-      c.env.DB.prepare('UPDATE codename_selection_sessions SET current_codename_id = ? WHERE id = ?').bind(revealed.id, session.id),
-      c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'available_check')").bind(session.id, revealed.id),
-    ]);
-  }
-
-  const reviewNumber = Number(session.passes_used || 0) + 1;
+  const revealedIds = [...new Set([...parseSessionCodenameIds(before.session.revealed_codenames_json), codenameId])];
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE codename_selection_sessions SET revealed_codenames_json = ?, current_codename_id = NULL WHERE id = ?')
+      .bind(JSON.stringify(revealedIds), session.id),
+    c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'available_check')")
+      .bind(session.id, codenameId),
+  ]);
+  const refreshed = await getCodenameSession(c.env.DB, actor.profileId!, pool);
+  const after = await wideBallotPresentation(c.env.DB, refreshed!, pool);
   return c.json({ success: true, data: {
     covered: false,
-    codename: { id: revealed.id, display_name: revealed.display_name },
     pool,
-    reviewNumber,
-    maxAttempts: 3,
-    finalReview: reviewNumber >= 3,
-    message: reviewNumber >= 3
-      ? 'This is your final covered selection. Claim it to complete your Code Rx identity.'
-      : 'One protected codename has been revealed for review.',
+    slots: after.slots,
+    revealedChoices: after.revealedChoices,
+    revealCount: after.revealedChoices.length,
+    reviewTarget: after.reviewTarget,
+    readyToChoose: after.readyToChoose,
+    message: after.readyToChoose
+      ? 'All comparison choices are revealed. Compare them and choose one codename.'
+      : `Choice ${after.revealedChoices.length} of ${after.reviewTarget} revealed. Open another covered card to complete your comparison group.`,
   } });
 });
 
-// Backward-compatible check route: it may inspect only the codename currently
-// revealed by the server, never an arbitrary pool entry.
+// Compatibility route: an ID can be checked only after it was revealed as one
+// of this member's comparison choices.
 app.post('/api/codenames/check', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
@@ -1581,46 +1752,23 @@ app.post('/api/codenames/check', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
-  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Review the covered ballot before checking a codename.' }, 400);
+  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Reveal your comparison choices before checking a codename.' }, 400);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  if (Number(session.current_codename_id || 0) !== codenameId) return c.json({ success: false, error: 'This codename is not the current covered selection.' }, 409);
+  const presentation = await wideBallotPresentation(c.env.DB, session, pool);
+  if (!presentation.revealedChoices.some((choice: any) => Number(choice.id) === codenameId)) return c.json({ success: false, error: 'This codename is not part of your revealed comparison group.' }, 409);
   const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, pool, status FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0];
   const available = Boolean(codename && codename.pool === pool && codename.status === 'available');
-  return c.json({ success: true, data: {
-    available,
-    codename: codename?.display_name || 'Codename',
-    pool,
-    message: available ? 'AVAILABLE' : 'This revealed codename is no longer available. Review the covered ballot again.',
-    attemptsUsed: Number(session.passes_used || 0),
-    maxAttempts: 3,
-  } });
+  return c.json({ success: true, data: { available, codename: codename?.display_name || 'Codename', pool, reviewTarget: presentation.reviewTarget, revealCount: presentation.revealedChoices.length, readyToChoose: presentation.readyToChoose, message: available ? 'AVAILABLE' : 'This revealed codename is no longer available. Open another covered card to complete your choices.' } });
 });
 
+// The earlier one-at-a-time pass flow is intentionally retired. A member now
+// reveals the comparison group first, then claims exactly one choice.
 app.post('/api/codenames/pass', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
-  const actor = access.actor!;
-  if (actor.codename || actor.codenamePath === 'direct_founding') return c.json({ success: false, error: 'This account cannot open another codename ballot.' }, 409);
-  const pool = ballotPoolFor(actor);
-  const body = await c.req.json().catch(() => ({}));
-  const codenameId = Number(body.codenameId);
-  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Review the covered ballot before choosing another codename.' }, 400);
-  const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
-  if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  if (Number(session.current_codename_id || 0) !== codenameId) return c.json({ success: false, error: 'This codename is not the current covered selection.' }, 409);
-  if (Number(session.passes_used || 0) >= 2) return c.json({ success: false, error: 'You have reached the final successful selection. Claim the revealed codename to complete your Code Rx identity.' }, 409);
-  const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, display_name, pool, status FROM codenames WHERE id = ?').bind(codenameId));
-  const codename = codeRows[0];
-  if (!codename || codename.pool !== pool || codename.status !== 'available') return c.json({ success: false, error: `This codename is no longer available. Attempts used: ${Number(session.passes_used || 0)}/3.` }, 409);
-  await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'passed')").bind(session.id, codenameId),
-    c.env.DB.prepare('UPDATE codename_selection_sessions SET passes_used = passes_used + 1, current_codename_id = NULL WHERE id = ? AND passes_used < 2').bind(session.id),
-  ]);
-  const attemptsUsed = Number(session.passes_used || 0) + 1;
-  await audit(c.env.DB, actor, 'codename.passed', 'codename', codenameId, { codename: codename.display_name, pool, attemptsUsed });
-  return c.json({ success: true, data: { attemptsUsed, maxAttempts: 3, pool, message: `${codename.display_name} passed. Tap Review ballot to reveal your next protected selection.` } });
+  return c.json({ success: false, error: 'This ballot now reveals all comparison choices first. Open the remaining covered cards, then choose one revealed codename.' }, 409);
 });
 
 app.post('/api/codenames/claim', requireAuth, async (c) => {
@@ -1631,26 +1779,27 @@ app.post('/api/codenames/claim', requireAuth, async (c) => {
   const pool = ballotPoolFor(actor);
   const body = await c.req.json().catch(() => ({}));
   const codenameId = Number(body.codenameId);
-  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Review the covered ballot before claiming a codename.' }, 400);
+  if (!Number.isInteger(codenameId) || codenameId < 1) return c.json({ success: false, error: 'Reveal your comparison choices before claiming a codename.' }, 400);
   const session = await getCodenameSession(c.env.DB, actor.profileId!, pool);
   if (!session || session.status !== 'open') return c.json({ success: false, error: 'Codename selection is closed.' }, 409);
-  if (Number(session.current_codename_id || 0) !== codenameId) return c.json({ success: false, error: 'This codename is not the current covered selection.' }, 409);
+  const presentation = await wideBallotPresentation(c.env.DB, session, pool);
+  if (!presentation.readyToChoose) return c.json({ success: false, error: `Reveal all ${presentation.reviewTarget} comparison choices before choosing one.` }, 409);
+  if (!presentation.revealedChoices.some((choice: any) => Number(choice.id) === codenameId)) return c.json({ success: false, error: 'Choose one of your revealed comparison codenames.' }, 409);
   const result = await c.env.DB.prepare(
     `UPDATE codenames
      SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
      WHERE id = ? AND pool = ? AND status = 'available' AND claimed_by_member_profile_id IS NULL`
   ).bind(actor.profileId, codenameId, pool).run();
-  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'This codename was just claimed by another member. Review the covered ballot again.' }, 409);
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'That codename was just claimed by another member. Open another covered choice and compare again.' }, 409);
   const codeRows = await dbRows<any>(c.env.DB.prepare('SELECT display_name FROM codenames WHERE id = ?').bind(codenameId));
   const codename = codeRows[0]?.display_name || 'Codename';
-  const attemptsUsed = Number(session.passes_used || 0) + 1;
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE codename_selection_sessions SET status = 'completed', claimed_codename_id = ?, current_codename_id = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(codenameId, session.id),
     c.env.DB.prepare("INSERT INTO codename_selection_events (session_id, codename_id, action) VALUES (?, ?, 'claimed')").bind(session.id, codenameId),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
-      .bind(codenameId, actor.profileId, actor.userId, `Claimed from ${pool} ballot on successful selection ${attemptsUsed}/3`),
+      .bind(codenameId, actor.profileId, actor.userId, `Claimed from ${pool} three-choice comparison ballot`),
   ]);
-  await audit(c.env.DB, actor, 'codename.claimed', 'codename', codenameId, { codename, pool, attemptsUsed });
+  await audit(c.env.DB, actor, 'codename.claimed', 'codename', codenameId, { codename, pool, revealedCount: presentation.revealedChoices.length, reviewTarget: presentation.reviewTarget });
   await awardAutomaticScore({
     db: c.env.DB,
     memberProfileId: actor.profileId,
@@ -1660,9 +1809,8 @@ app.post('/api/codenames/claim', requireAuth, async (c) => {
     actor,
     metadata: { codename, pool },
   });
-  return c.json({ success: true, data: { codename, pool, attemptsUsed, maxAttempts: 3, message: `${codename} is now your permanent Code Rx identity.` } });
+  return c.json({ success: true, data: { codename, pool, revealCount: presentation.revealedChoices.length, reviewTarget: presentation.reviewTarget, message: `${codename} is now your permanent Code Rx identity.` } });
 });
-
 
 // ============================================
 // 🗄️ CODE Rx VAULT
@@ -2901,22 +3049,26 @@ app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c
     const points = Number(body.points);
     const reason = cleanStr(body.reason, 2, 500);
     if (!['add', 'deduct', 'set'].includes(action) || !Number.isInteger(points) || points < 0 || points > 1_000_000 || !reason) {
-      return c.json({ success: false, error: 'Choose add, deduct, or set; provide a whole point value and a clear reason.' }, 400);
+      return c.json({ success: false, error: 'Choose add, deduct, or set; provide a whole Calcitonin value and a clear reason.' }, 400);
     }
     if ((action === 'add' || action === 'deduct') && points < 1) {
-      return c.json({ success: false, error: 'Add and deduct actions require at least one point.' }, 400);
+      return c.json({ success: false, error: 'Add and deduct actions require at least one CAL.' }, 400);
     }
-    const target = await dbRows<any>(c.env.DB.prepare('SELECT id, status FROM member_profiles WHERE id = ?').bind(profileId));
+    const target = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, mp.status, r.code AS role_code FROM member_profiles mp
+       LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+    ).bind(profileId));
     if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
-    if (target[0].status === 'archived') return c.json({ success: false, error: 'Restore this member before changing their score.' }, 409);
+    if (target[0].role_code === 'phantom') return c.json({ success: false, error: 'PHANTOM’s own Calcitonin balance is protected.' }, 403);
+    if (target[0].status === 'archived') return c.json({ success: false, error: 'Restore this member before changing their Calcitonins.' }, 409);
     const actor = await actorFromContext(c);
     const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileId, action, points, reason, actor });
-    if (!result) return c.json({ success: false, error: 'Member score could not be updated.' }, 404);
+    if (!result) return c.json({ success: false, error: 'Member Calcitonins could not be updated.' }, 404);
     await notifyMember(
       c.env.DB,
       profileId,
-      'Code Rx points updated',
-      `${result.delta >= 0 ? '+' : ''}${result.delta} points: ${reason}. Your balance is now ${result.balance}.`,
+      'Calcitonins updated',
+      `${result.delta >= 0 ? '+' : ''}${result.delta} CAL: ${reason}. Your Calcitonin balance is now ${result.balance} CAL.`,
       actor,
     );
     await audit(c.env.DB, actor, 'member.score.manual_adjustment', 'member_profile', profileId, {
@@ -2926,10 +3078,10 @@ app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c
       balance: result.balance,
       reason,
     });
-    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId }, message: 'Member score updated.' });
+    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId }, message: 'Member Calcitonins updated.' });
   } catch (error) {
-    console.error('[code-rx] manual score adjustment error:', error);
-    return c.json({ success: false, error: 'Could not update this member score.' }, 500);
+    console.error('[code-rx] manual Calcitonin adjustment error:', error);
+    return c.json({ success: false, error: 'Could not update this member’s Calcitonins.' }, 500);
   }
 });
 
@@ -2941,9 +3093,9 @@ app.get('/api/phantom/score-rules', requireAuth, requirePhantom, async (c) => {
 app.put('/api/phantom/score-rules/:key', requireAuth, requirePhantom, async (c) => {
   const key = cleanStr(c.req.param('key'), 2, 100);
   const body = await c.req.json().catch(() => ({}));
-  if (!key) return c.json({ success: false, error: 'Invalid score rule.' }, 400);
+  if (!key) return c.json({ success: false, error: 'Invalid Calcitonin rule.' }, 400);
   const current = await dbRows<any>(c.env.DB.prepare('SELECT * FROM score_rules WHERE rule_key = ?').bind(key));
-  if (!current[0]) return c.json({ success: false, error: 'Score rule not found.' }, 404);
+  if (!current[0]) return c.json({ success: false, error: 'Calcitonin rule not found.' }, 404);
   const fields: string[] = [];
   const values: unknown[] = [];
   if (body.enabled !== undefined) {
@@ -2952,16 +3104,16 @@ app.put('/api/phantom/score-rules/:key', requireAuth, requirePhantom, async (c) 
   }
   if (body.points !== undefined) {
     const points = Number(body.points);
-    if (!Number.isInteger(points) || points < 0 || points > 10_000) return c.json({ success: false, error: 'Automatic rule points must be a whole number from 0 to 10,000.' }, 400);
+    if (!Number.isInteger(points) || points < 0 || points > 10_000) return c.json({ success: false, error: 'Automatic rule Calcitonins must be a whole number from 0 to 10,000 CAL.' }, 400);
     fields.push('points = ?'); values.push(points);
   }
-  if (!fields.length) return c.json({ success: false, error: 'No score-rule change supplied.' }, 400);
+  if (!fields.length) return c.json({ success: false, error: 'No Calcitonin-rule change supplied.' }, 400);
   fields.push('updated_at = CURRENT_TIMESTAMP');
   const actor = await actorFromContext(c);
   values.push(actor?.userId ?? null, key);
   await c.env.DB.prepare(`UPDATE score_rules SET ${fields.join(', ')}, updated_by_user_id = ? WHERE rule_key = ?`).bind(...values).run();
   await audit(c.env.DB, actor, 'score.rule.updated', 'score_rule', key, { fields: fields.slice(0, -1) });
-  return c.json({ success: true, message: 'Automatic score rule updated.' });
+  return c.json({ success: true, message: 'Automatic Calcitonin rule updated.' });
 });
 
 app.get('/api/phantom/roles', requireAuth, requirePhantom, async (c) => {
@@ -3219,6 +3371,80 @@ app.post('/api/phantom/codenames', requireAuth, requirePhantom, async (c) => {
   } catch (error: any) {
     if (String(error?.message || '').includes('UNIQUE')) return c.json({ success: false, error: 'That codename already exists.' }, 409);
     return c.json({ success: false, error: 'Could not add codename' }, 500);
+  }
+});
+
+// Bulk import accepts simple comma/newline text, a JSON string array, or JSON
+// objects such as { name, pool, reserve, note }. It validates the full batch
+// before writing so a typo never leaves PHANTOM with a partial pool.
+app.post('/api/phantom/codenames/batch', requireAuth, requirePhantom, async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const defaultPool = body.pool === 'founding' ? 'founding' : 'member';
+    const defaultReserve = body.reserve === true;
+    const source = body.codenames ?? body.input;
+    let rawEntries: any[] = [];
+    if (Array.isArray(source)) rawEntries = source;
+    else if (typeof source === 'string') {
+      const raw = source.trim();
+      if (!raw) return c.json({ success: false, error: 'Paste at least one codename.' }, 400);
+      if (raw.startsWith('[') || raw.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(raw);
+          rawEntries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.codenames) ? parsed.codenames : parsed && typeof parsed === 'object' ? [parsed] : [];
+        } catch {
+          return c.json({ success: false, error: 'That JSON could not be read. Use a JSON array or a comma-separated list.' }, 400);
+        }
+      } else rawEntries = raw.split(/[\n,;]+/).map((name) => name.trim()).filter(Boolean);
+    }
+    if (!rawEntries.length) return c.json({ success: false, error: 'Add one or more codenames before importing.' }, 400);
+    if (rawEntries.length > 75) return c.json({ success: false, error: 'Add up to 75 codenames at one time.' }, 400);
+
+    const drafts: Array<{ displayName: string; normalized: string; pool: 'member' | 'founding'; reserve: boolean; note: string | null }> = [];
+    const seen = new Set<string>();
+    for (const entry of rawEntries) {
+      const object = typeof entry === 'object' && entry !== null ? entry : { name: entry };
+      const displayName = cleanStr(object.name ?? object.codename, 2, 50)?.replace(/\s+/g, ' ');
+      if (!displayName || !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(displayName)) {
+        return c.json({ success: false, error: `“${String(object.name ?? object.codename ?? 'codename').slice(0, 50)}” is not a valid codename. Use 2–50 letters, numbers, spaces, dots, hyphens, or underscores.` }, 400);
+      }
+      const normalized = normalizeCodename(displayName);
+      if (seen.has(normalized)) return c.json({ success: false, error: `“${displayName}” appears more than once in this batch.` }, 409);
+      seen.add(normalized);
+      drafts.push({
+        displayName,
+        normalized,
+        pool: object.pool === undefined ? defaultPool : object.pool === 'founding' ? 'founding' : object.pool === 'member' ? 'member' : defaultPool,
+        reserve: object.reserve === undefined ? defaultReserve : object.reserve === true,
+        note: cleanOptionalStr(object.note, 1000),
+      });
+    }
+    const existing = await dbRows<{ normalized_name: string }>(c.env.DB.prepare(
+      `SELECT normalized_name FROM codenames WHERE normalized_name IN (${drafts.map(() => '?').join(',')})`
+    ).bind(...drafts.map((draft) => draft.normalized)));
+    if (existing.length) {
+      const existingNames = new Set(existing.map((row) => row.normalized_name));
+      const duplicate = drafts.find((draft) => existingNames.has(draft.normalized));
+      return c.json({ success: false, error: `“${duplicate?.displayName || 'A codename'}” already exists. No codenames were added.` }, 409);
+    }
+    const actor = await actorFromContext(c);
+    const statements: D1PreparedStatement[] = [];
+    for (const draft of drafts) {
+      statements.push(c.env.DB.prepare(
+        'INSERT INTO codenames (normalized_name, display_name, pool, status, created_by_user_id) VALUES (?, ?, ?, ?, ?)'
+      ).bind(draft.normalized, draft.displayName, draft.pool, draft.reserve ? 'reserved' : 'available', actor?.userId ?? null));
+    }
+    const created = await c.env.DB.batch(statements);
+    const ids = created.map((result) => Number(result.meta.last_row_id));
+    await c.env.DB.batch(drafts.map((draft, index) => c.env.DB.prepare(
+      'INSERT INTO codename_history (codename_id, event_type, acted_by_user_id, note) VALUES (?, ?, ?, ?)'
+    ).bind(ids[index], draft.reserve ? 'reserved' : 'added', actor?.userId ?? null, draft.note)));
+    await audit(c.env.DB, actor, 'codename.batch_added', 'codename_batch', null, { count: drafts.length, pools: [...new Set(drafts.map((draft) => draft.pool))], reserved: drafts.filter((draft) => draft.reserve).length });
+    return c.json({ success: true, data: { count: drafts.length, codenames: drafts.map((draft, index) => ({ id: ids[index], displayName: draft.displayName, pool: draft.pool, reserved: draft.reserve })) }, message: `${drafts.length} codename${drafts.length === 1 ? '' : 's'} added.` }, 201);
+  } catch (error: any) {
+    if (String(error?.message || '').includes('UNIQUE')) return c.json({ success: false, error: 'One of these codenames already exists. No codenames were added.' }, 409);
+    console.error('[code-rx] bulk codename import error:', error);
+    return c.json({ success: false, error: 'Could not add this codename batch.' }, 500);
   }
 });
 
