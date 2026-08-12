@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { Dashboard } from './components/Dashboard';
+import { CodenameBallot } from './components/CodenameBallot';
 import { Vault } from './components/Vault';
 import { VaultSharedDocument } from './components/VaultSharedDocument';
 import { ResetPassword } from './components/ResetPassword';
@@ -16,8 +17,10 @@ import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
 function App() {
   const [isDashboard, setIsDashboard] = useState(false);
   const [isMemberVault, setIsMemberVault] = useState(false);
+  const [isCodenameBallotView, setIsCodenameBallotView] = useState(() => window.location.hash.startsWith('#codename-ballot'));
+  const [ballotRequired, setBallotRequired] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault'>('controller');
+  const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault' | 'phantom'>('controller');
   const [user, setUser] = useState<AuthUser | null>(auth.getUser());
   const [activeTab, setActiveTab] = useState('home');
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -66,6 +69,28 @@ function App() {
     ));
   };
 
+  const enforceCodenameBallot = async (authenticatedUser: AuthUser) => {
+    if (isAdminUser(authenticatedUser)) {
+      setBallotRequired(false);
+      return;
+    }
+    try {
+      const member = await db.member.me();
+      const session = member?.codenameSession;
+      const required = !member?.codename
+        && member?.codenamePath !== 'direct_founding'
+        && session?.status === 'open'
+        && (session?.assignmentSource || 'ballot') === 'ballot';
+      setBallotRequired(required);
+      if (required) {
+        setIsCodenameBallotView(true);
+        if (!window.location.hash.startsWith('#codename-ballot')) window.location.hash = 'codename-ballot';
+      }
+    } catch {
+      // The Dashboard will retry after its own real member-profile load.
+    }
+  };
+
   useEffect(() => {
     auth.me().then((authenticatedUser) => {
       if (!authenticatedUser) return;
@@ -79,6 +104,7 @@ function App() {
         setIsDashboard(true);
         setIsMemberVault(window.location.hash.startsWith('#member-vault'));
         setIsAdmin(false);
+        void enforceCodenameBallot(authenticatedUser);
       }
     });
   }, []);
@@ -89,8 +115,16 @@ function App() {
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
+      if (window.location.hash.startsWith('#codename-ballot')) {
+        setIsCodenameBallotView(true);
+        setIsSharedVaultView(false);
+        setIsActivationView(false);
+        setIsResetView(false);
+        return;
+      }
       if (window.location.hash.startsWith('#vault-share')) {
         setIsSharedVaultView(true);
+        setIsCodenameBallotView(false);
         setIsActivationView(false);
         setIsResetView(false);
         return;
@@ -98,6 +132,7 @@ function App() {
       if (window.location.hash.startsWith('#member-vault')) {
         setIsMemberVault(true);
         setIsSharedVaultView(false);
+        setIsCodenameBallotView(false);
         setIsActivationView(false);
         setIsResetView(false);
         return;
@@ -106,17 +141,20 @@ function App() {
         setIsActivationView(true);
         setIsResetView(false);
         setIsSharedVaultView(false);
+        setIsCodenameBallotView(false);
         return;
       }
       if (window.location.hash.startsWith('#reset')) {
         setIsResetView(true);
         setIsActivationView(false);
         setIsSharedVaultView(false);
+        setIsCodenameBallotView(false);
         return;
       }
       setIsResetView(false);
       setIsActivationView(false);
       setIsSharedVaultView(false);
+      setIsCodenameBallotView(false);
       setIsMemberVault(false);
       const id = idFromHash();
       const section = SECTION_MAP[id];
@@ -135,6 +173,14 @@ function App() {
     window.addEventListener('hashchange', applyHash);
     return () => window.removeEventListener('hashchange', applyHash);
   }, []);
+
+  useEffect(() => {
+    if (!ballotRequired || isAdmin || !user) return;
+    if (!window.location.hash.startsWith('#codename-ballot')) {
+      setIsCodenameBallotView(true);
+      window.location.hash = 'codename-ballot';
+    }
+  }, [ballotRequired, isAdmin, user]);
 
   const handleOpenJoin = () => {
     setAuthMode('join');
@@ -167,6 +213,7 @@ function App() {
       setIsDashboard(true);
       setIsMemberVault(false);
       setIsAdmin(false);
+      void enforceCodenameBallot(authenticatedUser);
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -199,6 +246,20 @@ function App() {
     />;
   }
 
+  // The unfinished identity ballot is an enforced full-page workspace. A member
+  // cannot accidentally navigate around it and abandon three revealed choices.
+  if (!isAdmin && user && isCodenameBallotView) {
+    return <CodenameBallot codenamePath={user.codenamePath} onClaimed={async () => {
+      const refreshed = await auth.me();
+      if (refreshed) setUser(refreshed);
+      setBallotRequired(false);
+      setIsCodenameBallotView(false);
+      setIsDashboard(true);
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    }} />;
+  }
+
   // Member Vault is deliberately returned outside the public/dashboard shell.
   // No dashboard sidebar, public navbar, or constrained parent remains mounted.
   if (!isAdmin && isDashboard && isMemberVault) {
@@ -207,15 +268,15 @@ function App() {
 
   // PHANTOM Vault already returns its standalone workspace from AdminPanel;
   // returning it directly here likewise removes the Admin shell completely.
-  if (isAdmin && adminWorkspace === 'vault') {
+  if (isAdmin && (adminWorkspace === 'vault' || adminWorkspace === 'phantom')) {
     return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />;
   }
 
-  const inImmersiveWorkspace = (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault')) || (!isAdmin && isDashboard && isMemberVault);
+  const inImmersiveWorkspace = (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault' || adminWorkspace === 'phantom')) || (!isAdmin && isDashboard);
   const mainContent = isAdmin
     ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
     : isDashboard
-      ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} />
+      ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} onExit={toggleDashboard} />
       : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;
 
   const shell = (

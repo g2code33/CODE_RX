@@ -104,9 +104,11 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
 3. Password fields expose an accessible Show/Hide control in login, activation, reset, and Admin Security.
 4. A Join application stays pending until PHANTOM creates the invitation.
 5. Test all codename paths:
-   - Member Ballot uses only the Member Pool.
+   - Member Ballot uses only the Member Pool and requires three covered-card reveals before a comparison choice can be claimed.
    - Custom Founding Ballot uses only the Founding Pool.
+   - An unfinished ballot returns the member to the full-page ballot after sign-in or navigation.
    - Direct Founding Assignment claims exactly one available founding codename and opens no ballot.
+   - Import a comma/newline batch and a JSON codename batch; confirm duplicates are rejected before anything is added.
 6. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
 7. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
 8. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.

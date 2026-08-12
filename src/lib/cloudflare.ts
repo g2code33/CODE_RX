@@ -173,8 +173,8 @@ export const db = {
       const result = await apiCall<{ data: any }>('/api/codenames/ballot');
       return result.data;
     },
-    reveal: async () => {
-      const result = await apiCall<{ data: any }>('/api/codenames/reveal', { method: 'POST' });
+    reveal: async (slot?: number) => {
+      const result = await apiCall<{ data: any }>('/api/codenames/reveal', { method: 'POST', body: JSON.stringify(slot ? { slot } : {}) });
       return result.data;
     },
     check: async (codenameId: number) => {
@@ -299,6 +299,7 @@ export const db = {
     updateVaultSection: (id: number, data: any) => apiCall(`/api/phantom/vault-sections/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     codenames: async () => (await apiCall<{ data: any }>('/api/phantom/codenames')).data,
     addCodename: (data: { name: string; pool?: 'member' | 'founding'; reserve?: boolean; note?: string }) => apiCall('/api/phantom/codenames', { method: 'POST', body: JSON.stringify(data) }),
+    addCodenamesBatch: (data: { input: string; pool?: 'member' | 'founding'; reserve?: boolean }) => apiCall<{ data: any; message?: string }>('/api/phantom/codenames/batch', { method: 'POST', body: JSON.stringify(data) }),
     assignCodename: (id: number, memberProfileId: number) => apiCall(`/api/phantom/codenames/${id}/assign`, { method: 'POST', body: JSON.stringify({ memberProfileId }) }),
     updateCodename: (id: number, data: any) => apiCall(`/api/phantom/codenames/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     releaseCodename: (id: number, data: { confirm: boolean; mode?: 'available' | 'retired' }) => apiCall(`/api/phantom/codenames/${id}/release`, { method: 'POST', body: JSON.stringify(data) }),

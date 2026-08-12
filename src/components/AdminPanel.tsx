@@ -682,8 +682,8 @@ export const AdminPanel = ({
 }: { 
   siteContent: SiteContent, 
   setSiteContent: React.Dispatch<React.SetStateAction<SiteContent>>;
-  workspace: 'controller' | 'builder' | 'vault';
-  onWorkspaceChange: (workspace: 'controller' | 'builder' | 'vault') => void;
+  workspace: 'controller' | 'builder' | 'vault' | 'phantom';
+  onWorkspaceChange: (workspace: 'controller' | 'builder' | 'vault' | 'phantom') => void;
   activeTab: string;
   onNavigate: (id: string) => void;
   onJoin?: () => void;
@@ -948,7 +948,11 @@ export const AdminPanel = ({
   };
 
   if (workspace === 'vault') {
-    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('controller')} />;
+    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('phantom')} />;
+  }
+
+  if (workspace === 'phantom') {
+    return <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onBack={() => onWorkspaceChange('controller')} />;
   }
 
   if (workspace === 'builder') {
@@ -1033,7 +1037,7 @@ export const AdminPanel = ({
                ].map((item) => (
                  <button
                    key={item.id}
-                   onClick={() => setActiveView(item.id as any)}
+                   onClick={() => item.id === 'phantom' ? onWorkspaceChange('phantom') : setActiveView(item.id as any)}
                    className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all ${
                      activeView === item.id 
                      ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 font-bold shadow-sm shadow-emerald-100'
