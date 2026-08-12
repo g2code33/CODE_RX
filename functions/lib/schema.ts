@@ -828,9 +828,11 @@ export async function ensureSchema(env: Env): Promise<void> {
     const db = env.DB;
     const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
     // One D1 batch avoids dozens of sequential network round trips on a cold
-    // login. Indexes wait until ALTER migrations add their referenced columns.
-    const indexStatements = statements.filter((statement) => /^CREATE INDEX/i.test(statement));
-    const schemaStatements = statements.filter((statement) => !/^CREATE INDEX/i.test(statement));
+    // login. Both normal and UNIQUE indexes must wait until ALTER migrations
+    // add any referenced columns to an older live D1 database.
+    const isIndexStatement = (statement: string) => /^CREATE\s+(?:UNIQUE\s+)?INDEX/i.test(statement);
+    const indexStatements = statements.filter(isIndexStatement);
+    const schemaStatements = statements.filter((statement) => !isIndexStatement(statement));
     await runBatchInChunks(db, schemaStatements.map((statement) => db.prepare(statement)));
     await db.prepare('INSERT OR IGNORE INTO site_content (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)').bind('{}').run();
     await db.prepare('INSERT OR IGNORE INTO member_sequences (id, next_value) VALUES (1, 1)').run();

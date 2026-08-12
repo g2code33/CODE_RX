@@ -399,8 +399,14 @@ app.use('/api/*', async (c, next) => {
   try {
     await ensureSchema(c.env);
   } catch (e) {
-    console.error('[code-rx] ensureSchema failed:', e);
-    return c.json({ success: false, error: 'Database is not configured. Attach the D1 binding "DB" in the Pages project settings.' }, 500);
+    const d1BindingPresent = Boolean(c.env.DB && typeof c.env.DB.prepare === 'function');
+    console.error('[code-rx] ensureSchema failed:', { d1BindingPresent, error: e });
+    return c.json({
+      success: false,
+      error: d1BindingPresent
+        ? 'The D1 database is connected, but its safe schema upgrade did not complete. Retry after the latest deployment; if it persists, PHANTOM should inspect the Pages Function real-time logs.'
+        : 'Database is not configured. Attach the D1 binding "DB" in the Pages project settings.',
+    }, 500);
   }
   await next();
 });
