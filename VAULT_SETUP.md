@@ -53,7 +53,8 @@ The Vault is a standalone full-page workspace:
 - Section-level `view`, `create`, `edit`, `delete`, and `manage` permissions, plus member-specific overrides.
 - A live **Calcitonins (CAL)** system with automatic rule awards, PHANTOM direct add/deduct/set controls, a click-to-edit member CAL balance, protected history, member balance, and a real active-member leaderboard.
 - Durable in-app notifications: PHANTOM can broadcast to all active members, a responsibility profile, or selected members, and can delegate trusted members to send notices. Sent notices can be edited for current recipients or withdrawn from inboxes; recipients receive an unread badge, an auto-refreshing inbox, and can remove a notice from their own inbox. Organization broadcast/audit records remain protected.
-- Timelines, histories, activity feeds, and useful inbox/listing views show the three newest entries first, with an explicit **Show more** control for older entries. Audit records remain immutable; editable public content, contacts, subscribers, unlinked applications, notifications in a recipient’s inbox, shares, and Vault records use the appropriate delete, revoke, archive, or restore action.
+- Timelines, histories, activity feeds, and useful inbox/listing views show the three newest entries first, with an explicit **Show more** control for older entries. Audit records remain immutable.
+- PHANTOM has a centralized **Recycle Bin** for deleted applications, subscribers, contact messages, sent notifications, and inbox notices. Items can be restored or permanently deleted; existing member, document, project, section, and share archive/revoke flows remain protected in their own workspaces.
 - Role history, audit logs, Website Admin delegation, and PHANTOM-only organization controls.
 - Archive/restore workflows for members, documents, sections, and projects.
 

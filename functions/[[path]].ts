@@ -83,6 +83,14 @@ const recoverVaultShareUrl = async (env: Env, share: { id: number; token_hash: s
 
 type FounderActor = NonNullable<Awaited<ReturnType<typeof getActor>>>;
 
+const moveToRecycleBin = async (db: D1Database, actor: FounderActor | null, resourceType: string, resourceId: string | number, title: string, payload: unknown) => {
+  const serialized = JSON.stringify(payload).slice(0, 250_000);
+  const result = await db.prepare(
+    'INSERT INTO recycle_bin_items (resource_type, resource_id, title, payload_json, deleted_by_user_id, deleted_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
+  ).bind(resourceType.slice(0, 80), String(resourceId).slice(0, 120), title.slice(0, 240), serialized, actor?.userId ?? null).run();
+  return Number(result.meta.last_row_id);
+};
+
 type CodenamePath = 'member' | 'custom_founding' | 'direct_founding';
 
 const codenamePathFrom = (value: unknown, roleCode: string): CodenamePath => {
@@ -291,16 +299,12 @@ const parseBallotSlots = (value: unknown): Array<number | null> => {
   } catch { return []; }
 };
 
-const eligibleBallotCodenames = async (db: D1Database, sessionId: number, pool: 'member' | 'founding') => dbRows<any>(db.prepare(
+const eligibleBallotCodenames = async (db: D1Database, pool: 'member' | 'founding') => dbRows<any>(db.prepare(
   `SELECT c.id, c.display_name, c.pool, c.status
    FROM codenames c
    WHERE c.pool = ? AND c.status = 'available'
-     AND NOT EXISTS (
-       SELECT 1 FROM codename_selection_events e
-       WHERE e.session_id = ? AND e.codename_id = c.id AND e.action = 'passed'
-     )
    ORDER BY RANDOM()`
-).bind(pool, sessionId));
+).bind(pool));
 
 /**
  * Creates stable, covered card positions for an open ballot. The browser is
@@ -315,7 +319,7 @@ const ensureWideBallotSession = async (db: D1Database, session: any, pool: 'memb
   if (legacyCurrent > 0 && !revealed.includes(legacyCurrent)) revealed = [legacyCurrent, ...revealed];
 
   if (!slots.length) {
-    const candidates = await eligibleBallotCodenames(db, Number(session.id), pool);
+    const candidates = await eligibleBallotCodenames(db, pool);
     slots = candidates.map((candidate) => Number(candidate.id));
     if (legacyCurrent > 0 && !slots.includes(legacyCurrent)) slots.unshift(legacyCurrent);
   }
@@ -977,17 +981,17 @@ app.post('/api/applications', async (c) => {
 app.delete('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid application id.' }, 400);
-  const rows = await dbRows<{ id: number; email: string; member_profile_id: number | null }>(c.env.DB.prepare(
-    'SELECT id, email, member_profile_id FROM applications WHERE id = ?'
-  ).bind(id));
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM applications WHERE id = ?').bind(id));
   const application = rows[0];
   if (!application) return c.json({ success: false, error: 'Application not found.' }, 404);
   if (application.member_profile_id) {
     return c.json({ success: false, error: 'This application is connected to a member record and is kept as part of that member history.' }, 409);
   }
+  const actor = await actorFromContext(c);
+  const recycleId = await moveToRecycleBin(c.env.DB, actor, 'application', id, `Application · ${application.name}`, application);
   await c.env.DB.prepare('DELETE FROM applications WHERE id = ?').bind(id).run();
-  await audit(c.env.DB, await actorFromContext(c), 'application.deleted', 'application', id, { email: application.email });
-  return c.json({ success: true, message: 'Application deleted.' });
+  await audit(c.env.DB, actor, 'application.recycled', 'application', id, { email: application.email, recycleId });
+  return c.json({ success: true, message: 'Application moved to the Recycle Bin.' });
 });
 
 app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
@@ -1039,10 +1043,14 @@ app.get('/api/subscribers', requireAuth, requireActiveLegacyAdmin, async (c) => 
 app.delete('/api/subscribers/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid subscriber id.' }, 400);
-  const result = await c.env.DB.prepare('DELETE FROM subscribers WHERE id = ?').bind(id).run();
-  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Subscriber not found.' }, 404);
-  await audit(c.env.DB, await actorFromContext(c), 'subscriber.deleted', 'subscriber', id);
-  return c.json({ success: true, message: 'Subscriber removed.' });
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM subscribers WHERE id = ?').bind(id));
+  const subscriber = rows[0];
+  if (!subscriber) return c.json({ success: false, error: 'Subscriber not found.' }, 404);
+  const actor = await actorFromContext(c);
+  const recycleId = await moveToRecycleBin(c.env.DB, actor, 'subscriber', id, `Subscriber · ${subscriber.email}`, subscriber);
+  await c.env.DB.prepare('DELETE FROM subscribers WHERE id = ?').bind(id).run();
+  await audit(c.env.DB, actor, 'subscriber.recycled', 'subscriber', id, { recycleId });
+  return c.json({ success: true, message: 'Subscriber moved to the Recycle Bin.' });
 });
 
 app.post('/api/subscribers', async (c) => {
@@ -1134,10 +1142,14 @@ app.patch('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) 
 app.delete('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid contact id.' }, 400);
-  const result = await c.env.DB.prepare('DELETE FROM contacts WHERE id = ?').bind(id).run();
-  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Contact message not found.' }, 404);
-  await audit(c.env.DB, await actorFromContext(c), 'contact.deleted', 'contact', id);
-  return c.json({ success: true, message: 'Contact message deleted.' });
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?').bind(id));
+  const contact = rows[0];
+  if (!contact) return c.json({ success: false, error: 'Contact message not found.' }, 404);
+  const actor = await actorFromContext(c);
+  const recycleId = await moveToRecycleBin(c.env.DB, actor, 'contact', id, `Contact · ${contact.name} · ${contact.subject}`, contact);
+  await c.env.DB.prepare('DELETE FROM contacts WHERE id = ?').bind(id).run();
+  await audit(c.env.DB, actor, 'contact.recycled', 'contact', id, { recycleId });
+  return c.json({ success: true, message: 'Contact message moved to the Recycle Bin.' });
 });
 
 // ============================================
@@ -1543,12 +1555,17 @@ app.delete('/api/notifications/sent/:id', requireAuth, async (c) => {
   if (editable.access.response) return editable.access.response;
   if (editable.forbidden) return c.json({ success: false, error: 'You can delete only notifications you are authorized to manage.' }, 403);
   if (!editable.notification) return c.json({ success: false, error: 'Active notification not found.' }, 404);
+  const [notificationRows, recipients] = await Promise.all([
+    dbRows<any>(c.env.DB.prepare('SELECT * FROM notifications WHERE id = ?').bind(id)),
+    dbRows<any>(c.env.DB.prepare('SELECT * FROM notification_recipients WHERE notification_id = ?').bind(id)),
+  ]);
+  const recycleId = await moveToRecycleBin(c.env.DB, editable.access.actor, 'sent_notification', id, `Notification · ${editable.notification.title}`, { notification: notificationRows[0], recipients });
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE notifications SET status = 'deleted' WHERE id = ?").bind(id),
     c.env.DB.prepare('DELETE FROM notification_recipients WHERE notification_id = ?').bind(id),
   ]);
-  await audit(c.env.DB, editable.access.actor, 'notification.deleted', 'notification', id, { withdrawnFromInboxes: true });
-  return c.json({ success: true, message: 'Notification withdrawn from recipient inboxes.' });
+  await audit(c.env.DB, editable.access.actor, 'notification.recycled', 'notification', id, { withdrawnFromInboxes: true, recycleId });
+  return c.json({ success: true, message: 'Notification moved to the Recycle Bin and withdrawn from inboxes.' });
 });
 
 app.post('/api/notifications/:id/read', requireAuth, async (c) => {
@@ -1571,12 +1588,18 @@ app.delete('/api/notifications/:id', requireAuth, async (c) => {
   if (access.response) return access.response;
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
-  const result = await c.env.DB.prepare(
-    'DELETE FROM notification_recipients WHERE notification_id = ? AND member_profile_id = ?'
-  ).bind(id, access.actor!.profileId).run();
-  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Notification not found.' }, 404);
-  await audit(c.env.DB, access.actor, 'notification.inbox_dismissed', 'notification', id);
-  return c.json({ success: true, message: 'Notification removed from your inbox.' });
+  const recipientRows = await dbRows<any>(c.env.DB.prepare(
+    'SELECT * FROM notification_recipients WHERE notification_id = ? AND member_profile_id = ?'
+  ).bind(id, access.actor!.profileId));
+  const recipient = recipientRows[0];
+  if (!recipient) return c.json({ success: false, error: 'Notification not found.' }, 404);
+  const noticeRows = await dbRows<any>(c.env.DB.prepare('SELECT id, title, status FROM notifications WHERE id = ?').bind(id));
+  const notice = noticeRows[0];
+  const recycleId = await moveToRecycleBin(c.env.DB, access.actor, 'notification_recipient', `${id}:${access.actor!.profileId}`, `Inbox notice · ${notice?.title || 'Notification'}`, { recipient, notificationId: id });
+  await c.env.DB.prepare('DELETE FROM notification_recipients WHERE notification_id = ? AND member_profile_id = ?')
+    .bind(id, access.actor!.profileId).run();
+  await audit(c.env.DB, access.actor, 'notification.inbox_recycled', 'notification', id, { recycleId });
+  return c.json({ success: true, message: 'Notification moved to the Recycle Bin.' });
 });
 
 app.post('/api/notifications/send', requireAuth, async (c) => {
@@ -2818,6 +2841,98 @@ app.post('/api/vault/meetings', requireAuth, async (c) => {
 // ============================================
 // 👁️ PHANTOM CONTROL CENTER
 // ============================================
+
+const restoreRecycleBinItem = async (db: D1Database, item: any) => {
+  let payload: any;
+  try { payload = JSON.parse(item.payload_json); } catch { throw new Error('This recycle-bin snapshot is unreadable.'); }
+  if (item.resource_type === 'application') {
+    const existing = await dbRows<any>(db.prepare('SELECT id FROM applications WHERE id = ?').bind(payload.id));
+    if (existing[0]) throw new Error('An application with this record already exists.');
+    await db.prepare(
+      `INSERT INTO applications (id, name, email, phone, date, status, created_at, reviewed_by_user_id, reviewed_at, review_note, member_profile_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(payload.id, payload.name, payload.email, payload.phone ?? null, payload.date, payload.status || 'pending', payload.created_at ?? null, payload.reviewed_by_user_id ?? null, payload.reviewed_at ?? null, payload.review_note ?? null, payload.member_profile_id ?? null, payload.updated_at ?? null).run();
+    return;
+  }
+  if (item.resource_type === 'subscriber') {
+    const existing = await dbRows<any>(db.prepare('SELECT id FROM subscribers WHERE id = ? OR email = ?').bind(payload.id, payload.email));
+    if (existing[0]) throw new Error('A subscriber with this record or email already exists.');
+    await db.prepare('INSERT INTO subscribers (id, email, name, phone, date, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(payload.id, payload.email, payload.name ?? null, payload.phone ?? null, payload.date, payload.source ?? 'website', payload.created_at ?? null).run();
+    return;
+  }
+  if (item.resource_type === 'contact') {
+    const existing = await dbRows<any>(db.prepare('SELECT id FROM contacts WHERE id = ?').bind(payload.id));
+    if (existing[0]) throw new Error('A contact message with this record already exists.');
+    await db.prepare('INSERT INTO contacts (id, name, email, subject, message, date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(payload.id, payload.name, payload.email, payload.subject, payload.message, payload.date, payload.status || 'unread', payload.created_at ?? null).run();
+    return;
+  }
+  if (item.resource_type === 'sent_notification') {
+    const notification = payload?.notification;
+    if (!notification?.id) throw new Error('The sent notification snapshot is incomplete.');
+    await db.prepare(
+      `INSERT INTO notifications (id, title, message, audience_type, audience_label, status, created_by_member_profile_id, created_by_user_id, sent_at, created_at)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET title = excluded.title, message = excluded.message, audience_type = excluded.audience_type, audience_label = excluded.audience_label, status = 'active', created_by_member_profile_id = excluded.created_by_member_profile_id, created_by_user_id = excluded.created_by_user_id, sent_at = excluded.sent_at, created_at = excluded.created_at`
+    ).bind(notification.id, notification.title, notification.message, notification.audience_type, notification.audience_label ?? null, notification.created_by_member_profile_id ?? null, notification.created_by_user_id ?? null, notification.sent_at ?? null, notification.created_at ?? null).run();
+    const recipients = Array.isArray(payload.recipients) ? payload.recipients : [];
+    if (recipients.length) await db.batch(recipients.map((recipient: any) => db.prepare(
+      `INSERT OR IGNORE INTO notification_recipients (notification_id, member_profile_id, status, delivered_at, read_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(notification.id, recipient.member_profile_id, recipient.status || 'unread', recipient.delivered_at ?? null, recipient.read_at ?? null)));
+    return;
+  }
+  if (item.resource_type === 'notification_recipient') {
+    const recipient = payload?.recipient;
+    if (!recipient?.notification_id || !recipient?.member_profile_id) throw new Error('The inbox notification snapshot is incomplete.');
+    const notice = await dbRows<any>(db.prepare("SELECT id FROM notifications WHERE id = ? AND status = 'active'").bind(recipient.notification_id));
+    if (!notice[0]) throw new Error('The original notification is no longer active, so this inbox item cannot be restored.');
+    await db.prepare(
+      `INSERT OR IGNORE INTO notification_recipients (notification_id, member_profile_id, status, delivered_at, read_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(recipient.notification_id, recipient.member_profile_id, recipient.status || 'unread', recipient.delivered_at ?? null, recipient.read_at ?? null).run();
+    return;
+  }
+  throw new Error('This recycle-bin item type is not restorable.');
+};
+
+app.get('/api/phantom/recycle-bin', requireAuth, requirePhantom, async (c) => {
+  const limit = Math.min(200, Math.max(1, Number(c.req.query('limit') || 100)));
+  const items = await dbRows<any>(c.env.DB.prepare(
+    `SELECT r.id, r.resource_type, r.resource_id, r.title, r.deleted_at, u.name AS deleted_by_name
+     FROM recycle_bin_items r LEFT JOIN users u ON u.id = r.deleted_by_user_id
+     ORDER BY r.deleted_at DESC, r.id DESC LIMIT ?`
+  ).bind(limit));
+  return c.json({ success: true, data: items });
+});
+
+app.post('/api/phantom/recycle-bin/:id/restore', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid recycle-bin item.' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM recycle_bin_items WHERE id = ?').bind(id));
+  const item = rows[0];
+  if (!item) return c.json({ success: false, error: 'Recycle-bin item not found.' }, 404);
+  try {
+    await restoreRecycleBinItem(c.env.DB, item);
+    await c.env.DB.prepare('DELETE FROM recycle_bin_items WHERE id = ?').bind(id).run();
+    await audit(c.env.DB, await actorFromContext(c), 'recycle_bin.restored', item.resource_type, item.resource_id, { recycleId: id, title: item.title });
+    return c.json({ success: true, message: `${item.title} restored.` });
+  } catch (error: any) {
+    return c.json({ success: false, error: error?.message || 'Could not restore this item.' }, 409);
+  }
+});
+
+app.delete('/api/phantom/recycle-bin/:id', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid recycle-bin item.' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM recycle_bin_items WHERE id = ?').bind(id));
+  const item = rows[0];
+  if (!item) return c.json({ success: false, error: 'Recycle-bin item not found.' }, 404);
+  await c.env.DB.prepare('DELETE FROM recycle_bin_items WHERE id = ?').bind(id).run();
+  await audit(c.env.DB, await actorFromContext(c), 'recycle_bin.permanently_deleted', item.resource_type, item.resource_id, { recycleId: id, title: item.title });
+  return c.json({ success: true, message: 'Recycle-bin item permanently deleted.' });
+});
 
 app.get('/api/phantom/overview', requireAuth, requirePhantom, async (c) => {
   const actor = await actorFromContext(c);
