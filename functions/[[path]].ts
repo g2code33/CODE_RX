@@ -313,6 +313,7 @@ const vaultAccess = async (c: any, slug: string, action: VaultAction) => {
 
 const DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active', 'archived']);
 const ACTIVE_DOCUMENT_STATUSES = new Set(['draft', 'in_review', 'approved', 'active']);
+const SHARE_EXPIRY_DAYS = new Set([1, 7, 30, 90]);
 const documentStatus = (value: unknown, fallback = 'draft') => {
   const status = cleanOptionalStr(value, 30)?.toLowerCase().replace(/\s+/g, '_');
   return status && DOCUMENT_STATUSES.has(status) ? status : fallback;
@@ -526,9 +527,11 @@ app.use('/api/*', async (c, next) => {
     console.error('[code-rx] ensureSchema failed:', { d1BindingPresent, error: e });
     return c.json({
       success: false,
+      // Keep operational detail in the server log. Members receive a clear
+      // next step rather than database or deployment terminology.
       error: d1BindingPresent
-        ? 'The D1 database is connected, but its safe schema upgrade did not complete. Retry after the latest deployment; if it persists, PHANTOM should inspect the Pages Function real-time logs.'
-        : 'Database is not configured. Attach the D1 binding "DB" in the Pages project settings.',
+        ? 'Code Rx is temporarily preparing your secure workspace. Please try again in a moment.'
+        : 'Code Rx is temporarily unavailable. Please try again shortly.',
     }, 500);
   }
   await next();
@@ -864,6 +867,22 @@ app.post('/api/applications', async (c) => {
   }
 });
 
+app.delete('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid application id.' }, 400);
+  const rows = await dbRows<{ id: number; email: string; member_profile_id: number | null }>(c.env.DB.prepare(
+    'SELECT id, email, member_profile_id FROM applications WHERE id = ?'
+  ).bind(id));
+  const application = rows[0];
+  if (!application) return c.json({ success: false, error: 'Application not found.' }, 404);
+  if (application.member_profile_id) {
+    return c.json({ success: false, error: 'This application is connected to a member record and is kept as part of that member history.' }, 409);
+  }
+  await c.env.DB.prepare('DELETE FROM applications WHERE id = ?').bind(id).run();
+  await audit(c.env.DB, await actorFromContext(c), 'application.deleted', 'application', id, { email: application.email });
+  return c.json({ success: true, message: 'Application deleted.' });
+});
+
 app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
   try {
     const id = Number(c.req.param('id'));
@@ -908,6 +927,15 @@ app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
 app.get('/api/subscribers', requireAuth, requireActiveLegacyAdmin, async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM subscribers ORDER BY date DESC, id DESC').all();
   return c.json({ success: true, data: results });
+});
+
+app.delete('/api/subscribers/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid subscriber id.' }, 400);
+  const result = await c.env.DB.prepare('DELETE FROM subscribers WHERE id = ?').bind(id).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Subscriber not found.' }, 404);
+  await audit(c.env.DB, await actorFromContext(c), 'subscriber.deleted', 'subscriber', id);
+  return c.json({ success: true, message: 'Subscriber removed.' });
 });
 
 app.post('/api/subscribers', async (c) => {
@@ -994,6 +1022,15 @@ app.patch('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) 
     console.error('[code-rx] update contact error:', e);
     return c.json({ success: false, error: 'Failed to update contact' }, 500);
   }
+});
+
+app.delete('/api/contacts/:id', requireAuth, requireActiveLegacyAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid contact id.' }, 400);
+  const result = await c.env.DB.prepare('DELETE FROM contacts WHERE id = ?').bind(id).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Contact message not found.' }, 404);
+  await audit(c.env.DB, await actorFromContext(c), 'contact.deleted', 'contact', id);
+  return c.json({ success: true, message: 'Contact message deleted.' });
 });
 
 // ============================================
@@ -1336,6 +1373,22 @@ app.post('/api/notifications/:id/read', requireAuth, async (c) => {
   ).bind(id, access.actor!.profileId).run();
   if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Notification not found.' }, 404);
   return c.json({ success: true, message: 'Notification marked as read.' });
+});
+
+// A member may clear an item from their own inbox. The broadcast and its
+// organization audit trail remain intact for PHANTOM; only this recipient's
+// personal inbox row is removed.
+app.delete('/api/notifications/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const result = await c.env.DB.prepare(
+    'DELETE FROM notification_recipients WHERE notification_id = ? AND member_profile_id = ?'
+  ).bind(id, access.actor!.profileId).run();
+  if (Number(result.meta.changes || 0) !== 1) return c.json({ success: false, error: 'Notification not found.' }, 404);
+  await audit(c.env.DB, access.actor, 'notification.inbox_dismissed', 'notification', id);
+  return c.json({ success: true, message: 'Notification removed from your inbox.' });
 });
 
 app.post('/api/notifications/send', requireAuth, async (c) => {
@@ -2254,20 +2307,48 @@ app.post('/api/vault/documents/:id/shares', requireAuth, async (c) => {
     }
     const body = await c.req.json().catch(() => ({}));
     const allowDownload = body.allowDownload === true;
+    const requestedExpiry = body.expiresInDays;
+    const noExpiry = requestedExpiry === undefined || requestedExpiry === null || requestedExpiry === ''
+      || requestedExpiry === 0 || requestedExpiry === '0' || requestedExpiry === 'never';
+    let expiresAt: string | null = null;
+    if (!noExpiry) {
+      const expiresInDays = Number(requestedExpiry);
+      if (!Number.isInteger(expiresInDays) || !SHARE_EXPIRY_DAYS.has(expiresInDays)) {
+        return c.json({ success: false, error: 'Choose No expiry, 1 day, 7 days, 30 days, or 90 days.' }, 400);
+      }
+      expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    // A PHANTOM choosing "Allow download and print" expects that choice to
+    // work immediately. Turn on the master switch for that deliberate action;
+    // PHANTOM can still pause every public download later from Document Sharing.
+    if (allowDownload && !capability.canDownload) {
+      if (!access.actor!.isPhantom) {
+        return c.json({ success: false, error: 'Download and print have not been enabled for this account. Ask PHANTOM to enable download access first.' }, 403);
+      }
+      await c.env.DB.prepare(
+        `INSERT INTO system_settings (setting_key, setting_value, updated_by_user_id, updated_at)
+         VALUES ('vault_downloads_enabled', '1', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+      ).bind(access.actor!.userId).run();
+      await audit(c.env.DB, access.actor, 'vault.downloads.global_enabled', 'system_setting', 'vault_downloads_enabled', { source: 'share_link_download_enabled' });
+    }
+
     const token = randomToken();
     const tokenCiphertext = await encryptVaultShareToken(token, c.env.JWT_SECRET);
     const created = await c.env.DB.prepare(
       `INSERT INTO vault_shares (document_id, token_hash, token_ciphertext, created_by_member_profile_id, status, allow_download, expires_at)
-       VALUES (?, ?, ?, ?, 'active', ?, NULL)`
-    ).bind(id, await sha256Hex(token), tokenCiphertext, access.actor!.profileId, allowDownload ? 1 : 0).run();
+       VALUES (?, ?, ?, ?, 'active', ?, ?)`
+    ).bind(id, await sha256Hex(token), tokenCiphertext, access.actor!.profileId, allowDownload ? 1 : 0, expiresAt).run();
     const shareId = Number(created.meta.last_row_id);
     const shareUrl = publicVaultShareUrl(c.env, token);
     await audit(c.env.DB, access.actor, 'vault.document.shared', 'vault_document', id, {
       shareId,
       documentCode: access.document!.document_code || null,
       allowDownload,
+      expiresAt,
     });
-    return c.json({ success: true, data: { id: shareId, shareUrl, allowDownload }, message: 'Read-only share link created. It remains active until you revoke it.' }, 201);
+    return c.json({ success: true, data: { id: shareId, shareUrl, allowDownload, expiresAt }, message: 'Read-only share link created. You can revoke it whenever access should end.' }, 201);
   } catch (error) {
     console.error('[code-rx] create Vault share error:', error);
     return c.json({ success: false, error: 'Could not create this share link.' }, 500);

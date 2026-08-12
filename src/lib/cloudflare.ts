@@ -101,6 +101,7 @@ export const db = {
     },
     updateStatus: (id: number, status: 'approved' | 'rejected') =>
       apiCall(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+    remove: (id: number) => apiCall(`/api/applications/${id}`, { method: 'DELETE' }),
   },
 
   subscribers: {
@@ -110,6 +111,7 @@ export const db = {
       const result = await apiCall<{ data: any[] }>('/api/subscribers');
       return result.data || [];
     },
+    remove: (id: number) => apiCall(`/api/subscribers/${id}`, { method: 'DELETE' }),
   },
 
   contacts: {
@@ -121,6 +123,7 @@ export const db = {
     },
     updateStatus: (id: number, status: 'read' | 'archived') =>
       apiCall(`/api/contacts/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+    remove: (id: number) => apiCall(`/api/contacts/${id}`, { method: 'DELETE' }),
   },
 
   siteContent: {
@@ -156,6 +159,7 @@ export const db = {
     inbox: async (limit = 40) => (await apiCall<{ data: any }>(`/api/notifications?limit=${limit}`)).data,
     audience: async () => (await apiCall<{ data: any }>('/api/notifications/audience')).data,
     markRead: (id: number) => apiCall(`/api/notifications/${id}/read`, { method: 'POST' }),
+    dismiss: (id: number) => apiCall(`/api/notifications/${id}`, { method: 'DELETE' }),
     send: (data: { title: string; message: string; audience: 'all' | 'selected' | 'role'; memberProfileIds?: number[]; roleCode?: string }) =>
       apiCall<{ data: any; message?: string }>('/api/notifications/send', { method: 'POST', body: JSON.stringify(data) }),
   },
@@ -190,7 +194,10 @@ export const db = {
     tags: async () => (await apiCall<{ data: any[] }>('/api/vault/tags')).data || [],
     sharingStatus: async () => (await apiCall<{ data: any }>('/api/vault/sharing/status')).data,
     shares: async (documentId: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`)).data,
-    createShare: (documentId: number, allowDownload = false) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, { method: 'POST', body: JSON.stringify({ allowDownload }) }),
+    createShare: (documentId: number, options: { allowDownload?: boolean; expiresInDays?: number | null } = {}) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares`, {
+      method: 'POST',
+      body: JSON.stringify({ allowDownload: options.allowDownload === true, expiresInDays: options.expiresInDays ?? null }),
+    }),
     replaceShare: (documentId: number, shareId: number) => apiCall<{ data: any }>(`/api/vault/documents/${documentId}/shares/${shareId}/replace`, { method: 'POST' }),
     revokeShare: (documentId: number, shareId: number) => apiCall(`/api/vault/documents/${documentId}/shares/${shareId}/revoke`, { method: 'POST' }),
     downloadDocument: async (documentId: number) => {
