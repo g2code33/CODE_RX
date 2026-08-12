@@ -34,8 +34,8 @@ Existing accounts remain available and are safely migrated into a member profile
 - PHANTOM can also restore archived members, Vault sections, and projects from their dedicated archive controls.
 - Archiving keeps historical rows and version history; it never deletes records.
 - Public document sharing and downloads are disabled by default. PHANTOM enables separate global master switches and then turns member-specific Share and Download buttons on only for trusted active members. When PHANTOM creates a link with **Allow download and print**, Download and Print are turned on for that link immediately; PHANTOM can pause them later. A shared page shows **Download** and **Print** only when the link allows them and its creator has permission. Share links are read-only and can be set to **No expiry**, **1 day**, **7 days**, **30 days**, or **90 days**. They exclude attachments and sensitive/restricted documents. Authorized owners can copy active links again from the Existing links list.
-- Scores are live: configurable automatic rules, PHANTOM manual adjustments with reasons/history, dashboard balances, and a real member leaderboard are all backed by D1.
-- Notifications are durable in-app broadcasts. PHANTOM can target all active members, a responsibility profile, or selected members, and can enable designated active members as notification senders.
+- **Calcitonins (CAL)** are live: configurable automatic CAL rules, PHANTOM direct balance edits and add/deduct/set controls with reasons/history, dashboard balances, and a real member leaderboard are all backed by D1.
+- Notifications are durable in-app broadcasts. PHANTOM can target all active members, a responsibility profile, or selected members, enable designated active members as notification senders, edit an active sent notice, or withdraw it from recipient inboxes.
 
 ## Required Cloudflare configuration
 
@@ -110,8 +110,8 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
 6. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
 7. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
 8. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
-9. Verify one automatic score award, one PHANTOM manual adjustment, the member score history, and the live leaderboard.
-10. Send a notification to a selected test member, confirm the unread badge/inbox, then enable a delegated sender and test their broadcaster access.
+9. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
+10. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
 11. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
 12. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
 

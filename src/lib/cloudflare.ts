@@ -160,6 +160,10 @@ export const db = {
     audience: async () => (await apiCall<{ data: any }>('/api/notifications/audience')).data,
     markRead: (id: number) => apiCall(`/api/notifications/${id}/read`, { method: 'POST' }),
     dismiss: (id: number) => apiCall(`/api/notifications/${id}`, { method: 'DELETE' }),
+    sent: async (limit = 40) => (await apiCall<{ data: any[] }>(`/api/notifications/sent?limit=${limit}`)).data || [],
+    updateSent: (id: number, data: { title?: string; message?: string }) =>
+      apiCall<{ data: any; message?: string }>(`/api/notifications/sent/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    deleteSent: (id: number) => apiCall(`/api/notifications/sent/${id}`, { method: 'DELETE' }),
     send: (data: { title: string; message: string; audience: 'all' | 'selected' | 'role'; memberProfileIds?: number[]; roleCode?: string }) =>
       apiCall<{ data: any; message?: string }>('/api/notifications/send', { method: 'POST', body: JSON.stringify(data) }),
   },

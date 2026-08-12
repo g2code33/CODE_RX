@@ -434,8 +434,8 @@ const awardAutomaticScore = async ({
     await notifyMember(
       db,
       result.memberProfileId,
-      'Code Rx points earned',
-      `You earned ${result.delta} points for ${result.label}. Your balance is now ${result.balance}.`,
+      'Calcitonins earned',
+      `You earned ${result.delta} CAL for ${result.label}. Your Calcitonin balance is now ${result.balance} CAL.`,
       actor,
     );
     await audit(db, actor, 'member.score.automatic_award', 'member_profile', result.memberProfileId, {
@@ -1119,7 +1119,7 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
     const hasScoreUpdate = body.points !== undefined;
     const requestedScore = Number(body.points);
     if (hasScoreUpdate && (!Number.isInteger(requestedScore) || requestedScore < 0 || requestedScore > 1_000_000)) {
-      return c.json({ success: false, error: 'Score must be a whole number from 0 to 1,000,000.' }, 400);
+      return c.json({ success: false, error: 'Calcitonins must be a whole number from 0 to 1,000,000 CAL.' }, 400);
     }
     if (body.level !== undefined) {
       const level = cleanOptionalStr(body.level, 100);
@@ -1150,10 +1150,10 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
       const profileRows = await dbRows<any>(c.env.DB.prepare('SELECT id FROM member_profiles WHERE member_record_id = ?').bind(id));
       const actor = await actorFromContext(c);
       if (profileRows[0]) {
-        const reason = cleanOptionalStr(body.scoreReason, 500) || 'Score balance updated from Admin Core';
+        const reason = cleanOptionalStr(body.scoreReason, 500) || 'Calcitonin balance updated from Admin Core';
         const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileRows[0].id, action: 'set', points: requestedScore, reason, actor });
         if (result) {
-          await notifyMember(c.env.DB, profileRows[0].id, 'Code Rx points updated', `Your score balance is now ${result.balance}.`, actor);
+          await notifyMember(c.env.DB, profileRows[0].id, 'Calcitonins updated', `Your Calcitonin balance is now ${result.balance} CAL.`, actor);
           await audit(c.env.DB, actor, 'member.score.legacy_set', 'member_profile', profileRows[0].id, { balance: result.balance, reason });
         }
       } else {
@@ -1330,7 +1330,7 @@ app.get('/api/notifications', requireAuth, async (c) => {
        JOIN notifications n ON n.id = nr.notification_id
        LEFT JOIN member_profiles sender_profile ON sender_profile.id = n.created_by_member_profile_id
        LEFT JOIN users sender ON sender.id = sender_profile.user_id
-       WHERE nr.member_profile_id = ?
+       WHERE nr.member_profile_id = ? AND n.status = 'active'
        ORDER BY nr.delivered_at DESC, n.id DESC LIMIT ?`
     ).bind(actor.profileId, limit)),
     dbRows<{ count: number }>(c.env.DB.prepare(
@@ -1361,6 +1361,85 @@ app.get('/api/notifications/audience', requireAuth, async (c) => {
     dbRows<any>(c.env.DB.prepare("SELECT code, name FROM roles WHERE code != 'phantom' ORDER BY name")),
   ]);
   return c.json({ success: true, data: { members, roles } });
+});
+
+// Sent-notice management is available to PHANTOM and to a delegated sender for
+// notices they created. Editing updates the delivered notice for every current
+// recipient; deleting withdraws it from inboxes while retaining an audit trail.
+app.get('/api/notifications/sent', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  if (!await canSendNotifications(c.env.DB, actor)) return c.json({ success: false, error: 'Notification sender access is required.' }, 403);
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') || 40)));
+  const records = await dbRows<any>(c.env.DB.prepare(
+    `SELECT n.id, n.title, n.message, n.audience_type, n.audience_label, n.status, n.sent_at, n.created_at,
+       sender.name AS sender_name, sender_profile.member_code AS sender_member_code,
+       COUNT(nr.member_profile_id) AS recipient_count,
+       SUM(CASE WHEN nr.status = 'read' THEN 1 ELSE 0 END) AS read_count
+     FROM notifications n
+     LEFT JOIN notification_recipients nr ON nr.notification_id = n.id
+     LEFT JOIN member_profiles sender_profile ON sender_profile.id = n.created_by_member_profile_id
+     LEFT JOIN users sender ON sender.id = sender_profile.user_id
+     WHERE n.status = 'active' ${actor.isPhantom ? '' : 'AND n.created_by_member_profile_id = ?'}
+     GROUP BY n.id
+     ORDER BY n.sent_at DESC, n.id DESC LIMIT ?`
+  ).bind(...(actor.isPhantom ? [limit] : [actor.profileId, limit])));
+  return c.json({ success: true, data: records.map((record) => ({
+    ...record,
+    recipient_count: Number(record.recipient_count || 0),
+    read_count: Number(record.read_count || 0),
+  })) });
+});
+
+const editableSentNotification = async (c: any, id: number) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return { access, notification: null };
+  const actor = access.actor!;
+  if (!await canSendNotifications(c.env.DB, actor)) return { access, notification: null, forbidden: true };
+  const notifications = await dbRows<any>(c.env.DB.prepare(
+    "SELECT id, title, message, created_by_member_profile_id FROM notifications WHERE id = ? AND status = 'active'"
+  ).bind(id));
+  const notification = notifications[0];
+  if (!notification) return { access, notification: null };
+  if (!actor.isPhantom && Number(notification.created_by_member_profile_id || 0) !== Number(actor.profileId || 0)) {
+    return { access, notification: null, forbidden: true };
+  }
+  return { access, notification, forbidden: false };
+};
+
+app.patch('/api/notifications/sent/:id', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const editable = await editableSentNotification(c, id);
+  if (editable.access.response) return editable.access.response;
+  if (editable.forbidden) return c.json({ success: false, error: 'You can edit only notifications you are authorized to manage.' }, 403);
+  if (!editable.notification) return c.json({ success: false, error: 'Active notification not found.' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const hasTitle = body.title !== undefined;
+  const hasMessage = body.message !== undefined;
+  if (!hasTitle && !hasMessage) return c.json({ success: false, error: 'Change the title or message before saving.' }, 400);
+  const title = hasTitle ? cleanStr(body.title, 2, 180) : editable.notification.title;
+  const message = hasMessage ? cleanStr(body.message, 2, 5000) : editable.notification.message;
+  if (!title || !message) return c.json({ success: false, error: 'Use a title and message with at least two characters each.' }, 400);
+  await c.env.DB.prepare('UPDATE notifications SET title = ?, message = ? WHERE id = ?').bind(title, message, id).run();
+  await audit(c.env.DB, editable.access.actor, 'notification.edited', 'notification', id, { titleChanged: hasTitle, messageChanged: hasMessage });
+  return c.json({ success: true, data: { id, title, message }, message: 'Sent notification updated for its recipients.' });
+});
+
+app.delete('/api/notifications/sent/:id', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid notification id.' }, 400);
+  const editable = await editableSentNotification(c, id);
+  if (editable.access.response) return editable.access.response;
+  if (editable.forbidden) return c.json({ success: false, error: 'You can delete only notifications you are authorized to manage.' }, 403);
+  if (!editable.notification) return c.json({ success: false, error: 'Active notification not found.' }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE notifications SET status = 'deleted' WHERE id = ?").bind(id),
+    c.env.DB.prepare('DELETE FROM notification_recipients WHERE notification_id = ?').bind(id),
+  ]);
+  await audit(c.env.DB, editable.access.actor, 'notification.deleted', 'notification', id, { withdrawnFromInboxes: true });
+  return c.json({ success: true, message: 'Notification withdrawn from recipient inboxes.' });
 });
 
 app.post('/api/notifications/:id/read', requireAuth, async (c) => {
@@ -2901,22 +2980,26 @@ app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c
     const points = Number(body.points);
     const reason = cleanStr(body.reason, 2, 500);
     if (!['add', 'deduct', 'set'].includes(action) || !Number.isInteger(points) || points < 0 || points > 1_000_000 || !reason) {
-      return c.json({ success: false, error: 'Choose add, deduct, or set; provide a whole point value and a clear reason.' }, 400);
+      return c.json({ success: false, error: 'Choose add, deduct, or set; provide a whole Calcitonin value and a clear reason.' }, 400);
     }
     if ((action === 'add' || action === 'deduct') && points < 1) {
-      return c.json({ success: false, error: 'Add and deduct actions require at least one point.' }, 400);
+      return c.json({ success: false, error: 'Add and deduct actions require at least one CAL.' }, 400);
     }
-    const target = await dbRows<any>(c.env.DB.prepare('SELECT id, status FROM member_profiles WHERE id = ?').bind(profileId));
+    const target = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, mp.status, r.code AS role_code FROM member_profiles mp
+       LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+    ).bind(profileId));
     if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
-    if (target[0].status === 'archived') return c.json({ success: false, error: 'Restore this member before changing their score.' }, 409);
+    if (target[0].role_code === 'phantom') return c.json({ success: false, error: 'PHANTOM’s own Calcitonin balance is protected.' }, 403);
+    if (target[0].status === 'archived') return c.json({ success: false, error: 'Restore this member before changing their Calcitonins.' }, 409);
     const actor = await actorFromContext(c);
     const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileId, action, points, reason, actor });
-    if (!result) return c.json({ success: false, error: 'Member score could not be updated.' }, 404);
+    if (!result) return c.json({ success: false, error: 'Member Calcitonins could not be updated.' }, 404);
     await notifyMember(
       c.env.DB,
       profileId,
-      'Code Rx points updated',
-      `${result.delta >= 0 ? '+' : ''}${result.delta} points: ${reason}. Your balance is now ${result.balance}.`,
+      'Calcitonins updated',
+      `${result.delta >= 0 ? '+' : ''}${result.delta} CAL: ${reason}. Your Calcitonin balance is now ${result.balance} CAL.`,
       actor,
     );
     await audit(c.env.DB, actor, 'member.score.manual_adjustment', 'member_profile', profileId, {
@@ -2926,10 +3009,10 @@ app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c
       balance: result.balance,
       reason,
     });
-    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId }, message: 'Member score updated.' });
+    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId }, message: 'Member Calcitonins updated.' });
   } catch (error) {
-    console.error('[code-rx] manual score adjustment error:', error);
-    return c.json({ success: false, error: 'Could not update this member score.' }, 500);
+    console.error('[code-rx] manual Calcitonin adjustment error:', error);
+    return c.json({ success: false, error: 'Could not update this member’s Calcitonins.' }, 500);
   }
 });
 
@@ -2941,9 +3024,9 @@ app.get('/api/phantom/score-rules', requireAuth, requirePhantom, async (c) => {
 app.put('/api/phantom/score-rules/:key', requireAuth, requirePhantom, async (c) => {
   const key = cleanStr(c.req.param('key'), 2, 100);
   const body = await c.req.json().catch(() => ({}));
-  if (!key) return c.json({ success: false, error: 'Invalid score rule.' }, 400);
+  if (!key) return c.json({ success: false, error: 'Invalid Calcitonin rule.' }, 400);
   const current = await dbRows<any>(c.env.DB.prepare('SELECT * FROM score_rules WHERE rule_key = ?').bind(key));
-  if (!current[0]) return c.json({ success: false, error: 'Score rule not found.' }, 404);
+  if (!current[0]) return c.json({ success: false, error: 'Calcitonin rule not found.' }, 404);
   const fields: string[] = [];
   const values: unknown[] = [];
   if (body.enabled !== undefined) {
@@ -2952,16 +3035,16 @@ app.put('/api/phantom/score-rules/:key', requireAuth, requirePhantom, async (c) 
   }
   if (body.points !== undefined) {
     const points = Number(body.points);
-    if (!Number.isInteger(points) || points < 0 || points > 10_000) return c.json({ success: false, error: 'Automatic rule points must be a whole number from 0 to 10,000.' }, 400);
+    if (!Number.isInteger(points) || points < 0 || points > 10_000) return c.json({ success: false, error: 'Automatic rule Calcitonins must be a whole number from 0 to 10,000 CAL.' }, 400);
     fields.push('points = ?'); values.push(points);
   }
-  if (!fields.length) return c.json({ success: false, error: 'No score-rule change supplied.' }, 400);
+  if (!fields.length) return c.json({ success: false, error: 'No Calcitonin-rule change supplied.' }, 400);
   fields.push('updated_at = CURRENT_TIMESTAMP');
   const actor = await actorFromContext(c);
   values.push(actor?.userId ?? null, key);
   await c.env.DB.prepare(`UPDATE score_rules SET ${fields.join(', ')}, updated_by_user_id = ? WHERE rule_key = ?`).bind(...values).run();
   await audit(c.env.DB, actor, 'score.rule.updated', 'score_rule', key, { fields: fields.slice(0, -1) });
-  return c.json({ success: true, message: 'Automatic score rule updated.' });
+  return c.json({ success: true, message: 'Automatic Calcitonin rule updated.' });
 });
 
 app.get('/api/phantom/roles', requireAuth, requirePhantom, async (c) => {

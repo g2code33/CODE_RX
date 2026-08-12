@@ -502,6 +502,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   message TEXT NOT NULL,
   audience_type TEXT NOT NULL CHECK (audience_type IN ('all','selected','role','system')),
   audience_label TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
   created_by_member_profile_id INTEGER,
   created_by_user_id INTEGER,
   sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -542,6 +543,7 @@ CREATE INDEX IF NOT EXISTS idx_vault_shares_document ON vault_shares(document_id
 CREATE INDEX IF NOT EXISTS idx_score_events_member ON member_score_events(member_profile_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notification_recipients_member ON notification_recipients(member_profile_id, status, delivered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_sent ON notifications(sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_status_sent ON notifications(status, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_projects_status ON vault_projects(status, is_archived);
@@ -565,6 +567,7 @@ const SAFE_MIGRATIONS = [
   { table: 'member_share_permissions', column: 'can_download', sql: 'ALTER TABLE member_share_permissions ADD COLUMN can_download INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_shares', column: 'allow_download', sql: 'ALTER TABLE vault_shares ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0' },
   { table: 'vault_shares', column: 'token_ciphertext', sql: 'ALTER TABLE vault_shares ADD COLUMN token_ciphertext TEXT' },
+  { table: 'notifications', column: 'status', sql: "ALTER TABLE notifications ADD COLUMN status TEXT NOT NULL DEFAULT 'active'" },
   { table: 'vault_documents', column: 'content_json', sql: 'ALTER TABLE vault_documents ADD COLUMN content_json TEXT' },
   { table: 'vault_documents', column: 'content_format', sql: "ALTER TABLE vault_documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'plain'" },
   { table: 'vault_documents', column: 'status', sql: "ALTER TABLE vault_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'" },
@@ -586,7 +589,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'current_codename_id', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN current_codename_id INTEGER' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-share-link-recopy-and-download-status-6';
+const VAULT_SCHEMA_VERSION = '2026-08-12-notification-management-calcitonins-7';
 
 
 const ROLE_SEEDS = [
