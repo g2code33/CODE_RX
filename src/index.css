@@ -2112,3 +2112,27 @@ h3.vault-rich-text {
 @media (max-width: 480px) {
   .visual-theme-colour-grid { grid-template-columns: 1fr; }
 }
+
+/* Community workspace tabs */
+.community-tab {
+  border: 1px solid #dbe9e0;
+  border-radius: 0.75rem;
+  background: #fff;
+  padding: 0.55rem 0.8rem;
+  color: #52665b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.community-tab:hover {
+  border-color: #86c9a2;
+  background: #f1faf4;
+  color: #057a46;
+}
+
+.community-tab.is-active {
+  border-color: #16834e;
+  background: #16834e;
+  color: #fff;
+}

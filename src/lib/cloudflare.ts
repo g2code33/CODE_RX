@@ -168,6 +168,65 @@ export const db = {
       apiCall<{ data: any; message?: string }>('/api/notifications/send', { method: 'POST', body: JSON.stringify(data) }),
   },
 
+  community: {
+    enterPublic: (email: string) => apiCall<{ data: any; message?: string }>('/api/community/public/enter', { method: 'POST', body: JSON.stringify({ email }) }),
+    publicThreads: async (query = '') => (await apiCall<{ data: any[] }>(`/api/community/public/threads${query ? `?q=${encodeURIComponent(query)}` : ''}`)).data || [],
+    publicThread: async (id: number) => (await apiCall<{ data: any }>(`/api/community/public/threads/${id}`)).data,
+    createPublicThread: (guestToken: string, data: { title: string; body: string }) => apiCall<{ data: any; message?: string }>('/api/community/public/threads', { method: 'POST', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify(data) }),
+    replyPublicThread: (guestToken: string, threadId: number, data: { body: string; parentPostId?: number }) => apiCall<{ data: any; message?: string }>(`/api/community/public/threads/${threadId}/posts`, { method: 'POST', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify(data) }),
+    editPublicThread: (guestToken: string, id: number, data: { title?: string; body?: string }) => apiCall(`/api/community/public/threads/${id}`, { method: 'PATCH', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify(data) }),
+    deletePublicThread: (guestToken: string, id: number) => apiCall(`/api/community/public/threads/${id}`, { method: 'DELETE', headers: { 'X-Code-Rx-Community-Guest': guestToken } }),
+    editPublicPost: (guestToken: string, id: number, body: string) => apiCall(`/api/community/public/posts/${id}`, { method: 'PATCH', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify({ body }) }),
+    deletePublicPost: (guestToken: string, id: number) => apiCall(`/api/community/public/posts/${id}`, { method: 'DELETE', headers: { 'X-Code-Rx-Community-Guest': guestToken } }),
+    reactPublicPost: (guestToken: string, postId: number, emoji: string) => apiCall<{ data: any }>(`/api/community/public/posts/${postId}/reactions`, { method: 'PUT', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify({ emoji }) }),
+    reportPublic: (guestToken: string, data: { threadId?: number; postId?: number; reason: string }) => apiCall('/api/community/public/reports', { method: 'POST', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify(data) }),
+    publicChat: async () => (await apiCall<{ data: any[] }>('/api/community/public/chat')).data || [],
+    sendPublicChat: (guestToken: string, body: string) => apiCall<{ data: any; message?: string }>('/api/community/public/chat', { method: 'POST', headers: { 'X-Code-Rx-Community-Guest': guestToken }, body: JSON.stringify({ body }) }),
+    members: async (query = '') => (await apiCall<{ data: any[] }>(`/api/community/members${query ? `?q=${encodeURIComponent(query)}` : ''}`)).data || [],
+    conversations: async () => (await apiCall<{ data: any[] }>('/api/community/conversations')).data || [],
+    openDm: async (profileId: number) => (await apiCall<{ data: any }>(`/api/community/dms/${profileId}`, { method: 'POST' })).data,
+    groups: async () => (await apiCall<{ data: any[] }>('/api/community/groups')).data || [],
+    group: async (id: number) => (await apiCall<{ data: any }>(`/api/community/groups/${id}`)).data,
+    createGroup: (data: any) => apiCall<{ data: any }>('/api/community/groups', { method: 'POST', body: JSON.stringify(data) }),
+    joinGroup: (id: number, message?: string) => apiCall<{ data: any; message?: string }>(`/api/community/groups/${id}/join`, { method: 'POST', body: JSON.stringify({ message }) }),
+    groupRequests: async (id: number) => (await apiCall<{ data: any[] }>(`/api/community/groups/${id}/requests`)).data || [],
+    reviewGroupRequest: (groupId: number, requestId: number, action: 'approve' | 'reject') => apiCall(`/api/community/groups/${groupId}/requests/${requestId}`, { method: 'POST', body: JSON.stringify({ action }) }),
+    updateGroup: (id: number, data: any) => apiCall(`/api/community/groups/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    updateGroupMember: (groupId: number, profileId: number, data: any) => apiCall(`/api/community/groups/${groupId}/members/${profileId}`, { method: 'PUT', body: JSON.stringify(data) }),
+    messages: async (conversationId: number, before?: number) => (await apiCall<{ data: any }>(`/api/community/conversations/${conversationId}/messages${before ? `?before=${before}` : ''}`)).data,
+    sendMessage: (conversationId: number, data: { body: string; replyToMessageId?: number; messageType?: 'text' | 'announcement' }) => apiCall<{ data: any; message?: string }>(`/api/community/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify(data) }),
+    editMessage: (id: number, body: string) => apiCall(`/api/community/messages/${id}`, { method: 'PATCH', body: JSON.stringify({ body }) }),
+    deleteMessage: (id: number) => apiCall(`/api/community/messages/${id}`, { method: 'DELETE' }),
+    reactMessage: (id: number, emoji: string) => apiCall<{ data: any }>(`/api/community/messages/${id}/reactions`, { method: 'PUT', body: JSON.stringify({ emoji }) }),
+    markRead: (conversationId: number, messageId: number) => apiCall(`/api/community/conversations/${conversationId}/read`, { method: 'POST', body: JSON.stringify({ messageId }) }),
+    pinMessage: (id: number) => apiCall(`/api/community/messages/${id}/pin`, { method: 'POST' }),
+    reportMessage: (id: number, reason: string) => apiCall(`/api/community/messages/${id}/reports`, { method: 'POST', body: JSON.stringify({ reason }) }),
+    search: async (query: string) => (await apiCall<{ data: any }>(`/api/community/search?q=${encodeURIComponent(query)}`)).data,
+    telegramLink: async () => (await apiCall<{ data: any }>('/api/community/telegram/link', { method: 'POST' })).data,
+    telegramStatus: async () => (await apiCall<{ data: any }>('/api/community/telegram/status')).data,
+    disconnectTelegram: () => apiCall('/api/community/telegram/link', { method: 'DELETE' }),
+    mediaPolicy: async (conversationId: number) => (await apiCall<{ data: any[] }>(`/api/community/conversations/${conversationId}/media-policy`)).data || [],
+    uploadAttachment: async (conversationId: number, file: File, caption = '') => {
+      const form = new FormData(); form.append('file', file); if (caption) form.append('caption', caption);
+      return apiCall<{ data: any; message?: string }>(`/api/community/conversations/${conversationId}/attachments`, { method: 'POST', body: form });
+    },
+    downloadAttachment: async (id: number) => {
+      const token = getToken();
+      const response = await fetch(`${API_BASE}/api/community/attachments/${id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!response.ok) { let data: any = null; try { data = await response.json(); } catch { /* ignore */ } throw new ApiError(data?.error || 'Could not open this attachment.', response.status); }
+      return { url: URL.createObjectURL(await response.blob()), filename: response.headers.get('content-disposition')?.match(/filename=\"?([^\";]+)/i)?.[1] || 'community-attachment' };
+    },
+    deleteAttachment: (id: number) => apiCall(`/api/community/attachments/${id}`, { method: 'DELETE' }),
+  },
+  communityAdmin: {
+    mediaSettings: async () => (await apiCall<{ data: any }>('/api/phantom/community/media-settings')).data,
+    saveMediaSetting: (data: any) => apiCall('/api/phantom/community/media-settings', { method: 'PUT', body: JSON.stringify(data) }),
+    publicReports: async () => (await apiCall<{ data: any[] }>('/api/phantom/community/public/reports')).data || [],
+    updatePublicReport: (id: number, status: 'reviewed' | 'resolved' | 'dismissed') => apiCall(`/api/phantom/community/public/reports/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+    moderatePublicThread: (id: number, data: { pinned?: boolean; status?: string }) => apiCall(`/api/phantom/community/public/threads/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    moderatePublicPost: (id: number, status: 'active' | 'hidden' | 'deleted') => apiCall(`/api/phantom/community/public/posts/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  },
+
   codenames: {
     ballot: async () => {
       const result = await apiCall<{ data: any }>('/api/codenames/ballot');

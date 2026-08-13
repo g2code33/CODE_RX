@@ -9,6 +9,7 @@ import { VaultSharedDocument } from './components/VaultSharedDocument';
 import { ResetPassword } from './components/ResetPassword';
 import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
+import { CommunityHub } from './components/CommunityHub';
 import { VisualEditorProvider } from './components/VisualEditorContext';
 import { SECTION_MAP } from './data/mockData';
 import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
@@ -218,6 +219,14 @@ function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const openCommunityHub = () => {
+    setIsMemberVault(false);
+    setIsDashboard(false);
+    setActiveTab('community');
+    if (window.location.hash !== '#community') window.location.hash = 'community';
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+
   const handleTabChange = (tabId: string) => {
     const section = SECTION_MAP[tabId];
     const tab = section ? section.tab : tabId;
@@ -276,8 +285,10 @@ function App() {
   const mainContent = isAdmin
     ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
     : isDashboard
-      ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} onExit={toggleDashboard} />
-      : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;
+      ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} onOpenCommunity={openCommunityHub} onExit={toggleDashboard} />
+      : activeTab === 'community'
+        ? <CommunityHub user={user} onLogin={() => { setAuthMode('login'); setIsAuthOpen(true); }} />
+        : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;
 
   const shell = (
     <div className="brand-app min-h-screen">

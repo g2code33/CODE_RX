@@ -526,6 +526,238 @@ CREATE TABLE IF NOT EXISTS notification_recipients (
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
 );
 
+-- Community + messaging system. Public visitors are explicitly separate from
+-- authenticated Code Rx members, and all private conversations reference the
+-- existing member_profiles table and never use public guest identities.
+CREATE TABLE IF NOT EXISTS community_guest_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  email_hash TEXT NOT NULL,
+  public_handle TEXT NOT NULL UNIQUE,
+  token_hash TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','restricted','banned')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public_forum_threads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_by_guest_id INTEGER,
+  created_by_member_profile_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','locked','archived','deleted')),
+  is_pinned INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(created_by_guest_id) REFERENCES community_guest_sessions(id),
+  FOREIGN KEY(created_by_member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS public_forum_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  parent_post_id INTEGER,
+  created_by_guest_id INTEGER,
+  created_by_member_profile_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted','hidden')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(thread_id) REFERENCES public_forum_threads(id),
+  FOREIGN KEY(parent_post_id) REFERENCES public_forum_posts(id),
+  FOREIGN KEY(created_by_guest_id) REFERENCES community_guest_sessions(id),
+  FOREIGN KEY(created_by_member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS public_forum_reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id INTEGER NOT NULL,
+  actor_key TEXT NOT NULL,
+  emoji TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(post_id, actor_key, emoji),
+  FOREIGN KEY(post_id) REFERENCES public_forum_posts(id)
+);
+
+CREATE TABLE IF NOT EXISTS public_forum_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id INTEGER,
+  post_id INTEGER,
+  reporter_key TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','reviewed','resolved','dismissed')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_by_user_id INTEGER,
+  reviewed_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS public_chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  body TEXT NOT NULL,
+  created_by_guest_id INTEGER,
+  created_by_member_profile_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted','hidden')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(created_by_guest_id) REFERENCES community_guest_sessions(id),
+  FOREIGN KEY(created_by_member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL CHECK (type IN ('dm','group')),
+  direct_key TEXT UNIQUE,
+  title TEXT,
+  description TEXT NOT NULL DEFAULT '',
+  image_key TEXT,
+  join_mode TEXT NOT NULL DEFAULT 'invite' CHECK (join_mode IN ('invite','open','approval','assigned')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','locked','archived','deleted')),
+  owner_member_profile_id INTEGER,
+  pinned_message_id INTEGER,
+  telegram_sync_enabled INTEGER NOT NULL DEFAULT 0,
+  telegram_chat_id TEXT UNIQUE,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(owner_member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_conversation_members (
+  conversation_id INTEGER NOT NULL,
+  member_profile_id INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner','admin','moderator','member')),
+  membership_status TEXT NOT NULL DEFAULT 'active' CHECK (membership_status IN ('active','left','removed')),
+  muted_until DATETIME,
+  joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_read_message_id INTEGER,
+  last_read_at DATETIME,
+  PRIMARY KEY(conversation_id, member_profile_id),
+  FOREIGN KEY(conversation_id) REFERENCES community_conversations(id),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_group_join_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  member_profile_id INTEGER NOT NULL,
+  message TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_by_member_profile_id INTEGER,
+  reviewed_at DATETIME,
+  UNIQUE(conversation_id, member_profile_id),
+  FOREIGN KEY(conversation_id) REFERENCES community_conversations(id),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  sender_member_profile_id INTEGER,
+  message_type TEXT NOT NULL DEFAULT 'text' CHECK (message_type IN ('text','image','file','voice','video','system','announcement')),
+  body TEXT NOT NULL DEFAULT '',
+  reply_to_message_id INTEGER,
+  source TEXT NOT NULL DEFAULT 'website' CHECK (source IN ('website','telegram','system')),
+  telegram_message_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted','hidden')),
+  edited_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(conversation_id) REFERENCES community_conversations(id),
+  FOREIGN KEY(sender_member_profile_id) REFERENCES member_profiles(id),
+  FOREIGN KEY(reply_to_message_id) REFERENCES community_messages(id),
+  UNIQUE(conversation_id, source, telegram_message_id)
+);
+
+CREATE TABLE IF NOT EXISTS community_message_reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL,
+  member_profile_id INTEGER NOT NULL,
+  emoji TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(message_id, member_profile_id, emoji),
+  FOREIGN KEY(message_id) REFERENCES community_messages(id),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_message_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL,
+  reporter_member_profile_id INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','reviewed','resolved','dismissed')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_by_member_profile_id INTEGER,
+  reviewed_at DATETIME,
+  FOREIGN KEY(message_id) REFERENCES community_messages(id),
+  FOREIGN KEY(reporter_member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_message_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL,
+  r2_key TEXT NOT NULL UNIQUE,
+  original_name TEXT NOT NULL,
+  media_type TEXT NOT NULL CHECK (media_type IN ('image','video','document','pdf','audio','other')),
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted','moderated')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(message_id) REFERENCES community_messages(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_media_settings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('global','area','group')),
+  scope_key TEXT NOT NULL,
+  media_type TEXT NOT NULL CHECK (media_type IN ('all','image','video','document','pdf','audio','other')),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  max_bytes INTEGER NOT NULL DEFAULT 0,
+  allowed_mimes_json TEXT NOT NULL DEFAULT '[]',
+  storage_limit_bytes INTEGER NOT NULL DEFAULT 0,
+  updated_by_user_id INTEGER,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(scope_type, scope_key, media_type)
+);
+
+CREATE TABLE IF NOT EXISTS community_telegram_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_profile_id INTEGER NOT NULL UNIQUE,
+  telegram_chat_id TEXT NOT NULL UNIQUE,
+  telegram_user_id TEXT,
+  linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  disconnected_at DATETIME,
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_telegram_link_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_profile_id INTEGER NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
+CREATE TABLE IF NOT EXISTS community_telegram_updates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telegram_update_id TEXT NOT NULL UNIQUE,
+  processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS community_telegram_message_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL,
+  telegram_chat_id TEXT NOT NULL,
+  telegram_message_id TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('website_to_telegram','telegram_to_website')),
+  synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(telegram_chat_id, telegram_message_id),
+  FOREIGN KEY(message_id) REFERENCES community_messages(id)
+);
+
 CREATE TABLE IF NOT EXISTS recycle_bin_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   resource_type TEXT NOT NULL,
@@ -561,6 +793,16 @@ CREATE INDEX IF NOT EXISTS idx_notification_recipients_member ON notification_re
 CREATE INDEX IF NOT EXISTS idx_notifications_sent ON notifications(sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_status_sent ON notifications(status, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_recycle_bin_deleted_at ON recycle_bin_items(deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_public_threads_activity ON public_forum_threads(status, is_pinned DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_public_posts_thread ON public_forum_posts(thread_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_public_chat_created ON public_chat_messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_community_conversations_activity ON community_conversations(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_community_members_profile ON community_conversation_members(member_profile_id, membership_status, joined_at DESC);
+CREATE INDEX IF NOT EXISTS idx_community_messages_conversation ON community_messages(conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_community_message_reactions ON community_message_reactions(message_id, emoji);
+CREATE INDEX IF NOT EXISTS idx_community_join_requests ON community_group_join_requests(conversation_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_community_attachments_message ON community_message_attachments(message_id, status);
+CREATE INDEX IF NOT EXISTS idx_community_telegram_links_message ON community_telegram_message_links(message_id, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_projects_status ON vault_projects(status, is_archived);
@@ -574,6 +816,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_subject ON audit_logs(subject_type, su
 // created by older versions receive non-destructive columns. Duplicate-column
 // errors are safely ignored by runSafeMigrations below.
 const SAFE_MIGRATIONS = [
+  { table: 'community_conversations', column: 'telegram_chat_id', sql: 'ALTER TABLE community_conversations ADD COLUMN telegram_chat_id TEXT' },
   { table: 'applications', column: 'reviewed_by_user_id', sql: 'ALTER TABLE applications ADD COLUMN reviewed_by_user_id INTEGER' },
   { table: 'applications', column: 'reviewed_at', sql: 'ALTER TABLE applications ADD COLUMN reviewed_at TEXT' },
   { table: 'applications', column: 'review_note', sql: 'ALTER TABLE applications ADD COLUMN review_note TEXT' },
@@ -609,7 +852,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-custom-founding-recycle-bin-11';
+const VAULT_SCHEMA_VERSION = '2026-08-12-community-telegram-media-13';
 
 
 const ROLE_SEEDS = [
@@ -716,6 +959,20 @@ const seedFeatureSettings = async (db: D1Database) => {
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_sharing_enabled', '0', CURRENT_TIMESTAMP)"),
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_downloads_enabled', '0', CURRENT_TIMESTAMP)"),
   ]);
+};
+
+const seedCommunityMediaSettings = async (db: D1Database) => {
+  const defaults = [
+    ['global', 'global', 'all', 0, 0, '[]', 0],
+    ['area', 'private', 'all', 0, 0, '[]', 0],
+    ['area', 'public_forum', 'all', 0, 0, '[]', 0],
+    ['area', 'public_chat', 'all', 0, 0, '[]', 0],
+  ] as const;
+  await runBatchInChunks(db, defaults.map(([scopeType, scopeKey, mediaType, enabled, maxBytes, mimes, storageLimit]) => db.prepare(
+    `INSERT OR IGNORE INTO community_media_settings
+     (scope_type, scope_key, media_type, enabled, max_bytes, allowed_mimes_json, storage_limit_bytes)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(scopeType, scopeKey, mediaType, enabled, maxBytes, mimes, storageLimit)));
 };
 
 const migrateFoundingRoleCodes = async (db: D1Database) => {
@@ -902,6 +1159,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       await seedVaultSections(db);
       await seedScoreRules(db);
       await seedFeatureSettings(db);
+      await seedCommunityMediaSettings(db);
       await ensurePhantom(env);
       await normalizeCustomFoundingAvailability(db);
       await db.prepare(
