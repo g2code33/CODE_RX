@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS member_activations (
   token_hash TEXT NOT NULL UNIQUE,
   expires_at TEXT NOT NULL,
   used_at DATETIME,
+  revoked_at DATETIME,
+  sent_at DATETIME,
+  delivery_status TEXT NOT NULL DEFAULT 'not_sent',
   created_by_user_id INTEGER,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
@@ -785,6 +788,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);
 CREATE INDEX IF NOT EXISTS idx_subscribers_email ON subscribers(email);
 CREATE INDEX IF NOT EXISTS idx_member_profiles_status ON member_profiles(status);
 CREATE INDEX IF NOT EXISTS idx_member_profiles_role ON member_profiles(primary_role_id);
+CREATE INDEX IF NOT EXISTS idx_member_activations_profile ON member_activations(member_profile_id, used_at, revoked_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_codenames_status ON codenames(status);
 CREATE INDEX IF NOT EXISTS idx_codenames_pool_status ON codenames(pool, status);
 CREATE INDEX IF NOT EXISTS idx_codename_events_session ON codename_selection_events(session_id, created_at);
@@ -827,6 +831,9 @@ const SAFE_MIGRATIONS = [
   { table: 'community_message_attachments', column: 'telegram_synced_at', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_synced_at DATETIME' },
   { table: 'community_message_attachments', column: 'telegram_sync_error', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_error TEXT' },
 
+  { table: 'member_activations', column: 'revoked_at', sql: 'ALTER TABLE member_activations ADD COLUMN revoked_at DATETIME' },
+  { table: 'member_activations', column: 'sent_at', sql: 'ALTER TABLE member_activations ADD COLUMN sent_at DATETIME' },
+  { table: 'member_activations', column: 'delivery_status', sql: "ALTER TABLE member_activations ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'not_sent'" },
   { table: 'applications', column: 'reviewed_by_user_id', sql: 'ALTER TABLE applications ADD COLUMN reviewed_by_user_id INTEGER' },
   { table: 'applications', column: 'reviewed_at', sql: 'ALTER TABLE applications ADD COLUMN reviewed_at TEXT' },
   { table: 'applications', column: 'review_note', sql: 'ALTER TABLE applications ADD COLUMN review_note TEXT' },
@@ -862,7 +869,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-13-community-telegram-media-retention-14';
+const VAULT_SCHEMA_VERSION = '2026-08-13-member-invitation-flow-15';
 
 
 const ROLE_SEEDS = [

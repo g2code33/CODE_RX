@@ -99,7 +99,7 @@ export const db = {
       const result = await apiCall<{ data: any[] }>('/api/applications');
       return result.data || [];
     },
-    updateStatus: (id: number, status: 'approved' | 'rejected') =>
+    updateStatus: (id: number, status: 'rejected' | 'pending') =>
       apiCall(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
     remove: (id: number) => apiCall(`/api/applications/${id}`, { method: 'DELETE' }),
   },
@@ -326,11 +326,17 @@ export const db = {
   phantom: {
     overview: async () => (await apiCall<{ data: any }>('/api/phantom/overview')).data,
     applications: async () => (await apiCall<{ data: any[] }>('/api/phantom/applications')).data || [],
-    reviewApplication: (id: number, status: 'approved' | 'rejected' | 'pending', note?: string) =>
+    reviewApplication: (id: number, status: 'rejected' | 'pending', note?: string) =>
       apiCall(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify({ status, note }) }),
+    approveAndInviteApplication: (id: number, data: any) =>
+      apiCall<{ data: any; message?: string }>(`/api/phantom/applications/${id}/approve-and-invite`, { method: 'POST', body: JSON.stringify(data) }),
+    // Retained as a compatibility name for older PHANTOM UI paths. It now uses
+    // the unified approval + secure invitation endpoint.
     createFromApplication: (id: number, data: any) =>
-      apiCall<{ data: any }>(`/api/phantom/applications/${id}/create-member`, { method: 'POST', body: JSON.stringify(data) }),
-    createMember: (data: any) => apiCall<{ data: any }>('/api/phantom/members', { method: 'POST', body: JSON.stringify(data) }),
+      apiCall<{ data: any; message?: string }>(`/api/phantom/applications/${id}/approve-and-invite`, { method: 'POST', body: JSON.stringify(data) }),
+    createMember: (data: any) => apiCall<{ data: any; message?: string }>('/api/phantom/members', { method: 'POST', body: JSON.stringify(data) }),
+    regenerateActivationLink: (profileId: number) =>
+      apiCall<{ data: any; message?: string }>(`/api/phantom/members/${profileId}/activation-link`, { method: 'POST' }),
     members: async (status?: string) => (await apiCall<{ data: any[] }>(`/api/phantom/members${status ? `?status=${encodeURIComponent(status)}` : ''}`)).data || [],
     updateMember: (id: number, data: any) => apiCall(`/api/phantom/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     memberHistory: async (id: number) => (await apiCall<{ data: any }>(`/api/phantom/members/${id}/history`)).data,

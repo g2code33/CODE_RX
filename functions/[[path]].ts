@@ -104,6 +104,94 @@ const codenamePathFrom = (value: unknown, roleCode: string): CodenamePath => {
 
 const poolForPath = (path: CodenamePath) => path === 'custom_founding' || path === 'direct_founding' ? 'founding' : 'member';
 
+const ACTIVATION_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+type MemberActivationInvite = {
+  activationId: number;
+  activationUrl: string;
+  expiresAt: string;
+  emailSent: boolean;
+  deliveryStatus: 'sent' | 'manual_required';
+};
+
+/**
+ * Creates a one-time password-setup invitation. The usable token deliberately
+ * exists only in this request and the outgoing email; D1 keeps its SHA-256
+ * hash. Reissuing an invitation revokes every earlier unused link first.
+ */
+const issueMemberActivationInvite = async ({
+  env,
+  actor,
+  profileId,
+  email,
+  name,
+  memberCode,
+  roleName,
+  event = 'member.activation_issued',
+}: {
+  env: Env;
+  actor: FounderActor;
+  profileId: number;
+  email: string;
+  name: string;
+  memberCode: string;
+  roleName: string;
+  event?: 'member.activation_issued' | 'member.activation_regenerated';
+}): Promise<MemberActivationInvite> => {
+  const db = env.DB;
+  await db.prepare(
+    `UPDATE member_activations
+     SET revoked_at = CURRENT_TIMESTAMP
+     WHERE member_profile_id = ? AND used_at IS NULL AND revoked_at IS NULL`
+  ).bind(profileId).run();
+
+  const rawToken = randomToken();
+  const expiresAt = new Date(Date.now() + ACTIVATION_LINK_TTL_MS).toISOString();
+  const created = await db.prepare(
+    `INSERT INTO member_activations (member_profile_id, email, token_hash, expires_at, created_by_user_id, delivery_status)
+     VALUES (?, ?, ?, ?, ?, 'not_sent')`
+  ).bind(profileId, email, await sha256Hex(rawToken), expiresAt, actor.userId).run();
+  const activationId = Number(created.meta.last_row_id);
+  const activationUrl = `${publicSiteUrl(env)}/#activate?token=${rawToken}&email=${encodeURIComponent(email)}`;
+
+  let emailSent = false;
+  try {
+    emailSent = await sendEmail(env, env.EMAILJS_TEMPLATE_ID_ACTIVATION || '', {
+      to_email: email,
+      member_name: name,
+      member_code: memberCode,
+      activation_link: activationUrl,
+      role_name: roleName,
+    });
+  } catch (error) {
+    // Mail delivery is optional. The PHANTOM response still receives a
+    // one-time link to send securely, and no account setup is rolled back.
+    console.error('[code-rx] activation invitation email error:', error);
+  }
+
+  const deliveryStatus: MemberActivationInvite['deliveryStatus'] = emailSent ? 'sent' : 'manual_required';
+  try {
+    await db.prepare(
+      `UPDATE member_activations
+       SET delivery_status = ?, sent_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END
+       WHERE id = ?`
+    ).bind(deliveryStatus, emailSent ? 1 : 0, activationId).run();
+  } catch (error) {
+    // The link remains valid even if non-critical delivery telemetry cannot be
+    // updated. Do not ever discard the approved member because mail metadata
+    // failed to save.
+    console.error('[code-rx] activation delivery status update failed:', error);
+  }
+
+  await audit(db, actor, event, 'member_activation', activationId, {
+    memberProfileId: profileId,
+    memberCode,
+    expiresAt,
+    deliveryStatus,
+  });
+  return { activationId, activationUrl, expiresAt, emailSent, deliveryStatus };
+};
+
 const createMemberAccount = async ({
   env,
   actor,
@@ -114,6 +202,7 @@ const createMemberAccount = async ({
   codenamePath,
   foundingCodenameId,
   applicationId,
+  applicationReviewNote,
 }: {
   env: Env;
   actor: FounderActor;
@@ -124,6 +213,7 @@ const createMemberAccount = async ({
   codenamePath?: CodenamePath;
   foundingCodenameId?: number | null;
   applicationId?: number;
+  applicationReviewNote?: string | null;
 }) => {
   const db = env.DB;
   if (roleCode === 'phantom') throw new Error('PHANTOM identity cannot be assigned through member creation.');
@@ -154,6 +244,7 @@ const createMemberAccount = async ({
   let createdMemberRecord = false;
   let profileId: number | null = null;
   let directClaimedCodenameId: number | null = null;
+  let applicationLinked = false;
   try {
     const temporaryHash = await hashPassword(randomToken());
     const today = new Date().toISOString().slice(0, 10);
@@ -200,20 +291,18 @@ const createMemberAccount = async ({
       await audit(db, actor, 'codename.phantom_assigned', 'codename', foundingCodenameId || null, { memberCode, codename: codeRows[0]?.display_name || null });
     }
 
-    const rawToken = randomToken();
-    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString();
-    await db.prepare(
-      'INSERT INTO member_activations (member_profile_id, email, token_hash, expires_at, created_by_user_id) VALUES (?, ?, ?, ?, ?)'
-    ).bind(profileId, email, await sha256Hex(rawToken), expiresAt, actor.userId).run();
-
     if (applicationId) {
-      await db.prepare(
-        `UPDATE applications SET status = 'approved', member_profile_id = ?, reviewed_by_user_id = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).bind(profileId, actor.userId, applicationId).run();
+      const linked = await db.prepare(
+        `UPDATE applications
+         SET status = 'approved', member_profile_id = ?, reviewed_by_user_id = ?, reviewed_at = CURRENT_TIMESTAMP,
+             review_note = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND member_profile_id IS NULL AND status != 'rejected'`
+      ).bind(profileId, actor.userId, cleanOptionalStr(applicationReviewNote, 2000), applicationId).run();
+      if (Number(linked.meta.changes || 0) !== 1) throw new Error('This application was already linked to another member or can no longer be approved.');
+      applicationLinked = true;
+      await audit(db, actor, 'application.approved_invited', 'application', applicationId, { memberProfileId: profileId, memberCode, role: role.code });
     }
 
-    const baseUrl = publicSiteUrl(env);
-    const activationUrl = `${baseUrl}/#activate?token=${rawToken}&email=${encodeURIComponent(email)}`;
     await audit(db, actor, 'member.created', 'member_profile', profileId, {
       memberCode,
       email,
@@ -223,19 +312,37 @@ const createMemberAccount = async ({
       applicationId: applicationId || null,
       status: 'pending_activation',
     });
-    await sendEmail(env, env.EMAILJS_TEMPLATE_ID_ACTIVATION || '', {
-      to_email: email,
-      member_name: name,
-      member_code: memberCode,
-      activation_link: activationUrl,
-      role_name: role.name,
+    const activation = await issueMemberActivationInvite({
+      env,
+      actor,
+      profileId,
+      email,
+      name,
+      memberCode,
+      roleName: role.name,
     });
 
-    return { profileId, userId, memberRecordId, memberCode, activationUrl, role: role.code, codenamePath: effectiveCodenamePath };
+    return {
+      profileId,
+      userId,
+      memberRecordId,
+      memberCode,
+      activationUrl: activation.activationUrl,
+      activationExpiresAt: activation.expiresAt,
+      activationEmailSent: activation.emailSent,
+      activationDeliveryStatus: activation.deliveryStatus,
+      role: role.code,
+      codenamePath: effectiveCodenamePath,
+    };
   } catch (error) {
     // Compensate incomplete account rows. The sequence remains consumed by
     // design, preserving the no-reuse member-ID rule.
     try {
+      if (applicationId && applicationLinked && profileId) {
+        await db.prepare(
+          "UPDATE applications SET status = 'pending', member_profile_id = NULL, reviewed_by_user_id = NULL, reviewed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND member_profile_id = ?"
+        ).bind(applicationId, profileId).run();
+      }
       if (profileId) await db.prepare('DELETE FROM member_activations WHERE member_profile_id = ?').bind(profileId).run();
       if (profileId && directClaimedCodenameId) {
         await db.prepare("UPDATE codenames SET status = 'available', claimed_by_member_profile_id = NULL, claimed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND claimed_by_member_profile_id = ?")
@@ -254,7 +361,7 @@ const createMemberAccount = async ({
 };
 
 const memberCreationErrorStatus = (message: string) => {
-  if (/already exists|profile already exists/i.test(message)) return 409;
+  if (/already exists|profile already exists|already linked|no longer be approved|rejected applications/i.test(message)) return 409;
   if (/valid|choose|select|custom founding|cannot be assigned/i.test(message)) return 400;
   return 500;
 };
@@ -1073,11 +1180,11 @@ app.post('/api/auth/activate', async (c) => {
        FROM member_activations a
        JOIN member_profiles mp ON mp.id = a.member_profile_id
        JOIN users u ON u.id = mp.user_id
-       WHERE a.email = ? AND a.token_hash = ?`
+       WHERE a.email = ? AND a.token_hash = ? AND a.revoked_at IS NULL`
     ).bind(email, tokenHash));
     const activation = rows[0];
     if (!activation || activation.used_at) {
-      return c.json({ success: false, error: 'This activation link is invalid or has already been used.' }, 400);
+      return c.json({ success: false, error: 'This invitation link is invalid, already used, or has been replaced. Ask PHANTOM to send a new one.' }, 400);
     }
     if (new Date(activation.expires_at).getTime() < Date.now()) {
       return c.json({ success: false, error: 'This activation link has expired. Ask PHANTOM for a new activation link.' }, 400);
@@ -1091,6 +1198,7 @@ app.post('/api/auth/activate', async (c) => {
       c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(passwordHash, activation.user_id),
       c.env.DB.prepare("UPDATE member_profiles SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(activation.profile_id),
       c.env.DB.prepare('UPDATE members SET is_active = 1 WHERE id = (SELECT member_record_id FROM member_profiles WHERE id = ?)').bind(activation.profile_id),
+      c.env.DB.prepare('UPDATE member_activations SET revoked_at = CURRENT_TIMESTAMP WHERE member_profile_id = ? AND id != ? AND used_at IS NULL AND revoked_at IS NULL').bind(activation.profile_id, activation.id),
       c.env.DB.prepare('UPDATE member_activations SET used_at = CURRENT_TIMESTAMP WHERE id = ?').bind(activation.id),
     ]);
     const actor = await getActor(c.env.DB, Number(activation.user_id));
@@ -1248,7 +1356,14 @@ app.post('/api/auth/change-password', requireAuth, async (c) => {
 
 app.get('/api/applications', requireAuth, requirePhantom, async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT * FROM applications ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, created_at DESC, id DESC`
+    `SELECT a.*, mp.member_code, mp.status AS member_status,
+       activation.expires_at AS activation_expires_at, activation.delivery_status AS activation_delivery_status
+     FROM applications a
+     LEFT JOIN member_profiles mp ON mp.id = a.member_profile_id
+     LEFT JOIN member_activations activation ON activation.id = (
+       SELECT ma.id FROM member_activations ma WHERE ma.member_profile_id = mp.id ORDER BY ma.id DESC LIMIT 1
+     )
+     ORDER BY CASE a.status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, a.created_at DESC, a.id DESC`
   ).all();
   return c.json({ success: true, data: results });
 });
@@ -1265,6 +1380,13 @@ app.post('/api/applications', async (c) => {
 
     if (!name || !email || !phone) {
       return c.json({ success: false, error: 'Please provide your full name, phone number, and a valid email address' }, 400);
+    }
+    const [existingAccount, existingApplication] = await Promise.all([
+      dbRows<any>(c.env.DB.prepare('SELECT id FROM users WHERE email = ? LIMIT 1').bind(email)),
+      dbRows<any>(c.env.DB.prepare("SELECT id FROM applications WHERE email = ? AND status IN ('pending', 'approved') LIMIT 1").bind(email)),
+    ]);
+    if (existingAccount[0] || existingApplication[0]) {
+      return c.json({ success: false, error: 'An account, secure invitation, or pending application already exists for this email. Sign in, use your invitation link, or contact PHANTOM for help.' }, 409);
     }
 
     const applicationResult = await c.env.DB
@@ -1317,11 +1439,17 @@ app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
     if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid application id' }, 400);
     const body = await c.req.json().catch(() => ({}));
     if (body.status !== 'approved' && body.status !== 'rejected' && body.status !== 'pending') {
-      return c.json({ success: false, error: 'Status must be pending, approved, or rejected' }, 400);
+      return c.json({ success: false, error: 'Status must be pending or rejected. Approval is completed through the secure invitation flow.' }, 400);
     }
     const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM applications WHERE id = ?').bind(id));
     const application = rows[0];
     if (!application) return c.json({ success: false, error: 'Application not found' }, 404);
+    if (application.member_profile_id) {
+      return c.json({ success: false, error: 'This application already has a member invitation. Manage the awaiting-activation member instead.' }, 409);
+    }
+    if (body.status === 'approved') {
+      return c.json({ success: false, error: 'Use Approve & Create Secure Invitation so approval, member creation, and password setup stay together.' }, 409);
+    }
     const actor = await actorFromContext(c);
     const note = cleanOptionalStr(body.note, 2000);
     await c.env.DB.prepare(
@@ -1336,12 +1464,7 @@ app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
         date: new Date().toISOString().slice(0, 10),
       });
     }
-    return c.json({
-      success: true,
-      message: body.status === 'approved'
-        ? 'Application reviewed. Use Create Member to generate an activation account.'
-        : `Application ${body.status}`,
-    });
+    return c.json({ success: true, message: body.status === 'pending' ? 'Application returned to pending review.' : 'Application rejected.' });
   } catch (error) {
     console.error('[code-rx] update application error:', error);
     return c.json({ success: false, error: 'Failed to update application' }, 500);
@@ -4286,21 +4409,29 @@ app.get('/api/phantom/overview', requireAuth, requirePhantom, async (c) => {
 
 app.get('/api/phantom/applications', requireAuth, requirePhantom, async (c) => {
   const applications = await dbRows<any>(c.env.DB.prepare(
-    `SELECT a.*, mp.member_code FROM applications a LEFT JOIN member_profiles mp ON mp.id = a.member_profile_id
+    `SELECT a.*, mp.member_code, mp.status AS member_status,
+       activation.expires_at AS activation_expires_at, activation.used_at AS activation_used_at,
+       activation.revoked_at AS activation_revoked_at, activation.sent_at AS activation_sent_at,
+       activation.delivery_status AS activation_delivery_status
+     FROM applications a
+     LEFT JOIN member_profiles mp ON mp.id = a.member_profile_id
+     LEFT JOIN member_activations activation ON activation.id = (
+       SELECT ma.id FROM member_activations ma WHERE ma.member_profile_id = mp.id ORDER BY ma.id DESC LIMIT 1
+     )
      ORDER BY CASE a.status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, a.created_at DESC, a.id DESC`
   ));
   return c.json({ success: true, data: applications });
 });
 
-app.post('/api/phantom/applications/:id/create-member', requireAuth, requirePhantom, async (c) => {
+const approveApplicationAndCreateInvitation = async (c: any) => {
   try {
     const applicationId = Number(c.req.param('id'));
     if (!Number.isInteger(applicationId) || applicationId < 1) return c.json({ success: false, error: 'Invalid application id' }, 400);
     const applicationRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM applications WHERE id = ?').bind(applicationId));
     const application = applicationRows[0];
     if (!application) return c.json({ success: false, error: 'Application not found' }, 404);
-    if (application.member_profile_id) return c.json({ success: false, error: 'A member was already created from this application.' }, 409);
-    if (application.status === 'rejected') return c.json({ success: false, error: 'Rejected applications cannot create members.' }, 409);
+    if (application.member_profile_id) return c.json({ success: false, error: 'This application already has a secure member invitation. Use the member invitation controls to regenerate the link if needed.' }, 409);
+    if (application.status === 'rejected') return c.json({ success: false, error: 'Return this rejected application to pending review before approving it.' }, 409);
     const body = await c.req.json().catch(() => ({}));
     const actor = await actorFromContext(c);
     if (!actor) return c.json({ success: false, error: 'PHANTOM identity not found' }, 403);
@@ -4314,14 +4445,27 @@ app.post('/api/phantom/applications/:id/create-member', requireAuth, requirePhan
       codenamePath: body.codenamePath as CodenamePath | undefined,
       foundingCodenameId: Number.isInteger(Number(body.foundingCodenameId)) ? Number(body.foundingCodenameId) : null,
       applicationId,
+      applicationReviewNote: cleanOptionalStr(body.reviewNote, 2000),
     });
-    return c.json({ success: true, data: member, message: 'Member created. Send the activation link securely to the applicant.' }, 201);
+    return c.json({
+      success: true,
+      data: member,
+      message: member.activationEmailSent
+        ? 'Application approved. The secure password-setup invitation was emailed and is ready to copy.'
+        : 'Application approved. Copy the secure password-setup link and send it to the applicant manually.',
+    }, 201);
   } catch (error) {
-    console.error('[code-rx] create member from application error:', error);
-    const message = error instanceof Error ? error.message : 'Could not create member';
+    console.error('[code-rx] approve application and create invitation error:', error);
+    const message = error instanceof Error ? error.message : 'Could not approve this application';
     return c.json({ success: false, error: message }, memberCreationErrorStatus(message));
   }
-});
+};
+
+// The approval action is deliberately one operation: an applicant is only
+// approved once a pending-activation member and one-time password setup link
+// have been created. Keep the old route as a compatibility alias.
+app.post('/api/phantom/applications/:id/approve-and-invite', requireAuth, requirePhantom, approveApplicationAndCreateInvitation);
+app.post('/api/phantom/applications/:id/create-member', requireAuth, requirePhantom, approveApplicationAndCreateInvitation);
 
 app.post('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
   try {
@@ -4345,6 +4489,55 @@ app.post('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
   }
 });
 
+app.post('/api/phantom/members/:id/activation-link', requireAuth, requirePhantom, async (c) => {
+  if (!checkRateLimit(c, 20, 60)) return c.json({ success: false, error: 'Please wait before generating another invitation link.' }, 429);
+  try {
+    const profileId = Number(c.req.param('id'));
+    if (!Number.isInteger(profileId) || profileId < 1) return c.json({ success: false, error: 'Invalid member profile id' }, 400);
+    const rows = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, mp.member_code, mp.status, u.name, u.email, r.name AS role_name
+       FROM member_profiles mp
+       JOIN users u ON u.id = mp.user_id
+       LEFT JOIN roles r ON r.id = mp.primary_role_id
+       WHERE mp.id = ?`
+    ).bind(profileId));
+    const profile = rows[0];
+    if (!profile) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+    if (profile.status !== 'pending_activation') {
+      return c.json({ success: false, error: 'Only an awaiting-activation member can receive a new password-setup invitation.' }, 409);
+    }
+    const actor = await actorFromContext(c);
+    if (!actor) return c.json({ success: false, error: 'PHANTOM identity not found' }, 403);
+    const invitation = await issueMemberActivationInvite({
+      env: c.env,
+      actor,
+      profileId,
+      email: profile.email,
+      name: profile.name,
+      memberCode: profile.member_code,
+      roleName: profile.role_name || 'Code Rx Member',
+      event: 'member.activation_regenerated',
+    });
+    return c.json({
+      success: true,
+      data: {
+        profileId,
+        memberCode: profile.member_code,
+        activationUrl: invitation.activationUrl,
+        activationExpiresAt: invitation.expiresAt,
+        activationEmailSent: invitation.emailSent,
+        activationDeliveryStatus: invitation.deliveryStatus,
+      },
+      message: invitation.emailSent
+        ? 'A replacement password-setup invitation was emailed. The earlier unused link is no longer valid.'
+        : 'A replacement password-setup link is ready. Copy it and send it to the member securely; the earlier unused link is no longer valid.',
+    });
+  } catch (error) {
+    console.error('[code-rx] regenerate activation invitation error:', error);
+    return c.json({ success: false, error: 'Could not generate a replacement password-setup invitation.' }, 500);
+  }
+});
+
 app.get('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
   const status = c.req.query('status');
   const values: unknown[] = [];
@@ -4354,12 +4547,18 @@ app.get('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
     values.push(status);
   }
   const members = await dbRows<any>(c.env.DB.prepare(
-    `SELECT mp.*, u.name, u.email, m.phone, m.points, m.level, r.code AS role_code, r.name AS role_name, c.display_name AS codename
+    `SELECT mp.*, u.name, u.email, m.phone, m.points, m.level, r.code AS role_code, r.name AS role_name, c.display_name AS codename,
+       activation.expires_at AS activation_expires_at, activation.used_at AS activation_used_at,
+       activation.revoked_at AS activation_revoked_at, activation.sent_at AS activation_sent_at,
+       activation.delivery_status AS activation_delivery_status
      FROM member_profiles mp
      LEFT JOIN users u ON u.id = mp.user_id
      LEFT JOIN members m ON m.id = mp.member_record_id
      LEFT JOIN roles r ON r.id = mp.primary_role_id
      LEFT JOIN codenames c ON c.claimed_by_member_profile_id = mp.id AND c.status = 'claimed'
+     LEFT JOIN member_activations activation ON activation.id = (
+       SELECT ma.id FROM member_activations ma WHERE ma.member_profile_id = mp.id ORDER BY ma.id DESC LIMIT 1
+     )
      ${where}
      ORDER BY CASE mp.status WHEN 'pending_activation' THEN 0 WHEN 'active' THEN 1 WHEN 'locked' THEN 2 ELSE 3 END, mp.created_at DESC`
   ).bind(...values));
@@ -4383,14 +4582,21 @@ app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => 
     }
     const action = body.action;
     if (action === 'lock' || action === 'unlock' || action === 'archive' || action === 'restore') {
-      const status = action === 'lock' ? 'locked' : action === 'unlock' || action === 'restore' ? 'active' : 'archived';
+      const completedActivation = await dbRows<any>(c.env.DB.prepare(
+        'SELECT id FROM member_activations WHERE member_profile_id = ? AND used_at IS NOT NULL LIMIT 1'
+      ).bind(profileId));
+      const hasCompletedActivation = Boolean(completedActivation[0]);
+      // Never allow a PHANTOM management action to skip the applicant's own
+      // password setup. A restored/unlocked unactivated invitation returns to
+      // pending_activation rather than becoming an active account.
+      const status = action === 'lock' ? 'locked' : action === 'archive' ? 'archived' : hasCompletedActivation ? 'active' : 'pending_activation';
       await c.env.DB.batch([
         c.env.DB.prepare("UPDATE member_profiles SET status = ?, locked_reason = ?, locked_at = CASE WHEN ? = 'locked' THEN CURRENT_TIMESTAMP ELSE NULL END, archived_at = CASE WHEN ? = 'archived' THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
           .bind(status, action === 'lock' ? cleanOptionalStr(body.reason, 1000) : null, status, status, profileId),
         c.env.DB.prepare('UPDATE members SET is_active = ? WHERE id = ?').bind(status === 'active' ? 1 : 0, profile.member_record_id),
       ]);
-      await audit(c.env.DB, actor, `member.${action}`, 'member_profile', profileId, { memberCode: profile.member_code, reason: cleanOptionalStr(body.reason, 1000) });
-      return c.json({ success: true, message: `Member ${action}ed`.replace('unlocked', 'unlocked').replace('archiveed', 'archived') });
+      await audit(c.env.DB, actor, `member.${action}`, 'member_profile', profileId, { memberCode: profile.member_code, reason: cleanOptionalStr(body.reason, 1000), resultingStatus: status });
+      return c.json({ success: true, message: status === 'pending_activation' ? 'Member remains awaiting their private password setup invitation.' : `Member ${action}ed`.replace('unlocked', 'unlocked').replace('archiveed', 'archived') });
     }
     if (body.roleCode !== undefined) {
       const roleCode = cleanStr(body.roleCode, 2, 50);

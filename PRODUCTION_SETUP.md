@@ -16,11 +16,12 @@ The existing public pages, Admin Core, authentication flow, Member Portal, and s
 ## Membership and account lifecycle
 
 1. A visitor uses **JOIN CODE Rx** with full name, phone, and email.
-2. The request is stored as a **pending application**; public account creation is disabled.
-3. PHANTOM reviews the application and creates the invited member account.
-4. The system assigns a permanent member ID such as `CRX-0001` and creates a one-time activation link.
-5. The member chooses a private password of at least **8 characters**. PHANTOM never receives that password.
-6. Depending on the selected path, the member either receives a direct founding codename or completes the appropriate member/founding codename ballot.
+2. The request is stored as a **pending application**; public account creation and public password setup are disabled.
+3. In **PHANTOM Control → Applications**, PHANTOM uses the single **Approve & invite** action to choose the member responsibility and Code Name path.
+4. That one action approves the application, creates the pending member profile and permanent member ID such as `CRX-0001`, and issues a one-time seven-day password-setup link.
+5. The activation email is sent when EmailJS is configured; PHANTOM can copy the one-time link for secure manual delivery when email delivery is unavailable. The raw link is never stored in D1.
+6. The member chooses a private password of at least **8 characters**. PHANTOM never receives that password. A replacement invitation invalidates the earlier unused link.
+7. Depending on the selected path, the member either receives a direct founding codename or completes the appropriate member/founding codename ballot.
 
 Existing accounts remain available and are safely migrated into a member profile when they next authenticate.
 
@@ -117,19 +118,20 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
 1. `https://coderxsociety.pages.dev/api/health` returns JSON with `status: "ok"`.
 2. A PHANTOM login succeeds quickly after the initial warm-up request.
 3. Password fields expose an accessible Show/Hide control in login, activation, reset, and Admin Security.
-4. A Join application stays pending until PHANTOM creates the invitation.
-5. Test all codename paths:
+4. A Join application stays pending until PHANTOM uses **Approve & invite**; confirm the action creates one `pending_activation` member, emits/copies a one-time password-setup link, and no password is visible to PHANTOM.
+5. Confirm a replacement invitation invalidates the earlier unused link, an unactivated member cannot sign in, and only successful password setup makes the member active.
+6. Test all codename paths:
    - Member Ballot uses only the Member Pool and requires three covered-card reveals before a comparison choice can be claimed.
    - Custom Founding Ballot uses only the Founding Pool.
    - An unfinished ballot returns the member to the full-page ballot after sign-in or navigation.
    - Direct Founding Assignment claims exactly one available founding codename and opens no ballot.
    - Import a comma/newline batch and a JSON codename batch; confirm duplicates are rejected before anything is added.
-6. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
-7. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
-8. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
-9. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
-10. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
-11. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
-12. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
+7. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
+8. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
+9. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
+10. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
+11. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
+12. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
+13. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
 
 > Do not change `public/_redirects` to a catch-all SPA rewrite. The API is routed by Pages Functions, and the Function provides the safe HTML navigation fallback.
