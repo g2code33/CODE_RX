@@ -678,6 +678,8 @@ export const AdminPanel = ({
   activeTab,
   onNavigate,
   onJoin,
+  onOpenCommunity,
+  onHome,
   user,
 }: { 
   siteContent: SiteContent, 
@@ -687,6 +689,8 @@ export const AdminPanel = ({
   activeTab: string;
   onNavigate: (id: string) => void;
   onJoin?: () => void;
+  onOpenCommunity?: () => void;
+  onHome?: () => void;
   user: AuthUser | null;
 }) => {
   const [activeView, setActiveView] = useState<'overview' | 'phantom' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
@@ -948,11 +952,11 @@ export const AdminPanel = ({
   };
 
   if (workspace === 'vault') {
-    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('phantom')} />;
+    return <Vault workspaceMode="phantom" onBack={() => onWorkspaceChange('phantom')} onHome={onHome} />;
   }
 
   if (workspace === 'phantom') {
-    return <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onBack={() => onWorkspaceChange('controller')} />;
+    return <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onBack={() => onWorkspaceChange('controller')} onHome={onHome} onOpenCommunity={onOpenCommunity} />;
   }
 
   if (workspace === 'builder') {
@@ -992,6 +996,11 @@ export const AdminPanel = ({
                   <span>Saved</span>
                 </div>
               )}
+            </div>
+
+            <div className="mb-4 grid gap-2">
+              <button type="button" onClick={() => { setActiveView('overview'); onHome?.(); }} className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-xs font-black uppercase tracking-wide text-slate-600 transition hover:bg-slate-50"><Home className="h-4 w-4 text-emerald-700" />Admin Home</button>
+              {user?.isPhantom && onOpenCommunity && <button type="button" onClick={onOpenCommunity} className="flex w-full items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-left text-xs font-black uppercase tracking-wide text-emerald-800 transition hover:bg-emerald-100"><MessageSquare className="h-4 w-4" />Open Community Hub</button>}
             </div>
 
             <button
@@ -1081,7 +1090,7 @@ export const AdminPanel = ({
 
           {/* Main Admin Content */}
           <main className="flex-grow space-y-6 bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} />}
+            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onHome={onHome} onOpenCommunity={onOpenCommunity} />}
             {activeView === 'overview' && (
               <div className="space-y-6">
                 <div className="flex justify-between items-center">
