@@ -142,7 +142,7 @@ export const db = {
     },
     create: (data: { name: string; email: string; phone: string; role?: string }) =>
       apiCall('/api/members', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: number, data: { points?: number; level?: string; is_active?: boolean }) =>
+    update: (id: number, data: { points?: number; is_active?: boolean }) =>
       apiCall(`/api/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     remove: (id: number) => apiCall(`/api/members/${id}`, { method: 'DELETE' }),
   },

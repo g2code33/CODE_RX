@@ -227,7 +227,7 @@ interface AdminStats {
   unreadContacts: number;
 }
 
-// Members Section — manage members (add, edit points/level, activate/deactivate, remove)
+// Members Section — CAL levels are earned automatically from verified points.
 const MembersSection = () => {
   const [members, setMembers] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -235,295 +235,53 @@ const MembersSection = () => {
   const [newMember, setNewMember] = useState({ name: '', email: '', phone: '', role: 'member' });
 
   const loadMembers = async () => {
-    try {
-      const data = await db.members.getAll();
-      setMembers(data || []);
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err?.message || 'Failed to load members.' });
-    } finally {
-      setIsLoading(false);
-    }
+    try { setMembers(await db.members.getAll()); }
+    catch (err: any) { setMessage({ type: 'error', text: err?.message || 'Failed to load members.' }); }
+    finally { setIsLoading(false); }
   };
+  useEffect(() => { void loadMembers(); }, []);
+  const flash = (type: 'success' | 'error', text: string) => { setMessage({ type, text }); window.setTimeout(() => setMessage(null), 4000); };
 
-  useEffect(() => {
-    loadMembers();
-  }, []);
-
-  const flash = (type: 'success' | 'error', text: string) => {
-    setMessage({ type, text });
-    setTimeout(() => setMessage(null), 4000);
-  };
-
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newMember.name.trim() || !newMember.email.trim()) {
-      flash('error', 'Name and email are required.');
-      return;
-    }
+  const handleAdd = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!newMember.name.trim() || !newMember.email.trim()) { flash('error', 'Name and email are required.'); return; }
     try {
       await db.members.create({ ...newMember, phone: newMember.phone, role: newMember.role });
-      flash('success', `${newMember.name} added as a member.`);
+      flash('success', 'Member invitation created. Open PHANTOM Control to copy or manage the secure password-setup link.');
       setNewMember({ name: '', email: '', phone: '', role: 'member' });
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to add member.');
-    }
+      void loadMembers();
+    } catch (err: any) { flash('error', err?.message || 'Failed to create member invitation.'); }
   };
-
-  const handleSave = async (id: number, updates: { points?: number; level?: string }) => {
-    try {
-      await db.members.update(id, updates);
-      flash('success', 'Member updated.');
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to update member.');
-    }
+  const handleSave = async (id: number, updates: { points?: number }) => {
+    try { await db.members.update(id, updates); flash('success', 'Calcitonin balance updated; the earned level recalculated automatically.'); void loadMembers(); }
+    catch (err: any) { flash('error', err?.message || 'Failed to update Calcitonins.'); }
   };
-
   const handleToggleActive = async (member: any) => {
-    try {
-      await db.members.update(member.id, { is_active: member.is_active === 1 ? false : true });
-      flash('success', member.is_active === 1 ? `${member.name} deactivated.` : `${member.name} activated.`);
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to update member.');
-    }
+    try { await db.members.update(member.id, { is_active: member.is_active === 1 ? false : true }); flash('success', member.is_active === 1 ? `${member.name} deactivated.` : `${member.name} activated.`); void loadMembers(); }
+    catch (err: any) { flash('error', err?.message || 'Failed to update member.'); }
   };
-
   const handleRemove = async (member: any) => {
     if (!window.confirm(`Archive ${member.name}? Their history will be preserved.`)) return;
-    try {
-      await db.members.remove(member.id);
-      flash('success', `${member.name} removed.`);
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to remove member.');
-    }
+    try { await db.members.remove(member.id); flash('success', `${member.name} archived.`); void loadMembers(); }
+    catch (err: any) { flash('error', err?.message || 'Failed to archive member.'); }
   };
 
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-2xl font-black text-slate-900 tracking-tight">Members</h3>
-        <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full">
-          {members.length} Members
-        </span>
-      </div>
-
-      {message && (
-        <div className={`px-4 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 ${
-          message.type === 'success'
-            ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
-            : 'bg-red-50 text-red-600 border border-red-100'
-        }`}>
-          {message.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <X className="w-4 h-4" />}
-          {message.text}
-        </div>
-      )}
-
-      {/* Add member form */}
-      <form onSubmit={handleAdd} className="bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-4">
-        <h4 className="font-black text-slate-900 flex items-center gap-2">
-          <UserPlus className="w-5 h-5 text-emerald-600" /> Add New Member
-        </h4>
-        <div className="grid md:grid-cols-4 gap-3">
-          <input
-            type="text"
-            placeholder="Full name *"
-            value={newMember.name}
-            onChange={(e) => setNewMember({ ...newMember, name: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-            required
-          />
-          <input
-            type="email"
-            placeholder="Email *"
-            value={newMember.email}
-            onChange={(e) => setNewMember({ ...newMember, email: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-            required
-          />
-          <input
-            type="tel"
-            placeholder="Phone"
-            value={newMember.phone}
-            onChange={(e) => setNewMember({ ...newMember, phone: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-          />
-          <select
-            value={newMember.role}
-            onChange={(e) => setNewMember({ ...newMember, role: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-          >
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-          </select>
-        </div>
-        <button
-          type="submit"
-          className="px-6 py-2.5 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-xs uppercase tracking-wide"
-        >
-          Add Member
-        </button>
-      </form>
-
-      {isLoading ? (
-        <div className="text-center py-16">
-          <p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading members…</p>
-        </div>
-      ) : members.length === 0 ? (
-        <div className="text-center py-16">
-          <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Users className="w-10 h-10 text-slate-400" />
-          </div>
-          <p className="text-slate-500 font-medium">No members yet</p>
-          <p className="text-slate-400 text-sm mt-2">Members appear here when applications are approved</p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-2xl border border-slate-100 overflow-x-auto">
-          <table className="w-full min-w-[800px]">
-            <thead className="bg-slate-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Member</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Level</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Calcitonins (CAL)</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {members.map((member) => (
-                <MemberRow
-                  key={member.id}
-                  member={member}
-                  onSave={(updates) => handleSave(member.id, updates)}
-                  onToggleActive={() => handleToggleActive(member)}
-                  onRemove={() => handleRemove(member)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
+  return <div className="space-y-6">
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-2xl font-black tracking-tight text-slate-900">Members</h3><p className="mt-1 text-sm text-slate-500">CAL Levels are earned automatically from verified Calcitonins. Responsibilities and Code Names remain separate.</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-600">{members.length} Members</span></div>
+    {message && <div className={`flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold ${message.type === 'success' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-red-100 bg-red-50 text-red-600'}`}>{message.type === 'success' ? <CheckCircle className="h-4 w-4" /> : <X className="h-4 w-4" />}{message.text}</div>}
+    <form onSubmit={handleAdd} className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-6"><h4 className="flex items-center gap-2 font-black text-slate-900"><UserPlus className="h-5 w-5 text-emerald-600" />Create a member invitation</h4><p className="text-xs leading-5 text-slate-500">The new member receives a secure password-setup invitation. Use PHANTOM Control for Founding Name assignment and full responsibility selection.</p><div className="grid gap-3 md:grid-cols-4"><input type="text" placeholder="Full name *" value={newMember.name} onChange={(event) => setNewMember({ ...newMember, name: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500" required /><input type="email" placeholder="Email *" value={newMember.email} onChange={(event) => setNewMember({ ...newMember, email: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500" required /><input type="tel" placeholder="Phone for sign-in" value={newMember.phone} onChange={(event) => setNewMember({ ...newMember, phone: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500" /><select value={newMember.role} onChange={(event) => setNewMember({ ...newMember, role: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"><option value="member">Member Responsibility</option><option value="custom">Custom Responsibility</option></select></div><button type="submit" className="rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold uppercase tracking-wide text-white transition hover:bg-emerald-700">Create invitation</button></form>
+    {isLoading ? <div className="py-16 text-center"><p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading members…</p></div> : members.length === 0 ? <div className="py-16 text-center"><div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-slate-100"><Users className="h-10 w-10 text-slate-400" /></div><p className="font-medium text-slate-500">No members yet</p><p className="mt-2 text-sm text-slate-400">Members appear after PHANTOM approves invitations.</p></div> : <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white"><table className="w-full min-w-[980px]"><thead className="bg-slate-50"><tr><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Member & identity</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">CAL Level</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Calcitonins</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Responsibility</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Status</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Actions</th></tr></thead><tbody className="divide-y divide-slate-50">{members.map((member) => <MemberRow key={member.id} member={member} onSave={(updates) => handleSave(member.id, updates)} onToggleActive={() => handleToggleActive(member)} onRemove={() => handleRemove(member)} />)}</tbody></table></div>}
+  </div>;
 };
 
-// Single member row with inline level/points editing
-const MemberRow = ({
-  member,
-  onSave,
-  onToggleActive,
-  onRemove,
-}: {
-  member: any;
-  onSave: (updates: { points?: number; level?: string }) => void;
-  onToggleActive: () => void;
-  onRemove: () => void;
-}) => {
-  const [level, setLevel] = useState(member.level || '');
+const MemberRow = ({ member, onSave, onToggleActive, onRemove }: { member: any; onSave: (updates: { points?: number }) => void; onToggleActive: () => void; onRemove: () => void }) => {
   const [points, setPoints] = useState(String(member.points ?? 0));
   const [editing, setEditing] = useState(false);
-
-  return (
-    <tr className={member.is_active === 1 ? '' : 'opacity-50'}>
-      <td className="px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-emerald-500 text-white rounded-xl flex items-center justify-center font-black text-sm flex-shrink-0">
-            {(member.name || '?')[0]}
-          </div>
-          <div>
-            <p className="font-bold text-slate-900">{member.name}</p>
-            <p className="text-xs text-slate-500">{member.email}</p>
-            {member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}
-          </div>
-        </div>
-      </td>
-      <td className="px-6 py-4">
-        {editing ? (
-          <input
-            type="text"
-            value={level}
-            onChange={(e) => setLevel(e.target.value)}
-            className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-40"
-          />
-        ) : (
-          <span className="text-sm font-bold text-slate-700">{member.level || '—'}</span>
-        )}
-      </td>
-      <td className="px-6 py-4">
-        {editing ? (
-          <input
-            type="number"
-            value={points}
-            onChange={(e) => setPoints(e.target.value)}
-            className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-24"
-          />
-        ) : (
-          <span className="text-sm font-black text-emerald-600">{member.points ?? 0} CAL</span>
-        )}
-      </td>
-      <td className="px-6 py-4">
-        <span className={`text-[10px] font-black uppercase px-2 py-1 rounded-full ${
-          member.role === 'admin' ? 'bg-purple-50 text-purple-600' : 'bg-emerald-50 text-emerald-600'
-        }`}>
-          {member.role || 'member'}
-        </span>
-      </td>
-      <td className="px-6 py-4">
-        <span className={`text-[10px] font-black uppercase px-2 py-1 rounded-full ${
-          member.is_active === 1 ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
-        }`}>
-          {member.is_active === 1 ? 'Active' : 'Inactive'}
-        </span>
-      </td>
-      <td className="px-6 py-4">
-        <div className="flex items-center gap-2">
-          {editing ? (
-            <>
-              <button
-                onClick={() => { onSave({ level, points: parseInt(points) || 0 }); setEditing(false); }}
-                className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
-                title="Save"
-              >
-                <CheckCircle className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => setEditing(false)}
-                className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition-all"
-                title="Cancel"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => setEditing(true)}
-              className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg transition-all"
-              title="Edit level & Calcitonins"
-            >
-              <Edit3 className="w-4 h-4" />
-            </button>
-          )}
-          <button
-            onClick={onToggleActive}
-            className="p-2 text-amber-500 hover:bg-amber-50 rounded-lg transition-all"
-            title={member.is_active === 1 ? 'Deactivate' : 'Activate'}
-          >
-            <Power className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onRemove}
-            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-all"
-            title="Archive member"
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
-      </td>
-    </tr>
-  );
+  const pointsValue = Number(member.points || 0);
+  const level = member.calculated_level || { label: member.level || 'Rx Initiate', description: 'Earned from Calcitonins.', minPoints: 0, nextPoints: 50, progressPercent: 0 };
+  const responsibility = member.responsibility || member.role_name || member.role || 'Member Responsibility';
+  const status = member.member_status || (member.is_active === 1 ? 'active' : 'inactive');
+  return <tr className={member.is_active === 1 ? '' : 'opacity-50'}><td className="px-6 py-4"><div className="flex items-center gap-3"><div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-sm font-black text-white">{(member.name || '?')[0]}</div><div><p className="font-bold text-slate-900">{member.name}</p><p className="text-xs text-slate-500">{member.email}</p>{member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}{member.codename && <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{member.codename}</p>}</div></div></td><td className="px-6 py-4"><div className="min-w-40"><p className="text-sm font-black text-slate-800">{level.label}</p><p className="mt-1 text-[10px] leading-4 text-slate-500">{level.description}</p><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Number(level.progressPercent || 0)}%` }} /></div><p className="mt-1 text-[10px] font-bold text-emerald-700">{level.nextPoints ? `${pointsValue.toLocaleString()} / ${Number(level.nextPoints).toLocaleString()} CAL` : 'Highest CAL Level'}</p></div></td><td className="px-6 py-4">{editing ? <input type="number" min="0" max="1000000" value={points} onChange={(event) => setPoints(event.target.value)} className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-black text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500" /> : <span className="text-sm font-black text-emerald-600">{pointsValue.toLocaleString()} CAL</span>}</td><td className="px-6 py-4"><span className="inline-flex rounded-full bg-sky-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-sky-700">{responsibility}</span></td><td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${status === 'active' ? 'bg-emerald-50 text-emerald-600' : status === 'pending_activation' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{status.replace(/_/g, ' ')}</span></td><td className="px-6 py-4"><div className="flex items-center gap-2">{editing ? <><button onClick={() => { onSave({ points: Math.max(0, parseInt(points, 10) || 0) }); setEditing(false); }} className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50" title="Save Calcitonins"><CheckCircle className="h-4 w-4" /></button><button onClick={() => { setPoints(String(member.points ?? 0)); setEditing(false); }} className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100" title="Cancel"><X className="h-4 w-4" /></button></> : <button onClick={() => setEditing(true)} className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100" title="Set Calcitonins; CAL Level updates automatically"><Edit3 className="h-4 w-4" /></button>}<button onClick={onToggleActive} className="rounded-lg p-2 text-amber-500 transition hover:bg-amber-50" title={member.is_active === 1 ? 'Deactivate' : 'Activate'}><Power className="h-4 w-4" /></button><button onClick={onRemove} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50" title="Archive member"><Trash2 className="h-4 w-4" /></button></div></td></tr>;
 };
 
 // Security Section — change the signed-in admin's password

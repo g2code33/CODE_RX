@@ -16,7 +16,7 @@ import { cleanStr, cleanEmail, cleanOptionalStr } from './lib/validate';
 import { checkRateLimit } from './lib/rate-limit';
 import { sendEmail } from './lib/email';
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
-import { adjustMemberScore, awardScoreRule, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
+import { adjustMemberScore, awardScoreRule, calcitoninLevel, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 
@@ -276,11 +276,11 @@ const createMemberAccount = async ({
     if (existingMemberRows[0]) {
       memberRecordId = Number(existingMemberRows[0].id);
       await db.prepare('UPDATE members SET name = ?, phone = ?, phone_login_key = ?, role = ?, level = ?, is_active = 0 WHERE id = ?')
-        .bind(name, phone, normalizedPhone, role.code, role.name, memberRecordId).run();
+        .bind(name, phone, normalizedPhone, role.code, calcitoninLevel(0).label, memberRecordId).run();
     } else {
       const memberResult = await db.prepare(
         'INSERT INTO members (name, email, phone, phone_login_key, role, joined_date, points, level, is_active) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0)'
-      ).bind(name, email, phone, normalizedPhone, role.code, today, role.name).run();
+      ).bind(name, email, phone, normalizedPhone, role.code, today, calcitoninLevel(0).label).run();
       memberRecordId = Number(memberResult.meta.last_row_id);
       createdMemberRecord = true;
     }
@@ -1016,7 +1016,7 @@ const awardAutomaticScore = async ({
       db,
       result.memberProfileId,
       'Calcitonins earned',
-      `You earned ${result.delta} CAL for ${result.label}. Your Calcitonin balance is now ${result.balance} CAL.`,
+      `You earned ${result.delta} CAL for ${result.label}. Your Calcitonin balance is now ${result.balance} CAL (${result.level.label}).`,
       actor,
     );
     await audit(db, actor, 'member.score.automatic_award', 'member_profile', result.memberProfileId, {
@@ -1697,8 +1697,29 @@ app.put('/api/site-content', requireAuth, requireWebsitePermission('content.mana
 // ============================================
 
 app.get('/api/members', requireAuth, requirePhantom, async (c) => {
-  const { results } = await c.env.DB.prepare('SELECT * FROM members ORDER BY created_at DESC, id DESC').all();
-  return c.json({ success: true, data: results });
+  const members = await dbRows<any>(c.env.DB.prepare(
+    `SELECT m.*, mp.id AS member_profile_id, mp.status AS member_status,
+       r.code AS role_code, r.name AS role_name, code.display_name AS codename
+     FROM members m
+     LEFT JOIN member_profiles mp ON mp.member_record_id = m.id
+     LEFT JOIN roles r ON r.id = mp.primary_role_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     ORDER BY m.created_at DESC, m.id DESC`
+  ));
+  return c.json({ success: true, data: members.map((member) => {
+    const points = Number(member.points || 0);
+    const level = calcitoninLevel(points);
+    return {
+      ...member,
+      points,
+      // `members.level` is legacy display data. The public/admin level is now
+      // earned from CAL only and cannot be manually overridden.
+      level: level.label,
+      calculated_level: level,
+      role: member.role_name || member.role || 'Member Responsibility',
+      responsibility: member.role_name || member.role || 'Member Responsibility',
+    };
+  }) });
 });
 
 // Backwards-compatible endpoint used by the existing Admin panel. It now
@@ -1743,10 +1764,7 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
       return c.json({ success: false, error: 'Calcitonins must be a whole number from 0 to 1,000,000 CAL.' }, 400);
     }
     if (body.level !== undefined) {
-      const level = cleanOptionalStr(body.level, 100);
-      if (!level) return c.json({ success: false, error: 'Invalid level' }, 400);
-      fields.push('level = ?');
-      values.push(level);
+      return c.json({ success: false, error: 'Code Rx levels are earned automatically from Calcitonins and cannot be edited manually.' }, 409);
     }
     if (body.is_active !== undefined) {
       fields.push('is_active = ?');
@@ -1774,7 +1792,7 @@ app.patch('/api/members/:id', requireAuth, requirePhantom, async (c) => {
         const reason = cleanOptionalStr(body.scoreReason, 500) || 'Calcitonin balance updated from Admin Core';
         const result = await adjustMemberScore(c.env.DB, { memberProfileId: profileRows[0].id, action: 'set', points: requestedScore, reason, actor });
         if (result) {
-          await notifyMember(c.env.DB, profileRows[0].id, 'Calcitonins updated', `Your Calcitonin balance is now ${result.balance} CAL.`, actor);
+          await notifyMember(c.env.DB, profileRows[0].id, 'Calcitonins updated', `Your Calcitonin balance is now ${result.balance} CAL (${result.level.label}).`, actor);
           await audit(c.env.DB, actor, 'member.score.legacy_set', 'member_profile', profileRows[0].id, { balance: result.balance, reason });
         }
       } else {
@@ -1885,8 +1903,8 @@ app.get('/api/member/me', requireAuth, async (c) => {
      FROM role_permissions WHERE role_id = ? ORDER BY section_slug`
   ).bind(actor.primaryRoleId || 0));
   const [memberRows, canSend] = await Promise.all([
-    dbRows<{ points: number; level: string }>(c.env.DB.prepare(
-      `SELECT m.points, m.level FROM members m
+    dbRows<{ points: number }>(c.env.DB.prepare(
+      `SELECT m.points FROM members m
        JOIN member_profiles mp ON mp.member_record_id = m.id WHERE mp.id = ?`
     ).bind(actor.profileId)),
     canSendNotifications(c.env.DB, actor),
@@ -1899,7 +1917,8 @@ app.get('/api/member/me', requireAuth, async (c) => {
       role: roleRows[0] || null,
       permissions,
       points: Number(memberRows[0]?.points || 0),
-      level: memberRows[0]?.level || 'Code Rx Member',
+      level: calcitoninLevel(Number(memberRows[0]?.points || 0)).label,
+      calculatedLevel: calcitoninLevel(Number(memberRows[0]?.points || 0)),
       canSendNotifications: canSend,
       codenameSession: session ? {
         status: session.status,
@@ -1920,7 +1939,7 @@ app.get('/api/members/leaderboard', requireAuth, async (c) => {
   if (access.response) return access.response;
   const limit = Math.min(25, Math.max(3, Number(c.req.query('limit') || 10)));
   const members = await dbRows<any>(c.env.DB.prepare(
-    `SELECT mp.id AS member_profile_id, mp.member_code, m.points, m.level,
+    `SELECT mp.id AS member_profile_id, mp.member_code, m.points,
        COALESCE(c.display_name, u.name, mp.member_code) AS display_name
      FROM member_profiles mp
      JOIN members m ON m.id = mp.member_record_id
@@ -1934,6 +1953,8 @@ app.get('/api/members/leaderboard', requireAuth, async (c) => {
     ...member,
     rank: index + 1,
     points: Number(member.points || 0),
+    level: calcitoninLevel(Number(member.points || 0)).label,
+    calculatedLevel: calcitoninLevel(Number(member.points || 0)),
   })) });
 });
 
@@ -4609,7 +4630,7 @@ app.get('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
     values.push(status);
   }
   const members = await dbRows<any>(c.env.DB.prepare(
-    `SELECT mp.*, u.name, u.email, m.phone, m.points, m.level, r.code AS role_code, r.name AS role_name, c.display_name AS codename,
+    `SELECT mp.*, u.name, u.email, m.phone, m.points, r.code AS role_code, r.name AS role_name, c.display_name AS codename,
        activation.expires_at AS activation_expires_at, activation.used_at AS activation_used_at,
        activation.revoked_at AS activation_revoked_at, activation.sent_at AS activation_sent_at,
        activation.delivery_status AS activation_delivery_status
@@ -4624,7 +4645,10 @@ app.get('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
      ${where}
      ORDER BY CASE mp.status WHEN 'pending_activation' THEN 0 WHEN 'active' THEN 1 WHEN 'locked' THEN 2 ELSE 3 END, mp.created_at DESC`
   ).bind(...values));
-  return c.json({ success: true, data: members });
+  return c.json({ success: true, data: members.map((member) => {
+    const points = Number(member.points || 0);
+    return { ...member, points, level: calcitoninLevel(points).label, calculated_level: calcitoninLevel(points) };
+  }) });
 });
 
 app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => {
@@ -4691,8 +4715,8 @@ app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => 
       const statements: D1PreparedStatement[] = [
         c.env.DB.prepare('UPDATE member_profiles SET primary_role_id = ?, codename_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .bind(role.id, nextCodenamePath, profileId),
-        c.env.DB.prepare('UPDATE members SET role = ?, level = ? WHERE id = ?')
-          .bind(role.code, role.name, profile.member_record_id),
+        c.env.DB.prepare('UPDATE members SET role = ? WHERE id = ?')
+          .bind(role.code, profile.member_record_id),
         c.env.DB.prepare('INSERT INTO member_role_history (member_profile_id, previous_role_id, new_role_id, changed_by_user_id, reason) VALUES (?, ?, ?, ?, ?)')
           .bind(profileId, profile.primary_role_id, role.id, actor?.userId ?? null, cleanOptionalStr(body.reason, 1000)),
       ];
@@ -4781,7 +4805,7 @@ app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c
       c.env.DB,
       profileId,
       'Calcitonins updated',
-      `${result.delta >= 0 ? '+' : ''}${result.delta} CAL: ${reason}. Your Calcitonin balance is now ${result.balance} CAL.`,
+      `${result.delta >= 0 ? '+' : ''}${result.delta} CAL: ${reason}. Your Calcitonin balance is now ${result.balance} CAL (${result.level.label}).`,
       actor,
     );
     await audit(c.env.DB, actor, 'member.score.manual_adjustment', 'member_profile', profileId, {

@@ -27,6 +27,22 @@ The existing public pages, Admin Core, authentication flow, Member Portal, and s
 
 Existing accounts remain available and are safely migrated into a member profile when they next authenticate.
 
+## Calcitonin (CAL) level system
+
+Levels are earned automatically from verified Calcitonins and cannot be manually assigned:
+
+| CAL balance | Earned level |
+|---:|---|
+| 0–49 | Rx Initiate |
+| 50–149 | Code Explorer |
+| 150–349 | Society Builder |
+| 350–699 | Innovation Specialist |
+| 700–1,199 | Systems Catalyst |
+| 1,200–1,999 | Code Rx Vanguard |
+| 2,000+ | Society Luminary |
+
+Responsibilities remain separate from these CAL Levels and from Code Names / Founding Names.
+
 ## Vault and archive behavior
 
 - PHANTOM enters the full Vault workspace from **PHANTOM Control Center → Open Vault**.
