@@ -89,8 +89,11 @@ function App() {
     try {
       const member = await db.member.me();
       const session = member?.codenameSession;
-      const required = !member?.codename
-        && member?.codenamePath !== 'direct_founding'
+      // A direct PHANTOM assignment is final even if a browser still has an
+      // older open-ballot view cached. Never send GHOST/NEXUS/etc. assignees
+      // back into a comparison ballot.
+      const directlyAssigned = member?.codenamePath === 'direct_founding' || session?.assignmentSource === 'phantom_direct' || Boolean(member?.codename);
+      const required = !directlyAssigned
         && session?.status === 'open'
         && (session?.assignmentSource || 'ballot') === 'ballot';
       setBallotRequired(required);

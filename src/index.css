@@ -1008,6 +1008,22 @@ footer {
   color: #047857;
 }
 
+/* High-contrast primary actions must override the default white mini-button
+   surface. Used for PHANTOM's Approve & invite / Complete invitation action. */
+.mini-button--primary,
+.mini-button--primary:hover {
+  border-color: #047857;
+  background: #059669;
+  color: #ffffff;
+  box-shadow: 0 6px 14px rgba(5, 150, 105, 0.18);
+}
+
+.mini-button--primary:hover {
+  border-color: #065f46;
+  background: #047857;
+  color: #ffffff;
+}
+
 .icon-button {
   display: inline-grid;
   height: 2rem;

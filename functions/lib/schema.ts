@@ -869,7 +869,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-13-member-invitation-flow-15';
+const VAULT_SCHEMA_VERSION = '2026-08-13-canonical-founding-direct-16';
 
 
 const ROLE_SEEDS = [
@@ -1097,6 +1097,39 @@ const normalizeCustomFoundingAvailability = async (db: D1Database) => {
   ).bind(...names).run();
 };
 
+/** Repair older direct founding assignments so an already PHANTOM-assigned
+ * GHOST/NEXUS/FALCON/QUANTUM/MATRIX account never re-enters a ballot because
+ * an old browser/session retained its former Custom/member path. */
+const normalizeDirectFoundingAssignments = async (db: D1Database) => {
+  await db.batch([
+    db.prepare(
+      `UPDATE member_profiles
+       SET codename_path = 'direct_founding', updated_at = CURRENT_TIMESTAMP
+       WHERE id IN (
+         SELECT s.member_profile_id
+         FROM codename_selection_sessions s
+         JOIN codenames c ON c.id = s.claimed_codename_id
+         WHERE s.assignment_source = 'phantom_direct'
+           AND c.status = 'claimed'
+           AND c.claimed_by_member_profile_id = s.member_profile_id
+       )`
+    ),
+    db.prepare(
+      `UPDATE codename_selection_sessions
+       SET status = 'completed', pool = 'founding', current_codename_id = NULL,
+           ballot_slots_json = '[]', revealed_codenames_json = '[]', review_target_count = 0,
+           completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+       WHERE assignment_source = 'phantom_direct'
+         AND EXISTS (
+           SELECT 1 FROM codenames c
+           WHERE c.id = codename_selection_sessions.claimed_codename_id
+             AND c.status = 'claimed'
+             AND c.claimed_by_member_profile_id = codename_selection_sessions.member_profile_id
+         )`
+    ),
+  ]);
+};
+
 const ensurePhantom = async (env: Env) => {
   const db = env.DB;
   const email = String(env.PHANTOM_EMAIL || env.ADMIN_EMAIL || '').trim().toLowerCase();
@@ -1179,6 +1212,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       await seedCommunityMediaSettings(db);
       await ensurePhantom(env);
       await normalizeCustomFoundingAvailability(db);
+      await normalizeDirectFoundingAssignments(db);
       await db.prepare(
         `INSERT INTO system_settings (setting_key, setting_value, updated_at)
          VALUES ('vault_schema_version', ?, CURRENT_TIMESTAMP)
