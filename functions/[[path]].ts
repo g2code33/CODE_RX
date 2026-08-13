@@ -3468,6 +3468,12 @@ app.put('/api/community/groups/:id/members/:profileId', requireAuth, async (c) =
   if ((!manager && !access.actor!.isPhantom) || !communityCanManage(manager, access.actor!, 'admin')) return c.json({ success: false, error: 'Group admin access is required.' }, 403);
   const ownerRows = await dbRows<any>(c.env.DB.prepare("SELECT owner_member_profile_id FROM community_conversations WHERE id = ? AND type = 'group'").bind(conversationId));
   if (!Number.isInteger(profileId) || profileId < 1 || profileId === Number(ownerRows[0]?.owner_member_profile_id || 0)) return c.json({ success: false, error: 'This group owner cannot be changed here.' }, 400);
+  if (body.action === 'assign') {
+    const targetRows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM member_profiles WHERE id = ? AND status = 'active'").bind(profileId));
+    if (!targetRows[0]) return c.json({ success: false, error: 'Choose an active Code Rx member.' }, 404);
+    await c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active') ON CONFLICT(conversation_id, member_profile_id) DO UPDATE SET membership_status = 'active', role = 'member', joined_at = CURRENT_TIMESTAMP").bind(conversationId, profileId).run();
+    return c.json({ success: true, message: 'Member assigned to the group.' });
+  }
   if (body.action === 'remove') {
     await c.env.DB.prepare("UPDATE community_conversation_members SET membership_status = 'removed' WHERE conversation_id = ? AND member_profile_id = ?").bind(conversationId, profileId).run();
     return c.json({ success: true, message: 'Member removed from the group.' });
