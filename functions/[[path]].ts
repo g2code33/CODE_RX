@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Env } from './env';
 import { ensureSchema } from './lib/schema';
-import { hashPassword, verifyPassword, signToken, requireAuth, JwtPayload } from './lib/auth';
+import { bearerToken, hashPassword, verifyPassword, verifyToken, signToken, requireAuth, JwtPayload } from './lib/auth';
 import {
   actorFromContext, allocateDocumentCode, allocateMemberCode, audit, getActor, hasVaultPermission,
   normalizeCodename, randomToken, requirePhantom,
@@ -409,6 +409,167 @@ const requireActiveLegacyAdmin = async (c: any, next: () => Promise<void>) => {
   if (actor.memberStatus !== 'active') return c.json({ success: false, error: 'This administrator account is not active' }, 403);
   if (!actor.isPhantom && actor.userRole !== 'admin') return c.json({ success: false, error: 'Admin access required' }, 403);
   await next();
+};
+
+type CommunityPublicIdentity =
+  | { kind: 'guest'; id: number; actorKey: string; handle: string; status: string }
+  | { kind: 'member'; id: number; actorKey: string; handle: string; actor: FounderActor };
+
+const COMMUNITY_GUEST_HEADER = 'X-Code-Rx-Community-Guest';
+const COMMUNITY_ROLE_RANK: Record<string, number> = { member: 0, moderator: 1, admin: 2, owner: 3 };
+const COMMUNITY_MEDIA_TYPES = new Set(['image', 'video', 'document', 'pdf', 'audio', 'other']);
+
+const communityPublicIdentity = async (c: any): Promise<CommunityPublicIdentity | null> => {
+  const memberToken = bearerToken(c);
+  if (memberToken) {
+    const payload = await verifyToken(memberToken, c.env.JWT_SECRET);
+    if (payload) {
+      const actor = await getActor(c.env.DB, Number(payload.sub));
+      if (actor?.profileId && (actor.isPhantom || actor.memberStatus === 'active')) {
+        return { kind: 'member', id: actor.profileId, actorKey: `member:${actor.profileId}`, handle: actor.codename || actor.memberCode || 'Code Rx Member', actor };
+      }
+    }
+  }
+  const token = cleanStr(c.req.header(COMMUNITY_GUEST_HEADER), 32, 160);
+  if (!token) return null;
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    "SELECT id, public_handle, status FROM community_guest_sessions WHERE token_hash = ? AND expires_at > CURRENT_TIMESTAMP"
+  ).bind(await sha256Hex(token)));
+  const guest = rows[0];
+  if (!guest || guest.status !== 'active') return null;
+  await c.env.DB.prepare('UPDATE community_guest_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(guest.id).run();
+  return { kind: 'guest', id: Number(guest.id), actorKey: `guest:${guest.id}`, handle: guest.public_handle, status: guest.status };
+};
+
+const communityConversationMember = async (db: D1Database, conversationId: number, profileId: number) => {
+  const rows = await dbRows<any>(db.prepare(
+    `SELECT cm.*, c.type, c.status AS conversation_status, c.owner_member_profile_id, c.join_mode, c.pinned_message_id, c.telegram_sync_enabled
+     FROM community_conversation_members cm
+     JOIN community_conversations c ON c.id = cm.conversation_id
+     WHERE cm.conversation_id = ? AND cm.member_profile_id = ? AND cm.membership_status = 'active'`
+  ).bind(conversationId, profileId));
+  return rows[0] || null;
+};
+
+const communityCanManage = (member: any, actor: FounderActor, minimum: 'moderator' | 'admin' | 'owner' = 'moderator') => actor.isPhantom || Number(COMMUNITY_ROLE_RANK[member?.role || 'member'] || 0) >= COMMUNITY_ROLE_RANK[minimum];
+
+const communityConversationSummary = async (db: D1Database, conversationId: number, actor: FounderActor) => {
+  const member = await communityConversationMember(db, conversationId, actor.profileId!);
+  if (!member) return null;
+  const rows = await dbRows<any>(db.prepare(
+    `SELECT c.id, c.type, c.title, c.description, c.image_key, c.join_mode, c.status, c.owner_member_profile_id, c.pinned_message_id, c.telegram_sync_enabled,
+       cm.role, cm.muted_until, cm.last_read_message_id, cm.last_read_at,
+       (SELECT body FROM community_messages m WHERE m.conversation_id = c.id AND m.status = 'active' ORDER BY m.id DESC LIMIT 1) AS latest_body,
+       (SELECT created_at FROM community_messages m WHERE m.conversation_id = c.id AND m.status = 'active' ORDER BY m.id DESC LIMIT 1) AS latest_at,
+       (SELECT COUNT(*) FROM community_messages unread WHERE unread.conversation_id = c.id AND unread.status = 'active' AND unread.id > COALESCE(cm.last_read_message_id, 0) AND unread.sender_member_profile_id != ?) AS unread_count,
+       (SELECT COUNT(*) FROM community_conversation_members gm WHERE gm.conversation_id = c.id AND gm.membership_status = 'active') AS member_count
+     FROM community_conversations c JOIN community_conversation_members cm ON cm.conversation_id = c.id
+     WHERE c.id = ? AND cm.member_profile_id = ?`
+  ).bind(actor.profileId, conversationId, actor.profileId));
+  const summary = rows[0];
+  if (!summary) return null;
+  if (summary.type === 'dm') {
+    const peerRows = await dbRows<any>(db.prepare(
+      `SELECT mp.id, mp.member_code, c.display_name AS codename
+       FROM community_conversation_members cm JOIN member_profiles mp ON mp.id = cm.member_profile_id
+       LEFT JOIN codenames c ON c.claimed_by_member_profile_id = mp.id AND c.status = 'claimed'
+       WHERE cm.conversation_id = ? AND cm.member_profile_id != ? AND cm.membership_status = 'active'`
+    ).bind(conversationId, actor.profileId));
+    const peer = peerRows[0];
+    summary.title = peer?.codename || peer?.member_code || 'Direct message';
+    summary.peer_profile_id = peer?.id || null;
+  }
+  return { ...summary, member_count: Number(summary.member_count || 0), unread_count: Number(summary.unread_count || 0) };
+};
+
+const communityMentionHandles = (body: string) => [...new Set(Array.from(body.matchAll(/@([A-Za-z0-9._-]{2,50})/g), (match) => match[1].toLowerCase()))];
+
+const communityMediaPolicy = async (db: D1Database, area: 'private' | 'public_forum' | 'public_chat', mediaType: string, groupId?: number | null) => {
+  const keys = ['global', area, ...(groupId ? [`group:${groupId}`] : [])];
+  const rows = await dbRows<any>(db.prepare(
+    `SELECT * FROM community_media_settings WHERE scope_key IN (${keys.map(() => '?').join(',')}) AND media_type IN ('all', ?)`
+  ).bind(...keys, mediaType));
+  const ordered = [
+    ['global', 'all'], ['global', mediaType], [area, 'all'], [area, mediaType],
+    ...(groupId ? [[`group:${groupId}`, 'all'], [`group:${groupId}`, mediaType]] : []),
+  ];
+  const globalMaster = rows.find((item) => item.scope_key === 'global' && item.media_type === 'all');
+  // The global all-media switch is a true safety master switch. Area and group
+  // overrides can narrow or permit categories only after PHANTOM enables it.
+  if (globalMaster && Number(globalMaster.enabled) !== 1) return { enabled: false, maxBytes: Number(globalMaster.max_bytes || 0), allowedMimes: [], storageLimitBytes: Number(globalMaster.storage_limit_bytes || 0) };
+  let enabled = false;
+  let maxBytes = 0;
+  let allowedMimes: string[] = [];
+  let storageLimitBytes = 0;
+  for (const [scopeKey, type] of ordered) {
+    const row = rows.find((item) => item.scope_key === scopeKey && item.media_type === type);
+    if (!row) continue;
+    enabled = Number(row.enabled) === 1;
+    if (Number(row.max_bytes || 0) > 0) maxBytes = Number(row.max_bytes);
+    if (Number(row.storage_limit_bytes || 0) > 0) storageLimitBytes = Number(row.storage_limit_bytes);
+    try { const parsed = JSON.parse(row.allowed_mimes_json || '[]'); if (Array.isArray(parsed) && parsed.length) allowedMimes = parsed.map(String); } catch { /* ignore invalid legacy setting */ }
+  }
+  return { enabled, maxBytes, allowedMimes, storageLimitBytes };
+};
+
+const communityMediaTypeFor = (name: string, mime: string) => {
+  const extension = name.split('.').pop()?.toLowerCase() || '';
+  if (mime.startsWith('image/') && ['jpg','jpeg','png','webp','gif'].includes(extension)) return 'image';
+  if (mime.startsWith('video/') && ['mp4','webm','mov'].includes(extension)) return 'video';
+  if (mime.startsWith('audio/') && ['mp3','wav','ogg','m4a'].includes(extension)) return 'audio';
+  if (mime === 'application/pdf' && extension === 'pdf') return 'pdf';
+  if (['txt','doc','docx','csv','md'].includes(extension) && ['text/plain','text/csv','text/markdown','application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(mime)) return 'document';
+  return null;
+};
+
+const telegramApi = async (env: Env, method: string, payload: Record<string, unknown>) => {
+  const token = String(env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token) return null;
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    if (!response.ok) return null;
+    return await response.json() as any;
+  } catch { return null; }
+};
+
+const syncCommunityMessageToTelegram = async (env: Env, db: D1Database, messageId: number, conversationId: number, senderProfileId: number, text: string) => {
+  const conversationRows = await dbRows<any>(db.prepare('SELECT type, telegram_sync_enabled, telegram_chat_id FROM community_conversations WHERE id = ?').bind(conversationId));
+  const conversation = conversationRows[0];
+  if (!conversation || Number(conversation.telegram_sync_enabled) !== 1 || !String(env.TELEGRAM_BOT_TOKEN || '').trim()) return;
+  const targets: string[] = [];
+  if (conversation.type === 'group' && conversation.telegram_chat_id) targets.push(String(conversation.telegram_chat_id));
+  if (conversation.type === 'dm') {
+    const rows = await dbRows<any>(db.prepare(
+      `SELECT tl.telegram_chat_id FROM community_conversation_members cm
+       JOIN community_telegram_links tl ON tl.member_profile_id = cm.member_profile_id AND tl.disconnected_at IS NULL
+       WHERE cm.conversation_id = ? AND cm.membership_status = 'active' AND cm.member_profile_id != ?`
+    ).bind(conversationId, senderProfileId));
+    targets.push(...rows.map((row) => String(row.telegram_chat_id)));
+  }
+  for (const chatId of [...new Set(targets)]) {
+    const sent = await telegramApi(env, 'sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
+    const telegramMessageId = sent?.result?.message_id;
+    if (telegramMessageId !== undefined) await db.prepare(
+      "INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'website_to_telegram')"
+    ).bind(messageId, chatId, String(telegramMessageId)).run();
+  }
+};
+
+const communityFileSignatureValid = async (file: File, mediaType: string) => {
+  const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const starts = (...values: number[]) => values.every((value, index) => bytes[index] === value);
+  if (mediaType === 'image') {
+    if (file.type === 'image/png') return starts(0x89, 0x50, 0x4e, 0x47);
+    if (file.type === 'image/jpeg') return starts(0xff, 0xd8, 0xff);
+    if (file.type === 'image/gif') return starts(0x47, 0x49, 0x46, 0x38);
+    if (file.type === 'image/webp') return starts(0x52, 0x49, 0x46, 0x46) && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+  }
+  if (mediaType === 'pdf') return starts(0x25, 0x50, 0x44, 0x46);
+  // Office/text/audio/video formats vary; their MIME + extension are still
+  // checked server-side and executable extensions are never admitted.
+  return mediaType === 'document' || mediaType === 'audio' || mediaType === 'video';
 };
 
 const vaultAccess = async (c: any, slug: string, action: VaultAction) => {
@@ -1393,6 +1554,7 @@ app.get('/api/member/me', requireAuth, async (c) => {
     success: true,
     data: {
       ...publicActor(actor),
+      memberProfileId: actor.profileId,
       role: roleRows[0] || null,
       permissions,
       points: Number(memberRows[0]?.points || 0),
@@ -1677,6 +1839,260 @@ app.put('/api/phantom/notification-delegates/:id', requireAuth, requirePhantom, 
   await audit(c.env.DB, actor, body.canSend ? 'notification.delegate.enabled' : 'notification.delegate.disabled', 'member_profile', profileId);
   return c.json({ success: true, message: body.canSend ? 'Notification sending enabled for this member.' : 'Notification sending disabled for this member.' });
 });
+
+// ============================================
+// 🌍 COMMUNITY: PUBLIC FORUM + PUBLIC CHAT
+// ============================================
+
+app.post('/api/community/public/enter', async (c) => {
+  if (!checkRateLimit(c, 8, 60)) return c.json({ success: false, error: 'Please wait a moment before trying again.' }, 429);
+  const body = await c.req.json().catch(() => ({}));
+  const email = cleanEmail(body.email);
+  if (!email) return c.json({ success: false, error: 'Enter a valid email address to join the public community.' }, 400);
+  const rawToken = randomToken();
+  const emailHash = await sha256Hex(email);
+  const handle = `Guest-${rawToken.slice(0, 4).toUpperCase()}`;
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
+  const result = await c.env.DB.prepare(
+    `INSERT INTO community_guest_sessions (email, email_hash, public_handle, token_hash, status, expires_at, last_seen_at)
+     VALUES (?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)`
+  ).bind(email, emailHash, handle, await sha256Hex(rawToken), expiresAt).run();
+  return c.json({ success: true, data: { token: rawToken, handle, expiresAt, guestId: Number(result.meta.last_row_id) }, message: 'Welcome to the General Community.' }, 201);
+});
+
+app.get('/api/community/public/threads', async (c) => {
+  const limit = Math.min(40, Math.max(1, Number(c.req.query('limit') || 20)));
+  const query = cleanOptionalStr(c.req.query('q'), 100);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT t.id, t.title, t.body, t.status, t.is_pinned, t.created_at, t.updated_at,
+       COALESCE(g.public_handle, code.display_name, mp.member_code, 'Community participant') AS author_handle,
+       COUNT(p.id) AS reply_count
+     FROM public_forum_threads t
+     LEFT JOIN community_guest_sessions g ON g.id = t.created_by_guest_id
+     LEFT JOIN member_profiles mp ON mp.id = t.created_by_member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     LEFT JOIN public_forum_posts p ON p.thread_id = t.id AND p.status = 'active'
+     WHERE t.status IN ('open','locked') ${query ? "AND (t.title LIKE ? OR t.body LIKE ?)" : ''}
+     GROUP BY t.id
+     ORDER BY t.is_pinned DESC, t.updated_at DESC, t.id DESC LIMIT ?`
+  ).bind(...(query ? [`%${query}%`, `%${query}%`, limit] : [limit])));
+  return c.json({ success: true, data: rows.map((row) => ({ ...row, is_pinned: Number(row.is_pinned) === 1, reply_count: Number(row.reply_count || 0) })) });
+});
+
+app.post('/api/community/public/threads', async (c) => {
+  if (!checkRateLimit(c, 6, 60)) return c.json({ success: false, error: 'You are posting too quickly. Please wait a moment.' }, 429);
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community with your email before posting.' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const title = cleanStr(body.title, 3, 180);
+  const message = cleanStr(body.body, 3, 10_000);
+  if (!title || !message) return c.json({ success: false, error: 'Use a discussion title and message.' }, 400);
+  const result = await c.env.DB.prepare(
+    `INSERT INTO public_forum_threads (title, body, created_by_guest_id, created_by_member_profile_id, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`
+  ).bind(title, message, identity.kind === 'guest' ? identity.id : null, identity.kind === 'member' ? identity.id : null).run();
+  return c.json({ success: true, data: { id: Number(result.meta.last_row_id) }, message: 'Discussion created.' }, 201);
+});
+
+app.get('/api/community/public/threads/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid discussion.' }, 400);
+  const threadRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT t.*, COALESCE(g.public_handle, code.display_name, mp.member_code, 'Community participant') AS author_handle
+     FROM public_forum_threads t
+     LEFT JOIN community_guest_sessions g ON g.id = t.created_by_guest_id
+     LEFT JOIN member_profiles mp ON mp.id = t.created_by_member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     WHERE t.id = ? AND t.status IN ('open','locked')`
+  ).bind(id));
+  const thread = threadRows[0];
+  if (!thread) return c.json({ success: false, error: 'Discussion not found.' }, 404);
+  const posts = await dbRows<any>(c.env.DB.prepare(
+    `SELECT p.*, COALESCE(g.public_handle, code.display_name, mp.member_code, 'Community participant') AS author_handle
+     FROM public_forum_posts p
+     LEFT JOIN community_guest_sessions g ON g.id = p.created_by_guest_id
+     LEFT JOIN member_profiles mp ON mp.id = p.created_by_member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     WHERE p.thread_id = ? AND p.status = 'active' ORDER BY p.created_at ASC, p.id ASC LIMIT 100`
+  ).bind(id));
+  const reactionRows = posts.length ? await dbRows<any>(c.env.DB.prepare(
+    `SELECT post_id, emoji, COUNT(*) AS count FROM public_forum_reactions WHERE post_id IN (${posts.map(() => '?').join(',')}) GROUP BY post_id, emoji`
+  ).bind(...posts.map((post) => post.id))) : [];
+  const reactions = new Map<number, Array<{ emoji: string; count: number }>>();
+  reactionRows.forEach((row) => reactions.set(Number(row.post_id), [...(reactions.get(Number(row.post_id)) || []), { emoji: row.emoji, count: Number(row.count || 0) }]));
+  return c.json({ success: true, data: { thread: { ...thread, is_pinned: Number(thread.is_pinned) === 1 }, posts: posts.map((post) => ({ ...post, reactions: reactions.get(Number(post.id)) || [] })) } });
+});
+
+app.post('/api/community/public/threads/:id/posts', async (c) => {
+  if (!checkRateLimit(c, 12, 60)) return c.json({ success: false, error: 'You are replying too quickly. Please wait a moment.' }, 429);
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community with your email before replying.' }, 401);
+  const threadId = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const message = cleanStr(body.body, 1, 10_000);
+  const parentId = Number.isInteger(Number(body.parentPostId)) ? Number(body.parentPostId) : null;
+  if (!Number.isInteger(threadId) || threadId < 1 || !message) return c.json({ success: false, error: 'Use a valid discussion and reply.' }, 400);
+  const threadRows = await dbRows<any>(c.env.DB.prepare("SELECT status FROM public_forum_threads WHERE id = ?").bind(threadId));
+  if (!threadRows[0] || threadRows[0].status !== 'open') return c.json({ success: false, error: 'This discussion is locked or unavailable.' }, 409);
+  const result = await c.env.DB.prepare(
+    `INSERT INTO public_forum_posts (thread_id, body, parent_post_id, created_by_guest_id, created_by_member_profile_id)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(threadId, message, parentId, identity.kind === 'guest' ? identity.id : null, identity.kind === 'member' ? identity.id : null).run();
+  await c.env.DB.prepare('UPDATE public_forum_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(threadId).run();
+  return c.json({ success: true, data: { id: Number(result.meta.last_row_id) }, message: 'Reply posted.' }, 201);
+});
+
+app.patch('/api/community/public/threads/:id', async (c) => {
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community before editing.' }, 401);
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM public_forum_threads WHERE id = ? AND status IN (\'open\',\'locked\')').bind(id));
+  const thread = rows[0];
+  if (!thread) return c.json({ success: false, error: 'Discussion not found.' }, 404);
+  const owner = identity.kind === 'guest' ? Number(thread.created_by_guest_id) === identity.id : Number(thread.created_by_member_profile_id) === identity.id;
+  if (!owner && !(identity.kind === 'member' && identity.actor.isPhantom)) return c.json({ success: false, error: 'You cannot edit this discussion.' }, 403);
+  const title = body.title === undefined ? thread.title : cleanStr(body.title, 3, 180);
+  const text = body.body === undefined ? thread.body : cleanStr(body.body, 3, 10_000);
+  if (!title || !text) return c.json({ success: false, error: 'Use a valid discussion title and message.' }, 400);
+  await c.env.DB.prepare('UPDATE public_forum_threads SET title = ?, body = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(title, text, id).run();
+  return c.json({ success: true, message: 'Discussion updated.' });
+});
+
+app.delete('/api/community/public/threads/:id', async (c) => {
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community before deleting.' }, 401);
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM public_forum_threads WHERE id = ? AND status IN (\'open\',\'locked\')').bind(id));
+  const thread = rows[0];
+  if (!thread) return c.json({ success: false, error: 'Discussion not found.' }, 404);
+  const owner = identity.kind === 'guest' ? Number(thread.created_by_guest_id) === identity.id : Number(thread.created_by_member_profile_id) === identity.id;
+  if (!owner && !(identity.kind === 'member' && identity.actor.isPhantom)) return c.json({ success: false, error: 'You cannot delete this discussion.' }, 403);
+  await c.env.DB.prepare("UPDATE public_forum_threads SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run();
+  return c.json({ success: true, message: 'Discussion deleted.' });
+});
+
+app.patch('/api/community/public/posts/:id', async (c) => {
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community before editing.' }, 401);
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const text = cleanStr(body.body, 1, 10_000);
+  const rows = await dbRows<any>(c.env.DB.prepare("SELECT * FROM public_forum_posts WHERE id = ? AND status = 'active'").bind(id));
+  const post = rows[0];
+  if (!post || !text) return c.json({ success: false, error: 'Valid post content is required.' }, 400);
+  const owner = identity.kind === 'guest' ? Number(post.created_by_guest_id) === identity.id : Number(post.created_by_member_profile_id) === identity.id;
+  if (!owner && !(identity.kind === 'member' && identity.actor.isPhantom)) return c.json({ success: false, error: 'You cannot edit this post.' }, 403);
+  await c.env.DB.prepare('UPDATE public_forum_posts SET body = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(text, id).run();
+  return c.json({ success: true, message: 'Post updated.' });
+});
+
+app.delete('/api/community/public/posts/:id', async (c) => {
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community before deleting.' }, 401);
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare("SELECT * FROM public_forum_posts WHERE id = ? AND status = 'active'").bind(id));
+  const post = rows[0];
+  if (!post) return c.json({ success: false, error: 'Post not found.' }, 404);
+  const owner = identity.kind === 'guest' ? Number(post.created_by_guest_id) === identity.id : Number(post.created_by_member_profile_id) === identity.id;
+  if (!owner && !(identity.kind === 'member' && identity.actor.isPhantom)) return c.json({ success: false, error: 'You cannot delete this post.' }, 403);
+  await c.env.DB.prepare("UPDATE public_forum_posts SET status = 'deleted', body = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).run();
+  return c.json({ success: true, message: 'Post deleted.' });
+});
+
+app.put('/api/community/public/posts/:id/reactions', async (c) => {
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community before reacting.' }, 401);
+  const postId = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const emoji = cleanStr(body.emoji, 1, 16);
+  if (!Number.isInteger(postId) || postId < 1 || !emoji) return c.json({ success: false, error: 'Choose a valid reaction.' }, 400);
+  const existing = await dbRows<any>(c.env.DB.prepare('SELECT id FROM public_forum_reactions WHERE post_id = ? AND actor_key = ? AND emoji = ?').bind(postId, identity.actorKey, emoji));
+  if (existing[0]) await c.env.DB.prepare('DELETE FROM public_forum_reactions WHERE id = ?').bind(existing[0].id).run();
+  else await c.env.DB.prepare('INSERT INTO public_forum_reactions (post_id, actor_key, emoji) VALUES (?, ?, ?)').bind(postId, identity.actorKey, emoji).run();
+  return c.json({ success: true, data: { active: !existing[0] } });
+});
+
+app.post('/api/community/public/reports', async (c) => {
+  if (!checkRateLimit(c, 4, 60)) return c.json({ success: false, error: 'Please wait before sending another report.' }, 429);
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community before reporting content.' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const reason = cleanStr(body.reason, 3, 1000);
+  const threadId = Number.isInteger(Number(body.threadId)) ? Number(body.threadId) : null;
+  const postId = Number.isInteger(Number(body.postId)) ? Number(body.postId) : null;
+  if (!reason || (!threadId && !postId)) return c.json({ success: false, error: 'Choose content and provide a report reason.' }, 400);
+  await c.env.DB.prepare('INSERT INTO public_forum_reports (thread_id, post_id, reporter_key, reason) VALUES (?, ?, ?, ?)').bind(threadId, postId, identity.actorKey, reason).run();
+  return c.json({ success: true, message: 'Report received for PHANTOM review.' }, 201);
+});
+
+app.get('/api/community/public/chat', async (c) => {
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') || 50)));
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT m.*, COALESCE(g.public_handle, code.display_name, mp.member_code, 'Community participant') AS author_handle,
+       CASE WHEN m.created_by_member_profile_id IS NULL THEN 0 ELSE 1 END AS is_member
+     FROM public_chat_messages m
+     LEFT JOIN community_guest_sessions g ON g.id = m.created_by_guest_id
+     LEFT JOIN member_profiles mp ON mp.id = m.created_by_member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     WHERE m.status = 'active' ORDER BY m.id DESC LIMIT ?`
+  ).bind(limit));
+  return c.json({ success: true, data: rows.reverse().map((row) => ({ ...row, is_member: Number(row.is_member) === 1 })) });
+});
+
+app.post('/api/community/public/chat', async (c) => {
+  if (!checkRateLimit(c, 10, 60)) return c.json({ success: false, error: 'You are chatting too quickly. Please wait a moment.' }, 429);
+  const identity = await communityPublicIdentity(c);
+  if (!identity) return c.json({ success: false, error: 'Enter the public community with your email before chatting.' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const message = cleanStr(body.body, 1, 2_000);
+  if (!message) return c.json({ success: false, error: 'Write a message before sending.' }, 400);
+  const result = await c.env.DB.prepare(
+    'INSERT INTO public_chat_messages (body, created_by_guest_id, created_by_member_profile_id) VALUES (?, ?, ?)'
+  ).bind(message, identity.kind === 'guest' ? identity.id : null, identity.kind === 'member' ? identity.id : null).run();
+  return c.json({ success: true, data: { id: Number(result.meta.last_row_id) }, message: 'Message sent.' }, 201);
+});
+
+app.get('/api/phantom/community/public/reports', requireAuth, requirePhantom, async (c) => {
+  const reports = await dbRows<any>(c.env.DB.prepare("SELECT * FROM public_forum_reports WHERE status IN ('open','reviewed') ORDER BY created_at ASC LIMIT 200"));
+  return c.json({ success: true, data: reports });
+});
+
+app.patch('/api/phantom/community/public/reports/:id', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  if (!Number.isInteger(id) || !['reviewed','resolved','dismissed'].includes(body.status)) return c.json({ success: false, error: 'Choose a valid report status.' }, 400);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare('UPDATE public_forum_reports SET status = ?, reviewed_by_user_id = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, actor?.userId ?? null, id).run();
+  return c.json({ success: true, message: 'Public report updated.' });
+});
+
+app.patch('/api/phantom/community/public/threads/:id', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (body.pinned !== undefined) { fields.push('is_pinned = ?'); values.push(body.pinned ? 1 : 0); }
+  if (body.status !== undefined && ['open','locked','archived','deleted'].includes(body.status)) { fields.push('status = ?'); values.push(body.status); }
+  if (!Number.isInteger(id) || !fields.length) return c.json({ success: false, error: 'Choose a valid public discussion moderation action.' }, 400);
+  fields.push('updated_at = CURRENT_TIMESTAMP'); values.push(id);
+  await c.env.DB.prepare(`UPDATE public_forum_threads SET ${fields.join(', ')} WHERE id = ?`).bind(...values).run();
+  await audit(c.env.DB, await actorFromContext(c), 'community.public_thread.moderated', 'public_forum_thread', id, { fields: fields.slice(0, -1) });
+  return c.json({ success: true, message: 'Public discussion moderated.' });
+});
+
+app.patch('/api/phantom/community/public/posts/:id', requireAuth, requirePhantom, async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  if (!Number.isInteger(id) || !['active','hidden','deleted'].includes(body.status)) return c.json({ success: false, error: 'Choose a valid public post moderation action.' }, 400);
+  await c.env.DB.prepare("UPDATE public_forum_posts SET status = ?, body = CASE WHEN ? = 'deleted' THEN '' ELSE body END, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.status, body.status, id).run();
+  await audit(c.env.DB, await actorFromContext(c), 'community.public_post.moderated', 'public_forum_post', id, { status: body.status });
+  return c.json({ success: true, message: 'Public post moderated.' });
+});
+
+// ============================================
+// 🪪 MEMBER IDENTITY + CODENAME BALLOT
+// ============================================
 
 app.get('/api/codenames/ballot', requireAuth, async (c) => {
   const access = await requireActiveActor(c);
@@ -2841,6 +3257,654 @@ app.post('/api/vault/meetings', requireAuth, async (c) => {
 // ============================================
 // 👁️ PHANTOM CONTROL CENTER
 // ============================================
+
+// ============================================
+// 🔐 COMMUNITY: PRIVATE CODE RX MESSAGING
+// ============================================
+
+app.get('/api/community/members', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const query = cleanOptionalStr(c.req.query('q'), 80)?.toLowerCase();
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT mp.id, mp.member_code, c.display_name AS codename,
+       CASE WHEN mp.id = ? THEN 1 ELSE 0 END AS is_self
+     FROM member_profiles mp
+     LEFT JOIN codenames c ON c.claimed_by_member_profile_id = mp.id AND c.status = 'claimed'
+     WHERE mp.status = 'active' AND mp.id != ? ${query ? "AND (LOWER(COALESCE(c.display_name, mp.member_code)) LIKE ?)" : ''}
+     ORDER BY CASE WHEN c.display_name IS NULL THEN 1 ELSE 0 END, c.display_name COLLATE NOCASE, mp.member_code LIMIT 100`
+  ).bind(...(query ? [access.actor!.profileId, access.actor!.profileId, `%${query}%`] : [access.actor!.profileId, access.actor!.profileId])));
+  return c.json({ success: true, data: rows.map((row) => ({ id: Number(row.id), codename: row.codename || row.member_code, memberCode: row.member_code, isSelf: Number(row.is_self) === 1 })) });
+});
+
+app.get('/api/community/conversations', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const rows = await dbRows<{ conversation_id: number }>(c.env.DB.prepare(
+    `SELECT conversation_id FROM community_conversation_members
+     WHERE member_profile_id = ? AND membership_status = 'active' ORDER BY joined_at DESC LIMIT 100`
+  ).bind(access.actor!.profileId));
+  const conversations = (await Promise.all(rows.map((row) => communityConversationSummary(c.env.DB, row.conversation_id, access.actor!)))).filter(Boolean);
+  return c.json({ success: true, data: conversations.sort((left: any, right: any) => String(right.latest_at || '').localeCompare(String(left.latest_at || ''))) });
+});
+
+app.post('/api/community/dms/:profileId', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const targetId = Number(c.req.param('profileId'));
+  if (!Number.isInteger(targetId) || targetId < 1 || targetId === access.actor!.profileId) return c.json({ success: false, error: 'Choose another active Code Rx member to message.' }, 400);
+  const targetRows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM member_profiles WHERE id = ? AND status = 'active'").bind(targetId));
+  if (!targetRows[0]) return c.json({ success: false, error: 'That Code Rx member is unavailable for messaging.' }, 404);
+  const directKey = [Number(access.actor!.profileId), targetId].sort((a, b) => a - b).join(':');
+  let rows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM community_conversations WHERE type = 'dm' AND direct_key = ?").bind(directKey));
+  let conversationId = Number(rows[0]?.id || 0);
+  if (!conversationId) {
+    const created = await c.env.DB.prepare(
+      "INSERT INTO community_conversations (type, direct_key, join_mode, status, owner_member_profile_id, telegram_sync_enabled, updated_at) VALUES ('dm', ?, 'invite', 'active', ?, 1, CURRENT_TIMESTAMP)"
+    ).bind(directKey, access.actor!.profileId).run();
+    conversationId = Number(created.meta.last_row_id);
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active')").bind(conversationId, access.actor!.profileId),
+      c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active')").bind(conversationId, targetId),
+    ]);
+  }
+  const conversation = await communityConversationSummary(c.env.DB, conversationId, access.actor!);
+  return c.json({ success: true, data: conversation }, 201);
+});
+
+app.get('/api/community/groups', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT c.id, c.title, c.description, c.image_key, c.join_mode, c.status, c.owner_member_profile_id, c.telegram_sync_enabled, c.telegram_chat_id,
+       (SELECT COUNT(*) FROM community_conversation_members cm WHERE cm.conversation_id = c.id AND cm.membership_status = 'active') AS member_count,
+       EXISTS(SELECT 1 FROM community_conversation_members mine WHERE mine.conversation_id = c.id AND mine.member_profile_id = ? AND mine.membership_status = 'active') AS is_member,
+       (SELECT status FROM community_group_join_requests r WHERE r.conversation_id = c.id AND r.member_profile_id = ?) AS request_status
+     FROM community_conversations c
+     WHERE c.type = 'group' AND c.status IN ('active','locked')
+       AND (? = 1 OR c.join_mode != 'invite' OR EXISTS(SELECT 1 FROM community_conversation_members mine WHERE mine.conversation_id = c.id AND mine.member_profile_id = ? AND mine.membership_status = 'active'))
+     ORDER BY c.updated_at DESC, c.id DESC LIMIT 100`
+  ).bind(access.actor!.profileId, access.actor!.profileId, access.actor!.isPhantom ? 1 : 0, access.actor!.profileId));
+  return c.json({ success: true, data: rows.map((row) => ({ ...row, member_count: Number(row.member_count || 0), is_member: Number(row.is_member) === 1, telegram_sync_enabled: Number(row.telegram_sync_enabled) === 1 })) });
+});
+
+app.post('/api/community/groups', requireAuth, requirePhantom, async (c) => {
+  const actor = await actorFromContext(c);
+  const body = await c.req.json().catch(() => ({}));
+  const title = cleanStr(body.title, 3, 120);
+  const description = cleanOptionalStr(body.description, 2_000) || '';
+  const joinMode = body.joinMode === 'open' || body.joinMode === 'approval' || body.joinMode === 'assigned' ? body.joinMode : 'invite';
+  if (!title || !actor?.profileId) return c.json({ success: false, error: 'Use a group name with at least three characters.' }, 400);
+  const created = await c.env.DB.prepare(
+    "INSERT INTO community_conversations (type, title, description, join_mode, status, owner_member_profile_id, telegram_sync_enabled, updated_at) VALUES ('group', ?, ?, ?, 'active', ?, ?, CURRENT_TIMESTAMP)"
+  ).bind(title, description, joinMode, actor.profileId, body.telegramSyncEnabled ? 1 : 0).run();
+  const conversationId = Number(created.meta.last_row_id);
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'owner', 'active')").bind(conversationId, actor.profileId),
+    c.env.DB.prepare("INSERT INTO community_messages (conversation_id, message_type, body, source) VALUES (?, 'system', ?, 'system')").bind(conversationId, 'PHANTOM created this official Code Rx group.'),
+  ]);
+  const assigned = Array.isArray(body.memberProfileIds) ? [...new Set(body.memberProfileIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0 && value !== actor.profileId))] : [];
+  if (assigned.length) await c.env.DB.batch(assigned.map((profileId) => c.env.DB.prepare(
+    "INSERT OR IGNORE INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active')"
+  ).bind(conversationId, profileId)));
+  await audit(c.env.DB, actor, 'community.group.created', 'community_conversation', conversationId, { title, joinMode, assignedCount: assigned.length });
+  const summary = await communityConversationSummary(c.env.DB, conversationId, actor);
+  return c.json({ success: true, data: summary }, 201);
+});
+
+app.get('/api/community/groups/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid group.' }, 400);
+  const groupRows = await dbRows<any>(c.env.DB.prepare("SELECT * FROM community_conversations WHERE id = ? AND type = 'group' AND status IN ('active','locked')").bind(id));
+  const group = groupRows[0];
+  if (!group) return c.json({ success: false, error: 'Group not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, id, access.actor!.profileId!);
+  if (!member && !access.actor!.isPhantom && group.join_mode === 'invite') return c.json({ success: false, error: 'This is an invite-only group.' }, 403);
+  const memberRows = (member || access.actor!.isPhantom) ? await dbRows<any>(c.env.DB.prepare(
+    `SELECT cm.member_profile_id, cm.role, cm.membership_status, cm.joined_at, mp.member_code, code.display_name AS codename
+     FROM community_conversation_members cm JOIN member_profiles mp ON mp.id = cm.member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     WHERE cm.conversation_id = ? AND cm.membership_status = 'active'
+     ORDER BY CASE cm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'moderator' THEN 2 ELSE 3 END, code.display_name`
+  ).bind(id)) : [];
+  return c.json({ success: true, data: { ...group, is_member: Boolean(member), my_role: member?.role || null, members: memberRows.map((row) => ({ id: row.member_profile_id, codename: row.codename || row.member_code, role: row.role, joined_at: row.joined_at })) } });
+});
+
+app.post('/api/community/groups/:id/join', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const groupRows = await dbRows<any>(c.env.DB.prepare("SELECT * FROM community_conversations WHERE id = ? AND type = 'group' AND status = 'active'").bind(id));
+  const group = groupRows[0];
+  if (!group) return c.json({ success: false, error: 'Active group not found.' }, 404);
+  const existing = await communityConversationMember(c.env.DB, id, access.actor!.profileId!);
+  if (existing) return c.json({ success: true, data: { status: 'joined' }, message: 'You are already in this group.' });
+  if (group.join_mode === 'open') {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active')").bind(id, access.actor!.profileId),
+      c.env.DB.prepare("INSERT INTO community_messages (conversation_id, message_type, body, source) VALUES (?, 'system', ?, 'system')").bind(id, `${access.actor!.codename || access.actor!.memberCode || 'A member'} joined the group.`),
+    ]);
+    return c.json({ success: true, data: { status: 'joined' }, message: 'You joined the group.' });
+  }
+  if (group.join_mode === 'approval') {
+    await c.env.DB.prepare(
+      `INSERT INTO community_group_join_requests (conversation_id, member_profile_id, message, status, created_at)
+       VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+       ON CONFLICT(conversation_id, member_profile_id) DO UPDATE SET message = excluded.message, status = 'pending', created_at = CURRENT_TIMESTAMP, reviewed_by_member_profile_id = NULL, reviewed_at = NULL`
+    ).bind(id, access.actor!.profileId, cleanOptionalStr(body.message, 1000)).run();
+    return c.json({ success: true, data: { status: 'pending' }, message: 'Join request sent.' });
+  }
+  return c.json({ success: false, error: group.join_mode === 'assigned' ? 'PHANTOM assigns members to this group.' : 'This group is invite-only.' }, 403);
+});
+
+app.get('/api/community/groups/:id/requests', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const member = await communityConversationMember(c.env.DB, id, access.actor!.profileId!);
+  if ((!member && !access.actor!.isPhantom) || !communityCanManage(member, access.actor!, 'admin')) return c.json({ success: false, error: 'Group admin access is required.' }, 403);
+  const requests = await dbRows<any>(c.env.DB.prepare(
+    `SELECT r.*, mp.member_code, code.display_name AS codename
+     FROM community_group_join_requests r JOIN member_profiles mp ON mp.id = r.member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     WHERE r.conversation_id = ? AND r.status = 'pending' ORDER BY r.created_at ASC`
+  ).bind(id));
+  return c.json({ success: true, data: requests.map((row) => ({ ...row, codename: row.codename || row.member_code })) });
+});
+
+app.post('/api/community/groups/:id/requests/:requestId', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const requestId = Number(c.req.param('requestId'));
+  const body = await c.req.json().catch(() => ({}));
+  const action = body.action === 'approve' ? 'approve' : body.action === 'reject' ? 'reject' : null;
+  if (!Number.isInteger(conversationId) || !Number.isInteger(requestId) || !action) return c.json({ success: false, error: 'Choose a valid join request action.' }, 400);
+  const manager = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if ((!manager && !access.actor!.isPhantom) || !communityCanManage(manager, access.actor!, 'admin')) return c.json({ success: false, error: 'Group admin access is required.' }, 403);
+  const requestRows = await dbRows<any>(c.env.DB.prepare("SELECT * FROM community_group_join_requests WHERE id = ? AND conversation_id = ? AND status = 'pending'").bind(requestId, conversationId));
+  const request = requestRows[0];
+  if (!request) return c.json({ success: false, error: 'Pending join request not found.' }, 404);
+  await c.env.DB.prepare('UPDATE community_group_join_requests SET status = ?, reviewed_by_member_profile_id = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').bind(action === 'approve' ? 'approved' : 'rejected', access.actor!.profileId, requestId).run();
+  if (action === 'approve') await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active') ON CONFLICT(conversation_id, member_profile_id) DO UPDATE SET membership_status = 'active', role = 'member', joined_at = CURRENT_TIMESTAMP").bind(conversationId, request.member_profile_id),
+    c.env.DB.prepare("INSERT INTO community_messages (conversation_id, message_type, body, source) VALUES (?, 'system', ?, 'system')").bind(conversationId, 'A join request was approved.'),
+  ]);
+  return c.json({ success: true, message: action === 'approve' ? 'Member added to the group.' : 'Join request rejected.' });
+});
+
+app.patch('/api/community/groups/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const member = await communityConversationMember(c.env.DB, id, access.actor!.profileId!);
+  if ((!member && !access.actor!.isPhantom) || !communityCanManage(member, access.actor!, 'admin')) return c.json({ success: false, error: 'Group admin access is required.' }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (body.title !== undefined) { const title = cleanStr(body.title, 3, 120); if (!title) return c.json({ success: false, error: 'Use a valid group name.' }, 400); fields.push('title = ?'); values.push(title); }
+  if (body.description !== undefined) { fields.push('description = ?'); values.push(cleanOptionalStr(body.description, 2000) || ''); }
+  if (body.joinMode !== undefined) { if (!['invite','open','approval','assigned'].includes(body.joinMode)) return c.json({ success: false, error: 'Choose a valid join method.' }, 400); fields.push('join_mode = ?'); values.push(body.joinMode); }
+  if (body.status !== undefined) { if (!['active','locked','archived'].includes(body.status)) return c.json({ success: false, error: 'Choose a valid group status.' }, 400); fields.push('status = ?'); values.push(body.status); }
+  if (access.actor!.isPhantom && body.telegramSyncEnabled !== undefined) { fields.push('telegram_sync_enabled = ?'); values.push(body.telegramSyncEnabled ? 1 : 0); }
+  if (access.actor!.isPhantom && body.telegramChatId !== undefined) { const chatId = cleanOptionalStr(body.telegramChatId, 80); fields.push('telegram_chat_id = ?'); values.push(chatId); }
+  if (!fields.length) return c.json({ success: false, error: 'No group changes supplied.' }, 400);
+  fields.push('updated_at = CURRENT_TIMESTAMP'); values.push(id);
+  await c.env.DB.prepare(`UPDATE community_conversations SET ${fields.join(', ')} WHERE id = ? AND type = 'group'`).bind(...values).run();
+  await audit(c.env.DB, access.actor, 'community.group.updated', 'community_conversation', id, { fields: fields.slice(0, -1) });
+  return c.json({ success: true, message: 'Group updated.' });
+});
+
+app.put('/api/community/groups/:id/members/:profileId', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const profileId = Number(c.req.param('profileId'));
+  const body = await c.req.json().catch(() => ({}));
+  const manager = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if ((!manager && !access.actor!.isPhantom) || !communityCanManage(manager, access.actor!, 'admin')) return c.json({ success: false, error: 'Group admin access is required.' }, 403);
+  const ownerRows = await dbRows<any>(c.env.DB.prepare("SELECT owner_member_profile_id FROM community_conversations WHERE id = ? AND type = 'group'").bind(conversationId));
+  if (!Number.isInteger(profileId) || profileId < 1 || profileId === Number(ownerRows[0]?.owner_member_profile_id || 0)) return c.json({ success: false, error: 'This group owner cannot be changed here.' }, 400);
+  if (body.action === 'remove') {
+    await c.env.DB.prepare("UPDATE community_conversation_members SET membership_status = 'removed' WHERE conversation_id = ? AND member_profile_id = ?").bind(conversationId, profileId).run();
+    return c.json({ success: true, message: 'Member removed from the group.' });
+  }
+  if (!['admin','moderator','member'].includes(body.role)) return c.json({ success: false, error: 'Choose a valid group role.' }, 400);
+  await c.env.DB.prepare("UPDATE community_conversation_members SET role = ? WHERE conversation_id = ? AND member_profile_id = ? AND membership_status = 'active'").bind(body.role, conversationId, profileId).run();
+  return c.json({ success: true, message: 'Group role updated.' });
+});
+
+app.get('/api/community/conversations/:id/messages', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const limit = Math.min(80, Math.max(1, Number(c.req.query('limit') || 40)));
+  const before = Number.isInteger(Number(c.req.query('before'))) ? Number(c.req.query('before')) : Number.MAX_SAFE_INTEGER;
+  const member = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if (!member && !access.actor!.isPhantom) return c.json({ success: false, error: 'You are not authorized to view this conversation.' }, 403);
+  const messages = await dbRows<any>(c.env.DB.prepare(
+    `SELECT m.*, COALESCE(sender_code.display_name, sender.member_code, 'Code Rx') AS sender_codename,
+       reply.body AS reply_body, COALESCE(reply_code.display_name, reply_sender.member_code) AS reply_sender_codename
+     FROM community_messages m
+     LEFT JOIN member_profiles sender ON sender.id = m.sender_member_profile_id
+     LEFT JOIN codenames sender_code ON sender_code.claimed_by_member_profile_id = sender.id AND sender_code.status = 'claimed'
+     LEFT JOIN community_messages reply ON reply.id = m.reply_to_message_id
+     LEFT JOIN member_profiles reply_sender ON reply_sender.id = reply.sender_member_profile_id
+     LEFT JOIN codenames reply_code ON reply_code.claimed_by_member_profile_id = reply_sender.id AND reply_code.status = 'claimed'
+     WHERE m.conversation_id = ? AND m.id < ? AND m.status = 'active'
+     ORDER BY m.id DESC LIMIT ?`
+  ).bind(conversationId, before, limit));
+  const ordered = messages.reverse();
+  const ids = ordered.map((message) => Number(message.id));
+  const reactionRows = ids.length ? await dbRows<any>(c.env.DB.prepare(
+    `SELECT message_id, emoji, COUNT(*) AS count, SUM(CASE WHEN member_profile_id = ? THEN 1 ELSE 0 END) AS mine
+     FROM community_message_reactions WHERE message_id IN (${ids.map(() => '?').join(',')}) GROUP BY message_id, emoji`
+  ).bind(access.actor!.profileId, ...ids)) : [];
+  const attachmentRows = ids.length ? await dbRows<any>(c.env.DB.prepare(
+    `SELECT id, message_id, original_name, media_type, mime_type, size_bytes FROM community_message_attachments
+     WHERE message_id IN (${ids.map(() => '?').join(',')}) AND status = 'active'`
+  ).bind(...ids)) : [];
+  const reactions = new Map<number, any[]>();
+  reactionRows.forEach((row) => reactions.set(Number(row.message_id), [...(reactions.get(Number(row.message_id)) || []), { emoji: row.emoji, count: Number(row.count || 0), mine: Number(row.mine || 0) > 0 }]));
+  const attachments = new Map<number, any[]>();
+  attachmentRows.forEach((row) => attachments.set(Number(row.message_id), [...(attachments.get(Number(row.message_id)) || []), row]));
+  return c.json({ success: true, data: { messages: ordered.map((message) => ({ ...message, reactions: reactions.get(Number(message.id)) || [], attachments: attachments.get(Number(message.id)) || [] })), hasMore: messages.length === limit } });
+});
+
+app.post('/api/community/conversations/:id/messages', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 30, 60)) return c.json({ success: false, error: 'You are sending messages too quickly. Please wait a moment.' }, 429);
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const member = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if (!member) return c.json({ success: false, error: 'You are not authorized to send to this conversation.' }, 403);
+  if (member.conversation_status !== 'active' && !communityCanManage(member, access.actor!)) return c.json({ success: false, error: 'This conversation is locked.' }, 409);
+  const body = await c.req.json().catch(() => ({}));
+  const text = cleanStr(body.body, 1, 10_000);
+  const requestedType = body.messageType === 'announcement' ? 'announcement' : 'text';
+  if (!text) return c.json({ success: false, error: 'Write a message before sending.' }, 400);
+  if (requestedType === 'announcement' && (!member.type || member.type !== 'group' || !communityCanManage(member, access.actor!, 'admin'))) return c.json({ success: false, error: 'Only a group admin can send an announcement.' }, 403);
+  const replyId = Number.isInteger(Number(body.replyToMessageId)) ? Number(body.replyToMessageId) : null;
+  if (replyId) {
+    const reply = await dbRows<any>(c.env.DB.prepare('SELECT id FROM community_messages WHERE id = ? AND conversation_id = ? AND status = \'active\'').bind(replyId, conversationId));
+    if (!reply[0]) return c.json({ success: false, error: 'The reply target is unavailable in this conversation.' }, 409);
+  }
+  const result = await c.env.DB.prepare(
+    `INSERT INTO community_messages (conversation_id, sender_member_profile_id, message_type, body, reply_to_message_id, source)
+     VALUES (?, ?, ?, ?, ?, 'website')`
+  ).bind(conversationId, access.actor!.profileId, requestedType, text, replyId).run();
+  const messageId = Number(result.meta.last_row_id);
+  await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(conversationId).run();
+  const participantRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT cm.member_profile_id, code.display_name AS codename, mp.member_code
+     FROM community_conversation_members cm JOIN member_profiles mp ON mp.id = cm.member_profile_id
+     LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+     WHERE cm.conversation_id = ? AND cm.membership_status = 'active' AND cm.member_profile_id != ?`
+  ).bind(conversationId, access.actor!.profileId));
+  const mentionHandles = communityMentionHandles(text);
+  const senderName = access.actor!.codename || access.actor!.memberCode || 'A Code Rx member';
+  for (const participant of participantRows) {
+    const handle = normalizeCodename(participant.codename || participant.member_code || '');
+    const isMentioned = mentionHandles.includes(handle);
+    const isDm = member.type === 'dm';
+    if (isMentioned || isDm || requestedType === 'announcement') {
+      await notifyMember(c.env.DB, participant.member_profile_id, isMentioned ? `${senderName} mentioned you` : requestedType === 'announcement' ? 'Group announcement' : `New message from ${senderName}`, text.slice(0, 500), access.actor);
+    }
+  }
+  // Telegram sync is best-effort and never blocks the Code Rx message itself.
+  try { await syncCommunityMessageToTelegram(c.env, c.env.DB, messageId, conversationId, access.actor!.profileId!, `${senderName}: ${text}`); }
+  catch (error) { console.warn('[code-rx] community Telegram sync skipped:', error); }
+  return c.json({ success: true, data: { id: messageId, createdAt: new Date().toISOString() }, message: 'Message sent.' }, 201);
+});
+
+app.patch('/api/community/messages/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const text = cleanStr(body.body, 1, 10_000);
+  if (!Number.isInteger(id) || id < 1 || !text) return c.json({ success: false, error: 'Use a valid message.' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM community_messages WHERE id = ? AND status = \'active\'').bind(id));
+  const message = rows[0];
+  if (!message) return c.json({ success: false, error: 'Message not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, Number(message.conversation_id), access.actor!.profileId!);
+  if (!member || (Number(message.sender_member_profile_id || 0) !== Number(access.actor!.profileId) && !communityCanManage(member, access.actor!))) return c.json({ success: false, error: 'You cannot edit this message.' }, 403);
+  await c.env.DB.prepare('UPDATE community_messages SET body = ?, edited_at = CURRENT_TIMESTAMP WHERE id = ?').bind(text, id).run();
+  return c.json({ success: true, message: 'Message edited.' });
+});
+
+app.delete('/api/community/messages/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM community_messages WHERE id = ? AND status = \'active\'').bind(id));
+  const message = rows[0];
+  if (!message) return c.json({ success: false, error: 'Message not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, Number(message.conversation_id), access.actor!.profileId!);
+  if (!member || (Number(message.sender_member_profile_id || 0) !== Number(access.actor!.profileId) && !communityCanManage(member, access.actor!))) return c.json({ success: false, error: 'You cannot delete this message.' }, 403);
+  const attachments = await dbRows<any>(c.env.DB.prepare("SELECT id, r2_key FROM community_message_attachments WHERE message_id = ? AND status = 'active'").bind(id));
+  for (const attachment of attachments) await c.env.BUCKET.delete(attachment.r2_key);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE community_messages SET status = 'deleted', body = '', edited_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id),
+    c.env.DB.prepare("UPDATE community_message_attachments SET status = 'deleted' WHERE message_id = ?").bind(id),
+  ]);
+  await audit(c.env.DB, access.actor, 'community.message.deleted', 'community_message', id, { conversationId: message.conversation_id, attachmentCount: attachments.length });
+  return c.json({ success: true, message: 'Message and attached media deleted.' });
+});
+
+app.put('/api/community/messages/:id/reactions', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const emoji = cleanStr(body.emoji, 1, 16);
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT conversation_id FROM community_messages WHERE id = ? AND status = \'active\'').bind(id));
+  const message = rows[0];
+  if (!message || !emoji) return c.json({ success: false, error: 'Choose a valid message reaction.' }, 400);
+  const member = await communityConversationMember(c.env.DB, Number(message.conversation_id), access.actor!.profileId!);
+  if (!member) return c.json({ success: false, error: 'You are not authorized to react here.' }, 403);
+  const existing = await dbRows<any>(c.env.DB.prepare('SELECT id FROM community_message_reactions WHERE message_id = ? AND member_profile_id = ? AND emoji = ?').bind(id, access.actor!.profileId, emoji));
+  if (existing[0]) await c.env.DB.prepare('DELETE FROM community_message_reactions WHERE id = ?').bind(existing[0].id).run();
+  else await c.env.DB.prepare('INSERT INTO community_message_reactions (message_id, member_profile_id, emoji) VALUES (?, ?, ?)').bind(id, access.actor!.profileId, emoji).run();
+  return c.json({ success: true, data: { active: !existing[0] } });
+});
+
+app.post('/api/community/conversations/:id/read', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const messageId = Number(body.messageId);
+  const member = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if (!member || !Number.isInteger(messageId)) return c.json({ success: false, error: 'Conversation read state is unavailable.' }, 403);
+  await c.env.DB.prepare('UPDATE community_conversation_members SET last_read_message_id = ?, last_read_at = CURRENT_TIMESTAMP WHERE conversation_id = ? AND member_profile_id = ?').bind(messageId, conversationId, access.actor!.profileId).run();
+  return c.json({ success: true });
+});
+
+app.post('/api/community/messages/:id/pin', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT conversation_id FROM community_messages WHERE id = ? AND status = \'active\'').bind(id));
+  const message = rows[0];
+  if (!message) return c.json({ success: false, error: 'Message not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, Number(message.conversation_id), access.actor!.profileId!);
+  if (!member || member.type !== 'group' || !communityCanManage(member, access.actor!, 'moderator')) return c.json({ success: false, error: 'Group moderator access is required to pin messages.' }, 403);
+  await c.env.DB.prepare('UPDATE community_conversations SET pinned_message_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(id, message.conversation_id).run();
+  return c.json({ success: true, message: 'Message pinned.' });
+});
+
+app.post('/api/community/messages/:id/reports', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json().catch(() => ({}));
+  const reason = cleanStr(body.reason, 3, 1000);
+  const rows = await dbRows<any>(c.env.DB.prepare('SELECT conversation_id FROM community_messages WHERE id = ? AND status = \'active\'').bind(id));
+  const message = rows[0];
+  if (!message || !reason) return c.json({ success: false, error: 'Use a valid message and report reason.' }, 400);
+  const member = await communityConversationMember(c.env.DB, Number(message.conversation_id), access.actor!.profileId!);
+  if (!member) return c.json({ success: false, error: 'You are not authorized to report this message.' }, 403);
+  await c.env.DB.prepare('INSERT INTO community_message_reports (message_id, reporter_member_profile_id, reason) VALUES (?, ?, ?)').bind(id, access.actor!.profileId, reason).run();
+  return c.json({ success: true, message: 'Report sent for moderation.' }, 201);
+});
+
+app.get('/api/community/search', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const query = cleanStr(c.req.query('q'), 2, 100);
+  if (!query) return c.json({ success: false, error: 'Enter at least two characters to search.' }, 400);
+  const conversationRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT c.id, c.type, c.title, c.description
+     FROM community_conversations c JOIN community_conversation_members cm ON cm.conversation_id = c.id
+     WHERE cm.member_profile_id = ? AND cm.membership_status = 'active' AND c.status IN ('active','locked')
+       AND (COALESCE(c.title, '') LIKE ? OR c.description LIKE ?) LIMIT 30`
+  ).bind(access.actor!.profileId, `%${query}%`, `%${query}%`));
+  const messageRows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT m.id, m.conversation_id, m.body, m.created_at
+     FROM community_messages m JOIN community_conversation_members cm ON cm.conversation_id = m.conversation_id
+     WHERE cm.member_profile_id = ? AND cm.membership_status = 'active' AND m.status = 'active' AND m.body LIKE ?
+     ORDER BY m.id DESC LIMIT 50`
+  ).bind(access.actor!.profileId, `%${query}%`));
+  return c.json({ success: true, data: { conversations: conversationRows, messages: messageRows } });
+});
+
+app.get('/api/phantom/community/media-settings', requireAuth, requirePhantom, async (c) => {
+  const settings = await dbRows<any>(c.env.DB.prepare('SELECT * FROM community_media_settings ORDER BY scope_type, scope_key, media_type'));
+  const stats = await dbRows<any>(c.env.DB.prepare(
+    `SELECT COUNT(*) AS file_count, COALESCE(SUM(size_bytes), 0) AS storage_bytes,
+       media_type, COUNT(*) AS type_count, COALESCE(SUM(size_bytes), 0) AS type_bytes
+     FROM community_message_attachments WHERE status = 'active' GROUP BY media_type`
+  ));
+  const totals = stats.reduce((acc: any, row: any) => ({ fileCount: acc.fileCount + Number(row.type_count || 0), storageBytes: acc.storageBytes + Number(row.type_bytes || 0) }), { fileCount: 0, storageBytes: 0 });
+  const byGroup = await dbRows<any>(c.env.DB.prepare(
+    `SELECT c.id AS group_id, c.title AS group_title, COUNT(a.id) AS file_count, COALESCE(SUM(a.size_bytes), 0) AS storage_bytes
+     FROM community_message_attachments a
+     JOIN community_messages m ON m.id = a.message_id
+     JOIN community_conversations c ON c.id = m.conversation_id
+     WHERE a.status = 'active' AND c.type = 'group'
+     GROUP BY c.id ORDER BY storage_bytes DESC LIMIT 50`
+  ));
+  return c.json({ success: true, data: { settings, totals, byType: stats.map((row) => ({ mediaType: row.media_type, fileCount: Number(row.type_count || 0), storageBytes: Number(row.type_bytes || 0) })), byGroup: byGroup.map((row) => ({ groupId: row.group_id, groupTitle: row.group_title, fileCount: Number(row.file_count || 0), storageBytes: Number(row.storage_bytes || 0) })) } });
+});
+
+app.put('/api/phantom/community/media-settings', requireAuth, requirePhantom, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const scopeType = body.scopeType === 'group' ? 'group' : body.scopeType === 'area' ? 'area' : 'global';
+  const scopeKey = cleanStr(body.scopeKey, 1, 120) || (scopeType === 'global' ? 'global' : '');
+  const mediaType = body.mediaType === 'all' || COMMUNITY_MEDIA_TYPES.has(body.mediaType) ? body.mediaType : null;
+  if (!scopeKey || !mediaType || typeof body.enabled !== 'boolean') return c.json({ success: false, error: 'Choose a valid media scope, type, and enabled state.' }, 400);
+  const maxBytes = body.maxBytes === undefined ? 0 : Number(body.maxBytes);
+  const storageLimitBytes = body.storageLimitBytes === undefined ? 0 : Number(body.storageLimitBytes);
+  if (!Number.isInteger(maxBytes) || maxBytes < 0 || maxBytes > 100 * 1024 * 1024 || !Number.isInteger(storageLimitBytes) || storageLimitBytes < 0) return c.json({ success: false, error: 'Use valid media size limits.' }, 400);
+  const allowedMimes = Array.isArray(body.allowedMimes) ? body.allowedMimes.filter((mime: unknown) => typeof mime === 'string' && mime.length <= 120).slice(0, 30) : [];
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO community_media_settings (scope_type, scope_key, media_type, enabled, max_bytes, allowed_mimes_json, storage_limit_bytes, updated_by_user_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(scope_type, scope_key, media_type) DO UPDATE SET enabled = excluded.enabled, max_bytes = excluded.max_bytes, allowed_mimes_json = excluded.allowed_mimes_json, storage_limit_bytes = excluded.storage_limit_bytes, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(scopeType, scopeKey, mediaType, body.enabled ? 1 : 0, maxBytes, JSON.stringify(allowedMimes), storageLimitBytes, actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, 'community.media_setting.updated', 'community_media_setting', `${scopeKey}:${mediaType}`, { scopeType, enabled: body.enabled, maxBytes, storageLimitBytes });
+  return c.json({ success: true, message: 'Community media setting saved.' });
+});
+
+app.get('/api/community/conversations/:id/media-policy', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const member = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if (!member) return c.json({ success: false, error: 'You are not authorized to view these media controls.' }, 403);
+  const types = ['image','video','document','pdf','audio','other'];
+  const policies = await Promise.all(types.map(async (mediaType) => ({ mediaType, ...(await communityMediaPolicy(c.env.DB, 'private', mediaType, member.type === 'group' ? conversationId : null)) })));
+  return c.json({ success: true, data: policies });
+});
+
+app.post('/api/community/conversations/:id/attachments', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const conversationId = Number(c.req.param('id'));
+  const member = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
+  if (!member) return c.json({ success: false, error: 'You are not authorized to upload to this conversation.' }, 403);
+  const form = await c.req.formData().catch(() => null);
+  const file = form?.get('file');
+  if (!(file instanceof File)) return c.json({ success: false, error: 'Choose a file to upload.' }, 400);
+  const groupId = member.type === 'group' ? conversationId : null;
+  const mediaType = communityMediaTypeFor(file.name || '', file.type || '');
+  if (!mediaType) return c.json({ success: false, error: 'This file type is not permitted. Executables and unsafe files are blocked.' }, 415);
+  const policy = await communityMediaPolicy(c.env.DB, 'private', mediaType, groupId);
+  if (!policy.enabled) return c.json({ success: false, error: 'PHANTOM has disabled this media type for this conversation area.' }, 403);
+  if (!await communityFileSignatureValid(file, mediaType)) return c.json({ success: false, error: 'The file content does not match its declared media type.' }, 415);
+  if (policy.maxBytes > 0 && file.size > policy.maxBytes) return c.json({ success: false, error: 'This file exceeds the configured media size limit.' }, 413);
+  if (policy.allowedMimes.length && !policy.allowedMimes.includes(file.type)) return c.json({ success: false, error: 'This MIME type is not permitted by PHANTOM media controls.' }, 415);
+  if (policy.storageLimitBytes > 0) {
+    const usage = groupId
+      ? await dbRows<{ bytes: number }>(c.env.DB.prepare(
+        `SELECT COALESCE(SUM(a.size_bytes), 0) AS bytes FROM community_message_attachments a
+         JOIN community_messages m ON m.id = a.message_id WHERE a.status = 'active' AND m.conversation_id = ?`
+      ).bind(groupId))
+      : await dbRows<{ bytes: number }>(c.env.DB.prepare("SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM community_message_attachments WHERE status = 'active'").bind());
+    if (Number(usage[0]?.bytes || 0) + file.size > policy.storageLimitBytes) return c.json({ success: false, error: 'The configured Community media storage limit has been reached. Text chat remains available.' }, 409);
+  }
+  const safeName = (file.name || 'attachment').replace(/[^A-Za-z0-9._-]/g, '_').slice(-100);
+  const key = `community/${conversationId}/${Date.now()}-${randomToken().slice(0, 12)}-${safeName}`;
+  await c.env.BUCKET.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+  const messageResult = await c.env.DB.prepare(
+    `INSERT INTO community_messages (conversation_id, sender_member_profile_id, message_type, body, source)
+     VALUES (?, ?, ?, ?, 'website')`
+  ).bind(conversationId, access.actor!.profileId, mediaType === 'image' ? 'image' : mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'voice' : 'file', cleanOptionalStr(form?.get('caption'), 1000) || '').run();
+  const messageId = Number(messageResult.meta.last_row_id);
+  const attachmentResult = await c.env.DB.prepare(
+    `INSERT INTO community_message_attachments (message_id, r2_key, original_name, media_type, mime_type, size_bytes)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(messageId, key, safeName, mediaType, file.type, file.size).run();
+  await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(conversationId).run();
+  return c.json({ success: true, data: { id: Number(attachmentResult.meta.last_row_id), messageId, name: safeName, mediaType, sizeBytes: file.size }, message: 'Attachment uploaded.' }, 201);
+});
+
+app.get('/api/community/attachments/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT a.*, m.conversation_id FROM community_message_attachments a
+     JOIN community_messages m ON m.id = a.message_id WHERE a.id = ? AND a.status = 'active'`
+  ).bind(id));
+  const attachment = rows[0];
+  if (!attachment) return c.json({ success: false, error: 'Attachment not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, Number(attachment.conversation_id), access.actor!.profileId!);
+  if (!member) return c.json({ success: false, error: 'You are not authorized to access this attachment.' }, 403);
+  const object = await c.env.BUCKET.get(attachment.r2_key);
+  if (!object) return c.json({ success: false, error: 'Attachment storage object not found.' }, 404);
+  return new Response(object.body, { headers: { 'Content-Type': attachment.mime_type || 'application/octet-stream', 'Content-Disposition': `inline; filename="${String(attachment.original_name).replace(/[^A-Za-z0-9._-]/g, '_')}"`, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
+});
+
+app.delete('/api/community/attachments/:id', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT a.*, m.conversation_id, m.sender_member_profile_id FROM community_message_attachments a
+     JOIN community_messages m ON m.id = a.message_id WHERE a.id = ? AND a.status = 'active'`
+  ).bind(id));
+  const attachment = rows[0];
+  if (!attachment) return c.json({ success: false, error: 'Attachment not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, Number(attachment.conversation_id), access.actor!.profileId!);
+  if (!member || (Number(attachment.sender_member_profile_id) !== Number(access.actor!.profileId) && !communityCanManage(member, access.actor!))) return c.json({ success: false, error: 'You cannot remove this attachment.' }, 403);
+  await c.env.BUCKET.delete(attachment.r2_key);
+  await c.env.DB.prepare("UPDATE community_message_attachments SET status = 'deleted' WHERE id = ?").bind(id).run();
+  await audit(c.env.DB, access.actor, 'community.attachment.deleted', 'community_attachment', id, { conversationId: attachment.conversation_id });
+  return c.json({ success: true, message: 'Attachment deleted.' });
+});
+
+app.post('/api/community/telegram/link', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const username = String(c.env.TELEGRAM_BOT_USERNAME || '').trim().replace(/^@/, '');
+  if (!String(c.env.TELEGRAM_BOT_TOKEN || '').trim() || !username) return c.json({ success: false, error: 'Telegram linking is not configured yet.' }, 503);
+  const token = randomToken();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  await c.env.DB.prepare(
+    'INSERT INTO community_telegram_link_tokens (member_profile_id, token_hash, expires_at) VALUES (?, ?, ?)'
+  ).bind(access.actor!.profileId, await sha256Hex(token), expiresAt).run();
+  return c.json({ success: true, data: { deepLink: `https://t.me/${username}?start=crx_${token}`, expiresAt }, message: 'Open Telegram to complete the secure link.' });
+});
+
+app.get('/api/community/telegram/status', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    'SELECT telegram_chat_id, telegram_user_id, linked_at FROM community_telegram_links WHERE member_profile_id = ? AND disconnected_at IS NULL'
+  ).bind(access.actor!.profileId));
+  return c.json({ success: true, data: { connected: Boolean(rows[0]), linkedAt: rows[0]?.linked_at || null } });
+});
+
+app.delete('/api/community/telegram/link', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  await c.env.DB.prepare('UPDATE community_telegram_links SET disconnected_at = CURRENT_TIMESTAMP WHERE member_profile_id = ? AND disconnected_at IS NULL').bind(access.actor!.profileId).run();
+  return c.json({ success: true, message: 'Telegram disconnected.' });
+});
+
+app.post('/api/telegram/webhook', async (c) => {
+  const secret = String(c.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+  if (!secret || c.req.header('X-Telegram-Bot-Api-Secret-Token') !== secret) return c.json({ success: false, error: 'Unauthorized webhook.' }, 401);
+  const update = await c.req.json().catch(() => null) as any;
+  const updateId = update?.update_id;
+  if (updateId === undefined || updateId === null) return c.json({ success: true });
+  const recorded = await c.env.DB.prepare('INSERT OR IGNORE INTO community_telegram_updates (telegram_update_id, payload_json) VALUES (?, ?)').bind(String(updateId), JSON.stringify(update).slice(0, 50_000)).run();
+  if (Number(recorded.meta.changes || 0) !== 1) return c.json({ success: true });
+  const message = update?.message;
+  const chatId = message?.chat?.id;
+  const text = typeof message?.text === 'string' ? message.text.trim() : '';
+  if (!chatId) return c.json({ success: true });
+  if (text.startsWith('/start crx_')) {
+    const rawToken = text.slice('/start crx_'.length).trim();
+    const rows = await dbRows<any>(c.env.DB.prepare(
+      'SELECT * FROM community_telegram_link_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP'
+    ).bind(await sha256Hex(rawToken)));
+    const token = rows[0];
+    if (!token) { await telegramApi(c.env, 'sendMessage', { chat_id: chatId, text: 'This Code Rx linking token is invalid or expired.' }); return c.json({ success: true }); }
+    await c.env.DB.batch([
+      c.env.DB.prepare('UPDATE community_telegram_link_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = ?').bind(token.id),
+      c.env.DB.prepare(
+        `INSERT INTO community_telegram_links (member_profile_id, telegram_chat_id, telegram_user_id, linked_at, disconnected_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP, NULL)
+         ON CONFLICT(member_profile_id) DO UPDATE SET telegram_chat_id = excluded.telegram_chat_id, telegram_user_id = excluded.telegram_user_id, linked_at = CURRENT_TIMESTAMP, disconnected_at = NULL`
+      ).bind(token.member_profile_id, String(chatId), message?.from?.id ? String(message.from.id) : null),
+    ]);
+    await telegramApi(c.env, 'sendMessage', { chat_id: chatId, text: 'Code Rx Telegram connected. Website messages can now sync where PHANTOM has enabled it.' });
+    return c.json({ success: true });
+  }
+  const linkedRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM community_telegram_links WHERE telegram_chat_id = ? AND disconnected_at IS NULL').bind(String(chatId)));
+  const link = linkedRows[0];
+  if (link && text.toLowerCase().startsWith('/dm ')) {
+    const [, targetToken, ...messageParts] = text.split(/\s+/);
+    const directText = messageParts.join(' ').trim();
+    const normalizedTarget = normalizeCodename(targetToken || '');
+    const targetRows = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id FROM member_profiles mp
+       LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+       WHERE mp.status = 'active' AND (code.normalized_name = ? OR LOWER(mp.member_code) = ?) LIMIT 1`
+    ).bind(normalizedTarget, normalizedTarget));
+    const target = targetRows[0];
+    if (!target || !directText) {
+      await telegramApi(c.env, 'sendMessage', { chat_id: chatId, text: 'Use /dm CODENAME your message. The Code Name must be an active Code Rx member.' });
+      return c.json({ success: true });
+    }
+    const directKey = [Number(link.member_profile_id), Number(target.id)].sort((a, b) => a - b).join(':');
+    let conversationRows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM community_conversations WHERE type = 'dm' AND direct_key = ?").bind(directKey));
+    let directConversationId = Number(conversationRows[0]?.id || 0);
+    if (!directConversationId) {
+      const created = await c.env.DB.prepare("INSERT INTO community_conversations (type, direct_key, join_mode, status, owner_member_profile_id, telegram_sync_enabled, updated_at) VALUES ('dm', ?, 'invite', 'active', ?, 1, CURRENT_TIMESTAMP)").bind(directKey, link.member_profile_id).run();
+      directConversationId = Number(created.meta.last_row_id);
+      await c.env.DB.batch([
+        c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active')").bind(directConversationId, link.member_profile_id),
+        c.env.DB.prepare("INSERT INTO community_conversation_members (conversation_id, member_profile_id, role, membership_status) VALUES (?, ?, 'member', 'active')").bind(directConversationId, target.id),
+      ]);
+    }
+    const created = await c.env.DB.prepare("INSERT INTO community_messages (conversation_id, sender_member_profile_id, message_type, body, source, telegram_message_id) VALUES (?, ?, 'text', ?, 'telegram', ?)").bind(directConversationId, link.member_profile_id, directText.slice(0, 10_000), String(message.message_id)).run();
+    await c.env.DB.prepare("INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'telegram_to_website')").bind(Number(created.meta.last_row_id), String(chatId), String(message.message_id)).run();
+    await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(directConversationId).run();
+    return c.json({ success: true });
+  }
+  const groupRows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM community_conversations WHERE telegram_chat_id = ? AND telegram_sync_enabled = 1 AND type = 'group' AND status = 'active'").bind(String(chatId)));
+  const conversationId = Number(groupRows[0]?.id || 0);
+  if (conversationId && link && text) {
+    const member = await communityConversationMember(c.env.DB, conversationId, Number(link.member_profile_id));
+    if (member) {
+      const created = await c.env.DB.prepare(
+        `INSERT INTO community_messages (conversation_id, sender_member_profile_id, message_type, body, source, telegram_message_id)
+         VALUES (?, ?, 'text', ?, 'telegram', ?)`
+      ).bind(conversationId, link.member_profile_id, text.slice(0, 10_000), String(message.message_id)).run();
+      await c.env.DB.prepare("INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'telegram_to_website')").bind(Number(created.meta.last_row_id), String(chatId), String(message.message_id)).run();
+      await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(conversationId).run();
+    }
+  }
+  return c.json({ success: true });
+});
 
 const restoreRecycleBinItem = async (db: D1Database, item: any) => {
   let payload: any;

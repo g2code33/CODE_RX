@@ -38,6 +38,20 @@ Existing accounts remain available and are safely migrated into a member profile
 - **Calcitonins (CAL)** are live: configurable automatic CAL rules, PHANTOM direct balance edits and add/deduct/set controls with reasons/history, dashboard balances, and a real member leaderboard are all backed by D1.
 - Notifications are durable in-app broadcasts. PHANTOM can target all active members, a responsibility profile, or selected members, enable designated active members as notification senders, edit an active sent notice, or withdraw it from recipient inboxes.
 
+## Community + messaging configuration
+
+The Community system reuses the existing `DB` D1 binding and `BUCKET` R2 binding. See `COMMUNITY_SETUP.md` for the full public/private separation, media policy, Telegram setup, rate limiting, and verification checklist.
+
+Telegram is optional. If enabled, set these only as encrypted Cloudflare secrets:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_BOT_USERNAME
+TELEGRAM_WEBHOOK_SECRET
+```
+
+Do not place those values in frontend variables, D1, Git, screenshots, or chat.
+
 ## Required Cloudflare configuration
 
 Use the existing production resources:

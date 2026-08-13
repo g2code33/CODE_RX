@@ -11,6 +11,12 @@ export interface Env {
   /** Seed-only secret; configure in Cloudflare, never in frontend code. */
   ADMIN_PASSWORD?: string;
   TELEGRAM_LINK: string;
+  /** Optional Community Telegram Bot secret; configure only in Cloudflare. */
+  TELEGRAM_BOT_TOKEN?: string;
+  /** Public bot username, used only to form an optional deep link. */
+  TELEGRAM_BOT_USERNAME?: string;
+  /** Optional Telegram webhook secret token; configure only in Cloudflare. */
+  TELEGRAM_WEBHOOK_SECRET?: string;
   SITE_URL?: string;
   ASSETS?: Fetcher;
   // EmailJS (optional — for email notifications)
