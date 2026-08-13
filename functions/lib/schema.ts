@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS members (
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
   phone TEXT,
+  phone_login_key TEXT,
   role TEXT DEFAULT 'member',
   joined_date TEXT NOT NULL,
   points INTEGER DEFAULT 0,
@@ -786,6 +787,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);
 CREATE INDEX IF NOT EXISTS idx_subscribers_email ON subscribers(email);
+CREATE INDEX IF NOT EXISTS idx_members_phone_login_key ON members(phone_login_key);
 CREATE INDEX IF NOT EXISTS idx_member_profiles_status ON member_profiles(status);
 CREATE INDEX IF NOT EXISTS idx_member_profiles_role ON member_profiles(primary_role_id);
 CREATE INDEX IF NOT EXISTS idx_member_activations_profile ON member_activations(member_profile_id, used_at, revoked_at, created_at DESC);
@@ -831,6 +833,7 @@ const SAFE_MIGRATIONS = [
   { table: 'community_message_attachments', column: 'telegram_synced_at', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_synced_at DATETIME' },
   { table: 'community_message_attachments', column: 'telegram_sync_error', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_error TEXT' },
 
+  { table: 'members', column: 'phone_login_key', sql: 'ALTER TABLE members ADD COLUMN phone_login_key TEXT' },
   { table: 'member_activations', column: 'revoked_at', sql: 'ALTER TABLE member_activations ADD COLUMN revoked_at DATETIME' },
   { table: 'member_activations', column: 'sent_at', sql: 'ALTER TABLE member_activations ADD COLUMN sent_at DATETIME' },
   { table: 'member_activations', column: 'delivery_status', sql: "ALTER TABLE member_activations ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'not_sent'" },
@@ -869,18 +872,20 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-13-canonical-founding-direct-16';
+const VAULT_SCHEMA_VERSION = '2026-08-13-responsibility-login-identifiers-17';
 
 
+// Role codes stay stable for member history and permissions. Their visible
+// names are deliberately operational responsibilities, never Founding Names.
 const ROLE_SEEDS = [
-  ['phantom', 'PHANTOM', 'Founder identity / full system coordination', 1],
-  ['nexus', 'NEXUS', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
-  ['ghost', 'GHOST', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
-  ['falcon', 'FALCON', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
-  ['quantum', 'QUANTUM', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
-  ['matrix', 'MATRIX', 'Founding Code Rx identity; responsibilities configured by PHANTOM', 1],
-  ['member', 'Member', 'Standard Code Rx member', 1],
-  ['custom', 'Custom', 'Custom responsibility profile', 0],
+  ['phantom', 'Founder Administration', 'Protected founder-level platform authority', 1],
+  ['nexus', 'Coordination & Operations', 'Operational responsibility for coordination and society operations', 1],
+  ['ghost', 'Research & Intelligence', 'Operational responsibility for research, analysis, and intelligence', 1],
+  ['falcon', 'Community & Partnerships', 'Operational responsibility for community, outreach, and partnerships', 1],
+  ['quantum', 'Technology & Innovation', 'Operational responsibility for technology and innovation work', 1],
+  ['matrix', 'Systems & Knowledge', 'Operational responsibility for systems, knowledge, and documentation', 1],
+  ['member', 'Member Responsibility', 'Standard Code Rx member responsibility profile', 1],
+  ['custom', 'Custom Responsibility', 'PHANTOM-configured responsibility profile with separately managed permissions', 0],
 ] as const;
 
 const ROLE_DEFAULT_SECTIONS: Record<string, string[]> = {};
@@ -898,6 +903,29 @@ const runBatchInChunks = async (db: D1Database, statements: D1PreparedStatement[
   for (let index = 0; index < statements.length; index += size) {
     await db.batch(statements.slice(index, index + size));
   }
+};
+
+// Phone keys are used only as a login lookup. They remove punctuation and
+// normalize common Ghanaian local/00 forms without storing a password or
+// creating any additional account identity.
+const phoneLoginKey = (value: unknown) => {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (/^0\d{9}$/.test(digits)) digits = `233${digits.slice(1)}`;
+  return digits.length >= 7 && digits.length <= 15 ? digits : null;
+};
+
+const backfillPhoneLoginKeys = async (db: D1Database) => {
+  const rows = await asRows<{ id: number; phone: string | null; phone_login_key: string | null }>(
+    db.prepare('SELECT id, phone, phone_login_key FROM members')
+  );
+  const statements = rows.map((row) => {
+    const key = phoneLoginKey(row.phone);
+    return key !== row.phone_login_key
+      ? db.prepare('UPDATE members SET phone_login_key = ? WHERE id = ?').bind(key, row.id)
+      : null;
+  }).filter((statement): statement is D1PreparedStatement => Boolean(statement));
+  if (statements.length) await runBatchInChunks(db, statements);
 };
 
 const runSafeMigrations = async (db: D1Database) => {
@@ -993,23 +1021,50 @@ const seedCommunityMediaSettings = async (db: D1Database) => {
 };
 
 const migrateFoundingRoleCodes = async (db: D1Database) => {
-  // Earlier development builds used operational labels as founding role codes.
-  // Rename only where the new identity has not yet been created, preserving the
-  // same role ID, memberships, permissions, and role history.
+  // Earlier development builds used operational labels as role codes. Preserve
+  // the same role IDs, memberships, permissions, and history while moving to
+  // stable internal codes whose visible labels are responsibilities.
   const replacements = [
-    ['kernel', 'ghost', 'GHOST'],
-    ['signal', 'falcon', 'FALCON'],
-    ['pulse', 'quantum', 'QUANTUM'],
-    ['vault', 'matrix', 'MATRIX'],
+    ['kernel', 'ghost', 'Research & Intelligence', 'Operational responsibility for research, analysis, and intelligence'],
+    ['signal', 'falcon', 'Community & Partnerships', 'Operational responsibility for community, outreach, and partnerships'],
+    ['pulse', 'quantum', 'Technology & Innovation', 'Operational responsibility for technology and innovation work'],
+    ['vault', 'matrix', 'Systems & Knowledge', 'Operational responsibility for systems, knowledge, and documentation'],
   ] as const;
-  for (const [oldCode, newCode, newName] of replacements) {
+  for (const [oldCode, newCode, newName, description] of replacements) {
     const oldRows = await asRows<{ id: number }>(db.prepare('SELECT id FROM roles WHERE code = ?').bind(oldCode));
     const newRows = await asRows<{ id: number }>(db.prepare('SELECT id FROM roles WHERE code = ?').bind(newCode));
     if (oldRows[0] && !newRows[0]) {
       await db.prepare('UPDATE roles SET code = ?, name = ?, description = ? WHERE id = ?')
-        .bind(newCode, newName, 'Founding Code Rx identity; responsibilities configured by PHANTOM', oldRows[0].id).run();
+        .bind(newCode, newName, description, oldRows[0].id).run();
     }
   }
+};
+
+/** Convert legacy Founding-Name role labels once. After PHANTOM changes a
+ * responsibility label, it is intentionally not overwritten on later boots. */
+const normalizeResponsibilityLabels = async (db: D1Database) => {
+  const markerKey = 'responsibility_label_identity_split_v1';
+  const marker = await asRows<{ setting_value: string }>(db.prepare('SELECT setting_value FROM system_settings WHERE setting_key = ?').bind(markerKey));
+  if (marker[0]?.setting_value === '1') return;
+  const defaults = [
+    ['phantom', 'Founder Administration', 'Protected founder-level platform authority', ['PHANTOM']],
+    ['nexus', 'Coordination & Operations', 'Operational responsibility for coordination and society operations', ['NEXUS']],
+    ['ghost', 'Research & Intelligence', 'Operational responsibility for research, analysis, and intelligence', ['GHOST']],
+    ['falcon', 'Community & Partnerships', 'Operational responsibility for community, outreach, and partnerships', ['FALCON']],
+    ['quantum', 'Technology & Innovation', 'Operational responsibility for technology and innovation work', ['QUANTUM']],
+    ['matrix', 'Systems & Knowledge', 'Operational responsibility for systems, knowledge, and documentation', ['MATRIX']],
+    ['member', 'Member Responsibility', 'Standard Code Rx member responsibility profile', ['Member']],
+    ['custom', 'Custom Responsibility', 'PHANTOM-configured responsibility profile with separately managed permissions', ['Custom']],
+  ] as const;
+  for (const [code, name, description, legacyNames] of defaults) {
+    await db.prepare(
+      `UPDATE roles SET name = ?, description = ?
+       WHERE code = ? AND name IN (${legacyNames.map(() => '?').join(',')})`
+    ).bind(name, description, code, ...legacyNames).run();
+  }
+  await db.prepare(
+    "INSERT INTO system_settings (setting_key, setting_value, updated_at) VALUES (?, '1', CURRENT_TIMESTAMP) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP"
+  ).bind(markerKey).run();
 };
 
 const seedRolesAndPermissions = async (db: D1Database) => {
@@ -1017,10 +1072,11 @@ const seedRolesAndPermissions = async (db: D1Database) => {
     db.prepare('INSERT OR IGNORE INTO roles (code, name, description, is_system) VALUES (?, ?, ?, ?)').bind(code, name, description, isSystem)
   );
   await runBatchInChunks(db, roleInserts);
-  const founderUpdates = ROLE_SEEDS.filter(([code]) => ['phantom', 'nexus', 'ghost', 'falcon', 'quantum', 'matrix'].includes(code)).map(([code, name, description, isSystem]) =>
-    db.prepare('UPDATE roles SET name = ?, description = ?, is_system = ? WHERE code = ?').bind(name, description, isSystem, code)
-  );
-  await runBatchInChunks(db, founderUpdates);
+  // Preserve PHANTOM-customized visible names/descriptions. System status and
+  // stable internal codes remain protected, while labels stay changeable.
+  await runBatchInChunks(db, ROLE_SEEDS.map(([code, , , isSystem]) =>
+    db.prepare('UPDATE roles SET is_system = ? WHERE code = ?').bind(isSystem, code)
+  ));
 
   const roles = await asRows<{ id: number; code: string }>(db.prepare('SELECT id, code FROM roles'));
   const sections = VAULT_SECTION_SEEDS.map(([slug]) => slug);
@@ -1206,6 +1262,8 @@ export async function ensureSchema(env: Env): Promise<void> {
       await runBatchInChunks(db, indexStatements.map((statement) => db.prepare(statement)));
       await migrateFoundingRoleCodes(db);
       await seedRolesAndPermissions(db);
+      await normalizeResponsibilityLabels(db);
+      await backfillPhoneLoginKeys(db);
       await seedVaultSections(db);
       await seedScoreRules(db);
       await seedFeatureSettings(db);

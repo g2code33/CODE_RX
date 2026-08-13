@@ -21,7 +21,9 @@ The existing public pages, Admin Core, authentication flow, Member Portal, and s
 4. That one action approves the application, creates the pending member profile and permanent member ID such as `CRX-0001`, and issues a one-time seven-day password-setup link.
 5. The activation email is sent when EmailJS is configured; PHANTOM can copy the one-time link for secure manual delivery when email delivery is unavailable. The raw link is never stored in D1.
 6. The member chooses a private password of at least **8 characters**. PHANTOM never receives that password. A replacement invitation invalidates the earlier unused link.
-7. Depending on the selected path, the member either receives a direct founding codename or completes the appropriate member/founding codename ballot.
+7. Depending on the selected path, the member either receives a PHANTOM-assigned Founding Name or completes the appropriate Member Code Name / Founding Name ballot.
+8. A responsibility profile controls permissions and work scope only. It is separate from a Code Name or Founding Name; PHANTOM can rename visible responsibility labels without changing member identity or permissions.
+9. After activation, the same account password can be used with the member’s email, saved phone number, or claimed Code Name. Password reset remains email-based.
 
 Existing accounts remain available and are safely migrated into a member profile when they next authenticate.
 
@@ -120,18 +122,18 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
 3. Password fields expose an accessible Show/Hide control in login, activation, reset, and Admin Security.
 4. A Join application stays pending until PHANTOM uses **Approve & invite**; confirm the action creates one `pending_activation` member, emits/copies a one-time password-setup link, and no password is visible to PHANTOM.
 5. Confirm a replacement invitation invalidates the earlier unused link, an unactivated member cannot sign in, and only successful password setup makes the member active.
-6. Test all codename paths:
-   - Member Ballot uses only the Member Pool and requires three covered-card reveals before a comparison choice can be claimed.
-   - Custom Founding Ballot exposes only the canonical six founding identities that remain unclaimed; PHANTOM and already claimed identities never appear as choices.
-   - An unfinished ballot returns the member to the full-page ballot after sign-in or navigation.
-   - Direct Founding Assignment, including GHOST/NEXUS/FALCON/QUANTUM/MATRIX, claims exactly one PHANTOM-selected founding codename and opens no ballot.
-   - Import a comma/newline batch and a JSON codename batch; confirm duplicates are rejected before anything is added.
-7. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
-8. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
-9. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
-10. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
-11. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
-12. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
-13. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
+6. Test responsibility profiles and identity naming:
+   - PHANTOM can rename an operational responsibility label without changing its permissions or a member’s Code Name.
+   - Founding Names remain identities only and do not appear as responsibility labels.
+   - Custom Founding Name Ballot exposes only the canonical six founding identities that remain unclaimed; PHANTOM and already claimed identities never appear as choices.
+   - A PHANTOM-assigned Founding Name, including GHOST/NEXUS/FALCON/QUANTUM/MATRIX, opens no ballot.
+7. Test sign-in with the same activated password using the member email, saved phone number, and claimed Code Name. Confirm a duplicate phone number is rejected for new phone-based sign-in records.
+8. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
+9. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
+10. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
+11. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
+12. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
+13. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
+14. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
 
 > Do not change `public/_redirects` to a catch-all SPA rewrite. The API is routed by Pages Functions, and the Function provides the safe HTML navigation fallback.

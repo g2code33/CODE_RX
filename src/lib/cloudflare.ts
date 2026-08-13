@@ -355,6 +355,8 @@ export const db = {
     setNotificationDelegate: (id: number, canSend: boolean) => apiCall(`/api/phantom/notification-delegates/${id}`, { method: 'PUT', body: JSON.stringify({ canSend }) }),
     roles: async () => (await apiCall<{ data: any }>('/api/phantom/roles')).data,
     createRole: (data: any) => apiCall('/api/phantom/roles', { method: 'POST', body: JSON.stringify(data) }),
+    updateRoleProfile: (id: number, data: { name?: string; description?: string }) =>
+      apiCall<{ data: any; message?: string }>(`/api/phantom/roles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     updateRolePermissions: (id: number, permissions: any[]) => apiCall(`/api/phantom/roles/${id}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) }),
     updateMemberPermissions: (id: number, permissions: any[]) => apiCall(`/api/phantom/members/${id}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) }),
     websiteAdmins: async () => (await apiCall<{ data: any }>('/api/phantom/website-admins')).data,
@@ -397,10 +399,10 @@ export const uploadFile = async (file: File, folder: string = 'uploads') => {
 
 // ---------- authentication ----------
 export const auth = {
-  login: async (email: string, password: string): Promise<AuthUser> => {
+  login: async (identifier: string, password: string): Promise<AuthUser> => {
     const data = await apiCall<{ token: string; user: AuthUser }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email: email.trim(), password }),
+      body: JSON.stringify({ identifier: identifier.trim(), password }),
     });
     if (!data?.token || !data?.user) {
       throw new ApiError('The authentication service returned an invalid response.', 502);

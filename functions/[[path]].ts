@@ -93,6 +93,16 @@ const moveToRecycleBin = async (db: D1Database, actor: FounderActor | null, reso
 
 type CodenamePath = 'member' | 'custom_founding' | 'direct_founding';
 
+// A normalized phone key makes +233..., 00233..., and a local 0XXXXXXXXX
+// Ghanaian form resolve to the same existing account. It is a lookup only;
+// the password and primary user email remain unchanged.
+const phoneLoginKey = (value: unknown) => {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (/^0\d{9}$/.test(digits)) digits = `233${digits.slice(1)}`;
+  return digits.length >= 7 && digits.length <= 15 ? digits : null;
+};
+
 const codenamePathFrom = (value: unknown, roleCode: string): CodenamePath => {
   // A named direct assignment made by PHANTOM always wins. This is especially
   // important for Custom members: selecting GHOST/NEXUS/FALCON/QUANTUM/MATRIX
@@ -237,6 +247,14 @@ const createMemberAccount = async ({
   ).bind(email));
   if (existingProfiles[0]) throw new Error('A member profile already exists for this email.');
   const existingMemberRows = await dbRows<{ id: number }>(db.prepare('SELECT id FROM members WHERE email = ?').bind(email));
+  const normalizedPhone = phoneLoginKey(phone);
+  if (phone && !normalizedPhone) throw new Error('Use a valid phone number for phone-number sign-in.');
+  if (normalizedPhone) {
+    const phoneOwners = await dbRows<{ id: number }>(db.prepare('SELECT id FROM members WHERE phone_login_key = ?').bind(normalizedPhone));
+    if (phoneOwners[0] && Number(phoneOwners[0].id) !== Number(existingMemberRows[0]?.id || 0)) {
+      throw new Error('Another member already uses this phone number for sign-in. Use a different phone number or correct that member record first.');
+    }
+  }
 
   // A sequence number is intentionally consumed even if a later validation or
   // storage failure occurs: Member IDs are permanent and are never reused.
@@ -257,12 +275,12 @@ const createMemberAccount = async ({
 
     if (existingMemberRows[0]) {
       memberRecordId = Number(existingMemberRows[0].id);
-      await db.prepare('UPDATE members SET name = ?, phone = ?, role = ?, level = ?, is_active = 0 WHERE id = ?')
-        .bind(name, phone, role.code, role.name, memberRecordId).run();
+      await db.prepare('UPDATE members SET name = ?, phone = ?, phone_login_key = ?, role = ?, level = ?, is_active = 0 WHERE id = ?')
+        .bind(name, phone, normalizedPhone, role.code, role.name, memberRecordId).run();
     } else {
       const memberResult = await db.prepare(
-        'INSERT INTO members (name, email, phone, role, joined_date, points, level, is_active) VALUES (?, ?, ?, ?, ?, 0, ?, 0)'
-      ).bind(name, email, phone, role.code, today, role.name).run();
+        'INSERT INTO members (name, email, phone, phone_login_key, role, joined_date, points, level, is_active) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0)'
+      ).bind(name, email, phone, normalizedPhone, role.code, today, role.name).run();
       memberRecordId = Number(memberResult.meta.last_row_id);
       createdMemberRecord = true;
     }
@@ -363,14 +381,14 @@ const createMemberAccount = async ({
 };
 
 const memberCreationErrorStatus = (message: string) => {
-  if (/already exists|profile already exists|already linked|no longer be approved|rejected applications/i.test(message)) return 409;
+  if (/already exists|profile already exists|already linked|no longer be approved|rejected applications|already uses this phone/i.test(message)) return 409;
   if (/valid|choose|select|custom founding|cannot be assigned/i.test(message)) return 400;
   return 500;
 };
 
 const ballotPoolFor = (actor: FounderActor) => actor.codenamePath === 'custom_founding' ? 'founding' : 'member';
 const ballotModeFor = (actor: FounderActor) => actor.codenamePath === 'custom_founding' ? 'custom_founding' : 'member';
-const ballotLabelFor = (pool: 'member' | 'founding') => pool === 'founding' ? 'Founding Codename Ballot' : 'Member Codename Ballot';
+const ballotLabelFor = (pool: 'member' | 'founding') => pool === 'founding' ? 'Founding Name Ballot' : 'Member Code Name Ballot';
 
 const getCodenameSession = async (db: D1Database, profileId: number, pool: 'member' | 'founding') => {
   let rows = await dbRows<any>(db.prepare('SELECT * FROM codename_selection_sessions WHERE member_profile_id = ?').bind(profileId));
@@ -1116,21 +1134,37 @@ app.post('/api/auth/login', async (c) => {
   }
   try {
     const body = await c.req.json().catch(() => ({}));
-    const email = cleanEmail(body.email);
+    // `email` remains accepted for older clients. New clients use `identifier`
+    // so a member may sign in with their email, saved phone number, or claimed
+    // Code Name while still using the same single password/account.
+    const identifier = cleanStr(body.identifier ?? body.email, 2, 254);
     const password = cleanStr(body.password, 1, 128);
-    if (!email || !password) {
-      return c.json({ success: false, error: 'Email and password are required' }, 400);
+    if (!identifier || !password) {
+      return c.json({ success: false, error: 'Email, phone number, or Code Name and password are required.' }, 400);
     }
-
-    const { results } = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).all<any>();
-    const user = results[0];
-    if (!user) {
-      return c.json({ success: false, error: 'Invalid email or password' }, 401);
+    const email = cleanEmail(identifier);
+    const phoneKey = phoneLoginKey(identifier);
+    const codename = normalizeCodename(identifier);
+    const users = await dbRows<any>(c.env.DB.prepare(
+      `SELECT DISTINCT u.*
+       FROM users u
+       LEFT JOIN member_profiles mp ON mp.user_id = u.id
+       LEFT JOIN members m ON m.id = mp.member_record_id
+       LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
+       WHERE u.email = ? OR m.phone_login_key = ? OR code.normalized_name = ?
+       LIMIT 3`
+    ).bind(email || '__no_email_match__', phoneKey || '__no_phone_match__', codename));
+    // A legacy duplicated phone number must not become an account-selection
+    // side channel. PHANTOM can correct duplicate phone data; login stays
+    // safely generic until then.
+    if (users.length !== 1) {
+      return c.json({ success: false, error: 'Invalid email, phone number, Code Name, or password.' }, 401);
     }
+    const user = users[0];
 
     const ok = await verifyPassword(password, user.password_hash);
     if (!ok) {
-      return c.json({ success: false, error: 'Invalid email or password' }, 401);
+      return c.json({ success: false, error: 'Invalid email, phone number, Code Name, or password.' }, 401);
     }
 
     const actor = await getActor(c.env.DB, Number(user.id));
@@ -4626,6 +4660,19 @@ app.patch('/api/phantom/members/:id', requireAuth, requirePhantom, async (c) => 
       await audit(c.env.DB, actor, `member.${action}`, 'member_profile', profileId, { memberCode: profile.member_code, reason: cleanOptionalStr(body.reason, 1000), resultingStatus: status });
       return c.json({ success: true, message: status === 'pending_activation' ? 'Member remains awaiting their private password setup invitation.' : `Member ${action}ed`.replace('unlocked', 'unlocked').replace('archiveed', 'archived') });
     }
+    if (body.phone !== undefined) {
+      const phone = cleanOptionalStr(body.phone, 30);
+      const normalizedPhone = phoneLoginKey(phone);
+      if (phone && !normalizedPhone) return c.json({ success: false, error: 'Use a valid phone number for phone-number sign-in.' }, 400);
+      if (normalizedPhone) {
+        const existing = await dbRows<any>(c.env.DB.prepare('SELECT id FROM members WHERE phone_login_key = ? AND id != ? LIMIT 1').bind(normalizedPhone, profile.member_record_id));
+        if (existing[0]) return c.json({ success: false, error: 'Another member already uses that phone number for sign-in.' }, 409);
+      }
+      await c.env.DB.prepare('UPDATE members SET phone = ?, phone_login_key = ? WHERE id = ?')
+        .bind(phone, normalizedPhone, profile.member_record_id).run();
+      await audit(c.env.DB, actor, 'member.phone_login.updated', 'member_profile', profileId, { memberCode: profile.member_code, phoneLoginEnabled: Boolean(normalizedPhone) });
+      return c.json({ success: true, message: normalizedPhone ? 'Phone-number sign-in updated.' : 'Phone-number sign-in removed.' });
+    }
     if (body.roleCode !== undefined) {
       const roleCode = cleanStr(body.roleCode, 2, 50);
       const roleRows = roleCode ? await dbRows<any>(c.env.DB.prepare('SELECT id, code, name FROM roles WHERE code = ?').bind(roleCode)) : [];
@@ -4678,7 +4725,7 @@ app.get('/api/phantom/members/:id/history', requireAuth, requirePhantom, async (
   if (!Number.isInteger(profileId) || profileId < 1) return c.json({ success: false, error: 'Invalid member profile id' }, 400);
   const [roles, codenames, activity] = await Promise.all([
     dbRows<any>(c.env.DB.prepare(
-      `SELECT h.*, old_role.code AS previous_role, new_role.code AS new_role, u.name AS changed_by
+      `SELECT h.*, old_role.name AS previous_role, new_role.name AS new_role, u.name AS changed_by
        FROM member_role_history h LEFT JOIN roles old_role ON old_role.id = h.previous_role_id
        LEFT JOIN roles new_role ON new_role.id = h.new_role_id LEFT JOIN users u ON u.id = h.changed_by_user_id
        WHERE h.member_profile_id = ? ORDER BY h.changed_at DESC`
@@ -4808,6 +4855,31 @@ app.post('/api/phantom/roles', requireAuth, requirePhantom, async (c) => {
   } catch (error: any) {
     if (String(error?.message || '').includes('UNIQUE')) return c.json({ success: false, error: 'That role code already exists.' }, 409);
     return c.json({ success: false, error: 'Could not create role' }, 500);
+  }
+});
+
+// The role code is a stable internal permission key. PHANTOM may change the
+// visible responsibility name and description without turning a Founding Name
+// into a role again or breaking historical memberships.
+app.patch('/api/phantom/roles/:id', requireAuth, requirePhantom, async (c) => {
+  try {
+    const roleId = Number(c.req.param('id'));
+    if (!Number.isInteger(roleId) || roleId < 1) return c.json({ success: false, error: 'Invalid responsibility id.' }, 400);
+    const body = await c.req.json().catch(() => ({}));
+    const currentRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM roles WHERE id = ?').bind(roleId));
+    const role = currentRows[0];
+    if (!role) return c.json({ success: false, error: 'Responsibility profile not found.' }, 404);
+    const name = body.name === undefined ? role.name : cleanStr(body.name, 2, 100);
+    const description = body.description === undefined ? role.description : cleanOptionalStr(body.description, 1000) || '';
+    if (!name) return c.json({ success: false, error: 'Use a responsibility name of 2–100 characters.' }, 400);
+    const actor = await actorFromContext(c);
+    await c.env.DB.prepare('UPDATE roles SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(name, description, roleId).run();
+    await audit(c.env.DB, actor, 'responsibility.label.updated', 'role', roleId, { code: role.code, name, description });
+    return c.json({ success: true, data: { id: roleId, code: role.code, name, description }, message: 'Responsibility label updated.' });
+  } catch (error) {
+    console.error('[code-rx] responsibility label update error:', error);
+    return c.json({ success: false, error: 'Could not update this responsibility label.' }, 500);
   }
 });
 
