@@ -9,7 +9,7 @@ import { ensureSchema } from './lib/schema';
 import { bearerToken, hashPassword, verifyPassword, verifyToken, signToken, requireAuth, JwtPayload } from './lib/auth';
 import {
   actorFromContext, allocateDocumentCode, allocateMemberCode, audit, getActor, hasVaultPermission,
-  normalizeCodename, randomToken, requirePhantom,
+  FOUNDING_CODENAMES, normalizeCodename, randomToken, requirePhantom,
   requireWebsitePermission, sha256Hex, VAULT_ACTIONS, VAULT_SECTION_SEEDS, VaultAction,
 } from './lib/vault';
 import { cleanStr, cleanEmail, cleanOptionalStr } from './lib/validate';
@@ -94,11 +94,13 @@ const moveToRecycleBin = async (db: D1Database, actor: FounderActor | null, reso
 type CodenamePath = 'member' | 'custom_founding' | 'direct_founding';
 
 const codenamePathFrom = (value: unknown, roleCode: string): CodenamePath => {
-  // A Custom responsibility always receives the founding ballot. The client
-  // is never trusted to put an ordinary member into that limited identity pool.
-  if (roleCode === 'custom') return 'custom_founding';
-  // Direct founding assignment is an explicit PHANTOM-only creation path.
+  // A named direct assignment made by PHANTOM always wins. This is especially
+  // important for Custom members: selecting GHOST/NEXUS/FALCON/QUANTUM/MATRIX
+  // is a completed identity assignment, never a second founding ballot.
   if (value === 'direct_founding') return 'direct_founding';
+  // Without an explicit direct assignment, Custom members use the protected
+  // canonical founding-identity ballot only.
+  if (roleCode === 'custom') return 'custom_founding';
   return 'member';
 };
 
@@ -282,8 +284,8 @@ const createMemberAccount = async ({
       const codeRows = await dbRows<any>(db.prepare('SELECT display_name FROM codenames WHERE id = ?').bind(foundingCodenameId));
       await db.batch([
         db.prepare(
-          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, completed_at)
-           VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, NULL, CURRENT_TIMESTAMP)`
+          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, ballot_slots_json, revealed_codenames_json, review_target_count, completed_at)
+           VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, NULL, '[]', '[]', 0, CURRENT_TIMESTAMP)`
         ).bind(profileId, foundingCodenameId),
         db.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
           .bind(foundingCodenameId, profileId, actor.userId, 'Direct founding codename assignment by PHANTOM'),
@@ -406,12 +408,28 @@ const parseBallotSlots = (value: unknown): Array<number | null> => {
   } catch { return []; }
 };
 
-const eligibleBallotCodenames = async (db: D1Database, pool: 'member' | 'founding') => dbRows<any>(db.prepare(
-  `SELECT c.id, c.display_name, c.pool, c.status
-   FROM codenames c
-   WHERE c.pool = ? AND c.status = 'available'
-   ORDER BY RANDOM()`
-).bind(pool));
+// Custom members are deliberately restricted to the six canonical founding
+// identities. PHANTOM is permanently claimed, so it naturally never appears
+// in an available ballot; a claimed GHOST/NEXUS/etc. is likewise excluded.
+const CANONICAL_FOUNDING_NORMALIZED = FOUNDING_CODENAMES.map((name) => normalizeCodename(name));
+
+const eligibleBallotCodenames = async (db: D1Database, pool: 'member' | 'founding') => {
+  if (pool === 'founding') {
+    return dbRows<any>(db.prepare(
+      `SELECT c.id, c.display_name, c.pool, c.status
+       FROM codenames c
+       WHERE c.pool = ? AND c.status = 'available'
+         AND c.normalized_name IN (${CANONICAL_FOUNDING_NORMALIZED.map(() => '?').join(',')})
+       ORDER BY RANDOM()`
+    ).bind(pool, ...CANONICAL_FOUNDING_NORMALIZED));
+  }
+  return dbRows<any>(db.prepare(
+    `SELECT c.id, c.display_name, c.pool, c.status
+     FROM codenames c
+     WHERE c.pool = ? AND c.status = 'available'
+     ORDER BY RANDOM()`
+  ).bind(pool));
+};
 
 /**
  * Creates stable, covered card positions for an open ballot. The browser is
@@ -425,10 +443,20 @@ const ensureWideBallotSession = async (db: D1Database, session: any, pool: 'memb
   const legacyCurrent = Number(session.current_codename_id || 0);
   if (legacyCurrent > 0 && !revealed.includes(legacyCurrent)) revealed = [legacyCurrent, ...revealed];
 
+  // A Custom/founding ballot must never retain a legacy or administrator-added
+  // founding name outside the canonical six. It also removes names claimed by
+  // another member before the browser can see them.
+  const foundingCandidates = pool === 'founding' ? await eligibleBallotCodenames(db, pool) : null;
+  if (pool === 'founding') {
+    const allowedIds = new Set((foundingCandidates || []).map((candidate) => Number(candidate.id)));
+    slots = slots.filter((id): id is number => Boolean(id) && allowedIds.has(Number(id)));
+    revealed = revealed.filter((id) => allowedIds.has(id));
+  }
+
   if (!slots.length) {
-    const candidates = await eligibleBallotCodenames(db, pool);
+    const candidates = foundingCandidates || await eligibleBallotCodenames(db, pool);
     slots = candidates.map((candidate) => Number(candidate.id));
-    if (legacyCurrent > 0 && !slots.includes(legacyCurrent)) slots.unshift(legacyCurrent);
+    if (legacyCurrent > 0 && pool !== 'founding' && !slots.includes(legacyCurrent)) slots.unshift(legacyCurrent);
   }
   const slotSet = new Set(slots.filter((id): id is number => Boolean(id)));
   revealed = revealed.filter((id) => slotSet.has(id));
@@ -5109,9 +5137,9 @@ app.post('/api/phantom/codenames/:id/assign', requireAuth, requirePhantom, async
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE member_profiles SET codename_path = 'direct_founding', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(profileId),
     c.env.DB.prepare(
-      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, completed_at)
-       VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, NULL, CURRENT_TIMESTAMP)
-       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', pool = 'founding', assignment_source = 'phantom_direct', claimed_codename_id = excluded.claimed_codename_id, current_codename_id = NULL, completed_at = CURRENT_TIMESTAMP`
+      `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, ballot_slots_json, revealed_codenames_json, review_target_count, completed_at)
+       VALUES (?, 'completed', 'founding', 'phantom_direct', 0, ?, NULL, '[]', '[]', 0, CURRENT_TIMESTAMP)
+       ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', pool = 'founding', assignment_source = 'phantom_direct', claimed_codename_id = excluded.claimed_codename_id, current_codename_id = NULL, ballot_slots_json = '[]', revealed_codenames_json = '[]', review_target_count = 0, completed_at = CURRENT_TIMESTAMP`
     ).bind(profileId, id),
     c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
       .bind(id, profileId, actor?.userId ?? null, 'Assigned by PHANTOM as a founding or reserved identity'),

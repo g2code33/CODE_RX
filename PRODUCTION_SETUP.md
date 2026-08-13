@@ -122,9 +122,9 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
 5. Confirm a replacement invitation invalidates the earlier unused link, an unactivated member cannot sign in, and only successful password setup makes the member active.
 6. Test all codename paths:
    - Member Ballot uses only the Member Pool and requires three covered-card reveals before a comparison choice can be claimed.
-   - Custom Founding Ballot uses only the Founding Pool.
+   - Custom Founding Ballot exposes only the canonical six founding identities that remain unclaimed; PHANTOM and already claimed identities never appear as choices.
    - An unfinished ballot returns the member to the full-page ballot after sign-in or navigation.
-   - Direct Founding Assignment claims exactly one available founding codename and opens no ballot.
+   - Direct Founding Assignment, including GHOST/NEXUS/FALCON/QUANTUM/MATRIX, claims exactly one PHANTOM-selected founding codename and opens no ballot.
    - Import a comma/newline batch and a JSON codename batch; confirm duplicates are rejected before anything is added.
 7. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
 8. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
