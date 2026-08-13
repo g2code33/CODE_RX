@@ -140,7 +140,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                     ? 'Start your journey at the intersection of RX & Tech'
                     : mode === 'forgot'
                         ? 'Enter your email and we will send you a reset link'
-                        : 'Enter your credentials to access the portal'}
+                        : 'Use your email, phone number, or claimed Code Name with your password'}
                 </p>
               </div>
 
@@ -178,8 +178,10 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 <div className="relative">
                   <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                   <input
-                    type="email"
-                    placeholder="Email Address"
+                    type={mode === 'login' ? 'text' : 'email'}
+                    placeholder={mode === 'login' ? 'Email, phone number, or Code Name' : 'Email Address'}
+                    aria-label={mode === 'login' ? 'Email, phone number, or Code Name' : 'Email address'}
+                    autoComplete={mode === 'login' ? 'username' : 'email'}
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
