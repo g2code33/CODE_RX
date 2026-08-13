@@ -217,6 +217,7 @@ export const db = {
       return { url: URL.createObjectURL(await response.blob()), filename: response.headers.get('content-disposition')?.match(/filename=\"?([^\";]+)/i)?.[1] || 'community-attachment' };
     },
     deleteAttachment: (id: number) => apiCall(`/api/community/attachments/${id}`, { method: 'DELETE' }),
+    retryAttachmentTelegramSync: (id: number) => apiCall<{ data: { deletedFromR2: boolean }; message?: string }>(`/api/community/attachments/${id}/telegram-sync`, { method: 'POST' }),
   },
   communityAdmin: {
     mediaSettings: async () => (await apiCall<{ data: any }>('/api/phantom/community/media-settings')).data,
