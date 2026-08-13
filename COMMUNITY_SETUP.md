@@ -112,7 +112,19 @@ Never put any Telegram secret in React, `VITE_*`, D1, Git, screenshots, or chat.
 - Telegram-originated messages use `source = telegram` and are not sent back through the website-to-Telegram path.
 - A linked direct Telegram chat can send `/dm CODENAME message` to create/open the matching private Code Rx DM without exposing emails.
 - Group sync requires PHANTOM to explicitly enable it and configure the Telegram group chat ID.
-- Telegram media does not bypass Code Rx media controls.
+- Telegram media does not bypass Code Rx media controls. Website-to-Telegram private attachments are handled only through the PHANTOM-controlled retention path below; inbound Telegram media remains unimported.
+
+### Telegram media retention
+
+PHANTOM can open **PHANTOM Control → Media Management → Global** and enable
+**Telegram storage protection**. When enabled:
+
+- A private-chat attachment is accepted only when the conversation has an active Telegram sync target.
+- Code Rx sends the private R2 object to that configured Telegram target as a document, without exposing an R2 key or public file URL.
+- The R2 object is deleted only after Telegram returns a confirmed message ID.
+- The Code Rx message and small attachment audit metadata remain, but active R2 storage totals no longer include the file.
+- A failed Telegram sync or failed R2 cleanup keeps the file safely in R2; PHANTOM and the sender can retry it. It is never deleted before delivery is confirmed.
+- The retention path has a conservative **20 MB per-file** cap to stay within safe Pages Function and Telegram limits. Text chat is never restricted by this setting.
 
 ## Required deployment verification
 
@@ -123,7 +135,9 @@ Never put any Telegram secret in React, `VITE_*`, D1, Git, screenshots, or chat.
 5. Verify join request approval, group roles, message deletion, reactions, mentions, pins, and read state.
 6. Confirm media upload is rejected when the global master switch is OFF.
 7. Enable image media, upload to an authorized group, then verify an unauthorized member cannot access the attachment route.
-8. Configure Telegram secrets only after the website messaging system is working.
+8. Enable PHANTOM Telegram storage protection, upload a supported file below 20 MB to a Telegram-synced test chat, verify Telegram receives it, then verify the R2 active-file total returns to its prior value.
+9. Deliberately use an unavailable Telegram target once, verify the local file is retained and appears in PHANTOM retry controls, then retry only after fixing the target.
+10. Configure Telegram secrets only after the website messaging system is working.
 
 ## Current Free-plan-aware limitation
 

@@ -702,6 +702,9 @@ CREATE TABLE IF NOT EXISTS community_message_attachments (
   mime_type TEXT NOT NULL,
   size_bytes INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted','moderated')),
+  telegram_sync_status TEXT NOT NULL DEFAULT 'not_requested',
+  telegram_synced_at DATETIME,
+  telegram_sync_error TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(message_id) REFERENCES community_messages(id)
 );
@@ -715,6 +718,7 @@ CREATE TABLE IF NOT EXISTS community_media_settings (
   max_bytes INTEGER NOT NULL DEFAULT 0,
   allowed_mimes_json TEXT NOT NULL DEFAULT '[]',
   storage_limit_bytes INTEGER NOT NULL DEFAULT 0,
+  telegram_auto_delete_after_sync INTEGER NOT NULL DEFAULT 0,
   updated_by_user_id INTEGER,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(scope_type, scope_key, media_type)
@@ -802,6 +806,7 @@ CREATE INDEX IF NOT EXISTS idx_community_messages_conversation ON community_mess
 CREATE INDEX IF NOT EXISTS idx_community_message_reactions ON community_message_reactions(message_id, emoji);
 CREATE INDEX IF NOT EXISTS idx_community_join_requests ON community_group_join_requests(conversation_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_community_attachments_message ON community_message_attachments(message_id, status);
+CREATE INDEX IF NOT EXISTS idx_community_attachments_telegram_sync ON community_message_attachments(status, telegram_sync_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_community_telegram_links_message ON community_telegram_message_links(message_id, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
@@ -817,6 +822,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_subject ON audit_logs(subject_type, su
 // errors are safely ignored by runSafeMigrations below.
 const SAFE_MIGRATIONS = [
   { table: 'community_conversations', column: 'telegram_chat_id', sql: 'ALTER TABLE community_conversations ADD COLUMN telegram_chat_id TEXT' },
+  { table: 'community_media_settings', column: 'telegram_auto_delete_after_sync', sql: 'ALTER TABLE community_media_settings ADD COLUMN telegram_auto_delete_after_sync INTEGER NOT NULL DEFAULT 0' },
+  { table: 'community_message_attachments', column: 'telegram_sync_status', sql: "ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_status TEXT NOT NULL DEFAULT 'not_requested'" },
+  { table: 'community_message_attachments', column: 'telegram_synced_at', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_synced_at DATETIME' },
+  { table: 'community_message_attachments', column: 'telegram_sync_error', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_error TEXT' },
+
   { table: 'applications', column: 'reviewed_by_user_id', sql: 'ALTER TABLE applications ADD COLUMN reviewed_by_user_id INTEGER' },
   { table: 'applications', column: 'reviewed_at', sql: 'ALTER TABLE applications ADD COLUMN reviewed_at TEXT' },
   { table: 'applications', column: 'review_note', sql: 'ALTER TABLE applications ADD COLUMN review_note TEXT' },
@@ -852,7 +862,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-12-community-telegram-media-13';
+const VAULT_SCHEMA_VERSION = '2026-08-13-community-telegram-media-retention-14';
 
 
 const ROLE_SEEDS = [

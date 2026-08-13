@@ -522,6 +522,20 @@ const communityMediaTypeFor = (name: string, mime: string) => {
   return null;
 };
 
+const TELEGRAM_MEDIA_SYNC_MAX_BYTES = 20 * 1024 * 1024;
+
+type CommunityTelegramDeliveryPlan = {
+  enabled: boolean;
+  targets: string[];
+};
+
+type CommunityAttachmentSyncResult = {
+  synced: boolean;
+  deleted: boolean;
+  attempted: boolean;
+  error?: string;
+};
+
 const telegramApi = async (env: Env, method: string, payload: Record<string, unknown>) => {
   const token = String(env.TELEGRAM_BOT_TOKEN || '').trim();
   if (!token) return null;
@@ -534,10 +548,29 @@ const telegramApi = async (env: Env, method: string, payload: Record<string, unk
   } catch { return null; }
 };
 
-const syncCommunityMessageToTelegram = async (env: Env, db: D1Database, messageId: number, conversationId: number, senderProfileId: number, text: string) => {
+/** Sends a private R2 object to Telegram without making its R2 key or a public
+ * download URL visible to Telegram, the browser, or D1. The deliberately
+ * conservative cap keeps Pages Functions memory use and Telegram file limits
+ * within a Free-plan-safe range. */
+const telegramDocumentApi = async (env: Env, chatId: string, caption: string, name: string, mimeType: string, bytes: ArrayBuffer) => {
+  const token = String(env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token) return null;
+  try {
+    const form = new FormData();
+    form.set('chat_id', chatId);
+    if (caption) form.set('caption', caption.slice(0, 1024));
+    form.set('document', new Blob([bytes], { type: mimeType || 'application/octet-stream' }), name);
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: form });
+    if (!response.ok) return null;
+    const payload = await response.json() as any;
+    return payload?.ok && payload?.result?.message_id !== undefined ? payload : null;
+  } catch { return null; }
+};
+
+const communityTelegramDeliveryPlan = async (db: D1Database, conversationId: number, senderProfileId: number): Promise<CommunityTelegramDeliveryPlan> => {
   const conversationRows = await dbRows<any>(db.prepare('SELECT type, telegram_sync_enabled, telegram_chat_id FROM community_conversations WHERE id = ?').bind(conversationId));
   const conversation = conversationRows[0];
-  if (!conversation || Number(conversation.telegram_sync_enabled) !== 1 || !String(env.TELEGRAM_BOT_TOKEN || '').trim()) return;
+  if (!conversation || Number(conversation.telegram_sync_enabled) !== 1) return { enabled: false, targets: [] };
   const targets: string[] = [];
   if (conversation.type === 'group' && conversation.telegram_chat_id) targets.push(String(conversation.telegram_chat_id));
   if (conversation.type === 'dm') {
@@ -548,13 +581,136 @@ const syncCommunityMessageToTelegram = async (env: Env, db: D1Database, messageI
     ).bind(conversationId, senderProfileId));
     targets.push(...rows.map((row) => String(row.telegram_chat_id)));
   }
-  for (const chatId of [...new Set(targets)]) {
+  return { enabled: true, targets: [...new Set(targets.filter(Boolean))] };
+};
+
+const communityTelegramAutoDeleteAfterSyncEnabled = async (db: D1Database) => {
+  const rows = await dbRows<any>(db.prepare(
+    "SELECT telegram_auto_delete_after_sync FROM community_media_settings WHERE scope_type = 'global' AND scope_key = 'global' AND media_type = 'all' LIMIT 1"
+  ));
+  return Number(rows[0]?.telegram_auto_delete_after_sync || 0) === 1;
+};
+
+const recordTelegramMessageLink = async (db: D1Database, messageId: number, chatId: string, telegramMessageId: string) => {
+  await db.prepare(
+    "INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'website_to_telegram')"
+  ).bind(messageId, chatId, telegramMessageId).run();
+};
+
+const syncCommunityMessageToTelegram = async (env: Env, db: D1Database, messageId: number, conversationId: number, senderProfileId: number, text: string) => {
+  if (!String(env.TELEGRAM_BOT_TOKEN || '').trim()) return { synced: 0, targets: 0 };
+  const plan = await communityTelegramDeliveryPlan(db, conversationId, senderProfileId);
+  if (!plan.enabled || !plan.targets.length) return { synced: 0, targets: 0 };
+  let synced = 0;
+  for (const chatId of plan.targets) {
     const sent = await telegramApi(env, 'sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
     const telegramMessageId = sent?.result?.message_id;
-    if (telegramMessageId !== undefined) await db.prepare(
-      "INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'website_to_telegram')"
-    ).bind(messageId, chatId, String(telegramMessageId)).run();
+    if (telegramMessageId !== undefined) {
+      await recordTelegramMessageLink(db, messageId, chatId, String(telegramMessageId));
+      synced += 1;
+    }
   }
+  return { synced, targets: plan.targets.length };
+};
+
+const setCommunityAttachmentSyncState = async (db: D1Database, attachmentId: number, status: string, error: string | null = null) => {
+  await db.prepare(
+    `UPDATE community_message_attachments
+     SET telegram_sync_status = ?, telegram_sync_error = ?,
+         telegram_synced_at = CASE WHEN ? = 'synced' THEN CURRENT_TIMESTAMP ELSE telegram_synced_at END
+     WHERE id = ? AND status = 'active'`
+  ).bind(status, error ? error.slice(0, 500) : null, status, attachmentId).run();
+};
+
+const removeTelegramSyncedAttachment = async (env: Env, db: D1Database, attachment: any, actor: FounderActor | null) => {
+  try {
+    await env.BUCKET.delete(String(attachment.r2_key));
+    await db.prepare(
+      "UPDATE community_message_attachments SET status = 'deleted', telegram_sync_status = 'synced', telegram_synced_at = COALESCE(telegram_synced_at, CURRENT_TIMESTAMP), telegram_sync_error = NULL WHERE id = ? AND status = 'active'"
+    ).bind(attachment.id).run();
+    await audit(db, actor, 'community.attachment.telegram_synced_deleted', 'community_attachment', attachment.id, { messageId: attachment.message_id, conversationId: attachment.conversation_id, sizeBytes: Number(attachment.size_bytes || 0) });
+    return true;
+  } catch (error) {
+    await setCommunityAttachmentSyncState(db, Number(attachment.id), 'synced_pending_delete', 'Telegram confirmed delivery but local R2 cleanup needs a retry.');
+    console.warn('[code-rx] Telegram-synced Community attachment cleanup failed:', error);
+    return false;
+  }
+};
+
+/**
+ * Mirrors a website-originated attachment only to the explicitly configured
+ * Telegram target(s). When PHANTOM enables auto-delete, the R2 object is
+ * removed only after every target has returned a Telegram message ID.
+ */
+const syncCommunityAttachmentToTelegram = async (
+  env: Env,
+  db: D1Database,
+  attachment: any,
+  message: any,
+  senderName: string,
+  actor: FounderActor | null,
+  deleteAfterSync: boolean,
+): Promise<CommunityAttachmentSyncResult> => {
+  const attachmentId = Number(attachment.id);
+  if (!attachmentId || attachment.status !== 'active') return { synced: false, deleted: false, attempted: false, error: 'This attachment is no longer available.' };
+
+  if (attachment.telegram_sync_status === 'synced_pending_delete') {
+    const deleted = deleteAfterSync ? await removeTelegramSyncedAttachment(env, db, attachment, actor) : false;
+    return { synced: true, deleted, attempted: false, error: deleted || !deleteAfterSync ? undefined : 'Telegram confirmed delivery, but local cleanup needs a retry.' };
+  }
+
+  if (!String(env.TELEGRAM_BOT_TOKEN || '').trim()) {
+    if (deleteAfterSync) await setCommunityAttachmentSyncState(db, attachmentId, 'failed', 'Telegram bot configuration is unavailable.');
+    return { synced: false, deleted: false, attempted: false, error: 'Telegram media sync is not configured.' };
+  }
+  const plan = await communityTelegramDeliveryPlan(db, Number(message.conversation_id), Number(message.sender_member_profile_id));
+  if (!plan.enabled || !plan.targets.length) {
+    if (deleteAfterSync) await setCommunityAttachmentSyncState(db, attachmentId, 'failed', 'This conversation does not have an active Telegram target.');
+    return { synced: false, deleted: false, attempted: false, error: 'This chat does not have an active Telegram sync target.' };
+  }
+  if (Number(attachment.size_bytes || 0) > TELEGRAM_MEDIA_SYNC_MAX_BYTES) {
+    await setCommunityAttachmentSyncState(db, attachmentId, 'failed', 'The attachment exceeds the safe Telegram sync limit.');
+    return { synced: false, deleted: false, attempted: false, error: `This file exceeds the ${Math.round(TELEGRAM_MEDIA_SYNC_MAX_BYTES / 1024 / 1024)} MB Telegram sync limit.` };
+  }
+
+  const deliveredRows = await dbRows<any>(db.prepare(
+    "SELECT telegram_chat_id FROM community_telegram_message_links WHERE message_id = ? AND direction = 'website_to_telegram'"
+  ).bind(Number(message.id)));
+  const delivered = new Set(deliveredRows.map((row) => String(row.telegram_chat_id)));
+  const remainingTargets = plan.targets.filter((chatId) => !delivered.has(chatId));
+
+  if (remainingTargets.length) {
+    const object = await env.BUCKET.get(String(attachment.r2_key));
+    if (!object) {
+      await setCommunityAttachmentSyncState(db, attachmentId, 'failed', 'The local attachment object could not be read for Telegram sync.');
+      return { synced: false, deleted: false, attempted: true, error: 'The local attachment object is unavailable for Telegram sync.' };
+    }
+    const bytes = await object.arrayBuffer();
+    const captionText = String(message.body || '').trim();
+    const caption = `${senderName}: ${captionText || `Sent a ${String(attachment.media_type || 'media')} file.`}`.slice(0, 1024);
+    await setCommunityAttachmentSyncState(db, attachmentId, 'pending');
+    let failed = false;
+    for (const chatId of remainingTargets) {
+      const sent = await telegramDocumentApi(env, chatId, caption, String(attachment.original_name || 'code-rx-media'), String(attachment.mime_type || 'application/octet-stream'), bytes);
+      const telegramMessageId = sent?.result?.message_id;
+      if (telegramMessageId === undefined) {
+        failed = true;
+        continue;
+      }
+      await recordTelegramMessageLink(db, Number(message.id), chatId, String(telegramMessageId));
+    }
+    if (failed) {
+      await setCommunityAttachmentSyncState(db, attachmentId, 'failed', 'Telegram did not confirm delivery to every configured target.');
+      await audit(db, actor, 'community.attachment.telegram_sync_failed', 'community_attachment', attachmentId, { messageId: message.id, conversationId: message.conversation_id });
+      return { synced: false, deleted: false, attempted: true, error: 'Telegram did not confirm this media delivery. The local file was retained safely.' };
+    }
+  }
+
+  await setCommunityAttachmentSyncState(db, attachmentId, 'synced');
+  await audit(db, actor, 'community.attachment.telegram_synced', 'community_attachment', attachmentId, { messageId: message.id, conversationId: message.conversation_id, autoDeleted: deleteAfterSync });
+  if (!deleteAfterSync) return { synced: true, deleted: false, attempted: true };
+  const deleted = await removeTelegramSyncedAttachment(env, db, attachment, actor);
+  return { synced: true, deleted, attempted: true, error: deleted ? undefined : 'Telegram confirmed delivery, but local cleanup needs a retry.' };
 };
 
 const communityFileSignatureValid = async (file: File, mediaType: string) => {
@@ -3493,7 +3649,8 @@ app.get('/api/community/conversations/:id/messages', requireAuth, async (c) => {
   if (!member && !access.actor!.isPhantom) return c.json({ success: false, error: 'You are not authorized to view this conversation.' }, 403);
   const messages = await dbRows<any>(c.env.DB.prepare(
     `SELECT m.*, COALESCE(sender_code.display_name, sender.member_code, 'Code Rx') AS sender_codename,
-       reply.body AS reply_body, COALESCE(reply_code.display_name, reply_sender.member_code) AS reply_sender_codename
+       reply.body AS reply_body, COALESCE(reply_code.display_name, reply_sender.member_code) AS reply_sender_codename,
+       (SELECT COUNT(*) FROM community_message_attachments removed WHERE removed.message_id = m.id AND removed.status = 'deleted' AND removed.telegram_sync_status = 'synced') AS telegram_removed_attachment_count
      FROM community_messages m
      LEFT JOIN member_profiles sender ON sender.id = m.sender_member_profile_id
      LEFT JOIN codenames sender_code ON sender_code.claimed_by_member_profile_id = sender.id AND sender_code.status = 'claimed'
@@ -3510,7 +3667,7 @@ app.get('/api/community/conversations/:id/messages', requireAuth, async (c) => {
      FROM community_message_reactions WHERE message_id IN (${ids.map(() => '?').join(',')}) GROUP BY message_id, emoji`
   ).bind(access.actor!.profileId, ...ids)) : [];
   const attachmentRows = ids.length ? await dbRows<any>(c.env.DB.prepare(
-    `SELECT id, message_id, original_name, media_type, mime_type, size_bytes FROM community_message_attachments
+    `SELECT id, message_id, original_name, media_type, mime_type, size_bytes, telegram_sync_status FROM community_message_attachments
      WHERE message_id IN (${ids.map(() => '?').join(',')}) AND status = 'active'`
   ).bind(...ids)) : [];
   const reactions = new Map<number, any[]>();
@@ -3694,7 +3851,30 @@ app.get('/api/phantom/community/media-settings', requireAuth, requirePhantom, as
      WHERE a.status = 'active' AND c.type = 'group'
      GROUP BY c.id ORDER BY storage_bytes DESC LIMIT 50`
   ));
-  return c.json({ success: true, data: { settings, totals, byType: stats.map((row) => ({ mediaType: row.media_type, fileCount: Number(row.type_count || 0), storageBytes: Number(row.type_bytes || 0) })), byGroup: byGroup.map((row) => ({ groupId: row.group_id, groupTitle: row.group_title, fileCount: Number(row.file_count || 0), storageBytes: Number(row.storage_bytes || 0) })) } });
+  const retryRows = await dbRows<any>(c.env.DB.prepare(
+    "SELECT telegram_sync_status, COUNT(*) AS file_count FROM community_message_attachments WHERE status = 'active' AND telegram_sync_status IN ('failed','synced_pending_delete') GROUP BY telegram_sync_status"
+  ));
+  const retryItems = await dbRows<any>(c.env.DB.prepare(
+    `SELECT a.id, a.original_name, a.media_type, a.size_bytes, a.telegram_sync_status, c.id AS conversation_id, c.type AS conversation_type, c.title AS conversation_title
+     FROM community_message_attachments a
+     JOIN community_messages m ON m.id = a.message_id
+     JOIN community_conversations c ON c.id = m.conversation_id
+     WHERE a.status = 'active' AND a.telegram_sync_status IN ('failed','synced_pending_delete')
+     ORDER BY a.created_at ASC LIMIT 50`
+  ));
+  const globalMaster = settings.find((setting) => setting.scope_type === 'global' && setting.scope_key === 'global' && setting.media_type === 'all');
+  return c.json({ success: true, data: {
+    settings,
+    totals,
+    telegramRetention: {
+      autoDeleteAfterSync: Number(globalMaster?.telegram_auto_delete_after_sync || 0) === 1,
+      maxSyncBytes: TELEGRAM_MEDIA_SYNC_MAX_BYTES,
+      retryRequiredCount: retryRows.reduce((total, row) => total + Number(row.file_count || 0), 0),
+    },
+    retryItems: retryItems.map((item) => ({ id: Number(item.id), originalName: item.original_name, mediaType: item.media_type, sizeBytes: Number(item.size_bytes || 0), syncStatus: item.telegram_sync_status, conversationId: Number(item.conversation_id), conversationType: item.conversation_type, conversationTitle: item.conversation_title || (item.conversation_type === 'dm' ? 'Direct message' : 'Private group') })),
+    byType: stats.map((row) => ({ mediaType: row.media_type, fileCount: Number(row.type_count || 0), storageBytes: Number(row.type_bytes || 0) })),
+    byGroup: byGroup.map((row) => ({ groupId: row.group_id, groupTitle: row.group_title, fileCount: Number(row.file_count || 0), storageBytes: Number(row.storage_bytes || 0) })),
+  } });
 });
 
 app.put('/api/phantom/community/media-settings', requireAuth, requirePhantom, async (c) => {
@@ -3707,13 +3887,26 @@ app.put('/api/phantom/community/media-settings', requireAuth, requirePhantom, as
   const storageLimitBytes = body.storageLimitBytes === undefined ? 0 : Number(body.storageLimitBytes);
   if (!Number.isInteger(maxBytes) || maxBytes < 0 || maxBytes > 100 * 1024 * 1024 || !Number.isInteger(storageLimitBytes) || storageLimitBytes < 0) return c.json({ success: false, error: 'Use valid media size limits.' }, 400);
   const allowedMimes = Array.isArray(body.allowedMimes) ? body.allowedMimes.filter((mime: unknown) => typeof mime === 'string' && mime.length <= 120).slice(0, 30) : [];
+  const isGlobalMaster = scopeType === 'global' && scopeKey === 'global' && mediaType === 'all';
+  if (body.telegramAutoDeleteAfterSync !== undefined && (!isGlobalMaster || typeof body.telegramAutoDeleteAfterSync !== 'boolean')) {
+    return c.json({ success: false, error: 'Telegram auto-delete can only be changed on the Global all-media setting.' }, 400);
+  }
+  if (body.telegramAutoDeleteAfterSync === true && !String(c.env.TELEGRAM_BOT_TOKEN || '').trim()) {
+    return c.json({ success: false, error: 'Configure the Telegram bot secret before enabling automatic Telegram media cleanup.' }, 503);
+  }
+  const existingRows = await dbRows<any>(c.env.DB.prepare(
+    'SELECT telegram_auto_delete_after_sync FROM community_media_settings WHERE scope_type = ? AND scope_key = ? AND media_type = ? LIMIT 1'
+  ).bind(scopeType, scopeKey, mediaType));
+  const autoDeleteAfterSync = body.telegramAutoDeleteAfterSync === undefined
+    ? Number(existingRows[0]?.telegram_auto_delete_after_sync || 0) === 1
+    : body.telegramAutoDeleteAfterSync;
   const actor = await actorFromContext(c);
   await c.env.DB.prepare(
-    `INSERT INTO community_media_settings (scope_type, scope_key, media_type, enabled, max_bytes, allowed_mimes_json, storage_limit_bytes, updated_by_user_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(scope_type, scope_key, media_type) DO UPDATE SET enabled = excluded.enabled, max_bytes = excluded.max_bytes, allowed_mimes_json = excluded.allowed_mimes_json, storage_limit_bytes = excluded.storage_limit_bytes, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
-  ).bind(scopeType, scopeKey, mediaType, body.enabled ? 1 : 0, maxBytes, JSON.stringify(allowedMimes), storageLimitBytes, actor?.userId ?? null).run();
-  await audit(c.env.DB, actor, 'community.media_setting.updated', 'community_media_setting', `${scopeKey}:${mediaType}`, { scopeType, enabled: body.enabled, maxBytes, storageLimitBytes });
+    `INSERT INTO community_media_settings (scope_type, scope_key, media_type, enabled, max_bytes, allowed_mimes_json, storage_limit_bytes, telegram_auto_delete_after_sync, updated_by_user_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(scope_type, scope_key, media_type) DO UPDATE SET enabled = excluded.enabled, max_bytes = excluded.max_bytes, allowed_mimes_json = excluded.allowed_mimes_json, storage_limit_bytes = excluded.storage_limit_bytes, telegram_auto_delete_after_sync = excluded.telegram_auto_delete_after_sync, updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(scopeType, scopeKey, mediaType, body.enabled ? 1 : 0, maxBytes, JSON.stringify(allowedMimes), storageLimitBytes, autoDeleteAfterSync ? 1 : 0, actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, 'community.media_setting.updated', 'community_media_setting', `${scopeKey}:${mediaType}`, { scopeType, enabled: body.enabled, maxBytes, storageLimitBytes, telegramAutoDeleteAfterSync: autoDeleteAfterSync && isGlobalMaster });
   return c.json({ success: true, message: 'Community media setting saved.' });
 });
 
@@ -3729,11 +3922,13 @@ app.get('/api/community/conversations/:id/media-policy', requireAuth, async (c) 
 });
 
 app.post('/api/community/conversations/:id/attachments', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 12, 60)) return c.json({ success: false, error: 'You are uploading media too quickly. Please wait a moment.' }, 429);
   const access = await requireActiveActor(c);
   if (access.response) return access.response;
   const conversationId = Number(c.req.param('id'));
   const member = await communityConversationMember(c.env.DB, conversationId, access.actor!.profileId!);
   if (!member) return c.json({ success: false, error: 'You are not authorized to upload to this conversation.' }, 403);
+  if (member.conversation_status !== 'active' && !communityCanManage(member, access.actor!)) return c.json({ success: false, error: 'This conversation is locked.' }, 409);
   const form = await c.req.formData().catch(() => null);
   const file = form?.get('file');
   if (!(file instanceof File)) return c.json({ success: false, error: 'Choose a file to upload.' }, 400);
@@ -3745,6 +3940,13 @@ app.post('/api/community/conversations/:id/attachments', requireAuth, async (c) 
   if (!await communityFileSignatureValid(file, mediaType)) return c.json({ success: false, error: 'The file content does not match its declared media type.' }, 415);
   if (policy.maxBytes > 0 && file.size > policy.maxBytes) return c.json({ success: false, error: 'This file exceeds the configured media size limit.' }, 413);
   if (policy.allowedMimes.length && !policy.allowedMimes.includes(file.type)) return c.json({ success: false, error: 'This MIME type is not permitted by PHANTOM media controls.' }, 415);
+  const autoDeleteAfterTelegramSync = await communityTelegramAutoDeleteAfterSyncEnabled(c.env.DB);
+  if (autoDeleteAfterTelegramSync) {
+    if (file.size > TELEGRAM_MEDIA_SYNC_MAX_BYTES) return c.json({ success: false, error: `Telegram storage protection is enabled. Use a file of ${Math.round(TELEGRAM_MEDIA_SYNC_MAX_BYTES / 1024 / 1024)} MB or less, or ask PHANTOM to turn that protection off.` }, 413);
+    if (!String(c.env.TELEGRAM_BOT_TOKEN || '').trim()) return c.json({ success: false, error: 'Telegram storage protection is enabled, but the Telegram bot is not configured.' }, 503);
+    const plan = await communityTelegramDeliveryPlan(c.env.DB, conversationId, access.actor!.profileId!);
+    if (!plan.enabled || !plan.targets.length) return c.json({ success: false, error: 'Telegram storage protection is enabled. This chat needs an active Telegram sync target before media can be uploaded.' }, 409);
+  }
   if (policy.storageLimitBytes > 0) {
     const usage = groupId
       ? await dbRows<{ bytes: number }>(c.env.DB.prepare(
@@ -3757,17 +3959,62 @@ app.post('/api/community/conversations/:id/attachments', requireAuth, async (c) 
   const safeName = (file.name || 'attachment').replace(/[^A-Za-z0-9._-]/g, '_').slice(-100);
   const key = `community/${conversationId}/${Date.now()}-${randomToken().slice(0, 12)}-${safeName}`;
   await c.env.BUCKET.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+  const caption = cleanOptionalStr(form?.get('caption'), 1000) || '';
   const messageResult = await c.env.DB.prepare(
     `INSERT INTO community_messages (conversation_id, sender_member_profile_id, message_type, body, source)
      VALUES (?, ?, ?, ?, 'website')`
-  ).bind(conversationId, access.actor!.profileId, mediaType === 'image' ? 'image' : mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'voice' : 'file', cleanOptionalStr(form?.get('caption'), 1000) || '').run();
+  ).bind(conversationId, access.actor!.profileId, mediaType === 'image' ? 'image' : mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'voice' : 'file', caption).run();
   const messageId = Number(messageResult.meta.last_row_id);
   const attachmentResult = await c.env.DB.prepare(
     `INSERT INTO community_message_attachments (message_id, r2_key, original_name, media_type, mime_type, size_bytes)
      VALUES (?, ?, ?, ?, ?, ?)`
   ).bind(messageId, key, safeName, mediaType, file.type, file.size).run();
+  const attachmentId = Number(attachmentResult.meta.last_row_id);
   await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(conversationId).run();
-  return c.json({ success: true, data: { id: Number(attachmentResult.meta.last_row_id), messageId, name: safeName, mediaType, sizeBytes: file.size }, message: 'Attachment uploaded.' }, 201);
+
+  const senderName = access.actor!.codename || access.actor!.memberCode || 'A Code Rx member';
+  const attachment = { id: attachmentId, message_id: messageId, conversation_id: conversationId, r2_key: key, original_name: safeName, media_type: mediaType, mime_type: file.type, size_bytes: file.size, status: 'active', telegram_sync_status: 'not_requested' };
+  const message = { id: messageId, conversation_id: conversationId, sender_member_profile_id: access.actor!.profileId, body: caption };
+  let telegram: CommunityAttachmentSyncResult | null = null;
+  try {
+    telegram = await syncCommunityAttachmentToTelegram(c.env, c.env.DB, attachment, message, senderName, access.actor, autoDeleteAfterTelegramSync);
+  } catch (error) {
+    if (autoDeleteAfterTelegramSync) await setCommunityAttachmentSyncState(c.env.DB, attachmentId, 'failed', 'Telegram media sync could not complete.');
+    console.warn('[code-rx] community Telegram media sync skipped:', error);
+    telegram = { synced: false, deleted: false, attempted: true, error: 'Telegram media sync could not complete. The local file was retained safely.' };
+  }
+  await audit(c.env.DB, access.actor, 'community.attachment.uploaded', 'community_attachment', attachmentId, { conversationId, mediaType, sizeBytes: file.size, telegramSynced: Boolean(telegram?.synced), autoDeletedFromR2: Boolean(telegram?.deleted) });
+  const messageText = telegram?.deleted
+    ? 'Attachment synced to Telegram and removed from Code Rx storage.'
+    : telegram?.synced
+      ? 'Attachment uploaded and synced to Telegram.'
+      : telegram?.error || 'Attachment uploaded.';
+  return c.json({ success: true, data: { id: attachmentId, messageId, name: safeName, mediaType, sizeBytes: file.size, telegramSynced: Boolean(telegram?.synced), deletedFromR2: Boolean(telegram?.deleted) }, message: messageText }, 201);
+});
+
+app.post('/api/community/attachments/:id/telegram-sync', requireAuth, async (c) => {
+  if (!checkRateLimit(c, 5, 60)) return c.json({ success: false, error: 'Please wait before retrying Telegram media sync.' }, 429);
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const id = Number(c.req.param('id'));
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT a.*, m.conversation_id, m.sender_member_profile_id, m.body, m.status AS message_status,
+       COALESCE(sender_code.display_name, sender.member_code, 'Code Rx member') AS sender_codename
+     FROM community_message_attachments a
+     JOIN community_messages m ON m.id = a.message_id
+     LEFT JOIN member_profiles sender ON sender.id = m.sender_member_profile_id
+     LEFT JOIN codenames sender_code ON sender_code.claimed_by_member_profile_id = sender.id AND sender_code.status = 'claimed'
+     WHERE a.id = ? AND a.status = 'active'`
+  ).bind(id));
+  const attachment = rows[0];
+  if (!attachment || attachment.message_status !== 'active') return c.json({ success: false, error: 'Attachment not found.' }, 404);
+  const member = await communityConversationMember(c.env.DB, Number(attachment.conversation_id), access.actor!.profileId!);
+  if (!member && !access.actor!.isPhantom) return c.json({ success: false, error: 'You are not authorized to retry this attachment.' }, 403);
+  if (Number(attachment.sender_member_profile_id) !== Number(access.actor!.profileId) && !communityCanManage(member, access.actor!)) return c.json({ success: false, error: 'Only the sender, a group moderator, or PHANTOM can retry this attachment.' }, 403);
+  const autoDeleteAfterTelegramSync = await communityTelegramAutoDeleteAfterSyncEnabled(c.env.DB);
+  const result = await syncCommunityAttachmentToTelegram(c.env, c.env.DB, attachment, attachment, String(attachment.sender_codename || 'Code Rx member'), access.actor, autoDeleteAfterTelegramSync);
+  if (!result.synced) return c.json({ success: false, error: result.error || 'Telegram did not confirm this media delivery. The local file remains protected.' }, 409);
+  return c.json({ success: true, data: { deletedFromR2: result.deleted }, message: result.deleted ? 'Telegram confirmed delivery and the local R2 media was removed.' : result.error || 'Telegram media sync completed.' });
 });
 
 app.get('/api/community/attachments/:id', requireAuth, async (c) => {
