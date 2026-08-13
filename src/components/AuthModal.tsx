@@ -93,7 +93,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                 <CheckCircle className="w-10 h-10" />
               </div>
               <h2 className="text-3xl font-black text-slate-900 mb-2 tracking-tighter uppercase">Application Sent!</h2>
-              <p className="text-slate-500 font-medium mb-8">Your pending JOIN CODE Rx request has been sent. PHANTOM will review it and contact you by email.</p>
+              <p className="text-slate-500 font-medium mb-8">Your JOIN CODE Rx application is pending PHANTOM review. If approved, you will receive a secure link to create your own private password.</p>
               <button onClick={onClose} className="w-full py-4 bg-slate-900 text-white font-black rounded-2xl hover:bg-black transition-all">CLOSE</button>
             </motion.div>
           </div>

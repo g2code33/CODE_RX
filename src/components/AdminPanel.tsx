@@ -36,7 +36,7 @@ const STORAGE_KEY = 'codeRx_siteContent';
 const PENDING_PUBLISH_KEY = 'codeRx_pendingSiteContent';
 
 // Applications Section Component
-const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) => void }) => {
+const ApplicationsSection = ({ onPendingCount, onOpenPhantom }: { onPendingCount?: (n: number) => void; onOpenPhantom?: () => void }) => {
   const [applications, setApplications] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -61,19 +61,12 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
     }
   };
 
-  const handleApprove = async (id: number) => {
-    try {
-      await db.applications.updateStatus(id, 'approved');
-      const updated = applications.map(app => 
-        app.id === id ? { ...app, status: 'approved' } : app
-      );
-      setApplications(updated);
-      // Approval is review only. PHANTOM must deliberately use Create Member
-      // in the Control Center to issue a member ID and secure activation link.
-      alert('Application reviewed. Open PHANTOM Control Center → Applications → Create Member to issue the secure activation process.');
-    } catch (error) {
-      console.error('Failed to approve application:', error);
-    }
+  const handleApprove = (id: number) => {
+    const application = applications.find((item) => Number(item.id) === Number(id));
+    // Keep the legacy Admin Core from creating an "approved but no account"
+    // record. PHANTOM Control owns the single approve → invite workflow.
+    if (onOpenPhantom) onOpenPhantom();
+    else alert(`Open PHANTOM Control → Applications and select “Approve & invite” for ${application?.name || 'this applicant'}. That one action creates the member and secure password-setup link together.`);
   };
 
   const handleReject = async (id: number) => {
@@ -134,7 +127,7 @@ const ApplicationsSection = ({ onPendingCount }: { onPendingCount?: (n: number) 
                   onClick={() => handleApprove(app.id)}
                   className="px-6 py-2 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-xs uppercase tracking-wide"
                 >
-                  Approve
+                  Approve in PHANTOM
                 </button>
                 <button 
                   onClick={() => handleReject(app.id)}
@@ -1616,7 +1609,7 @@ export const AdminPanel = ({
             )}
 
             {activeView === 'applications' && (
-              <ApplicationsSection onPendingCount={setPendingCount} />
+              <ApplicationsSection onPendingCount={setPendingCount} onOpenPhantom={() => onWorkspaceChange('phantom')} />
             )}
 
             {activeView === 'members' && (
