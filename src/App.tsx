@@ -15,6 +15,14 @@ import { SECTION_MAP } from './data/mockData';
 import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
 import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
 
+type CommunityOrigin = 'public' | 'member' | 'phantom' | 'admin';
+
+const communityOriginFor = (currentUser: AuthUser | null): CommunityOrigin => {
+  if (!currentUser) return 'public';
+  if (isAdminUser(currentUser)) return currentUser.isPhantom || currentUser.role === 'phantom' ? 'phantom' : 'admin';
+  return 'member';
+};
+
 function App() {
   const [isDashboard, setIsDashboard] = useState(false);
   const [isMemberVault, setIsMemberVault] = useState(false);
@@ -24,6 +32,9 @@ function App() {
   const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault' | 'phantom'>('controller');
   const [user, setUser] = useState<AuthUser | null>(auth.getUser());
   const [activeTab, setActiveTab] = useState('home');
+  const [isCommunityWorkspace, setIsCommunityWorkspace] = useState(() => window.location.hash.startsWith('#community'));
+  const [communityOrigin, setCommunityOrigin] = useState<CommunityOrigin>(() => communityOriginFor(auth.getUser()));
+  const [resumeCommunityAfterLogin, setResumeCommunityAfterLogin] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'join' | 'login'>('join');
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
@@ -96,6 +107,7 @@ function App() {
     auth.me().then((authenticatedUser) => {
       if (!authenticatedUser) return;
       setUser(authenticatedUser);
+      if (isCommunityWorkspace) setCommunityOrigin(communityOriginFor(authenticatedUser));
       if (isAdminUser(authenticatedUser)) {
         setIsAdmin(true);
         setIsDashboard(false);
@@ -112,11 +124,14 @@ function App() {
 
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+  const userRef = useRef(user);
+  userRef.current = user;
 
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
       if (window.location.hash.startsWith('#codename-ballot')) {
+        setIsCommunityWorkspace(false);
         setIsCodenameBallotView(true);
         setIsSharedVaultView(false);
         setIsActivationView(false);
@@ -124,6 +139,7 @@ function App() {
         return;
       }
       if (window.location.hash.startsWith('#vault-share')) {
+        setIsCommunityWorkspace(false);
         setIsSharedVaultView(true);
         setIsCodenameBallotView(false);
         setIsActivationView(false);
@@ -131,6 +147,7 @@ function App() {
         return;
       }
       if (window.location.hash.startsWith('#member-vault')) {
+        setIsCommunityWorkspace(false);
         setIsMemberVault(true);
         setIsSharedVaultView(false);
         setIsCodenameBallotView(false);
@@ -139,6 +156,7 @@ function App() {
         return;
       }
       if (window.location.hash.startsWith('#activate')) {
+        setIsCommunityWorkspace(false);
         setIsActivationView(true);
         setIsResetView(false);
         setIsSharedVaultView(false);
@@ -146,6 +164,7 @@ function App() {
         return;
       }
       if (window.location.hash.startsWith('#reset')) {
+        setIsCommunityWorkspace(false);
         setIsResetView(true);
         setIsActivationView(false);
         setIsSharedVaultView(false);
@@ -160,6 +179,12 @@ function App() {
       const id = idFromHash();
       const section = SECTION_MAP[id];
       const tab = section ? section.tab : 'home';
+      if (tab === 'community') {
+        setCommunityOrigin(communityOriginFor(userRef.current));
+        setIsCommunityWorkspace(true);
+      } else {
+        setIsCommunityWorkspace(false);
+      }
       if (tab !== activeTabRef.current) {
         setActiveTab(tab);
         setIsDashboard(false);
@@ -188,21 +213,73 @@ function App() {
     setIsAuthOpen(true);
   };
 
-  const toggleDashboard = () => {
-    if (!isDashboard && !isAdmin) {
-      setAuthMode('login');
-      setIsAuthOpen(true);
-      return;
+  const clearAppHash = () => {
+    if (window.location.hash) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+  };
+
+  const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'instant' });
+
+  // Home always returns to the first workspace a signed-in person sees after
+  // login: Member Portal overview for members and Admin Core for administrators.
+  const goToPostLoginHome = () => {
+    setIsCommunityWorkspace(false);
+    setIsMemberVault(false);
+    setActiveTab('home');
+    if (isAdmin) {
+      setIsDashboard(false);
+      setAdminWorkspace('controller');
+    } else if (user) {
+      setIsDashboard(true);
+    } else {
+      setIsDashboard(false);
     }
+    clearAppHash();
+    scrollToTop();
+  };
+
+  const returnToPublicSite = () => {
+    setIsCommunityWorkspace(false);
+    setIsMemberVault(false);
+    setIsDashboard(false);
+    setActiveTab('home');
+    clearAppHash();
+    scrollToTop();
+  };
+
+  const signOut = () => {
     auth.logout();
     setUser(null);
     setIsDashboard(false);
     setIsMemberVault(false);
+    setIsCommunityWorkspace(false);
     setIsAdmin(false);
     setAdminWorkspace('controller');
+    setActiveTab('home');
+    clearAppHash();
+    scrollToTop();
+  };
+
+  const toggleDashboard = () => {
+    if (isAdmin) {
+      goToPostLoginHome();
+      return;
+    }
+    if (user) {
+      setIsCommunityWorkspace(false);
+      setIsMemberVault(false);
+      setIsDashboard(true);
+      setActiveTab('home');
+      clearAppHash();
+      scrollToTop();
+      return;
+    }
+    setAuthMode('login');
+    setIsAuthOpen(true);
   };
 
   const handleLoginSuccess = (authenticatedUser: AuthUser) => {
+    const shouldResumeCommunity = resumeCommunityAfterLogin;
+    setResumeCommunityAfterLogin(false);
     setUser(authenticatedUser);
     setIsAuthOpen(false);
     if (isAdminUser(authenticatedUser)) {
@@ -216,25 +293,68 @@ function App() {
       setIsAdmin(false);
       void enforceCodenameBallot(authenticatedUser);
     }
+    if (shouldResumeCommunity) {
+      setCommunityOrigin(communityOriginFor(authenticatedUser));
+      setIsCommunityWorkspace(true);
+      setActiveTab('community');
+      setIsDashboard(false);
+      if (window.location.hash !== '#community') window.history.pushState(null, '', `${window.location.pathname}${window.location.search}#community`);
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const openCommunityHub = () => {
+  const openCommunityHub = (origin: CommunityOrigin = communityOriginFor(user)) => {
+    setCommunityOrigin(origin);
+    setIsCommunityWorkspace(true);
     setIsMemberVault(false);
     setIsDashboard(false);
     setActiveTab('community');
     if (window.location.hash !== '#community') window.location.hash = 'community';
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    scrollToTop();
+  };
+
+  const requestCommunityLogin = () => {
+    setResumeCommunityAfterLogin(true);
+    setAuthMode('login');
+    setIsAuthOpen(true);
+  };
+
+  const returnFromCommunity = () => {
+    setIsCommunityWorkspace(false);
+    setActiveTab('home');
+    setIsMemberVault(false);
+    if (communityOrigin === 'member') {
+      setIsDashboard(true);
+    } else if (communityOrigin === 'phantom') {
+      setIsDashboard(false);
+      setAdminWorkspace('phantom');
+    } else if (communityOrigin === 'admin') {
+      setIsDashboard(false);
+      setAdminWorkspace('controller');
+    } else {
+      setIsDashboard(false);
+    }
+    clearAppHash();
+    scrollToTop();
   };
 
   const handleTabChange = (tabId: string) => {
     const section = SECTION_MAP[tabId];
     const tab = section ? section.tab : tabId;
+    const isBuilderPreview = isAdmin && adminWorkspace === 'builder';
     setActiveTab(tab);
+    if (tab === 'community' && !isBuilderPreview) {
+      setCommunityOrigin(communityOriginFor(user));
+      setIsCommunityWorkspace(true);
+    } else if (!isBuilderPreview) {
+      setIsCommunityWorkspace(false);
+    }
     setIsDashboard(false);
-    if (window.location.hash !== `#${tabId}`) window.location.hash = tabId;
+    // The visual Website Builder uses the same page tabs for its preview. Its
+    // navigation should not replace the builder with the Community workspace.
+    if (!isBuilderPreview && window.location.hash !== `#${tabId}`) window.location.hash = tabId;
     if (tabId === tab) {
-      window.scrollTo({ top: 0, behavior: 'instant' });
+      scrollToTop();
     } else {
       setTimeout(() => document.getElementById(tabId)?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 80);
     }
@@ -272,27 +392,27 @@ function App() {
   // Member Vault is deliberately returned outside the public/dashboard shell.
   // No dashboard sidebar, public navbar, or constrained parent remains mounted.
   if (!isAdmin && isDashboard && isMemberVault) {
-    return <Vault workspaceMode="member" onBack={() => { setIsMemberVault(false); if (window.location.hash.startsWith('#member-vault')) window.location.hash = ''; }} />;
+    return <Vault workspaceMode="member" onBack={() => { setIsMemberVault(false); if (window.location.hash.startsWith('#member-vault')) window.location.hash = ''; }} onHome={goToPostLoginHome} />;
   }
 
   // PHANTOM Vault already returns its standalone workspace from AdminPanel;
   // returning it directly here likewise removes the Admin shell completely.
-  if (isAdmin && (adminWorkspace === 'vault' || adminWorkspace === 'phantom')) {
-    return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />;
+  if (!isCommunityWorkspace && isAdmin && (adminWorkspace === 'vault' || adminWorkspace === 'phantom')) {
+    return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} onOpenCommunity={() => openCommunityHub('phantom')} onHome={goToPostLoginHome} user={user} />;
   }
 
-  const inImmersiveWorkspace = (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault' || adminWorkspace === 'phantom')) || (!isAdmin && isDashboard);
-  const mainContent = isAdmin
-    ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} user={user} />
-    : isDashboard
-      ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} onOpenCommunity={openCommunityHub} onExit={toggleDashboard} />
-      : activeTab === 'community'
-        ? <CommunityHub user={user} onLogin={() => { setAuthMode('login'); setIsAuthOpen(true); }} />
+  const inImmersiveWorkspace = isCommunityWorkspace || (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault' || adminWorkspace === 'phantom')) || (!isAdmin && isDashboard);
+  const mainContent = isCommunityWorkspace
+    ? <CommunityHub user={user} onLogin={requestCommunityLogin} onBack={returnFromCommunity} onHome={goToPostLoginHome} initialArea={user ? 'private' : 'public'} standalone backLabel={communityOrigin === 'phantom' ? 'PHANTOM' : communityOrigin === 'member' ? 'Portal' : communityOrigin === 'admin' ? 'Admin' : 'Back'} />
+    : isAdmin
+      ? <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} onOpenCommunity={() => openCommunityHub(user?.isPhantom ? 'phantom' : 'admin')} onHome={goToPostLoginHome} user={user} />
+      : isDashboard
+        ? <Dashboard user={user} onOpenVault={() => { setIsMemberVault(true); window.location.hash = 'member-vault'; }} onOpenCommunity={() => openCommunityHub('member')} onBackToSite={returnToPublicSite} onSignOut={signOut} />
         : <SiteFlow siteContent={siteContent} activeTab={activeTab} onJoin={handleOpenJoin} includeFooter includeJoinCta />;
 
   const shell = (
     <div className="brand-app min-h-screen">
-      {!inImmersiveWorkspace && <Navbar onDashboardToggle={toggleDashboard} isDashboard={isDashboard} activeTab={activeTab} setActiveTab={handleTabChange} copy={siteContent.copy} media={siteContent.media} />}
+      {!inImmersiveWorkspace && <Navbar onDashboardToggle={isAdmin ? signOut : toggleDashboard} isDashboard={isDashboard} isAdmin={isAdmin} activeTab={activeTab} setActiveTab={handleTabChange} copy={siteContent.copy} media={siteContent.media} />}
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}

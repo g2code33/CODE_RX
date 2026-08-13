@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Menu, X, ArrowUpRight } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, Home, Menu, X } from 'lucide-react';
 import { NAV_LINKS } from '../data/mockData';
 import { MediaAsset } from '../data/editorSchema';
 import { getCopy, getMedia } from '../data/editorSchema';
@@ -8,6 +8,7 @@ import { EditableImage, EditableRegion, EditableText } from './VisualEditorConte
 export const Navbar = ({
   onDashboardToggle,
   isDashboard,
+  isAdmin = false,
   activeTab,
   setActiveTab,
   copy,
@@ -15,6 +16,7 @@ export const Navbar = ({
 }: {
   onDashboardToggle: () => void;
   isDashboard: boolean;
+  isAdmin?: boolean;
   activeTab: string;
   setActiveTab: (id: string) => void;
   copy?: Record<string, string>;
@@ -28,7 +30,15 @@ export const Navbar = ({
     setIsOpen(false);
   };
 
+  const goBack = () => {
+    setIsOpen(false);
+    if (window.history.length > 1) window.history.back();
+    else goHome();
+  };
+
   const navLabel = (id: string, fallback: string) => getCopy(copy, `nav.${id}`, fallback);
+  const portalCopyKey = isAdmin ? 'nav.portal.signout' : isDashboard ? 'nav.portal.exit' : 'nav.portal.enter';
+  const portalLabel = isAdmin ? 'Sign out' : isDashboard ? 'Exit Portal' : 'Member Portal';
 
   return (
     <EditableRegion as="nav" elementKey="nav.section" label="Navigation bar" className="brand-nav fixed inset-x-0 top-0 z-50 backdrop-blur-xl">
@@ -50,6 +60,7 @@ export const Navbar = ({
         </button>
 
         <div className="hidden items-center gap-0.5 lg:flex">
+          {!isDashboard && <button type="button" onClick={goBack} className="mr-1 grid h-9 w-9 place-items-center rounded-lg text-[#244f31] transition hover:bg-[#0f2a17]/5" aria-label="Go back" title="Back"><ArrowLeft className="h-4 w-4" /></button>}
           {!isDashboard && NAV_LINKS.map((link) => (
             <a
               key={link.id}
@@ -66,7 +77,7 @@ export const Navbar = ({
             onClick={onDashboardToggle}
             className="brand-button brand-button--small ml-3"
           >
-            <EditableText elementKey="nav.portal" copyKey={isDashboard ? 'nav.portal.exit' : 'nav.portal.enter'} label="Portal button label">{getCopy(copy, isDashboard ? 'nav.portal.exit' : 'nav.portal.enter', isDashboard ? 'Exit Portal' : 'Member Portal')}</EditableText>
+            <EditableText elementKey="nav.portal" copyKey={portalCopyKey} label="Portal button label">{getCopy(copy, portalCopyKey, portalLabel)}</EditableText>
             <ArrowUpRight className="h-3.5 w-3.5" />
           </button>
         </div>
@@ -85,6 +96,7 @@ export const Navbar = ({
       {isOpen && (
         <div className="brand-nav-dropdown px-5 pb-5 pt-3 shadow-2xl backdrop-blur-xl lg:hidden">
           <div className="mx-auto max-w-[1440px] space-y-1">
+            {!isDashboard && <div className="grid grid-cols-2 gap-2 pb-2"><button type="button" onClick={goBack} className="flex items-center justify-center gap-2 rounded-xl border border-[#06110a]/10 px-4 py-3 text-xs font-black text-[#244f31] hover:bg-[#0f2a17]/5"><ArrowLeft className="h-4 w-4" />Back</button><button type="button" onClick={goHome} className="flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-black text-emerald-800 hover:bg-emerald-100"><Home className="h-4 w-4" />Home</button></div>}
             {!isDashboard && NAV_LINKS.map((link) => (
               <a
                 key={link.id}
@@ -106,7 +118,7 @@ export const Navbar = ({
               }}
               className="brand-button mt-3 w-full"
             >
-              <EditableText elementKey="nav.mobile.portal" copyKey={isDashboard ? 'nav.portal.exit' : 'nav.portal.enter'} label="Mobile portal button label">{getCopy(copy, isDashboard ? 'nav.portal.exit' : 'nav.portal.enter', isDashboard ? 'Exit Portal' : 'Member Portal')}</EditableText>
+              <EditableText elementKey="nav.mobile.portal" copyKey={portalCopyKey} label="Mobile portal button label">{getCopy(copy, portalCopyKey, portalLabel)}</EditableText>
               <ArrowUpRight className="h-4 w-4" />
             </button>
           </div>

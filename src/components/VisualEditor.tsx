@@ -4,7 +4,7 @@ import {
   ChevronDown,
   Eye,
   FilePlus2,
-  LayoutPanelTop,
+  Home,
   Monitor,
   Palette,
   PanelRightOpen,
@@ -368,7 +368,7 @@ const BuilderToolbar = ({
   <div className="visual-editor-toolbar fixed inset-x-0 top-[4.5rem] z-[70] border-b border-emerald-900/10 bg-white/95 px-3 py-2 shadow-lg backdrop-blur-xl sm:px-5">
     <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2">
       <div className="flex items-center gap-2">
-        <button type="button" onClick={onExit} className="visual-editor-toolbar-button visual-editor-toolbar-button--quiet"><LayoutPanelTop className="h-4 w-4" /><span className="hidden sm:inline">Controller</span></button>
+        <button type="button" onClick={onExit} className="visual-editor-toolbar-button visual-editor-toolbar-button--quiet" title="Back to Admin home"><Home className="h-4 w-4" /><span className="hidden sm:inline">Admin Home</span></button>
         <span className="hidden h-6 w-px bg-slate-200 sm:block" />
         <div className="visual-editor-segment"><button type="button" onClick={() => setInteractionMode('edit')} className={interactionMode === 'edit' ? 'is-active' : ''}><PenLine className="h-3.5 w-3.5" />Edit</button><button type="button" onClick={() => setInteractionMode('preview')} className={interactionMode === 'preview' ? 'is-active' : ''}><Eye className="h-3.5 w-3.5" />Preview</button></div>
         <div className="hidden visual-editor-segment md:flex"><button type="button" aria-label="Desktop preview" onClick={() => setDevice('desktop')} className={device === 'desktop' ? 'is-active' : ''}><Monitor className="h-3.5 w-3.5" /></button><button type="button" aria-label="Tablet preview" onClick={() => setDevice('tablet')} className={device === 'tablet' ? 'is-active' : ''}><Tablet className="h-3.5 w-3.5" /></button><button type="button" aria-label="Mobile preview" onClick={() => setDevice('mobile')} className={device === 'mobile' ? 'is-active' : ''}><Smartphone className="h-3.5 w-3.5" /></button></div>
