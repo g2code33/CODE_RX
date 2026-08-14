@@ -1262,6 +1262,7 @@ app.post('/api/auth/activate', async (c) => {
       c.env.DB.prepare('UPDATE members SET is_active = 1 WHERE id = (SELECT member_record_id FROM member_profiles WHERE id = ?)').bind(activation.profile_id),
       c.env.DB.prepare('UPDATE member_activations SET revoked_at = CURRENT_TIMESTAMP WHERE member_profile_id = ? AND id != ? AND used_at IS NULL AND revoked_at IS NULL').bind(activation.profile_id, activation.id),
       c.env.DB.prepare('UPDATE member_activations SET used_at = CURRENT_TIMESTAMP WHERE id = ?').bind(activation.id),
+      c.env.DB.prepare("UPDATE applications SET activation_completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE member_profile_id = ? AND status = 'approved'").bind(activation.profile_id),
     ]);
     const actor = await getActor(c.env.DB, Number(activation.user_id));
     if (!actor) return c.json({ success: false, error: 'Activation completed but the account profile could not be loaded.' }, 500);
@@ -4618,6 +4619,101 @@ app.post('/api/phantom/members/:id/activation-link', requireAuth, requirePhantom
   } catch (error) {
     console.error('[code-rx] regenerate activation invitation error:', error);
     return c.json({ success: false, error: 'Could not generate a replacement password-setup invitation.' }, 500);
+  }
+});
+
+/** PHANTOM-only identity reassignment. The newly selected available Code Name
+ * becomes permanently claimed, while the old claimed name returns to the pool
+ * immediately. The completed direct session prevents any replacement ballot. */
+app.post('/api/phantom/members/:id/codename', requireAuth, requirePhantom, async (c) => {
+  if (!checkRateLimit(c, 20, 60)) return c.json({ success: false, error: 'Please wait before changing another Code Name.' }, 429);
+  try {
+    const profileId = Number(c.req.param('id'));
+    const body = await c.req.json().catch(() => ({}));
+    const nextCodenameId = Number(body.codenameId);
+    if (!Number.isInteger(profileId) || profileId < 1 || !Number.isInteger(nextCodenameId) || nextCodenameId < 1) {
+      return c.json({ success: false, error: 'Choose a member and an available Code Name.' }, 400);
+    }
+    const profileRows = await dbRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, mp.member_code, mp.status, mp.codename_path, r.code AS role_code
+       FROM member_profiles mp LEFT JOIN roles r ON r.id = mp.primary_role_id WHERE mp.id = ?`
+    ).bind(profileId));
+    const profile = profileRows[0];
+    if (!profile) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+    if (profile.role_code === 'phantom') return c.json({ success: false, error: 'The PHANTOM Founding Name is protected and cannot be reassigned.' }, 403);
+    const nextRows = await dbRows<any>(c.env.DB.prepare('SELECT * FROM codenames WHERE id = ?').bind(nextCodenameId));
+    const next = nextRows[0];
+    if (!next || next.status !== 'available') return c.json({ success: false, error: 'That Code Name is no longer available.' }, 409);
+    const currentRows = await dbRows<any>(c.env.DB.prepare(
+      "SELECT * FROM codenames WHERE claimed_by_member_profile_id = ? AND status = 'claimed' LIMIT 1"
+    ).bind(profileId));
+    const current = currentRows[0] || null;
+    if (current?.id === next.id) return c.json({ success: false, error: 'This member already has that Code Name.' }, 409);
+    const actor = await actorFromContext(c);
+    const reclaimCurrent = async () => {
+      if (!current) return;
+      await c.env.DB.prepare(
+        `UPDATE codenames
+         SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP,
+             reserved_note = NULL, reserved_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'available' AND claimed_by_member_profile_id IS NULL`
+      ).bind(profileId, current.id).run();
+    };
+    let releasedCurrent = false;
+    if (current) {
+      const released = await c.env.DB.prepare(
+        `UPDATE codenames SET status = 'available', claimed_by_member_profile_id = NULL, claimed_at = NULL,
+         reserved_note = NULL, reserved_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'claimed' AND claimed_by_member_profile_id = ?`
+      ).bind(current.id, profileId).run();
+      if (Number(released.meta.changes || 0) !== 1) return c.json({ success: false, error: 'The current Code Name changed before reassignment could finish.' }, 409);
+      releasedCurrent = true;
+    }
+    const claimed = await c.env.DB.prepare(
+      `UPDATE codenames
+       SET status = 'claimed', claimed_by_member_profile_id = ?, claimed_at = CURRENT_TIMESTAMP,
+           reserved_note = NULL, reserved_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'available' AND claimed_by_member_profile_id IS NULL`
+    ).bind(profileId, next.id).run();
+    if (Number(claimed.meta.changes || 0) !== 1) {
+      if (releasedCurrent) await reclaimCurrent();
+      return c.json({ success: false, error: 'That Code Name was just claimed by another member.' }, 409);
+    }
+    try {
+      const nextPath: CodenamePath = next.pool === 'founding' ? 'direct_founding' : 'member';
+      const statements: D1PreparedStatement[] = [
+        c.env.DB.prepare('UPDATE member_profiles SET codename_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(nextPath, profileId),
+        c.env.DB.prepare(
+          `INSERT INTO codename_selection_sessions (member_profile_id, status, pool, assignment_source, passes_used, claimed_codename_id, current_codename_id, ballot_slots_json, revealed_codenames_json, review_target_count, completed_at)
+           VALUES (?, 'completed', ?, 'phantom_direct', 0, ?, NULL, '[]', '[]', 0, CURRENT_TIMESTAMP)
+           ON CONFLICT(member_profile_id) DO UPDATE SET status = 'completed', pool = excluded.pool, assignment_source = 'phantom_direct', passes_used = 0, claimed_codename_id = excluded.claimed_codename_id, current_codename_id = NULL, ballot_slots_json = '[]', revealed_codenames_json = '[]', review_target_count = 0, completed_at = CURRENT_TIMESTAMP`
+        ).bind(profileId, next.pool, next.id),
+        c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'claimed', ?, ?)")
+          .bind(next.id, profileId, actor?.userId ?? null, 'PHANTOM reassigned this Code Name'),
+      ];
+      if (current) {
+        statements.push(c.env.DB.prepare("INSERT INTO codename_history (codename_id, member_profile_id, event_type, acted_by_user_id, note) VALUES (?, ?, 'released', ?, ?)")
+          .bind(current.id, profileId, actor?.userId ?? null, `Released because PHANTOM reassigned ${next.display_name}`));
+      }
+      await c.env.DB.batch(statements);
+      await audit(c.env.DB, actor, 'codename.reassigned', 'member_profile', profileId, {
+        memberCode: profile.member_code,
+        oldCodename: current?.display_name || null,
+        newCodename: next.display_name,
+        newPool: next.pool,
+      });
+      return c.json({ success: true, data: { oldCodename: current?.display_name || null, codename: next.display_name, pool: next.pool }, message: current ? `${current.display_name} was returned to available Code Names and ${next.display_name} was assigned.` : `${next.display_name} was assigned.` });
+    } catch (error) {
+      // Restore the previous identity if session/profile metadata cannot be
+      // committed. A member must never be left without their prior Code Name.
+      await c.env.DB.prepare("UPDATE codenames SET status = 'available', claimed_by_member_profile_id = NULL, claimed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND claimed_by_member_profile_id = ?")
+        .bind(next.id, profileId).run();
+      if (releasedCurrent) await reclaimCurrent();
+      throw error;
+    }
+  } catch (error) {
+    console.error('[code-rx] codename reassignment error:', error);
+    return c.json({ success: false, error: 'Could not reassign this Code Name.' }, 500);
   }
 });
 

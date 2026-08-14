@@ -337,6 +337,8 @@ export const db = {
     createMember: (data: any) => apiCall<{ data: any; message?: string }>('/api/phantom/members', { method: 'POST', body: JSON.stringify(data) }),
     regenerateActivationLink: (profileId: number) =>
       apiCall<{ data: any; message?: string }>(`/api/phantom/members/${profileId}/activation-link`, { method: 'POST' }),
+    reassignCodename: (profileId: number, codenameId: number) =>
+      apiCall<{ data: { oldCodename: string | null; codename: string; pool: 'member' | 'founding' }; message?: string }>(`/api/phantom/members/${profileId}/codename`, { method: 'POST', body: JSON.stringify({ codenameId }) }),
     members: async (status?: string) => (await apiCall<{ data: any[] }>(`/api/phantom/members${status ? `?status=${encodeURIComponent(status)}` : ''}`)).data || [],
     updateMember: (id: number, data: any) => apiCall(`/api/phantom/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     memberHistory: async (id: number) => (await apiCall<{ data: any }>(`/api/phantom/members/${id}/history`)).data,

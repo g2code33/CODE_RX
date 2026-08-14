@@ -17,13 +17,14 @@ The existing public pages, Admin Core, authentication flow, Member Portal, and s
 
 1. A visitor uses **JOIN CODE Rx** with full name, phone, and email.
 2. The request is stored as a **pending application**; public account creation and public password setup are disabled.
-3. In **PHANTOM Control → Applications**, PHANTOM uses the single **Approve & invite** action to choose the member responsibility and Code Name path.
-4. That one action approves the application, creates the pending member profile and permanent member ID such as `CRX-0001`, and issues a one-time seven-day password-setup link.
+3. Only **PHANTOM Control → Applications** can approve a Join application. Admin Core contains no application approval action.
+4. PHANTOM uses the single **Approve & invite** action to choose the member responsibility and Code Name path. That one action creates the pending member profile and permanent member ID such as `CRX-0001`, and issues a one-time seven-day password-setup link.
 5. The activation email is sent when EmailJS is configured; PHANTOM can copy the one-time link for secure manual delivery when email delivery is unavailable. The raw link is never stored in D1.
 6. The member chooses a private password of at least **8 characters**. PHANTOM never receives that password. A replacement invitation invalidates the earlier unused link.
 7. Depending on the selected path, the member either receives a PHANTOM-assigned Founding Name or completes the appropriate Member Code Name / Founding Name ballot.
 8. A responsibility profile controls permissions and work scope only. It is separate from a Code Name or Founding Name; PHANTOM can rename visible responsibility labels without changing member identity or permissions.
 9. After activation, the same account password can be used with the member’s email, saved phone number, or claimed Code Name. Password reset remains email-based.
+10. PHANTOM can reassign any non-PHANTOM member’s Code Name. The newly assigned name becomes unavailable immediately, the prior name returns to available names, and no new ballot opens.
 
 Existing accounts remain available and are safely migrated into a member profile when they next authenticate.
 
@@ -137,12 +138,13 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
 2. A PHANTOM login succeeds quickly after the initial warm-up request.
 3. Password fields expose an accessible Show/Hide control in login, activation, reset, and Admin Security.
 4. A Join application stays pending until PHANTOM uses **Approve & invite**; confirm the action creates one `pending_activation` member, emits/copies a one-time password-setup link, and no password is visible to PHANTOM.
-5. Confirm a replacement invitation invalidates the earlier unused link, an unactivated member cannot sign in, and only successful password setup makes the member active.
+5. Confirm PHANTOM Applications shows **Approved · Password created** only after the invited member completes password setup; an unactivated member cannot sign in and a replacement invitation invalidates the earlier unused link.
 6. Test responsibility profiles and identity naming:
    - PHANTOM can rename an operational responsibility label without changing its permissions or a member’s Code Name.
    - Founding Names remain identities only and do not appear as responsibility labels.
    - Custom Founding Name Ballot exposes only the canonical six founding identities that remain unclaimed; PHANTOM and already claimed identities never appear as choices.
    - A PHANTOM-assigned Founding Name, including GHOST/NEXUS/FALCON/QUANTUM/MATRIX, opens no ballot.
+   - PHANTOM can reassign a non-PHANTOM member’s name; confirm the old name becomes available and the member cannot reopen a ballot.
 7. Test sign-in with the same activated password using the member email, saved phone number, and claimed Code Name. Confirm a duplicate phone number is rejected for new phone-based sign-in records.
 8. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
 9. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.

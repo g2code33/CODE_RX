@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS applications (
   phone TEXT,
   date TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  activation_completed_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -841,6 +842,7 @@ const SAFE_MIGRATIONS = [
   { table: 'applications', column: 'reviewed_at', sql: 'ALTER TABLE applications ADD COLUMN reviewed_at TEXT' },
   { table: 'applications', column: 'review_note', sql: 'ALTER TABLE applications ADD COLUMN review_note TEXT' },
   { table: 'applications', column: 'member_profile_id', sql: 'ALTER TABLE applications ADD COLUMN member_profile_id INTEGER' },
+  { table: 'applications', column: 'activation_completed_at', sql: 'ALTER TABLE applications ADD COLUMN activation_completed_at DATETIME' },
   { table: 'applications', column: 'updated_at', sql: 'ALTER TABLE applications ADD COLUMN updated_at TEXT' },
   { table: 'meetings', column: 'project_id', sql: 'ALTER TABLE meetings ADD COLUMN project_id INTEGER' },
   { table: 'vault_documents', column: 'document_code', sql: 'ALTER TABLE vault_documents ADD COLUMN document_code TEXT' },
@@ -872,7 +874,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-13-calcitonin-levels-18';
+const VAULT_SCHEMA_VERSION = '2026-08-13-phantom-approval-codename-reassignment-19';
 
 
 // Role codes stay stable for member history and permissions. Their visible
@@ -935,6 +937,18 @@ const backfillCalcitoninLevels = async (db: D1Database) => {
     return row.level !== level ? db.prepare('UPDATE members SET level = ? WHERE id = ?').bind(level, row.id) : null;
   }).filter((statement): statement is D1PreparedStatement => Boolean(statement));
   if (statements.length) await runBatchInChunks(db, statements);
+};
+
+const backfillApprovedApplicationActivations = async (db: D1Database) => {
+  await db.prepare(
+    `UPDATE applications
+     SET activation_completed_at = COALESCE(activation_completed_at, (
+       SELECT ma.used_at FROM member_activations ma
+       WHERE ma.member_profile_id = applications.member_profile_id AND ma.used_at IS NOT NULL
+       ORDER BY ma.used_at DESC LIMIT 1
+     ))
+     WHERE status = 'approved' AND member_profile_id IS NOT NULL AND activation_completed_at IS NULL`
+  ).run();
 };
 
 const runSafeMigrations = async (db: D1Database) => {
@@ -1274,6 +1288,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       await normalizeResponsibilityLabels(db);
       await backfillPhoneLoginKeys(db);
       await backfillCalcitoninLevels(db);
+      await backfillApprovedApplicationActivations(db);
       await seedVaultSections(db);
       await seedScoreRules(db);
       await seedFeatureSettings(db);

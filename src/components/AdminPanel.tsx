@@ -30,193 +30,9 @@ import { db, auth, AuthUser } from '../lib/cloudflare';
 import { PhantomControlCenter } from './PhantomControlCenter';
 import { VisualEditor } from './VisualEditor';
 import { Vault } from './Vault';
-import { RecentItems } from './RecentItems';
 
 const STORAGE_KEY = 'codeRx_siteContent';
 const PENDING_PUBLISH_KEY = 'codeRx_pendingSiteContent';
-
-// Applications Section Component
-const ApplicationsSection = ({ onPendingCount, onOpenPhantom }: { onPendingCount?: (n: number) => void; onOpenPhantom?: () => void }) => {
-  const [applications, setApplications] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    loadApplications();
-  }, []);
-
-  // Report pending count to the sidebar badge
-  useEffect(() => {
-    onPendingCount?.(applications.filter((a) => a.status === 'pending').length);
-  }, [applications, onPendingCount]);
-
-  const loadApplications = async () => {
-    try {
-      const data = await db.applications.getAll();
-      setApplications(data || []);
-    } catch (error) {
-      console.error('Failed to load applications:', error);
-      setApplications([]);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleApprove = (id: number) => {
-    const application = applications.find((item) => Number(item.id) === Number(id));
-    // Keep the legacy Admin Core from creating an "approved but no account"
-    // record. PHANTOM Control owns the single approve → invite workflow.
-    if (onOpenPhantom) onOpenPhantom();
-    else alert(`Open PHANTOM Control → Applications and select “Approve & invite” for ${application?.name || 'this applicant'}. That one action creates the member and secure password-setup link together.`);
-  };
-
-  const handleReject = async (id: number) => {
-    try {
-      await db.applications.updateStatus(id, 'rejected');
-      const updated = applications.filter(app => app.id !== id);
-      setApplications(updated);
-    } catch (error) {
-      console.error('Failed to reject application:', error);
-    }
-  };
-
-  const handleDelete = async (application: any) => {
-    if (!window.confirm(`Delete the application from ${application.name}?`)) return;
-    try {
-      await db.applications.remove(application.id);
-      setApplications((current) => current.filter((item) => item.id !== application.id));
-    } catch (error: any) {
-      alert(error?.message || 'Could not delete this application.');
-    }
-  };
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-2xl font-black text-slate-900 tracking-tight">Membership Applications</h3>
-        <span className="text-xs font-bold text-yellow-600 bg-yellow-50 px-3 py-1 rounded-full">
-          {applications.filter(a => a.status === 'pending').length} Pending
-        </span>
-      </div>
-      
-      {isLoading ? (
-        <div className="text-center py-20">
-          <p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading applications…</p>
-        </div>
-      ) : applications.length === 0 ? (
-        <div className="text-center py-20">
-          <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Users className="w-10 h-10 text-slate-400" />
-          </div>
-          <p className="text-slate-500 font-medium">No applications yet</p>
-          <p className="text-slate-400 text-sm mt-2">Applications will appear here when users join</p>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {applications.map((app) => (
-            <div key={app.id} className="bg-slate-50 p-6 rounded-2xl border border-slate-100 flex flex-wrap items-center justify-between gap-6">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-emerald-500 text-white rounded-xl flex items-center justify-center font-black text-lg">{app.name[0]}</div>
-                <div>
-                  <p className="font-black text-slate-900">{app.name}</p>
-                  <p className="text-xs text-slate-500 font-medium">{app.email} • {app.phone}</p>
-                  <p className="text-[10px] text-slate-400 mt-1">Applied: {app.date}</p>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => handleApprove(app.id)}
-                  className="px-6 py-2 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-xs uppercase tracking-wide"
-                >
-                  Approve in PHANTOM
-                </button>
-                <button 
-                  onClick={() => handleReject(app.id)}
-                  className="px-6 py-2 bg-red-50 text-red-600 font-bold rounded-xl hover:bg-red-100 transition-all text-xs uppercase tracking-wide"
-                >
-                  Reject
-                </button>
-                {!app.member_profile_id && <button
-                  onClick={() => void handleDelete(app)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-white border border-red-100 text-red-600 font-bold rounded-xl hover:bg-red-50 transition-all text-xs uppercase tracking-wide"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                </button>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      
-      {/* Subscribers Section */}
-      <div className="mt-12 pt-12 border-t border-slate-200">
-        <h4 className="text-xl font-black text-slate-900 mb-6">Newsletter Subscribers</h4>
-        <SubscribersList />
-      </div>
-      
-      {/* Contact Messages Section */}
-      <div className="mt-12 pt-12 border-t border-slate-200">
-        <h4 className="text-xl font-black text-slate-900 mb-6">Contact Messages</h4>
-        <ContactMessagesList />
-      </div>
-    </div>
-  );
-};
-
-// Subscribers List Component
-const SubscribersList = () => {
-  const [subscribers, setSubscribers] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [showAll, setShowAll] = useState(false);
-  const [removingId, setRemovingId] = useState<number | null>(null);
-
-  const loadSubscribers = async () => {
-    try { setSubscribers(await db.subscribers.getAll()); }
-    catch (error) { console.error('Failed to load subscribers:', error); setSubscribers([]); }
-    finally { setIsLoading(false); }
-  };
-  useEffect(() => { void loadSubscribers(); }, []);
-
-  const remove = async (subscriber: any) => {
-    if (!window.confirm(`Remove ${subscriber.email} from the newsletter list?`)) return;
-    setRemovingId(subscriber.id);
-    try { await db.subscribers.remove(subscriber.id); setSubscribers((current) => current.filter((item) => item.id !== subscriber.id)); }
-    catch (error) { console.error('Failed to remove subscriber:', error); }
-    finally { setRemovingId(null); }
-  };
-
-  if (isLoading) return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading subscribers…</div>;
-  if (!subscribers.length) return <p className="text-sm text-slate-500">No subscribers yet</p>;
-  const visible = showAll ? subscribers : subscribers.slice(0, 3);
-
-  return <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white"><table className="w-full min-w-[620px]"><thead className="bg-slate-50"><tr><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Name</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Email</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Phone</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Date</th><th className="px-6 py-3 text-right text-[10px] font-black uppercase tracking-widest text-slate-400">Action</th></tr></thead><tbody className="divide-y divide-slate-50">{visible.map((sub) => <tr key={sub.id}><td className="px-6 py-4 text-sm font-bold text-slate-900">{sub.name || '—'}</td><td className="px-6 py-4 text-sm text-slate-600">{sub.email}</td><td className="px-6 py-4 text-sm text-slate-600">{sub.phone || '—'}</td><td className="px-6 py-4 text-sm text-slate-400">{sub.date}</td><td className="px-6 py-4 text-right"><button disabled={removingId === sub.id} onClick={() => void remove(sub)} className="inline-flex items-center gap-1.5 rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-black text-red-600 transition hover:bg-red-100 disabled:opacity-60"><Trash2 className="h-3.5 w-3.5" />{removingId === sub.id ? 'Removing…' : 'Delete'}</button></td></tr>)}</tbody></table>{subscribers.length > 3 && <div className="border-t border-slate-100 px-5 py-3"><button onClick={() => setShowAll((current) => !current)} className="text-xs font-black text-emerald-700 hover:underline">{showAll ? 'Show recent 3 only' : `Show ${subscribers.length - 3} more subscribers`}</button></div>}</div>;
-};
-
-// Contact Messages List Component
-const ContactMessagesList = () => {
-  const [contacts, setContacts] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [removingId, setRemovingId] = useState<number | null>(null);
-
-  const loadContacts = async () => {
-    try { setContacts(await db.contacts.getAll()); }
-    catch (error) { console.error('Failed to load contacts:', error); setContacts([]); }
-    finally { setIsLoading(false); }
-  };
-  useEffect(() => { void loadContacts(); }, []);
-
-  const remove = async (contact: any) => {
-    if (!window.confirm(`Delete the message from ${contact.name}? This cannot be restored.`)) return;
-    setRemovingId(contact.id);
-    try { await db.contacts.remove(contact.id); setContacts((current) => current.filter((item) => item.id !== contact.id)); }
-    catch (error) { console.error('Failed to delete contact message:', error); }
-    finally { setRemovingId(null); }
-  };
-
-  if (isLoading) return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading contact messages…</div>;
-  if (!contacts.length) return <p className="text-sm text-slate-500">No contact messages yet</p>;
-
-  return <div className="space-y-4"><RecentItems items={contacts} label="contact messages" render={(contact) => <article key={contact.id} className="rounded-2xl border border-slate-100 bg-white p-6"><div className="flex items-start justify-between gap-4"><div><p className="font-black text-slate-900">{contact.name}</p><p className="text-sm text-slate-500">{contact.email}</p></div><div className="flex items-center gap-3"><span className="text-[10px] text-slate-400">{contact.date}</span><button disabled={removingId === contact.id} onClick={() => void remove(contact)} aria-label={`Delete message from ${contact.name}`} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50 disabled:opacity-60"><Trash2 className="h-4 w-4" /></button></div></div><p className="mt-4 font-bold text-slate-700">{contact.subject}</p><p className="mt-2 text-sm leading-relaxed text-slate-600">{contact.message}</p></article>} /></div>;
-};
 
 interface AdminStats {
   applications: number;
@@ -226,6 +42,33 @@ interface AdminStats {
   contacts: number;
   unreadContacts: number;
 }
+
+// Administrative communications remain available in Admin Core, while all
+// membership approval is intentionally restricted to PHANTOM Control.
+const CommunicationsSection = () => {
+  const [subscribers, setSubscribers] = useState<any[]>([]);
+  const [contacts, setContacts] = useState<any[]>([]);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const load = async () => {
+    setLoading(true);
+    try { const [subscriberRows, contactRows] = await Promise.all([db.subscribers.getAll(), db.contacts.getAll()]); setSubscribers(subscriberRows); setContacts(contactRows); }
+    catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not load communications.' }); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(); }, []);
+  const removeSubscriber = async (subscriber: any) => {
+    if (!window.confirm(`Remove ${subscriber.email} from subscribers?`)) return;
+    try { await db.subscribers.remove(subscriber.id); setSubscribers((current) => current.filter((item) => item.id !== subscriber.id)); setMessage({ type: 'success', text: 'Subscriber removed.' }); }
+    catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not remove subscriber.' }); }
+  };
+  const removeContact = async (contact: any) => {
+    if (!window.confirm(`Remove the contact message from ${contact.name}?`)) return;
+    try { await db.contacts.remove(contact.id); setContacts((current) => current.filter((item) => item.id !== contact.id)); setMessage({ type: 'success', text: 'Contact message removed.' }); }
+    catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not remove contact message.' }); }
+  };
+  return <div className="space-y-8"><div><p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Administrative communications</p><h3 className="mt-1 text-2xl font-black text-slate-900">Subscribers & contact messages</h3><p className="mt-2 text-sm leading-6 text-slate-500">Membership applications and all approval actions are managed only in PHANTOM Control → Applications.</p></div>{message && <p className={`rounded-xl px-4 py-3 text-sm font-bold ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{message.text}</p>}{loading ? <p className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading communications…</p> : <><section><div className="flex items-center justify-between"><h4 className="text-lg font-black text-slate-900">Newsletter subscribers</h4><span className="text-xs font-bold text-slate-400">{subscribers.length}</span></div><div className="mt-3 overflow-x-auto rounded-2xl border border-slate-100"><table className="w-full min-w-[620px]"><thead className="bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-400"><tr><th className="px-4 py-3 text-left">Name</th><th className="text-left">Email</th><th className="text-left">Phone</th><th className="text-right px-4 py-3">Action</th></tr></thead><tbody>{subscribers.map((subscriber) => <tr key={subscriber.id} className="border-t border-slate-100"><td className="px-4 py-3 text-sm font-bold text-slate-800">{subscriber.name || '—'}</td><td className="text-sm text-slate-600">{subscriber.email}</td><td className="text-sm text-slate-500">{subscriber.phone || '—'}</td><td className="px-4 py-3 text-right"><button onClick={() => void removeSubscriber(subscriber)} className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-black text-red-600">Delete</button></td></tr>)}{!subscribers.length && <tr><td colSpan={4} className="px-4 py-8 text-center text-sm text-slate-500">No subscribers yet.</td></tr>}</tbody></table></div></section><section><div className="flex items-center justify-between"><h4 className="text-lg font-black text-slate-900">Contact messages</h4><span className="text-xs font-bold text-slate-400">{contacts.length}</span></div><div className="mt-3 space-y-3">{contacts.map((contact) => <article key={contact.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-5"><div className="flex items-start justify-between gap-4"><div><p className="font-black text-slate-900">{contact.name}</p><p className="mt-1 text-xs text-slate-500">{contact.email} · {contact.phone || 'No phone'}</p></div><button onClick={() => void removeContact(contact)} className="rounded-lg border border-red-100 bg-white px-2.5 py-1.5 text-xs font-black text-red-600">Delete</button></div><p className="mt-4 text-sm font-bold text-slate-800">{contact.subject}</p><p className="mt-2 text-sm leading-6 text-slate-600">{contact.message}</p></article>)}{!contacts.length && <p className="rounded-2xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">No contact messages yet.</p>}</div></section></>}</div>;
+};
 
 // Members Section — CAL levels are earned automatically from verified points.
 const MembersSection = () => {
@@ -444,7 +287,7 @@ export const AdminPanel = ({
   onHome?: () => void;
   user: AuthUser | null;
 }) => {
-  const [activeView, setActiveView] = useState<'overview' | 'phantom' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
+  const [activeView, setActiveView] = useState<'overview' | 'phantom' | 'communications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [contentHistory, setContentHistory] = useState<SiteContent[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -452,7 +295,6 @@ export const AdminPanel = ({
   const [savedToStorage, setSavedToStorage] = useState(false);
   const saveFeedbackTimer = useRef<number | null>(null);
   const [stats, setStats] = useState<AdminStats | null>(null);
-  const [pendingCount, setPendingCount] = useState(0);
   const [hasPendingPublish, setHasPendingPublish] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -792,7 +634,7 @@ export const AdminPanel = ({
                {[
                  ...(user?.isPhantom ? [{ id: 'phantom', label: 'PHANTOM Control', icon: ShieldAlert }] : []),
                  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
-                 ...(user?.isPhantom ? [{ id: 'applications', label: 'Applications', icon: Users, badge: pendingCount }, { id: 'members', label: 'Members', icon: UserCheck }] : []),
+                 ...(user?.isPhantom ? [{ id: 'members', label: 'Members', icon: UserCheck }, { id: 'communications', label: 'Communications', icon: MessageSquare }] : []),
                  { id: 'security', label: 'Security', icon: ShieldAlert },
                ].map((item) => (
                  <button
@@ -808,7 +650,6 @@ export const AdminPanel = ({
                      <item.icon className="w-5 h-5" />
                      <span className="text-xs uppercase tracking-wide font-bold">{item.label}</span>
                    </div>
-                   {item.badge && <span className="bg-red-500 text-white px-2 py-0.5 rounded-full text-[10px] font-bold">{item.badge}</span>}
                  </button>
                ))}
 
@@ -1366,12 +1207,12 @@ export const AdminPanel = ({
               </div>
             )}
 
-            {activeView === 'applications' && (
-              <ApplicationsSection onPendingCount={setPendingCount} onOpenPhantom={() => onWorkspaceChange('phantom')} />
-            )}
-
             {activeView === 'members' && (
               <MembersSection />
+            )}
+
+            {activeView === 'communications' && (
+              <CommunicationsSection />
             )}
 
             {activeView === 'security' && (
