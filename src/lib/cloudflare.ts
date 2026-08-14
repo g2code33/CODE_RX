@@ -142,7 +142,7 @@ export const db = {
     },
     create: (data: { name: string; email: string; phone: string; role?: string }) =>
       apiCall('/api/members', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: number, data: { points?: number; level?: string; is_active?: boolean }) =>
+    update: (id: number, data: { points?: number; is_active?: boolean }) =>
       apiCall(`/api/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     remove: (id: number) => apiCall(`/api/members/${id}`, { method: 'DELETE' }),
   },
@@ -337,6 +337,8 @@ export const db = {
     createMember: (data: any) => apiCall<{ data: any; message?: string }>('/api/phantom/members', { method: 'POST', body: JSON.stringify(data) }),
     regenerateActivationLink: (profileId: number) =>
       apiCall<{ data: any; message?: string }>(`/api/phantom/members/${profileId}/activation-link`, { method: 'POST' }),
+    reassignCodename: (profileId: number, codenameId: number) =>
+      apiCall<{ data: { oldCodename: string | null; codename: string; pool: 'member' | 'founding' }; message?: string }>(`/api/phantom/members/${profileId}/codename`, { method: 'POST', body: JSON.stringify({ codenameId }) }),
     members: async (status?: string) => (await apiCall<{ data: any[] }>(`/api/phantom/members${status ? `?status=${encodeURIComponent(status)}` : ''}`)).data || [],
     updateMember: (id: number, data: any) => apiCall(`/api/phantom/members/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     memberHistory: async (id: number) => (await apiCall<{ data: any }>(`/api/phantom/members/${id}/history`)).data,

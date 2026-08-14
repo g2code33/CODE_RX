@@ -72,6 +72,41 @@ const memberScore = async (db: D1Database, memberProfileId: number): Promise<Mem
 
 const boundedPoints = (value: number) => Math.max(0, Math.min(1_000_000, Math.trunc(value)));
 
+/** Code Rx Society progression is derived exclusively from Calcitonins (CAL).
+ * It is never manually assigned, so every screen and API response can show the
+ * same earned level for the same verified balance. */
+export const CAL_LEVELS = [
+  { key: 'rx_initiate', label: 'Rx Initiate', minPoints: 0, description: 'Beginning the Code Rx Society journey.' },
+  { key: 'code_explorer', label: 'Code Explorer', minPoints: 50, description: 'Exploring practical Code Rx learning and contribution.' },
+  { key: 'society_builder', label: 'Society Builder', minPoints: 150, description: 'Building useful work for the Society.' },
+  { key: 'innovation_specialist', label: 'Innovation Specialist', minPoints: 350, description: 'Demonstrating sustained technical and community impact.' },
+  { key: 'systems_catalyst', label: 'Systems Catalyst', minPoints: 700, description: 'Catalysing reliable systems, projects, and knowledge.' },
+  { key: 'code_rx_vanguard', label: 'Code Rx Vanguard', minPoints: 1_200, description: 'Leading high-value Society contribution.' },
+  { key: 'society_luminary', label: 'Society Luminary', minPoints: 2_000, description: 'Sustained exemplary contribution to Code Rx Society.' },
+] as const;
+
+export type CalcitoninLevel = {
+  key: typeof CAL_LEVELS[number]['key'];
+  label: string;
+  description: string;
+  minPoints: number;
+  nextPoints: number | null;
+  progressPercent: number;
+};
+
+export const calcitoninLevel = (value: number | null | undefined): CalcitoninLevel => {
+  const points = boundedPoints(Number(value || 0));
+  let index = 0;
+  for (let candidate = 0; candidate < CAL_LEVELS.length; candidate += 1) {
+    if (points >= CAL_LEVELS[candidate].minPoints) index = candidate;
+  }
+  const current = CAL_LEVELS[index];
+  const next = CAL_LEVELS[index + 1] || null;
+  const span = next ? Math.max(1, next.minPoints - current.minPoints) : 1;
+  const progressPercent = next ? Math.max(0, Math.min(100, Math.round(((points - current.minPoints) / span) * 100))) : 100;
+  return { key: current.key, label: current.label, description: current.description, minPoints: current.minPoints, nextPoints: next?.minPoints || null, progressPercent };
+};
+
 export interface ScoreAwardInput {
   memberProfileId: number | null | undefined;
   ruleKey: ScoreRuleKey;
@@ -90,6 +125,7 @@ export interface ScoreResult {
   eventId: number;
   label: string;
   automatic: boolean;
+  level: CalcitoninLevel;
 }
 
 /**
@@ -133,6 +169,7 @@ export const awardScoreRule = async (db: D1Database, input: ScoreAwardInput): Pr
       'UPDATE members SET points = MIN(1000000, MAX(0, points + ?)) WHERE id = ? RETURNING points'
     ).bind(delta, member.member_record_id));
     const balance = boundedPoints(Number(updated[0]?.points || 0));
+    await db.prepare('UPDATE members SET level = ? WHERE id = ?').bind(calcitoninLevel(balance).label, member.member_record_id).run();
     await db.prepare('UPDATE member_score_events SET balance_after = ? WHERE id = ?').bind(balance, eventId).run();
     return {
       memberProfileId: member.profile_id,
@@ -142,6 +179,7 @@ export const awardScoreRule = async (db: D1Database, input: ScoreAwardInput): Pr
       eventId,
       label: rule.label,
       automatic: true,
+      level: calcitoninLevel(balance),
     };
   } catch (error) {
     // A failed reservation must not permanently suppress a later retry.
@@ -170,7 +208,7 @@ export const adjustMemberScore = async (db: D1Database, input: ManualScoreInput)
   if (input.action === 'set') balance = amount;
   const delta = balance - previous;
 
-  await db.prepare('UPDATE members SET points = ? WHERE id = ?').bind(balance, member.member_record_id).run();
+  await db.prepare('UPDATE members SET points = ?, level = ? WHERE id = ?').bind(balance, calcitoninLevel(balance).label, member.member_record_id).run();
   const event = await db.prepare(
     `INSERT INTO member_score_events
      (member_profile_id, member_record_id, event_type, points_delta, balance_after, reason, metadata_json, created_by_user_id)
@@ -193,5 +231,6 @@ export const adjustMemberScore = async (db: D1Database, input: ManualScoreInput)
     eventId: Number(event.meta.last_row_id),
     label: `Manual ${input.action}`,
     automatic: false,
+    level: calcitoninLevel(balance),
   };
 };

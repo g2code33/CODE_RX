@@ -30,193 +30,9 @@ import { db, auth, AuthUser } from '../lib/cloudflare';
 import { PhantomControlCenter } from './PhantomControlCenter';
 import { VisualEditor } from './VisualEditor';
 import { Vault } from './Vault';
-import { RecentItems } from './RecentItems';
 
 const STORAGE_KEY = 'codeRx_siteContent';
 const PENDING_PUBLISH_KEY = 'codeRx_pendingSiteContent';
-
-// Applications Section Component
-const ApplicationsSection = ({ onPendingCount, onOpenPhantom }: { onPendingCount?: (n: number) => void; onOpenPhantom?: () => void }) => {
-  const [applications, setApplications] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    loadApplications();
-  }, []);
-
-  // Report pending count to the sidebar badge
-  useEffect(() => {
-    onPendingCount?.(applications.filter((a) => a.status === 'pending').length);
-  }, [applications, onPendingCount]);
-
-  const loadApplications = async () => {
-    try {
-      const data = await db.applications.getAll();
-      setApplications(data || []);
-    } catch (error) {
-      console.error('Failed to load applications:', error);
-      setApplications([]);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleApprove = (id: number) => {
-    const application = applications.find((item) => Number(item.id) === Number(id));
-    // Keep the legacy Admin Core from creating an "approved but no account"
-    // record. PHANTOM Control owns the single approve → invite workflow.
-    if (onOpenPhantom) onOpenPhantom();
-    else alert(`Open PHANTOM Control → Applications and select “Approve & invite” for ${application?.name || 'this applicant'}. That one action creates the member and secure password-setup link together.`);
-  };
-
-  const handleReject = async (id: number) => {
-    try {
-      await db.applications.updateStatus(id, 'rejected');
-      const updated = applications.filter(app => app.id !== id);
-      setApplications(updated);
-    } catch (error) {
-      console.error('Failed to reject application:', error);
-    }
-  };
-
-  const handleDelete = async (application: any) => {
-    if (!window.confirm(`Delete the application from ${application.name}?`)) return;
-    try {
-      await db.applications.remove(application.id);
-      setApplications((current) => current.filter((item) => item.id !== application.id));
-    } catch (error: any) {
-      alert(error?.message || 'Could not delete this application.');
-    }
-  };
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-2xl font-black text-slate-900 tracking-tight">Membership Applications</h3>
-        <span className="text-xs font-bold text-yellow-600 bg-yellow-50 px-3 py-1 rounded-full">
-          {applications.filter(a => a.status === 'pending').length} Pending
-        </span>
-      </div>
-      
-      {isLoading ? (
-        <div className="text-center py-20">
-          <p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading applications…</p>
-        </div>
-      ) : applications.length === 0 ? (
-        <div className="text-center py-20">
-          <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Users className="w-10 h-10 text-slate-400" />
-          </div>
-          <p className="text-slate-500 font-medium">No applications yet</p>
-          <p className="text-slate-400 text-sm mt-2">Applications will appear here when users join</p>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {applications.map((app) => (
-            <div key={app.id} className="bg-slate-50 p-6 rounded-2xl border border-slate-100 flex flex-wrap items-center justify-between gap-6">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-emerald-500 text-white rounded-xl flex items-center justify-center font-black text-lg">{app.name[0]}</div>
-                <div>
-                  <p className="font-black text-slate-900">{app.name}</p>
-                  <p className="text-xs text-slate-500 font-medium">{app.email} • {app.phone}</p>
-                  <p className="text-[10px] text-slate-400 mt-1">Applied: {app.date}</p>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => handleApprove(app.id)}
-                  className="px-6 py-2 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-xs uppercase tracking-wide"
-                >
-                  Approve in PHANTOM
-                </button>
-                <button 
-                  onClick={() => handleReject(app.id)}
-                  className="px-6 py-2 bg-red-50 text-red-600 font-bold rounded-xl hover:bg-red-100 transition-all text-xs uppercase tracking-wide"
-                >
-                  Reject
-                </button>
-                {!app.member_profile_id && <button
-                  onClick={() => void handleDelete(app)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-white border border-red-100 text-red-600 font-bold rounded-xl hover:bg-red-50 transition-all text-xs uppercase tracking-wide"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                </button>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      
-      {/* Subscribers Section */}
-      <div className="mt-12 pt-12 border-t border-slate-200">
-        <h4 className="text-xl font-black text-slate-900 mb-6">Newsletter Subscribers</h4>
-        <SubscribersList />
-      </div>
-      
-      {/* Contact Messages Section */}
-      <div className="mt-12 pt-12 border-t border-slate-200">
-        <h4 className="text-xl font-black text-slate-900 mb-6">Contact Messages</h4>
-        <ContactMessagesList />
-      </div>
-    </div>
-  );
-};
-
-// Subscribers List Component
-const SubscribersList = () => {
-  const [subscribers, setSubscribers] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [showAll, setShowAll] = useState(false);
-  const [removingId, setRemovingId] = useState<number | null>(null);
-
-  const loadSubscribers = async () => {
-    try { setSubscribers(await db.subscribers.getAll()); }
-    catch (error) { console.error('Failed to load subscribers:', error); setSubscribers([]); }
-    finally { setIsLoading(false); }
-  };
-  useEffect(() => { void loadSubscribers(); }, []);
-
-  const remove = async (subscriber: any) => {
-    if (!window.confirm(`Remove ${subscriber.email} from the newsletter list?`)) return;
-    setRemovingId(subscriber.id);
-    try { await db.subscribers.remove(subscriber.id); setSubscribers((current) => current.filter((item) => item.id !== subscriber.id)); }
-    catch (error) { console.error('Failed to remove subscriber:', error); }
-    finally { setRemovingId(null); }
-  };
-
-  if (isLoading) return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading subscribers…</div>;
-  if (!subscribers.length) return <p className="text-sm text-slate-500">No subscribers yet</p>;
-  const visible = showAll ? subscribers : subscribers.slice(0, 3);
-
-  return <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white"><table className="w-full min-w-[620px]"><thead className="bg-slate-50"><tr><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Name</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Email</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Phone</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Date</th><th className="px-6 py-3 text-right text-[10px] font-black uppercase tracking-widest text-slate-400">Action</th></tr></thead><tbody className="divide-y divide-slate-50">{visible.map((sub) => <tr key={sub.id}><td className="px-6 py-4 text-sm font-bold text-slate-900">{sub.name || '—'}</td><td className="px-6 py-4 text-sm text-slate-600">{sub.email}</td><td className="px-6 py-4 text-sm text-slate-600">{sub.phone || '—'}</td><td className="px-6 py-4 text-sm text-slate-400">{sub.date}</td><td className="px-6 py-4 text-right"><button disabled={removingId === sub.id} onClick={() => void remove(sub)} className="inline-flex items-center gap-1.5 rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-black text-red-600 transition hover:bg-red-100 disabled:opacity-60"><Trash2 className="h-3.5 w-3.5" />{removingId === sub.id ? 'Removing…' : 'Delete'}</button></td></tr>)}</tbody></table>{subscribers.length > 3 && <div className="border-t border-slate-100 px-5 py-3"><button onClick={() => setShowAll((current) => !current)} className="text-xs font-black text-emerald-700 hover:underline">{showAll ? 'Show recent 3 only' : `Show ${subscribers.length - 3} more subscribers`}</button></div>}</div>;
-};
-
-// Contact Messages List Component
-const ContactMessagesList = () => {
-  const [contacts, setContacts] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [removingId, setRemovingId] = useState<number | null>(null);
-
-  const loadContacts = async () => {
-    try { setContacts(await db.contacts.getAll()); }
-    catch (error) { console.error('Failed to load contacts:', error); setContacts([]); }
-    finally { setIsLoading(false); }
-  };
-  useEffect(() => { void loadContacts(); }, []);
-
-  const remove = async (contact: any) => {
-    if (!window.confirm(`Delete the message from ${contact.name}? This cannot be restored.`)) return;
-    setRemovingId(contact.id);
-    try { await db.contacts.remove(contact.id); setContacts((current) => current.filter((item) => item.id !== contact.id)); }
-    catch (error) { console.error('Failed to delete contact message:', error); }
-    finally { setRemovingId(null); }
-  };
-
-  if (isLoading) return <div className="py-10 text-center text-sm font-bold text-emerald-700">Loading contact messages…</div>;
-  if (!contacts.length) return <p className="text-sm text-slate-500">No contact messages yet</p>;
-
-  return <div className="space-y-4"><RecentItems items={contacts} label="contact messages" render={(contact) => <article key={contact.id} className="rounded-2xl border border-slate-100 bg-white p-6"><div className="flex items-start justify-between gap-4"><div><p className="font-black text-slate-900">{contact.name}</p><p className="text-sm text-slate-500">{contact.email}</p></div><div className="flex items-center gap-3"><span className="text-[10px] text-slate-400">{contact.date}</span><button disabled={removingId === contact.id} onClick={() => void remove(contact)} aria-label={`Delete message from ${contact.name}`} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50 disabled:opacity-60"><Trash2 className="h-4 w-4" /></button></div></div><p className="mt-4 font-bold text-slate-700">{contact.subject}</p><p className="mt-2 text-sm leading-relaxed text-slate-600">{contact.message}</p></article>} /></div>;
-};
 
 interface AdminStats {
   applications: number;
@@ -227,7 +43,34 @@ interface AdminStats {
   unreadContacts: number;
 }
 
-// Members Section — manage members (add, edit points/level, activate/deactivate, remove)
+// Administrative communications remain available in Admin Core, while all
+// membership approval is intentionally restricted to PHANTOM Control.
+const CommunicationsSection = () => {
+  const [subscribers, setSubscribers] = useState<any[]>([]);
+  const [contacts, setContacts] = useState<any[]>([]);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const load = async () => {
+    setLoading(true);
+    try { const [subscriberRows, contactRows] = await Promise.all([db.subscribers.getAll(), db.contacts.getAll()]); setSubscribers(subscriberRows); setContacts(contactRows); }
+    catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not load communications.' }); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(); }, []);
+  const removeSubscriber = async (subscriber: any) => {
+    if (!window.confirm(`Remove ${subscriber.email} from subscribers?`)) return;
+    try { await db.subscribers.remove(subscriber.id); setSubscribers((current) => current.filter((item) => item.id !== subscriber.id)); setMessage({ type: 'success', text: 'Subscriber removed.' }); }
+    catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not remove subscriber.' }); }
+  };
+  const removeContact = async (contact: any) => {
+    if (!window.confirm(`Remove the contact message from ${contact.name}?`)) return;
+    try { await db.contacts.remove(contact.id); setContacts((current) => current.filter((item) => item.id !== contact.id)); setMessage({ type: 'success', text: 'Contact message removed.' }); }
+    catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not remove contact message.' }); }
+  };
+  return <div className="space-y-8"><div><p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Administrative communications</p><h3 className="mt-1 text-2xl font-black text-slate-900">Subscribers & contact messages</h3><p className="mt-2 text-sm leading-6 text-slate-500">Membership applications and all approval actions are managed only in PHANTOM Control → Applications.</p></div>{message && <p className={`rounded-xl px-4 py-3 text-sm font-bold ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{message.text}</p>}{loading ? <p className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading communications…</p> : <><section><div className="flex items-center justify-between"><h4 className="text-lg font-black text-slate-900">Newsletter subscribers</h4><span className="text-xs font-bold text-slate-400">{subscribers.length}</span></div><div className="mt-3 overflow-x-auto rounded-2xl border border-slate-100"><table className="w-full min-w-[620px]"><thead className="bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-400"><tr><th className="px-4 py-3 text-left">Name</th><th className="text-left">Email</th><th className="text-left">Phone</th><th className="text-right px-4 py-3">Action</th></tr></thead><tbody>{subscribers.map((subscriber) => <tr key={subscriber.id} className="border-t border-slate-100"><td className="px-4 py-3 text-sm font-bold text-slate-800">{subscriber.name || '—'}</td><td className="text-sm text-slate-600">{subscriber.email}</td><td className="text-sm text-slate-500">{subscriber.phone || '—'}</td><td className="px-4 py-3 text-right"><button onClick={() => void removeSubscriber(subscriber)} className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-1.5 text-xs font-black text-red-600">Delete</button></td></tr>)}{!subscribers.length && <tr><td colSpan={4} className="px-4 py-8 text-center text-sm text-slate-500">No subscribers yet.</td></tr>}</tbody></table></div></section><section><div className="flex items-center justify-between"><h4 className="text-lg font-black text-slate-900">Contact messages</h4><span className="text-xs font-bold text-slate-400">{contacts.length}</span></div><div className="mt-3 space-y-3">{contacts.map((contact) => <article key={contact.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-5"><div className="flex items-start justify-between gap-4"><div><p className="font-black text-slate-900">{contact.name}</p><p className="mt-1 text-xs text-slate-500">{contact.email} · {contact.phone || 'No phone'}</p></div><button onClick={() => void removeContact(contact)} className="rounded-lg border border-red-100 bg-white px-2.5 py-1.5 text-xs font-black text-red-600">Delete</button></div><p className="mt-4 text-sm font-bold text-slate-800">{contact.subject}</p><p className="mt-2 text-sm leading-6 text-slate-600">{contact.message}</p></article>)}{!contacts.length && <p className="rounded-2xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">No contact messages yet.</p>}</div></section></>}</div>;
+};
+
+// Members Section — CAL levels are earned automatically from verified points.
 const MembersSection = () => {
   const [members, setMembers] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -235,295 +78,53 @@ const MembersSection = () => {
   const [newMember, setNewMember] = useState({ name: '', email: '', phone: '', role: 'member' });
 
   const loadMembers = async () => {
-    try {
-      const data = await db.members.getAll();
-      setMembers(data || []);
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err?.message || 'Failed to load members.' });
-    } finally {
-      setIsLoading(false);
-    }
+    try { setMembers(await db.members.getAll()); }
+    catch (err: any) { setMessage({ type: 'error', text: err?.message || 'Failed to load members.' }); }
+    finally { setIsLoading(false); }
   };
+  useEffect(() => { void loadMembers(); }, []);
+  const flash = (type: 'success' | 'error', text: string) => { setMessage({ type, text }); window.setTimeout(() => setMessage(null), 4000); };
 
-  useEffect(() => {
-    loadMembers();
-  }, []);
-
-  const flash = (type: 'success' | 'error', text: string) => {
-    setMessage({ type, text });
-    setTimeout(() => setMessage(null), 4000);
-  };
-
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newMember.name.trim() || !newMember.email.trim()) {
-      flash('error', 'Name and email are required.');
-      return;
-    }
+  const handleAdd = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!newMember.name.trim() || !newMember.email.trim()) { flash('error', 'Name and email are required.'); return; }
     try {
       await db.members.create({ ...newMember, phone: newMember.phone, role: newMember.role });
-      flash('success', `${newMember.name} added as a member.`);
+      flash('success', 'Member invitation created. Open PHANTOM Control to copy or manage the secure password-setup link.');
       setNewMember({ name: '', email: '', phone: '', role: 'member' });
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to add member.');
-    }
+      void loadMembers();
+    } catch (err: any) { flash('error', err?.message || 'Failed to create member invitation.'); }
   };
-
-  const handleSave = async (id: number, updates: { points?: number; level?: string }) => {
-    try {
-      await db.members.update(id, updates);
-      flash('success', 'Member updated.');
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to update member.');
-    }
+  const handleSave = async (id: number, updates: { points?: number }) => {
+    try { await db.members.update(id, updates); flash('success', 'Calcitonin balance updated; the earned level recalculated automatically.'); void loadMembers(); }
+    catch (err: any) { flash('error', err?.message || 'Failed to update Calcitonins.'); }
   };
-
   const handleToggleActive = async (member: any) => {
-    try {
-      await db.members.update(member.id, { is_active: member.is_active === 1 ? false : true });
-      flash('success', member.is_active === 1 ? `${member.name} deactivated.` : `${member.name} activated.`);
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to update member.');
-    }
+    try { await db.members.update(member.id, { is_active: member.is_active === 1 ? false : true }); flash('success', member.is_active === 1 ? `${member.name} deactivated.` : `${member.name} activated.`); void loadMembers(); }
+    catch (err: any) { flash('error', err?.message || 'Failed to update member.'); }
   };
-
   const handleRemove = async (member: any) => {
     if (!window.confirm(`Archive ${member.name}? Their history will be preserved.`)) return;
-    try {
-      await db.members.remove(member.id);
-      flash('success', `${member.name} removed.`);
-      loadMembers();
-    } catch (err: any) {
-      flash('error', err?.message || 'Failed to remove member.');
-    }
+    try { await db.members.remove(member.id); flash('success', `${member.name} archived.`); void loadMembers(); }
+    catch (err: any) { flash('error', err?.message || 'Failed to archive member.'); }
   };
 
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-2xl font-black text-slate-900 tracking-tight">Members</h3>
-        <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full">
-          {members.length} Members
-        </span>
-      </div>
-
-      {message && (
-        <div className={`px-4 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 ${
-          message.type === 'success'
-            ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
-            : 'bg-red-50 text-red-600 border border-red-100'
-        }`}>
-          {message.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <X className="w-4 h-4" />}
-          {message.text}
-        </div>
-      )}
-
-      {/* Add member form */}
-      <form onSubmit={handleAdd} className="bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-4">
-        <h4 className="font-black text-slate-900 flex items-center gap-2">
-          <UserPlus className="w-5 h-5 text-emerald-600" /> Add New Member
-        </h4>
-        <div className="grid md:grid-cols-4 gap-3">
-          <input
-            type="text"
-            placeholder="Full name *"
-            value={newMember.name}
-            onChange={(e) => setNewMember({ ...newMember, name: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-            required
-          />
-          <input
-            type="email"
-            placeholder="Email *"
-            value={newMember.email}
-            onChange={(e) => setNewMember({ ...newMember, email: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-            required
-          />
-          <input
-            type="tel"
-            placeholder="Phone"
-            value={newMember.phone}
-            onChange={(e) => setNewMember({ ...newMember, phone: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-          />
-          <select
-            value={newMember.role}
-            onChange={(e) => setNewMember({ ...newMember, role: e.target.value })}
-            className="bg-white border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium"
-          >
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-          </select>
-        </div>
-        <button
-          type="submit"
-          className="px-6 py-2.5 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all text-xs uppercase tracking-wide"
-        >
-          Add Member
-        </button>
-      </form>
-
-      {isLoading ? (
-        <div className="text-center py-16">
-          <p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading members…</p>
-        </div>
-      ) : members.length === 0 ? (
-        <div className="text-center py-16">
-          <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Users className="w-10 h-10 text-slate-400" />
-          </div>
-          <p className="text-slate-500 font-medium">No members yet</p>
-          <p className="text-slate-400 text-sm mt-2">Members appear here when applications are approved</p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-2xl border border-slate-100 overflow-x-auto">
-          <table className="w-full min-w-[800px]">
-            <thead className="bg-slate-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Member</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Level</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Calcitonins (CAL)</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-                <th className="px-6 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {members.map((member) => (
-                <MemberRow
-                  key={member.id}
-                  member={member}
-                  onSave={(updates) => handleSave(member.id, updates)}
-                  onToggleActive={() => handleToggleActive(member)}
-                  onRemove={() => handleRemove(member)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
+  return <div className="space-y-6">
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-2xl font-black tracking-tight text-slate-900">Members</h3><p className="mt-1 text-sm text-slate-500">CAL Levels are earned automatically from verified Calcitonins. Responsibilities and Code Names remain separate.</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-600">{members.length} Members</span></div>
+    {message && <div className={`flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold ${message.type === 'success' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-red-100 bg-red-50 text-red-600'}`}>{message.type === 'success' ? <CheckCircle className="h-4 w-4" /> : <X className="h-4 w-4" />}{message.text}</div>}
+    <form onSubmit={handleAdd} className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-6"><h4 className="flex items-center gap-2 font-black text-slate-900"><UserPlus className="h-5 w-5 text-emerald-600" />Create a member invitation</h4><p className="text-xs leading-5 text-slate-500">The new member receives a secure password-setup invitation. Use PHANTOM Control for Founding Name assignment and full responsibility selection.</p><div className="grid gap-3 md:grid-cols-4"><input type="text" placeholder="Full name *" value={newMember.name} onChange={(event) => setNewMember({ ...newMember, name: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500" required /><input type="email" placeholder="Email *" value={newMember.email} onChange={(event) => setNewMember({ ...newMember, email: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500" required /><input type="tel" placeholder="Phone for sign-in" value={newMember.phone} onChange={(event) => setNewMember({ ...newMember, phone: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500" /><select value={newMember.role} onChange={(event) => setNewMember({ ...newMember, role: event.target.value })} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"><option value="member">Member Responsibility</option><option value="custom">Custom Responsibility</option></select></div><button type="submit" className="rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold uppercase tracking-wide text-white transition hover:bg-emerald-700">Create invitation</button></form>
+    {isLoading ? <div className="py-16 text-center"><p className="mx-auto w-fit rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Loading members…</p></div> : members.length === 0 ? <div className="py-16 text-center"><div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-slate-100"><Users className="h-10 w-10 text-slate-400" /></div><p className="font-medium text-slate-500">No members yet</p><p className="mt-2 text-sm text-slate-400">Members appear after PHANTOM approves invitations.</p></div> : <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white"><table className="w-full min-w-[980px]"><thead className="bg-slate-50"><tr><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Member & identity</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">CAL Level</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Calcitonins</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Responsibility</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Status</th><th className="px-6 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">Actions</th></tr></thead><tbody className="divide-y divide-slate-50">{members.map((member) => <MemberRow key={member.id} member={member} onSave={(updates) => handleSave(member.id, updates)} onToggleActive={() => handleToggleActive(member)} onRemove={() => handleRemove(member)} />)}</tbody></table></div>}
+  </div>;
 };
 
-// Single member row with inline level/points editing
-const MemberRow = ({
-  member,
-  onSave,
-  onToggleActive,
-  onRemove,
-}: {
-  member: any;
-  onSave: (updates: { points?: number; level?: string }) => void;
-  onToggleActive: () => void;
-  onRemove: () => void;
-}) => {
-  const [level, setLevel] = useState(member.level || '');
+const MemberRow = ({ member, onSave, onToggleActive, onRemove }: { member: any; onSave: (updates: { points?: number }) => void; onToggleActive: () => void; onRemove: () => void }) => {
   const [points, setPoints] = useState(String(member.points ?? 0));
   const [editing, setEditing] = useState(false);
-
-  return (
-    <tr className={member.is_active === 1 ? '' : 'opacity-50'}>
-      <td className="px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-emerald-500 text-white rounded-xl flex items-center justify-center font-black text-sm flex-shrink-0">
-            {(member.name || '?')[0]}
-          </div>
-          <div>
-            <p className="font-bold text-slate-900">{member.name}</p>
-            <p className="text-xs text-slate-500">{member.email}</p>
-            {member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}
-          </div>
-        </div>
-      </td>
-      <td className="px-6 py-4">
-        {editing ? (
-          <input
-            type="text"
-            value={level}
-            onChange={(e) => setLevel(e.target.value)}
-            className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-40"
-          />
-        ) : (
-          <span className="text-sm font-bold text-slate-700">{member.level || '—'}</span>
-        )}
-      </td>
-      <td className="px-6 py-4">
-        {editing ? (
-          <input
-            type="number"
-            value={points}
-            onChange={(e) => setPoints(e.target.value)}
-            className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-24"
-          />
-        ) : (
-          <span className="text-sm font-black text-emerald-600">{member.points ?? 0} CAL</span>
-        )}
-      </td>
-      <td className="px-6 py-4">
-        <span className={`text-[10px] font-black uppercase px-2 py-1 rounded-full ${
-          member.role === 'admin' ? 'bg-purple-50 text-purple-600' : 'bg-emerald-50 text-emerald-600'
-        }`}>
-          {member.role || 'member'}
-        </span>
-      </td>
-      <td className="px-6 py-4">
-        <span className={`text-[10px] font-black uppercase px-2 py-1 rounded-full ${
-          member.is_active === 1 ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
-        }`}>
-          {member.is_active === 1 ? 'Active' : 'Inactive'}
-        </span>
-      </td>
-      <td className="px-6 py-4">
-        <div className="flex items-center gap-2">
-          {editing ? (
-            <>
-              <button
-                onClick={() => { onSave({ level, points: parseInt(points) || 0 }); setEditing(false); }}
-                className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
-                title="Save"
-              >
-                <CheckCircle className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => setEditing(false)}
-                className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition-all"
-                title="Cancel"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => setEditing(true)}
-              className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg transition-all"
-              title="Edit level & Calcitonins"
-            >
-              <Edit3 className="w-4 h-4" />
-            </button>
-          )}
-          <button
-            onClick={onToggleActive}
-            className="p-2 text-amber-500 hover:bg-amber-50 rounded-lg transition-all"
-            title={member.is_active === 1 ? 'Deactivate' : 'Activate'}
-          >
-            <Power className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onRemove}
-            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-all"
-            title="Archive member"
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
-      </td>
-    </tr>
-  );
+  const pointsValue = Number(member.points || 0);
+  const level = member.calculated_level || { label: member.level || 'Rx Initiate', description: 'Earned from Calcitonins.', minPoints: 0, nextPoints: 50, progressPercent: 0 };
+  const responsibility = member.responsibility || member.role_name || member.role || 'Member Responsibility';
+  const status = member.member_status || (member.is_active === 1 ? 'active' : 'inactive');
+  return <tr className={member.is_active === 1 ? '' : 'opacity-50'}><td className="px-6 py-4"><div className="flex items-center gap-3"><div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-sm font-black text-white">{(member.name || '?')[0]}</div><div><p className="font-bold text-slate-900">{member.name}</p><p className="text-xs text-slate-500">{member.email}</p>{member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}{member.codename && <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{member.codename}</p>}</div></div></td><td className="px-6 py-4"><div className="min-w-40"><p className="text-sm font-black text-slate-800">{level.label}</p><p className="mt-1 text-[10px] leading-4 text-slate-500">{level.description}</p><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Number(level.progressPercent || 0)}%` }} /></div><p className="mt-1 text-[10px] font-bold text-emerald-700">{level.nextPoints ? `${pointsValue.toLocaleString()} / ${Number(level.nextPoints).toLocaleString()} CAL` : 'Highest CAL Level'}</p></div></td><td className="px-6 py-4">{editing ? <input type="number" min="0" max="1000000" value={points} onChange={(event) => setPoints(event.target.value)} className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-black text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500" /> : <span className="text-sm font-black text-emerald-600">{pointsValue.toLocaleString()} CAL</span>}</td><td className="px-6 py-4"><span className="inline-flex rounded-full bg-sky-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-sky-700">{responsibility}</span></td><td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${status === 'active' ? 'bg-emerald-50 text-emerald-600' : status === 'pending_activation' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{status.replace(/_/g, ' ')}</span></td><td className="px-6 py-4"><div className="flex items-center gap-2">{editing ? <><button onClick={() => { onSave({ points: Math.max(0, parseInt(points, 10) || 0) }); setEditing(false); }} className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50" title="Save Calcitonins"><CheckCircle className="h-4 w-4" /></button><button onClick={() => { setPoints(String(member.points ?? 0)); setEditing(false); }} className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100" title="Cancel"><X className="h-4 w-4" /></button></> : <button onClick={() => setEditing(true)} className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100" title="Set Calcitonins; CAL Level updates automatically"><Edit3 className="h-4 w-4" /></button>}<button onClick={onToggleActive} className="rounded-lg p-2 text-amber-500 transition hover:bg-amber-50" title={member.is_active === 1 ? 'Deactivate' : 'Activate'}><Power className="h-4 w-4" /></button><button onClick={onRemove} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50" title="Archive member"><Trash2 className="h-4 w-4" /></button></div></td></tr>;
 };
 
 // Security Section — change the signed-in admin's password
@@ -686,7 +287,7 @@ export const AdminPanel = ({
   onHome?: () => void;
   user: AuthUser | null;
 }) => {
-  const [activeView, setActiveView] = useState<'overview' | 'phantom' | 'applications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
+  const [activeView, setActiveView] = useState<'overview' | 'phantom' | 'communications' | 'members' | 'security' | 'home' | 'about' | 'learn' | 'projects' | 'challenges' | 'community' | 'resources' | 'terms'>('overview');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [contentHistory, setContentHistory] = useState<SiteContent[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -694,7 +295,6 @@ export const AdminPanel = ({
   const [savedToStorage, setSavedToStorage] = useState(false);
   const saveFeedbackTimer = useRef<number | null>(null);
   const [stats, setStats] = useState<AdminStats | null>(null);
-  const [pendingCount, setPendingCount] = useState(0);
   const [hasPendingPublish, setHasPendingPublish] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -1034,7 +634,7 @@ export const AdminPanel = ({
                {[
                  ...(user?.isPhantom ? [{ id: 'phantom', label: 'PHANTOM Control', icon: ShieldAlert }] : []),
                  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
-                 ...(user?.isPhantom ? [{ id: 'applications', label: 'Applications', icon: Users, badge: pendingCount }, { id: 'members', label: 'Members', icon: UserCheck }] : []),
+                 ...(user?.isPhantom ? [{ id: 'members', label: 'Members', icon: UserCheck }, { id: 'communications', label: 'Communications', icon: MessageSquare }] : []),
                  { id: 'security', label: 'Security', icon: ShieldAlert },
                ].map((item) => (
                  <button
@@ -1050,7 +650,6 @@ export const AdminPanel = ({
                      <item.icon className="w-5 h-5" />
                      <span className="text-xs uppercase tracking-wide font-bold">{item.label}</span>
                    </div>
-                   {item.badge && <span className="bg-red-500 text-white px-2 py-0.5 rounded-full text-[10px] font-bold">{item.badge}</span>}
                  </button>
                ))}
 
@@ -1608,12 +1207,12 @@ export const AdminPanel = ({
               </div>
             )}
 
-            {activeView === 'applications' && (
-              <ApplicationsSection onPendingCount={setPendingCount} onOpenPhantom={() => onWorkspaceChange('phantom')} />
-            )}
-
             {activeView === 'members' && (
               <MembersSection />
+            )}
+
+            {activeView === 'communications' && (
+              <CommunicationsSection />
             )}
 
             {activeView === 'security' && (
