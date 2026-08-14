@@ -30,7 +30,7 @@ Existing accounts remain available and are safely migrated into a member profile
 
 ## Calcitonin (CAL) level system
 
-Levels are earned automatically from verified Calcitonins and cannot be manually assigned:
+Levels are earned automatically from verified Calcitonins and cannot be manually assigned to individual members. PHANTOM can manage the level names, thresholds, descriptions, and order in **PHANTOM Control → Calcitonins → PHANTOM Level Management**; saving recalculates every member from their current CAL balance:
 
 | CAL balance | Earned level |
 |---:|---|
@@ -145,13 +145,14 @@ Wrangler bundles the root `functions/` directory during the Pages deployment. Ne
    - Custom Founding Name Ballot exposes only the canonical six founding identities that remain unclaimed; PHANTOM and already claimed identities never appear as choices.
    - A PHANTOM-assigned Founding Name, including GHOST/NEXUS/FALCON/QUANTUM/MATRIX, opens no ballot.
    - PHANTOM can reassign a non-PHANTOM member’s name; confirm the old name becomes available and the member cannot reopen a ballot.
-7. Test sign-in with the same activated password using the member email, saved phone number, and claimed Code Name. Confirm a duplicate phone number is rejected for new phone-based sign-in records.
-8. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
-9. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
-10. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
-11. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
-12. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
-13. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
-14. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
+7. In PHANTOM Level Management, change a CAL level label/threshold, verify all displayed member levels recalculate from their current CAL balances, then adjust one member CAL balance and verify the new ranking applies immediately.
+8. Test sign-in with the same activated password using the member email, saved phone number, and claimed Code Name. Confirm a duplicate phone number is rejected for new phone-based sign-in records.
+9. Confirm a member cannot see a Vault section, tag, document, attachment, or project without the matching server-side permission.
+10. Confirm a new document receives a `CRX-DOC-####` code and shows automatic author/date metadata and autosave state.
+11. Enable global sharing, create links with **No expiry** and a time-limited option, copy one again from **Existing links**, test the optional shared-page **Download**/**Print** controls, revoke one, then verify that a sensitive/restricted document cannot be shared.
+12. Verify one automatic Calcitonins award, one PHANTOM direct CAL adjustment, the member Calcitonin history, and the live leaderboard.
+13. Send a notification to a selected test member, confirm the unread badge/inbox, edit the sent notice, withdraw it from inboxes, then enable a delegated sender and test their broadcaster access.
+14. Archive and then restore a member, document, section, and project as an authorized PHANTOM/manager.
+15. Confirm PHANTOM and member Vault entry points both use the full workspace with the appropriate Back button.
 
 > Do not change `public/_redirects` to a catch-all SPA rewrite. The API is routed by Pages Functions, and the Function provides the safe HTML navigation fallback.
