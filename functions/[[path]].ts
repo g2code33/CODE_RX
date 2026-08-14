@@ -16,7 +16,7 @@ import { cleanStr, cleanEmail, cleanOptionalStr } from './lib/validate';
 import { checkRateLimit } from './lib/rate-limit';
 import { sendEmail } from './lib/email';
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
-import { adjustMemberScore, awardScoreRule, calcitoninLevel, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
+import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLevel, type CalLevelDefinition, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 
@@ -45,6 +45,15 @@ const publicActor = (actor: NonNullable<Awaited<ReturnType<typeof getActor>>>) =
 const dbRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
   const result = await statement.all<T>();
   return result.results || [];
+};
+
+const syncStoredCalLevelLabels = async (db: D1Database, levels: readonly CalLevelDefinition[]) => {
+  const members = await dbRows<{ id: number; points: number; level: string | null }>(db.prepare('SELECT id, points, level FROM members'));
+  const statements = members.map((member) => {
+    const level = resolveCalcitoninLevel(levels, Number(member.points || 0)).label;
+    return member.level !== level ? db.prepare('UPDATE members SET level = ? WHERE id = ?').bind(level, member.id) : null;
+  }).filter((statement): statement is D1PreparedStatement => Boolean(statement));
+  for (let index = 0; index < statements.length; index += 50) await db.batch(statements.slice(index, index + 50));
 };
 
 // Never derive security links from an incoming Host header. A configured
@@ -228,6 +237,7 @@ const createMemberAccount = async ({
   applicationReviewNote?: string | null;
 }) => {
   const db = env.DB;
+  const levelDefinitions = await readCalLevels(db);
   if (roleCode === 'phantom') throw new Error('PHANTOM identity cannot be assigned through member creation.');
   const roleRows = await dbRows<{ id: number; code: string; name: string }>(db.prepare('SELECT id, code, name FROM roles WHERE code = ?').bind(roleCode));
   const role = roleRows[0];
@@ -276,11 +286,11 @@ const createMemberAccount = async ({
     if (existingMemberRows[0]) {
       memberRecordId = Number(existingMemberRows[0].id);
       await db.prepare('UPDATE members SET name = ?, phone = ?, phone_login_key = ?, role = ?, level = ?, is_active = 0 WHERE id = ?')
-        .bind(name, phone, normalizedPhone, role.code, calcitoninLevel(0).label, memberRecordId).run();
+        .bind(name, phone, normalizedPhone, role.code, resolveCalcitoninLevel(levelDefinitions, 0).label, memberRecordId).run();
     } else {
       const memberResult = await db.prepare(
         'INSERT INTO members (name, email, phone, phone_login_key, role, joined_date, points, level, is_active) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0)'
-      ).bind(name, email, phone, normalizedPhone, role.code, today, calcitoninLevel(0).label).run();
+      ).bind(name, email, phone, normalizedPhone, role.code, today, resolveCalcitoninLevel(levelDefinitions, 0).label).run();
       memberRecordId = Number(memberResult.meta.last_row_id);
       createdMemberRecord = true;
     }
@@ -1707,9 +1717,10 @@ app.get('/api/members', requireAuth, requirePhantom, async (c) => {
      LEFT JOIN codenames code ON code.claimed_by_member_profile_id = mp.id AND code.status = 'claimed'
      ORDER BY m.created_at DESC, m.id DESC`
   ));
+  const levelDefinitions = await readCalLevels(c.env.DB);
   return c.json({ success: true, data: members.map((member) => {
     const points = Number(member.points || 0);
-    const level = calcitoninLevel(points);
+    const level = resolveCalcitoninLevel(levelDefinitions, points);
     return {
       ...member,
       points,
@@ -1903,13 +1914,15 @@ app.get('/api/member/me', requireAuth, async (c) => {
     `SELECT section_slug, can_view, can_create, can_edit, can_delete, can_manage
      FROM role_permissions WHERE role_id = ? ORDER BY section_slug`
   ).bind(actor.primaryRoleId || 0));
-  const [memberRows, canSend] = await Promise.all([
+  const [memberRows, canSend, levelDefinitions] = await Promise.all([
     dbRows<{ points: number }>(c.env.DB.prepare(
       `SELECT m.points FROM members m
        JOIN member_profiles mp ON mp.member_record_id = m.id WHERE mp.id = ?`
     ).bind(actor.profileId)),
     canSendNotifications(c.env.DB, actor),
+    readCalLevels(c.env.DB),
   ]);
+  const currentLevel = resolveCalcitoninLevel(levelDefinitions, Number(memberRows[0]?.points || 0));
   return c.json({
     success: true,
     data: {
@@ -1918,8 +1931,8 @@ app.get('/api/member/me', requireAuth, async (c) => {
       role: roleRows[0] || null,
       permissions,
       points: Number(memberRows[0]?.points || 0),
-      level: calcitoninLevel(Number(memberRows[0]?.points || 0)).label,
-      calculatedLevel: calcitoninLevel(Number(memberRows[0]?.points || 0)),
+      level: currentLevel.label,
+      calculatedLevel: currentLevel,
       canSendNotifications: canSend,
       codenameSession: session ? {
         status: session.status,
@@ -1950,13 +1963,11 @@ app.get('/api/members/leaderboard', requireAuth, async (c) => {
      WHERE mp.status = 'active' AND COALESCE(r.code, '') != 'phantom'
      ORDER BY m.points DESC, mp.created_at ASC, mp.id ASC LIMIT ?`
   ).bind(limit));
-  return c.json({ success: true, data: members.map((member, index) => ({
-    ...member,
-    rank: index + 1,
-    points: Number(member.points || 0),
-    level: calcitoninLevel(Number(member.points || 0)).label,
-    calculatedLevel: calcitoninLevel(Number(member.points || 0)),
-  })) });
+  const levelDefinitions = await readCalLevels(c.env.DB);
+  return c.json({ success: true, data: members.map((member, index) => {
+    const level = resolveCalcitoninLevel(levelDefinitions, Number(member.points || 0));
+    return { ...member, rank: index + 1, points: Number(member.points || 0), level: level.label, calculatedLevel: level };
+  }) });
 });
 
 // ============================================
@@ -4741,9 +4752,11 @@ app.get('/api/phantom/members', requireAuth, requirePhantom, async (c) => {
      ${where}
      ORDER BY CASE mp.status WHEN 'pending_activation' THEN 0 WHEN 'active' THEN 1 WHEN 'locked' THEN 2 ELSE 3 END, mp.created_at DESC`
   ).bind(...values));
+  const levelDefinitions = await readCalLevels(c.env.DB);
   return c.json({ success: true, data: members.map((member) => {
     const points = Number(member.points || 0);
-    return { ...member, points, level: calcitoninLevel(points).label, calculated_level: calcitoninLevel(points) };
+    const level = resolveCalcitoninLevel(levelDefinitions, points);
+    return { ...member, points, level: level.label, calculated_level: level };
   }) });
 });
 
@@ -4911,7 +4924,7 @@ app.post('/api/phantom/members/:id/score', requireAuth, requirePhantom, async (c
       balance: result.balance,
       reason,
     });
-    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId }, message: 'Member Calcitonins updated.' });
+    return c.json({ success: true, data: { balance: result.balance, delta: result.delta, eventId: result.eventId, level: result.level }, message: 'Member Calcitonins updated.' });
   } catch (error) {
     console.error('[code-rx] manual Calcitonin adjustment error:', error);
     return c.json({ success: false, error: 'Could not update this member’s Calcitonins.' }, 500);
@@ -4947,6 +4960,63 @@ app.put('/api/phantom/score-rules/:key', requireAuth, requirePhantom, async (c) 
   await c.env.DB.prepare(`UPDATE score_rules SET ${fields.join(', ')}, updated_by_user_id = ? WHERE rule_key = ?`).bind(...values).run();
   await audit(c.env.DB, actor, 'score.rule.updated', 'score_rule', key, { fields: fields.slice(0, -1) });
   return c.json({ success: true, message: 'Automatic Calcitonin rule updated.' });
+});
+
+app.get('/api/phantom/cal-levels', requireAuth, requirePhantom, async (c) => {
+  const levels = await readCalLevels(c.env.DB);
+  return c.json({ success: true, data: levels });
+});
+
+/** PHANTOM manages the ranking definitions, not an individual member's level.
+ * Every level must start at a unique CAL threshold, with a base rank at 0. */
+app.put('/api/phantom/cal-levels', requireAuth, requirePhantom, async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    if (!Array.isArray(body.levels) || body.levels.length < 2 || body.levels.length > 12) {
+      return c.json({ success: false, error: 'Create between 2 and 12 CAL levels.' }, 400);
+    }
+    const seenKeys = new Set<string>();
+    const seenLabels = new Set<string>();
+    const seenThresholds = new Set<number>();
+    const levels: CalLevelDefinition[] = [];
+    for (let index = 0; index < body.levels.length; index += 1) {
+      const source = body.levels[index] || {};
+      const label = cleanStr(source.label, 2, 100);
+      const description = cleanOptionalStr(source.description, 500) || '';
+      const minPoints = Number(source.minPoints);
+      const key = cleanStr(source.key || `level_${index + 1}`, 2, 60)?.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      if (!label || !key || !Number.isInteger(minPoints) || minPoints < 0 || minPoints > 1_000_000) {
+        return c.json({ success: false, error: 'Each CAL level needs a valid name and whole-number CAL threshold.' }, 400);
+      }
+      const normalizedLabel = label.toLowerCase();
+      if (seenKeys.has(key) || seenLabels.has(normalizedLabel) || seenThresholds.has(minPoints)) {
+        return c.json({ success: false, error: 'CAL level names, keys, and thresholds must each be unique.' }, 409);
+      }
+      seenKeys.add(key); seenLabels.add(normalizedLabel); seenThresholds.add(minPoints);
+      levels.push({ key, label, description, minPoints, sortOrder: index + 1 });
+    }
+    levels.sort((left, right) => left.minPoints - right.minPoints || left.sortOrder - right.sortOrder);
+    if (levels[0].minPoints !== 0) return c.json({ success: false, error: 'The first CAL level must begin at 0 CAL.' }, 400);
+    for (let index = 1; index < levels.length; index += 1) {
+      if (levels[index].minPoints <= levels[index - 1].minPoints) {
+        return c.json({ success: false, error: 'Each CAL level must begin above the previous level threshold.' }, 400);
+      }
+      levels[index].sortOrder = index + 1;
+    }
+    const actor = await actorFromContext(c);
+    const statements: D1PreparedStatement[] = [c.env.DB.prepare('DELETE FROM cal_level_definitions')];
+    levels.forEach((level) => statements.push(c.env.DB.prepare(
+      `INSERT INTO cal_level_definitions (level_key, label, description, min_points, sort_order, updated_by_user_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+    ).bind(level.key, level.label, level.description, level.minPoints, level.sortOrder, actor?.userId ?? null)));
+    await c.env.DB.batch(statements);
+    await syncStoredCalLevelLabels(c.env.DB, levels);
+    await audit(c.env.DB, actor, 'cal.levels.updated', 'cal_level_definitions', null, { levels: levels.map((level) => ({ key: level.key, label: level.label, minPoints: level.minPoints })) });
+    return c.json({ success: true, data: levels, message: 'CAL level rankings saved. Every member level was recalculated from current Calcitonins.' });
+  } catch (error) {
+    console.error('[code-rx] CAL level update error:', error);
+    return c.json({ success: false, error: 'Could not save CAL level rankings.' }, 500);
+  }
 });
 
 app.get('/api/phantom/roles', requireAuth, requirePhantom, async (c) => {

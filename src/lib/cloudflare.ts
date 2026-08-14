@@ -346,6 +346,8 @@ export const db = {
     adjustScore: (id: number, data: { action: 'add' | 'deduct' | 'set'; points: number; reason: string }) =>
       apiCall<{ data: any }>(`/api/phantom/members/${id}/score`, { method: 'POST', body: JSON.stringify(data) }),
     scoreRules: async () => (await apiCall<{ data: any[] }>('/api/phantom/score-rules')).data || [],
+    calLevels: async () => (await apiCall<{ data: any[] }>('/api/phantom/cal-levels')).data || [],
+    saveCalLevels: (levels: any[]) => apiCall<{ data: any[]; message?: string }>('/api/phantom/cal-levels', { method: 'PUT', body: JSON.stringify({ levels }) }),
     updateScoreRule: (key: string, data: { enabled?: boolean; points?: number }) =>
       apiCall(`/api/phantom/score-rules/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(data) }),
     sharing: async () => (await apiCall<{ data: any }>('/api/phantom/sharing')).data,

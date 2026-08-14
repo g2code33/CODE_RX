@@ -73,20 +73,33 @@ const memberScore = async (db: D1Database, memberProfileId: number): Promise<Mem
 const boundedPoints = (value: number) => Math.max(0, Math.min(1_000_000, Math.trunc(value)));
 
 /** Code Rx Society progression is derived exclusively from Calcitonins (CAL).
- * It is never manually assigned, so every screen and API response can show the
- * same earned level for the same verified balance. */
-export const CAL_LEVELS = [
-  { key: 'rx_initiate', label: 'Rx Initiate', minPoints: 0, description: 'Beginning the Code Rx Society journey.' },
-  { key: 'code_explorer', label: 'Code Explorer', minPoints: 50, description: 'Exploring practical Code Rx learning and contribution.' },
-  { key: 'society_builder', label: 'Society Builder', minPoints: 150, description: 'Building useful work for the Society.' },
-  { key: 'innovation_specialist', label: 'Innovation Specialist', minPoints: 350, description: 'Demonstrating sustained technical and community impact.' },
-  { key: 'systems_catalyst', label: 'Systems Catalyst', minPoints: 700, description: 'Catalysing reliable systems, projects, and knowledge.' },
-  { key: 'code_rx_vanguard', label: 'Code Rx Vanguard', minPoints: 1_200, description: 'Leading high-value Society contribution.' },
-  { key: 'society_luminary', label: 'Society Luminary', minPoints: 2_000, description: 'Sustained exemplary contribution to Code Rx Society.' },
-] as const;
+ * Defaults seed a new installation; PHANTOM may manage the stored definitions
+ * later without assigning a level directly to an individual member. */
+export type CalLevelDefinition = {
+  id?: number;
+  key: string;
+  label: string;
+  description: string;
+  minPoints: number;
+  sortOrder: number;
+};
+
+export const DEFAULT_CAL_LEVELS: readonly CalLevelDefinition[] = [
+  { key: 'rx_initiate', label: 'Rx Initiate', minPoints: 0, description: 'Beginning the Code Rx Society journey.', sortOrder: 1 },
+  { key: 'code_explorer', label: 'Code Explorer', minPoints: 50, description: 'Exploring practical Code Rx learning and contribution.', sortOrder: 2 },
+  { key: 'society_builder', label: 'Society Builder', minPoints: 150, description: 'Building useful work for the Society.', sortOrder: 3 },
+  { key: 'innovation_specialist', label: 'Innovation Specialist', minPoints: 350, description: 'Demonstrating sustained technical and community impact.', sortOrder: 4 },
+  { key: 'systems_catalyst', label: 'Systems Catalyst', minPoints: 700, description: 'Catalysing reliable systems, projects, and knowledge.', sortOrder: 5 },
+  { key: 'code_rx_vanguard', label: 'Code Rx Vanguard', minPoints: 1_200, description: 'Leading high-value Society contribution.', sortOrder: 6 },
+  { key: 'society_luminary', label: 'Society Luminary', minPoints: 2_000, description: 'Sustained exemplary contribution to Code Rx Society.', sortOrder: 7 },
+];
+
+// Backward-compatible export for schema/default callers. Runtime API results
+// use the stored PHANTOM-managed definitions through readCalLevels().
+export const CAL_LEVELS = DEFAULT_CAL_LEVELS;
 
 export type CalcitoninLevel = {
-  key: typeof CAL_LEVELS[number]['key'];
+  key: string;
   label: string;
   description: string;
   minPoints: number;
@@ -94,17 +107,35 @@ export type CalcitoninLevel = {
   progressPercent: number;
 };
 
-export const calcitoninLevel = (value: number | null | undefined): CalcitoninLevel => {
+export const resolveCalcitoninLevel = (definitions: readonly CalLevelDefinition[], value: number | null | undefined): CalcitoninLevel => {
+  const levels = [...definitions].sort((left, right) => left.minPoints - right.minPoints || left.sortOrder - right.sortOrder);
+  const usable = levels.length ? levels : [...DEFAULT_CAL_LEVELS];
   const points = boundedPoints(Number(value || 0));
   let index = 0;
-  for (let candidate = 0; candidate < CAL_LEVELS.length; candidate += 1) {
-    if (points >= CAL_LEVELS[candidate].minPoints) index = candidate;
+  for (let candidate = 0; candidate < usable.length; candidate += 1) {
+    if (points >= usable[candidate].minPoints) index = candidate;
   }
-  const current = CAL_LEVELS[index];
-  const next = CAL_LEVELS[index + 1] || null;
+  const current = usable[index];
+  const next = usable[index + 1] || null;
   const span = next ? Math.max(1, next.minPoints - current.minPoints) : 1;
   const progressPercent = next ? Math.max(0, Math.min(100, Math.round(((points - current.minPoints) / span) * 100))) : 100;
   return { key: current.key, label: current.label, description: current.description, minPoints: current.minPoints, nextPoints: next?.minPoints || null, progressPercent };
+};
+
+/** Static fallback used only during schema setup or when a legacy database has
+ * not seeded its level definitions yet. Application requests use readCalLevels. */
+export const calcitoninLevel = (value: number | null | undefined): CalcitoninLevel => resolveCalcitoninLevel(DEFAULT_CAL_LEVELS, value);
+
+export const readCalLevels = async (db: D1Database): Promise<CalLevelDefinition[]> => {
+  try {
+    const result = await rows<{ id: number; level_key: string; label: string; description: string; min_points: number; sort_order: number }>(db.prepare(
+      'SELECT id, level_key, label, description, min_points, sort_order FROM cal_level_definitions ORDER BY min_points, sort_order, id'
+    ));
+    if (!result.length) return [...DEFAULT_CAL_LEVELS];
+    return result.map((level) => ({ id: Number(level.id), key: String(level.level_key), label: String(level.label), description: String(level.description || ''), minPoints: Number(level.min_points || 0), sortOrder: Number(level.sort_order || 0) }));
+  } catch {
+    return [...DEFAULT_CAL_LEVELS];
+  }
 };
 
 export interface ScoreAwardInput {
@@ -144,6 +175,7 @@ export const awardScoreRule = async (db: D1Database, input: ScoreAwardInput): Pr
 
   const member = await memberScore(db, input.memberProfileId);
   if (!member) return null;
+  const levelDefinitions = await readCalLevels(db);
   const referenceType = input.referenceType.slice(0, 80);
   const referenceId = String(input.referenceId).slice(0, 120);
   const reserved = await db.prepare(
@@ -169,7 +201,8 @@ export const awardScoreRule = async (db: D1Database, input: ScoreAwardInput): Pr
       'UPDATE members SET points = MIN(1000000, MAX(0, points + ?)) WHERE id = ? RETURNING points'
     ).bind(delta, member.member_record_id));
     const balance = boundedPoints(Number(updated[0]?.points || 0));
-    await db.prepare('UPDATE members SET level = ? WHERE id = ?').bind(calcitoninLevel(balance).label, member.member_record_id).run();
+    const level = resolveCalcitoninLevel(levelDefinitions, balance);
+    await db.prepare('UPDATE members SET level = ? WHERE id = ?').bind(level.label, member.member_record_id).run();
     await db.prepare('UPDATE member_score_events SET balance_after = ? WHERE id = ?').bind(balance, eventId).run();
     return {
       memberProfileId: member.profile_id,
@@ -179,7 +212,7 @@ export const awardScoreRule = async (db: D1Database, input: ScoreAwardInput): Pr
       eventId,
       label: rule.label,
       automatic: true,
-      level: calcitoninLevel(balance),
+      level,
     };
   } catch (error) {
     // A failed reservation must not permanently suppress a later retry.
@@ -200,6 +233,7 @@ export interface ManualScoreInput {
 export const adjustMemberScore = async (db: D1Database, input: ManualScoreInput): Promise<ScoreResult | null> => {
   const member = await memberScore(db, input.memberProfileId);
   if (!member) return null;
+  const levelDefinitions = await readCalLevels(db);
   const amount = boundedPoints(input.points);
   const previous = boundedPoints(Number(member.points || 0));
   let balance = previous;
@@ -208,7 +242,8 @@ export const adjustMemberScore = async (db: D1Database, input: ManualScoreInput)
   if (input.action === 'set') balance = amount;
   const delta = balance - previous;
 
-  await db.prepare('UPDATE members SET points = ?, level = ? WHERE id = ?').bind(balance, calcitoninLevel(balance).label, member.member_record_id).run();
+  const level = resolveCalcitoninLevel(levelDefinitions, balance);
+  await db.prepare('UPDATE members SET points = ?, level = ? WHERE id = ?').bind(balance, level.label, member.member_record_id).run();
   const event = await db.prepare(
     `INSERT INTO member_score_events
      (member_profile_id, member_record_id, event_type, points_delta, balance_after, reason, metadata_json, created_by_user_id)
@@ -231,6 +266,6 @@ export const adjustMemberScore = async (db: D1Database, input: ManualScoreInput)
     eventId: Number(event.meta.last_row_id),
     label: `Manual ${input.action}`,
     automatic: false,
-    level: calcitoninLevel(balance),
+    level,
   };
 };

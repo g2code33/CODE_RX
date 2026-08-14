@@ -5,7 +5,7 @@
 import type { Env } from '../env';
 import { hashPassword } from './auth';
 import { allocateMemberCode, FOUNDING_CODENAMES, VAULT_SECTION_SEEDS } from './vault';
-import { SCORE_RULE_SEEDS, calcitoninLevel } from './score';
+import { DEFAULT_CAL_LEVELS, SCORE_RULE_SEEDS, readCalLevels, resolveCalcitoninLevel } from './score';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS applications (
@@ -478,6 +478,19 @@ CREATE TABLE IF NOT EXISTS score_rules (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS cal_level_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  level_key TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  min_points INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL,
+  updated_by_user_id INTEGER,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(min_points),
+  UNIQUE(sort_order)
+);
+
 CREATE TABLE IF NOT EXISTS member_score_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   member_profile_id INTEGER NOT NULL,
@@ -799,6 +812,7 @@ CREATE INDEX IF NOT EXISTS idx_vault_documents_section ON vault_documents(sectio
 CREATE INDEX IF NOT EXISTS idx_vault_documents_status ON vault_documents(status, is_archived, updated_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_documents_code ON vault_documents(document_code);
 CREATE INDEX IF NOT EXISTS idx_vault_shares_document ON vault_shares(document_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_cal_levels_min_points ON cal_level_definitions(min_points, sort_order);
 CREATE INDEX IF NOT EXISTS idx_score_events_member ON member_score_events(member_profile_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notification_recipients_member ON notification_recipients(member_profile_id, status, delivered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_sent ON notifications(sent_at DESC);
@@ -874,7 +888,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-13-phantom-approval-codename-reassignment-19';
+const VAULT_SCHEMA_VERSION = '2026-08-14-phantom-level-management-20';
 
 
 // Role codes stay stable for member history and permissions. Their visible
@@ -931,9 +945,10 @@ const backfillPhoneLoginKeys = async (db: D1Database) => {
 };
 
 const backfillCalcitoninLevels = async (db: D1Database) => {
+  const definitions = await readCalLevels(db);
   const rows = await asRows<{ id: number; points: number; level: string | null }>(db.prepare('SELECT id, points, level FROM members'));
   const statements = rows.map((row) => {
-    const level = calcitoninLevel(Number(row.points || 0)).label;
+    const level = resolveCalcitoninLevel(definitions, Number(row.points || 0)).label;
     return row.level !== level ? db.prepare('UPDATE members SET level = ? WHERE id = ?').bind(level, row.id) : null;
   }).filter((statement): statement is D1PreparedStatement => Boolean(statement));
   if (statements.length) await runBatchInChunks(db, statements);
@@ -1020,6 +1035,14 @@ const seedScoreRules = async (db: D1Database) => {
       .bind(rule.label, rule.description, rule.key),
   ]);
   await runBatchInChunks(db, statements);
+};
+
+const seedCalLevels = async (db: D1Database) => {
+  const statements = DEFAULT_CAL_LEVELS.map((level) => db.prepare(
+    `INSERT OR IGNORE INTO cal_level_definitions (level_key, label, description, min_points, sort_order)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(level.key, level.label, level.description, level.minPoints, level.sortOrder));
+  if (statements.length) await runBatchInChunks(db, statements);
 };
 
 const seedFeatureSettings = async (db: D1Database) => {
@@ -1235,7 +1258,7 @@ const ensurePhantom = async (env: Env) => {
   if (!memberRows[0]) {
     const created = await db.prepare(
       'INSERT INTO members (name, email, phone, role, joined_date, points, level, is_active) VALUES (?, ?, NULL, ?, ?, 0, ?, 1)'
-    ).bind('PHANTOM', email, 'phantom', new Date().toISOString().slice(0, 10), calcitoninLevel(0).label).run();
+    ).bind('PHANTOM', email, 'phantom', new Date().toISOString().slice(0, 10), resolveCalcitoninLevel(DEFAULT_CAL_LEVELS, 0).label).run();
     memberRows = [{ id: Number(created.meta.last_row_id) }];
   }
 
@@ -1287,10 +1310,11 @@ export async function ensureSchema(env: Env): Promise<void> {
       await seedRolesAndPermissions(db);
       await normalizeResponsibilityLabels(db);
       await backfillPhoneLoginKeys(db);
-      await backfillCalcitoninLevels(db);
       await backfillApprovedApplicationActivations(db);
       await seedVaultSections(db);
       await seedScoreRules(db);
+      await seedCalLevels(db);
+      await backfillCalcitoninLevels(db);
       await seedFeatureSettings(db);
       await seedCommunityMediaSettings(db);
       await ensurePhantom(env);
