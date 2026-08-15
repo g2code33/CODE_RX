@@ -1474,13 +1474,15 @@ app.post('/api/applications', async (c) => {
       .bind(email, name, phone, new Date().toISOString().split('T')[0], 'application')
       .run();
 
-    // Notify the admin (non-blocking; skipped when EmailJS is not configured)
+    // Notify PHANTOM with a secure deep link. The route still requires a
+    // PHANTOM session; it never exposes application data to public visitors.
     await sendEmail(c.env, c.env.EMAILJS_TEMPLATE_ID_JOIN || '', {
       to_email: c.env.ADMIN_EMAIL,
       applicant_name: name,
       applicant_email: email,
       applicant_phone: phone || '—',
-      date: new Date().toISOString().split('T')[0],
+      submitted_at: new Date().toISOString(),
+      review_link: `${publicSiteUrl(c.env)}/#phantom-applications`,
     });
 
     return c.json({ success: true, message: 'Application submitted successfully' });

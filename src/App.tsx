@@ -112,10 +112,11 @@ function App() {
       setUser(authenticatedUser);
       if (isCommunityWorkspace) setCommunityOrigin(communityOriginFor(authenticatedUser));
       if (isAdminUser(authenticatedUser)) {
+        const openPhantomApplications = window.location.hash.startsWith('#phantom-applications') && (authenticatedUser.isPhantom || authenticatedUser.role === 'phantom');
         setIsAdmin(true);
         setIsDashboard(false);
         setIsMemberVault(false);
-        setAdminWorkspace('controller');
+        setAdminWorkspace(openPhantomApplications ? 'phantom' : 'controller');
       } else {
         setIsDashboard(true);
         setIsMemberVault(window.location.hash.startsWith('#member-vault'));
@@ -133,6 +134,25 @@ function App() {
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
+      if (window.location.hash.startsWith('#phantom-applications')) {
+        setIsCommunityWorkspace(false);
+        setIsCodenameBallotView(false);
+        setIsSharedVaultView(false);
+        setIsActivationView(false);
+        setIsResetView(false);
+        setIsMemberVault(false);
+        setActiveTab('home');
+        const current = userRef.current;
+        if (current?.isPhantom || current?.role === 'phantom') {
+          setIsAdmin(true);
+          setIsDashboard(false);
+          setAdminWorkspace('phantom');
+        } else if (!current) {
+          setAuthMode('login');
+          setIsAuthOpen(true);
+        }
+        return;
+      }
       if (window.location.hash.startsWith('#codename-ballot')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(true);
@@ -285,12 +305,14 @@ function App() {
     setResumeCommunityAfterLogin(false);
     setUser(authenticatedUser);
     setIsAuthOpen(false);
+    const shouldOpenPhantomApplications = window.location.hash.startsWith('#phantom-applications') && (authenticatedUser.isPhantom || authenticatedUser.role === 'phantom');
     if (isAdminUser(authenticatedUser)) {
       setIsAdmin(true);
       setIsDashboard(false);
       setIsMemberVault(false);
-      setAdminWorkspace('controller');
+      setAdminWorkspace(shouldOpenPhantomApplications ? 'phantom' : 'controller');
     } else {
+      if (window.location.hash.startsWith('#phantom-applications')) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
       setIsDashboard(true);
       setIsMemberVault(false);
       setIsAdmin(false);

@@ -28,7 +28,7 @@ database. These are the only keys/secrets you need:
 
 | Template | Purpose | Variables |
 |---|---|---|
-| `template_join` | New application → admin | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `date` |
+| `template_join` | New application → PHANTOM | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `submitted_at`, `review_link` |
 | `template_contact` | Contact form → admin | `to_email`, `sender_name`, `sender_email`, `subject`, `message`, `date` |
 | `template_approval` | Approval/rejection → applicant | `to_email`, `member_name`, `status`, `date` |
 | `template_reset` | Password reset → user | `to_email`, `reset_link`, `name` |

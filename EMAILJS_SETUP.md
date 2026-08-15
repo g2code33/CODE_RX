@@ -14,7 +14,7 @@ The Function sends these template parameters.
 
 | Purpose | Pages variable | Required template parameters |
 |---|---|---|
-| New Join application | `EMAILJS_TEMPLATE_ID_JOIN` | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `date` |
+| New Join application | `EMAILJS_TEMPLATE_ID_JOIN` | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `submitted_at`, `review_link` |
 | New contact message | `EMAILJS_TEMPLATE_ID_CONTACT` | `to_email`, `sender_name`, `sender_email`, `subject`, `message`, `date` |
 | Application review notice | `EMAILJS_TEMPLATE_ID_APPROVAL` | `to_email`, `member_name`, `status`, `date` |
 | Password reset | `EMAILJS_TEMPLATE_ID_RESET` | `to_email`, `name`, `reset_link` |
