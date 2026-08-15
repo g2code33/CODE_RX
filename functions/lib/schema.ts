@@ -888,7 +888,7 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-14-phantom-level-management-20';
+const VAULT_SCHEMA_VERSION = '2026-08-15-code-rx11-brand-21';
 
 
 // Role codes stay stable for member history and permissions. Their visible
@@ -964,6 +964,29 @@ const backfillApprovedApplicationActivations = async (db: D1Database) => {
      ))
      WHERE status = 'approved' AND member_profile_id IS NOT NULL AND activation_completed_at IS NULL`
   ).run();
+};
+
+/** Use the new supplied Code Rx Society asset throughout published branding,
+ * while deliberately preserving the Home page Hero's /logo.png source. */
+const normalizePublishedBrandLogos = async (db: D1Database) => {
+  const rows = await asRows<{ data: string }>(db.prepare('SELECT data FROM site_content WHERE id = 1'));
+  const raw = rows[0]?.data;
+  if (!raw) return;
+  let content: any;
+  try { content = JSON.parse(raw); } catch { return; }
+  if (!content || typeof content !== 'object' || !content.media || typeof content.media !== 'object') return;
+  const legacy = new Set(['/logo.png', '/logo-small.png', 'logo.png', 'logo-small.png']);
+  const targets = ['brand.logo', 'brand.logoSmall', 'about.logo', 'footer.logo'];
+  let changed = false;
+  for (const key of targets) {
+    const asset = content.media[key];
+    if (asset && typeof asset === 'object' && legacy.has(String(asset.src || ''))) {
+      content.media[key] = { ...asset, src: '/CODE%20RX11.png' };
+      changed = true;
+    }
+  }
+  // hero.logo is intentionally not included: logo.png stays on the Home page.
+  if (changed) await db.prepare('UPDATE site_content SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').bind(JSON.stringify(content)).run();
 };
 
 const runSafeMigrations = async (db: D1Database) => {
@@ -1311,6 +1334,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       await normalizeResponsibilityLabels(db);
       await backfillPhoneLoginKeys(db);
       await backfillApprovedApplicationActivations(db);
+      await normalizePublishedBrandLogos(db);
       await seedVaultSections(db);
       await seedScoreRules(db);
       await seedCalLevels(db);

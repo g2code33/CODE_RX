@@ -23,7 +23,7 @@ export const Navbar = ({
   media?: Record<string, MediaAsset>;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const logo = getMedia(media, 'brand.logoSmall', { src: '/logo-small.png', alt: 'Code Rx Society' });
+  const logo = getMedia(media, 'brand.logoSmall', { src: '/CODE%20RX11.png', alt: 'Code Rx Society' });
 
   const goHome = () => {
     setActiveTab('home');

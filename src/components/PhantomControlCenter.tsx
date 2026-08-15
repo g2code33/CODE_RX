@@ -109,7 +109,7 @@ export const PhantomControlCenter = ({
           <button onClick={() => setNavigationOpen((current) => !current)} className="rounded-xl border border-emerald-200 bg-emerald-50 p-2.5 text-emerald-800 hover:bg-emerald-100" aria-label={navigationOpen ? 'Hide PHANTOM navigation' : 'Show PHANTOM navigation'}><Menu className="h-5 w-5" /></button>
           {onBack && <button onClick={onBack} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-black text-slate-600 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">Back</span></button>}
           {(onHome || onBack) && <button onClick={onHome || onBack} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-black text-emerald-800 hover:bg-emerald-100" title="Admin home"><Home className="h-4 w-4" /><span className="hidden md:inline">Home</span></button>}
-          <img src="/logo.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
+          <img src="/CODE%20RX11.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
           <div className="min-w-0"><p className="truncate text-sm font-black tracking-wide text-slate-900">PHANTOM CONTROL</p><p className="truncate text-[9px] font-black uppercase tracking-[0.16em] text-emerald-700">Wide founder workspace</p></div>
         </div>
         <div className="flex shrink-0 items-center gap-2">

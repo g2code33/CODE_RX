@@ -2,11 +2,12 @@
 // Caches the app shell (the single-file index.html + logos) for offline
 // launch; API requests are never cached.
 
-const CACHE = 'code-rx-v2';
+const CACHE = 'code-rx-v3';
 const CORE = [
   '/',
   '/index.html',
-  '/logo.png',
+  '/logo.png', // Home page Hero logo — intentionally preserved
+  '/CODE%20RX11.png',
   '/logo-small.png',
   '/manifest.webmanifest',
   '/icon-192.png',

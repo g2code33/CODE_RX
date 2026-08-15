@@ -41,7 +41,7 @@ export const About = ({
   copy?: Record<string, string>;
   media?: Record<string, MediaAsset>;
 }) => {
-  const aboutLogo = getMedia(media, 'about.logo', { src: '/logo.png', alt: 'Code Rx Society emblem' });
+  const aboutLogo = getMedia(media, 'about.logo', { src: '/CODE%20RX11.png', alt: 'Code Rx Society emblem' });
   return (
     <EditableRegion elementKey="about.section" label="About section">
       <section id="about" className="brand-section brand-grid brand-grid-fine py-28 sm:py-36">

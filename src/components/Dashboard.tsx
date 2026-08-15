@@ -58,7 +58,7 @@ export const Dashboard = ({
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <button onClick={() => setNavigationOpen((current) => !current)} className="rounded-xl border border-emerald-200 bg-emerald-50 p-2.5 text-emerald-800 hover:bg-emerald-100" aria-label={navigationOpen ? 'Hide portal navigation' : 'Show portal navigation'}><Menu className="h-5 w-5" /></button>
           <button onClick={() => { setView('overview'); setNavigationOpen(false); }} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-black text-emerald-800 hover:bg-emerald-100" title="Member Portal home"><Home className="h-4 w-4" /><span className="hidden sm:inline">Home</span></button>
-          <img src="/logo.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
+          <img src="/CODE%20RX11.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
           <div className="min-w-0"><p className="truncate text-sm font-black tracking-wide text-slate-900">CODE <span className="text-emerald-600">Rx</span> MEMBER PORTAL</p><p className="truncate text-[9px] font-black uppercase tracking-[0.16em] text-emerald-700">Wide member workspace</p></div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
