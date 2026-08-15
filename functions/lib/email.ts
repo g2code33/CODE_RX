@@ -50,16 +50,33 @@ export const generalEmailNotification = ({
   sent_at: sentAt,
 });
 
+const configuredValue = (value: unknown) => String(value || '').trim();
+
+/**
+ * Sends through EmailJS from a Cloudflare Pages Function. EmailJS blocks
+ * server/non-browser calls by default, so the account must explicitly allow
+ * them in Account → Security. When the recommended EmailJS Private Key mode
+ * is enabled, EMAILJS_PRIVATE_KEY is supplied as accessToken from a Pages
+ * encrypted secret; it is never exposed to the browser or written to logs.
+ */
 export async function sendEmail(
   env: Env,
   templateId: string,
   params: Record<string, unknown>
 ): Promise<boolean> {
-  const serviceId = env.EMAILJS_SERVICE_ID;
-  const publicKey = env.EMAILJS_PUBLIC_KEY;
+  const serviceId = configuredValue(env.EMAILJS_SERVICE_ID);
+  const publicKey = configuredValue(env.EMAILJS_PUBLIC_KEY);
+  const privateKey = configuredValue(env.EMAILJS_PRIVATE_KEY);
+  const resolvedTemplateId = configuredValue(templateId);
+  const missing = [
+    !serviceId ? 'EMAILJS_SERVICE_ID' : '',
+    !publicKey ? 'EMAILJS_PUBLIC_KEY' : '',
+    !resolvedTemplateId ? 'EMAILJS_TEMPLATE_ID_GENERAL or an event template ID' : '',
+  ].filter(Boolean);
 
-  if (!serviceId || !publicKey || !templateId) {
-    console.log(`[code-rx] Email skipped — EmailJS not configured (template: ${templateId})`);
+  if (missing.length > 0) {
+    // Never log any value, key, template ID, or recipient address here.
+    console.warn(`[code-rx] Email skipped — missing ${missing.join(', ')}`);
     return false;
   }
 
@@ -69,8 +86,11 @@ export async function sendEmail(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         service_id: serviceId,
-        template_id: templateId,
+        template_id: resolvedTemplateId,
         user_id: publicKey,
+        // EmailJS calls this field accessToken. It is required only when the
+        // account has "Use Private Key" enabled in EmailJS Account → Security.
+        ...(privateKey ? { accessToken: privateKey } : {}),
         template_params: params,
       }),
     });
@@ -79,10 +99,10 @@ export async function sendEmail(
       console.error(`[code-rx] Email send failed (${res.status}):`, text.slice(0, 300));
       return false;
     }
-    console.log(`[code-rx] Email sent via EmailJS (${templateId})`);
+    console.log('[code-rx] Email sent via EmailJS');
     return true;
   } catch (e) {
-    console.error('[code-rx] Email error:', e);
+    console.error('[code-rx] Email network error:', e);
     return false;
   }
 }

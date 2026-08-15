@@ -32,6 +32,8 @@ TELEGRAM_LINK = "https://t.me/+EdRpfR1GTGNjM2Q0"
 # EMAILJS_TEMPLATE_ID_GENERAL is an optional reusable template for contact,
 # application review, password reset, and activation notifications on plans
 # with limited template slots. Event-specific IDs override it when configured.
+# EMAILJS_PRIVATE_KEY is deliberately NOT listed here: if EmailJS Private Key
+# mode is enabled, store it only as an encrypted Pages production secret.
 # Create templates and credentials at https://www.emailjs.com
 EMAILJS_PUBLIC_KEY = ""
 EMAILJS_SERVICE_ID = ""

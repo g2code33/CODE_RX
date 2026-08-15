@@ -105,7 +105,7 @@ When configured, the Functions API sends email through EmailJS for:
 4. Password reset links
 5. Member activation links
 
-See `SETUP_KEYS.md` and `EMAILJS_SETUP.md` for the optional variable names. The application remains functional without EmailJS, but reset and activation links must be delivered securely before production use.
+See `SETUP_KEYS.md` and `EMAILJS_SETUP.md` for the optional variable names. EmailJS must allow **non-browser applications** in its Account → Security settings because Code Rx sends from Pages Functions. If EmailJS Private Key mode is enabled, store `EMAILJS_PRIVATE_KEY` only as an encrypted Pages secret. The application remains functional without EmailJS, but reset and activation links must be delivered securely before production use.
 
 ## Pre-deployment validation
 

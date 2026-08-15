@@ -21,6 +21,8 @@ export interface Env {
   ASSETS?: Fetcher;
   // EmailJS (optional — for email notifications)
   EMAILJS_PUBLIC_KEY?: string;
+  /** Encrypted Pages secret when EmailJS Private Key mode is enabled. */
+  EMAILJS_PRIVATE_KEY?: string;
   EMAILJS_SERVICE_ID?: string;
   EMAILJS_TEMPLATE_ID_JOIN?: string;
   /** Optional shared template for EmailJS plans with limited template slots. */
