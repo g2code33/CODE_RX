@@ -2,6 +2,27 @@
 
 Email notifications are sent by the **Cloudflare Pages Functions API**, never by browser code. Configure EmailJS only in the Cloudflare Pages environment (and an ignored local environment file when testing locally). Do **not** put EmailJS values in `src/`, a `VITE_*` variable, public assets, Git, screenshots, or chat.
 
+## Required EmailJS server security setting
+
+A Pages Function is a **non-browser application**. EmailJS blocks server-side API requests by default, so EmailJS dashboard tests can succeed while Code Rx sends nothing until this setting is enabled.
+
+1. In **EmailJS → Account → Security**, enable:
+
+   ```text
+   Allow EmailJS API for non-browser applications
+   ```
+
+2. Keep **Use Private Key (recommended)** enabled if it is available.
+3. When Private Key mode is enabled, create this as an **encrypted Secret** — not a Text variable — in Cloudflare Pages Production:
+
+   ```text
+   EMAILJS_PRIVATE_KEY
+   ```
+
+   Copy it directly from EmailJS Account privately. Never paste it into chat, Git, `wrangler.toml`, frontend code, or a screenshot.
+
+Code Rx sends this secret only as EmailJS's server-side `accessToken`; it never reaches a browser. If you deliberately disable EmailJS Private Key mode, omit `EMAILJS_PRIVATE_KEY`, but **Allow EmailJS API for non-browser applications** must remain enabled.
+
 ## Choose the template layout
 
 | Layout | EmailJS templates needed | Use when |
@@ -117,7 +138,7 @@ Open **Cloudflare Dashboard → Workers & Pages → coderxsociety → Settings �
 
 ### Two-template layout
 
-Only these EmailJS variables are required:
+Create these **Text** variables:
 
 ```text
 EMAILJS_PUBLIC_KEY
@@ -126,7 +147,13 @@ EMAILJS_TEMPLATE_ID_JOIN
 EMAILJS_TEMPLATE_ID_GENERAL
 ```
 
-Set `EMAILJS_TEMPLATE_ID_GENERAL` to the ID of **Code Rx Notification**. Leave the four event-specific variables empty unless you later create a dedicated template for that event.
+Create this **encrypted Secret** when EmailJS Private Key mode is enabled (recommended):
+
+```text
+EMAILJS_PRIVATE_KEY
+```
+
+Set `EMAILJS_TEMPLATE_ID_GENERAL` to the ID of **Code Rx Notification**. Leave the four event-specific variables **absent** unless you later create a dedicated template for that event — Cloudflare does not permit an empty variable value.
 
 ### Separate-template layout
 
@@ -135,6 +162,7 @@ Configure the base values plus the template IDs you created:
 ```text
 EMAILJS_PUBLIC_KEY
 EMAILJS_SERVICE_ID
+EMAILJS_PRIVATE_KEY                           (encrypted Secret when Private Key mode is enabled)
 EMAILJS_TEMPLATE_ID_JOIN
 EMAILJS_TEMPLATE_ID_GENERAL                 (optional fallback)
 EMAILJS_TEMPLATE_ID_CONTACT                  (optional override)
@@ -143,15 +171,16 @@ EMAILJS_TEMPLATE_ID_RESET                    (optional override)
 EMAILJS_TEMPLATE_ID_ACTIVATION               (optional override)
 ```
 
-After changing Pages variables, deploy the current production build so the Functions use the updated environment.
+After changing Pages variables, create a **new Production deployment**. A browser refresh alone cannot apply new Pages Function variables.
 
-`JWT_SECRET` and `ADMIN_PASSWORD` remain encrypted Cloudflare secrets. They are unrelated to EmailJS and must never be placed in an EmailJS template or client-side setting.
+`JWT_SECRET`, `ADMIN_PASSWORD`, and `EMAILJS_PRIVATE_KEY` remain encrypted Cloudflare secrets. They must never be placed in an EmailJS template or client-side setting.
 
 ## Test safely
 
-1. Save the EmailJS template before selecting **Test it**.
-2. Test the JOIN template with a PHANTOM/admin inbox as `to_email` and `https://coderxsociety.pages.dev/#phantom-applications` as `review_link`.
-3. Test **Code Rx Notification** with your own inbox:
+1. In EmailJS **Account → Security**, enable **Allow EmailJS API for non-browser applications** before testing a Code Rx form.
+2. Save the EmailJS template before selecting **Test it**.
+3. Test the JOIN template with a PHANTOM/admin inbox as `to_email` and `https://coderxsociety.pages.dev/#phantom-applications` as `review_link`.
+4. Test **Code Rx Notification** with your own inbox:
 
    ```text
    to_email: your inbox
@@ -164,16 +193,19 @@ After changing Pages variables, deploy the current production build so the Funct
    sent_at: 2026-08-15T14:30:00.000Z
    ```
 
-4. After deployment, submit a test Contact message, request a reset for a test account, and create a test member invitation as PHANTOM.
-5. Check EmailJS activity and the mailbox spam folder if a message does not arrive.
+5. After saving Cloudflare variables, create a new **Production** deployment, then submit a test Contact message.
+6. Confirm a new **Code Rx Notification** record appears in EmailJS → Email History. Only then test password reset and a PHANTOM member invitation.
+7. Check the destination mailbox spam folder if EmailJS History says `OK` but a message does not arrive.
 
 When EmailJS is not configured, public JOIN and Contact forms still save to D1. Reset and activation links are deliberately not returned to public browsers, so configure delivery before relying on those flows in production.
 
 ## Troubleshooting
 
 - Confirm the values are configured in the **Production** Pages environment, not only Preview.
+- Confirm **Allow EmailJS API for non-browser applications** is enabled in EmailJS Account → Security. A dashboard template test does not verify this server-side permission.
+- When EmailJS Private Key mode is enabled, confirm `EMAILJS_PRIVATE_KEY` exists as an encrypted Cloudflare Secret. Do not expose or paste its value.
 - Confirm `EMAILJS_TEMPLATE_ID_GENERAL` is set when using the two-template layout.
 - Confirm the generic template uses the eight parameter names above exactly.
 - Confirm the EmailJS service and public key are configured. Do not share either in chat.
+- If no record appears in EmailJS History after a footer Contact submission, inspect the Pages Function log for either `Email skipped — missing ...` or `Email send failed (...)`; neither message includes a credential value.
 - Thunderbird and some other mail clients can block the external Code Rx11 image for privacy. Use **Show Remote Content** / **Allow remote content from coderxsociety.pages.dev** in the recipient mailbox; email HTML cannot force remote images to load.
-- The Functions log `Email skipped — EmailJS not configured` when no usable EmailJS template ID, service ID, or public key is available.
