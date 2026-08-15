@@ -11,7 +11,7 @@ export const Footer = ({ copy, links, media }: { copy?: Record<string, string>; 
   const [isCodeOpen, setIsCodeOpen] = useState(false);
   const [subscribeEmail, setSubscribeEmail] = useState('');
   const [subscribeStatus, setSubscribeStatus] = useState<'idle' | 'submitting' | 'success'>('idle');
-  const logo = getMedia(media, 'footer.logo', { src: '/logo.png', alt: 'Code Rx Society' });
+  const logo = getMedia(media, 'footer.logo', { src: '/CODE%20RX11.png', alt: 'Code Rx Society' });
   const telegram = getLink(links, 'footer.telegram', 'https://t.me/+EdRpfR1GTGNjM2Q0');
   const email = getLink(links, 'footer.email', 'coderxsociety@gmail.com');
 

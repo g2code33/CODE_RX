@@ -130,7 +130,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
             <div className="auth-modal-content p-7 sm:p-8 md:p-10">
               <div className="auth-modal-header mb-5 text-center">
                 <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                  <img src="/logo.png" alt="Logo" className="w-10 h-10 object-contain" />
+                  <img src="/CODE%20RX11.png" alt="Logo" className="w-10 h-10 object-contain" />
                 </div>
                 <h2 className="text-3xl font-black text-slate-900 leading-none tracking-tighter">
                   {mode === 'join' ? 'Join the Society' : mode === 'forgot' ? 'Forgot Password?' : 'Welcome Back'}

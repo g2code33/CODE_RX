@@ -235,7 +235,7 @@ export const CommunityHub = ({
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           {onBack && <button onClick={onBack} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50" title={backLabel}><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">{backLabel}</span></button>}
           {onHome && <button onClick={onHome} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-black text-emerald-800 transition hover:bg-emerald-100" title="Home"><Home className="h-4 w-4" /><span className="hidden sm:inline">Home</span></button>}
-          <img src="/logo.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
+          <img src="/CODE%20RX11.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
           <div className="min-w-0"><p className="truncate text-sm font-black tracking-wide">CODE <span className="text-emerald-600">Rx</span> COMMUNITY</p><p className="truncate text-[9px] font-black uppercase tracking-[0.16em] text-emerald-700">Public forum + private society messaging</p></div>
         </div>
         <div className="flex shrink-0 items-center gap-2">

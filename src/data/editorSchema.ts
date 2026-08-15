@@ -275,11 +275,12 @@ export const DEFAULT_SITE_LINKS: Record<string, string> = {
 };
 
 export const DEFAULT_MEDIA: Record<string, MediaAsset> = {
-  'brand.logo': { src: '/logo.png', alt: 'Code Rx Society' },
-  'brand.logoSmall': { src: '/logo-small.png', alt: 'Code Rx Society' },
+  'brand.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
+  'brand.logoSmall': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
+  // Preserve logo.png for the Home page Hero exactly as requested.
   'hero.logo': { src: '/logo.png', alt: 'CODE Rx Society — Coding the Future of Pharmacy' },
-  'about.logo': { src: '/logo.png', alt: 'Code Rx Society emblem' },
-  'footer.logo': { src: '/logo.png', alt: 'Code Rx Society' },
+  'about.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society emblem' },
+  'footer.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
 };
 
 export const DEFAULT_SITE_DESIGN: SiteDesign = {
