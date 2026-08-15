@@ -23,6 +23,8 @@ export interface Env {
   EMAILJS_PUBLIC_KEY?: string;
   EMAILJS_SERVICE_ID?: string;
   EMAILJS_TEMPLATE_ID_JOIN?: string;
+  /** Optional shared template for EmailJS plans with limited template slots. */
+  EMAILJS_TEMPLATE_ID_GENERAL?: string;
   EMAILJS_TEMPLATE_ID_CONTACT?: string;
   EMAILJS_TEMPLATE_ID_APPROVAL?: string;
   EMAILJS_TEMPLATE_ID_RESET?: string;

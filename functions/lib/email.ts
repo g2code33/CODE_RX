@@ -5,6 +5,51 @@
 
 import type { Env } from '../env';
 
+/**
+ * A single reusable EmailJS template can serve the account and admin notices
+ * on EmailJS plans that limit the number of saved templates. Event-specific
+ * template IDs always take precedence, so paid/separate templates remain
+ * fully backwards compatible.
+ */
+export const notificationTemplateId = (env: Env, eventTemplateId?: string) =>
+  String(eventTemplateId || '').trim() || String(env.EMAILJS_TEMPLATE_ID_GENERAL || '').trim();
+
+export type GeneralEmailNotification = {
+  toEmail: string;
+  replyTo: string;
+  title: string;
+  greeting: string;
+  body: string;
+  actionLabel: string;
+  actionLink: string;
+  sentAt: string;
+};
+
+/**
+ * Parameters for the reusable "Code Rx Notification" EmailJS template.
+ * Keep the link passed in by the caller exactly intact: reset and activation
+ * URLs are single-use security credentials, never replacement fixed URLs.
+ */
+export const generalEmailNotification = ({
+  toEmail,
+  replyTo,
+  title,
+  greeting,
+  body,
+  actionLabel,
+  actionLink,
+  sentAt,
+}: GeneralEmailNotification) => ({
+  to_email: toEmail,
+  reply_to: replyTo,
+  email_title: title,
+  greeting,
+  notification_body: body,
+  action_label: actionLabel,
+  action_link: actionLink,
+  sent_at: sentAt,
+});
+
 export async function sendEmail(
   env: Env,
   templateId: string,

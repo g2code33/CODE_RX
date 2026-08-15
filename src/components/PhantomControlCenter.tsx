@@ -23,7 +23,7 @@ export const PhantomControlCenter = ({
   onHome?: () => void;
   onOpenCommunity?: () => void;
 }) => {
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>(() => window.location.hash.startsWith('#phantom-applications') ? 'applications' : 'overview');
   const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth >= 1024);
   const [overview, setOverview] = useState<any>(null);
   const [applications, setApplications] = useState<any[]>([]);
@@ -83,6 +83,11 @@ export const PhantomControlCenter = ({
   };
 
   useEffect(() => { void load(tab); }, [tab]);
+  useEffect(() => {
+    const openApplicationsFromLink = () => { if (window.location.hash.startsWith('#phantom-applications')) setTab('applications'); };
+    window.addEventListener('hashchange', openApplicationsFromLink);
+    return () => window.removeEventListener('hashchange', openApplicationsFromLink);
+  }, []);
 
   const refresh = async () => { await load(tab, true); setMessage('Saved and refreshed in the background.'); };
   const refreshTab = async (target: Tab, confirmation = 'Saved.') => { await load(target, true); setMessage(confirmation); };

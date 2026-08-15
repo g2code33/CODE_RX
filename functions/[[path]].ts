@@ -14,7 +14,7 @@ import {
 } from './lib/vault';
 import { cleanStr, cleanEmail, cleanOptionalStr } from './lib/validate';
 import { checkRateLimit } from './lib/rate-limit';
-import { sendEmail } from './lib/email';
+import { generalEmailNotification, notificationTemplateId, sendEmail } from './lib/email';
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
 import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLevel, type CalLevelDefinition, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
@@ -175,14 +175,36 @@ const issueMemberActivationInvite = async ({
   const activationId = Number(created.meta.last_row_id);
   const activationUrl = `${publicSiteUrl(env)}/#activate?token=${rawToken}&email=${encodeURIComponent(email)}`;
 
+  const invitationSentAt = new Date().toISOString();
   let emailSent = false;
   try {
-    emailSent = await sendEmail(env, env.EMAILJS_TEMPLATE_ID_ACTIVATION || '', {
+    emailSent = await sendEmail(env, notificationTemplateId(env, env.EMAILJS_TEMPLATE_ID_ACTIVATION), {
+      // Preserve the original event-specific parameters for organisations that
+      // use a dedicated activation template.
       to_email: email,
       member_name: name,
       member_code: memberCode,
       activation_link: activationUrl,
       role_name: roleName,
+      // These parameters power the optional single reusable EmailJS template.
+      ...generalEmailNotification({
+        toEmail: email,
+        replyTo: String(env.ADMIN_EMAIL || '').trim() || email,
+        title: 'Activate your Code Rx Society account',
+        greeting: `Hello ${name},`,
+        body: [
+          'Your Code Rx Society member invitation is ready.',
+          '',
+          `Member ID: ${memberCode}`,
+          `Responsibility: ${roleName}`,
+          '',
+          'Use the secure button below to create your password and activate your account.',
+          `This invitation expires: ${expiresAt}`,
+        ].join('\n'),
+        actionLabel: 'Activate account',
+        actionLink: activationUrl,
+        sentAt: invitationSentAt,
+      }),
     });
   } catch (error) {
     // Mail delivery is optional. The PHANTOM response still receives a
@@ -1328,11 +1350,30 @@ app.post('/api/auth/forgot-password', async (c) => {
 
     const base = publicSiteUrl(c.env);
     const resetLink = `${base}/#reset?token=${token}&email=${encodeURIComponent(email)}`;
+    const resetName = String(user.name || 'there');
+    const resetSentAt = new Date().toISOString();
 
-    const sent = await sendEmail(c.env, c.env.EMAILJS_TEMPLATE_ID_RESET || '', {
+    const sent = await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_RESET), {
+      // Preserve the original event-specific parameters for a dedicated reset
+      // template, while also supporting the shared free-plan template.
       to_email: email,
-      name: user.name || 'there',
+      name: resetName,
       reset_link: resetLink,
+      ...generalEmailNotification({
+        toEmail: email,
+        replyTo: String(c.env.ADMIN_EMAIL || '').trim() || email,
+        title: 'Reset your Code Rx Society password',
+        greeting: `Hello ${resetName},`,
+        body: [
+          'We received a request to reset the password for your Code Rx Society account.',
+          '',
+          'Use the secure button below to choose a new password. If you did not request a reset, you can safely ignore this email.',
+          `This reset link expires: ${expiresAt}`,
+        ].join('\n'),
+        actionLabel: 'Reset password',
+        actionLink: resetLink,
+        sentAt: resetSentAt,
+      }),
     });
 
     // Never return a reset token to a browser. If mail is not configured, keep
@@ -1474,13 +1515,15 @@ app.post('/api/applications', async (c) => {
       .bind(email, name, phone, new Date().toISOString().split('T')[0], 'application')
       .run();
 
-    // Notify the admin (non-blocking; skipped when EmailJS is not configured)
+    // Notify PHANTOM with a secure deep link. The route still requires a
+    // PHANTOM session; it never exposes application data to public visitors.
     await sendEmail(c.env, c.env.EMAILJS_TEMPLATE_ID_JOIN || '', {
       to_email: c.env.ADMIN_EMAIL,
       applicant_name: name,
       applicant_email: email,
       applicant_phone: phone || '—',
-      date: new Date().toISOString().split('T')[0],
+      submitted_at: new Date().toISOString(),
+      review_link: `${publicSiteUrl(c.env)}/#phantom-applications`,
     });
 
     return c.json({ success: true, message: 'Application submitted successfully' });
@@ -1530,11 +1573,31 @@ app.patch('/api/applications/:id', requireAuth, requirePhantom, async (c) => {
     ).bind(body.status, actor?.userId ?? null, note, id).run();
     await audit(c.env.DB, actor, `application.${body.status}`, 'application', id, { email: application.email, note });
     if (body.status === 'rejected') {
-      await sendEmail(c.env, c.env.EMAILJS_TEMPLATE_ID_APPROVAL || '', {
+      const reviewedAt = new Date().toISOString();
+      await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_APPROVAL), {
+        // Preserve the original event-specific parameters for a dedicated
+        // application-review template.
         to_email: application.email,
         member_name: application.name,
         status: 'rejected',
-        date: new Date().toISOString().slice(0, 10),
+        date: reviewedAt.slice(0, 10),
+        ...generalEmailNotification({
+          toEmail: application.email,
+          replyTo: String(c.env.ADMIN_EMAIL || '').trim() || application.email,
+          title: 'Update on your Code Rx Society application',
+          greeting: `Hello ${application.name},`,
+          body: [
+            'Your Code Rx Society JOIN application has been reviewed.',
+            '',
+            'Status: Not approved at this time',
+            `Reviewed: ${reviewedAt.slice(0, 10)}`,
+            '',
+            'Thank you for your interest in Code Rx Society.',
+          ].join('\n'),
+          actionLabel: 'Visit Code Rx Society',
+          actionLink: `${publicSiteUrl(c.env)}/#home`,
+          sentAt: reviewedAt,
+        }),
       });
     }
     return c.json({ success: true, message: body.status === 'pending' ? 'Application returned to pending review.' : 'Application rejected.' });
@@ -1614,19 +1677,44 @@ app.post('/api/contacts', async (c) => {
       return c.json({ success: false, error: 'Please fill in all fields with valid values' }, 400);
     }
 
+    const receivedAt = new Date().toISOString();
     await c.env.DB
       .prepare('INSERT INTO contacts (name, email, subject, message, date, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(name, email, subject, message, new Date().toISOString(), 'unread')
+      .bind(name, email, subject, message, receivedAt, 'unread')
       .run();
 
-    // Notify the admin (non-blocking; skipped when EmailJS is not configured)
-    await sendEmail(c.env, c.env.EMAILJS_TEMPLATE_ID_CONTACT || '', {
+    // Notify the admin (non-blocking; skipped when EmailJS is not configured).
+    // The generic fields allow a free EmailJS account to use its one reusable
+    // notification template for this event without affecting dedicated ones.
+    const emailSubject = subject.replace(/[\r\n]+/g, ' ').trim();
+    await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_CONTACT), {
+      // Original template-specific fields remain available.
       to_email: c.env.ADMIN_EMAIL,
       sender_name: name,
       sender_email: email,
       subject,
       message,
-      date: new Date().toISOString(),
+      date: receivedAt,
+      ...generalEmailNotification({
+        toEmail: c.env.ADMIN_EMAIL,
+        replyTo: email,
+        title: `New Code Rx contact message — ${emailSubject}`,
+        greeting: 'Hello PHANTOM,',
+        body: [
+          'A visitor has sent a message through the Code Rx Society public contact form.',
+          '',
+          `From: ${name}`,
+          `Email: ${email}`,
+          `Subject: ${emailSubject}`,
+          `Received: ${receivedAt}`,
+          '',
+          'Message:',
+          message,
+        ].join('\n'),
+        actionLabel: 'Reply to sender',
+        actionLink: `mailto:${email}?subject=${encodeURIComponent(`Re: ${emailSubject}`)}`,
+        sentAt: receivedAt,
+      }),
     });
 
     return c.json({ success: true, message: 'Message sent successfully. We will get back to you soon.' });
