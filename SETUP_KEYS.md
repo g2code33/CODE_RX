@@ -22,26 +22,34 @@ database. These are the only keys/secrets you need:
 
 ## 2. EmailJS (optional — enables email notifications)
 
-1. Create a free account at https://www.emailjs.com with coderxsociety@gmail.com
-2. **Email Services → Add New Service** → connect Gmail → copy the **Service ID**
-3. **Email Templates** → create 5 templates:
+1. Create or sign in to EmailJS and add the Code Rx Society email service.
+2. Copy the **Service ID** and **Public Key** privately; do not put either in frontend code, Git, screenshots, or chat.
+3. Choose a template layout:
 
-| Template | Purpose | Variables |
+| Layout | Templates | Pages variables |
 |---|---|---|
-| `template_join` | New application → PHANTOM | `to_email`, `applicant_name`, `applicant_email`, `applicant_phone`, `submitted_at`, `review_link` |
-| `template_contact` | Contact form → admin | `to_email`, `sender_name`, `sender_email`, `subject`, `message`, `date` |
-| `template_approval` | Approval/rejection → applicant | `to_email`, `member_name`, `status`, `date` |
-| `template_reset` | Password reset → user | `to_email`, `reset_link`, `name` |
-| `template_activation` | New member activation → member | `to_email`, `member_name`, `member_code`, `activation_link`, `role_name` |
+| **Limited/free plan (recommended)** | `template_join` plus one reusable `template_general` | `EMAILJS_TEMPLATE_ID_JOIN`, `EMAILJS_TEMPLATE_ID_GENERAL` |
+| Separate event templates | One template per event | `EMAILJS_TEMPLATE_ID_JOIN`, `EMAILJS_TEMPLATE_ID_CONTACT`, `EMAILJS_TEMPLATE_ID_APPROVAL`, `EMAILJS_TEMPLATE_ID_RESET`, `EMAILJS_TEMPLATE_ID_ACTIVATION` |
 
-4. Copy the **Public Key** (Account → General) and the template IDs.
-5. Set these variables on the Pages project (and only in an ignored local environment file for local development):
+The reusable general template receives these parameters:
+
+```text
+to_email, reply_to, email_title, greeting, notification_body,
+action_label, action_link, sent_at
+```
+
+It is used automatically for Contact, application review/rejection, password reset, and member activation when the respective event-specific template ID is absent. Keep the secure `{{action_link}}` supplied by the server; never replace reset or activation links with a fixed URL.
+
+4. Set the required Pages variables in **Workers & Pages → coderxsociety → Settings → Variables and Secrets**. The limited/free layout needs:
+
+   ```text
+   EMAILJS_PUBLIC_KEY
+   EMAILJS_SERVICE_ID
+   EMAILJS_TEMPLATE_ID_JOIN
+   EMAILJS_TEMPLATE_ID_GENERAL
    ```
-   EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID,
-   EMAILJS_TEMPLATE_ID_JOIN, EMAILJS_TEMPLATE_ID_CONTACT,
-   EMAILJS_TEMPLATE_ID_APPROVAL, EMAILJS_TEMPLATE_ID_RESET,
-   EMAILJS_TEMPLATE_ID_ACTIVATION
-   ```
+
+See `EMAILJS_SETUP.md` for the exact template content, optional event-specific overrides, and safe test values.
 
 ---
 
@@ -62,7 +70,6 @@ VITE_ENABLE_AUTH=true
 
 - **Login fails?** Confirm the `users` table was seeded (first API request) and
   that `ADMIN_EMAIL`/`ADMIN_PASSWORD` match what you used at seed time.
-- **Emails not sending?** Verify all 5 EmailJS template IDs and the service ID;
-  the API logs "Email skipped — EmailJS not configured" when keys are missing.
+- **Emails not sending?** Verify the EmailJS service ID, public key, and either the shared `EMAILJS_TEMPLATE_ID_GENERAL` or the relevant event-specific template ID. The API logs "Email skipped — EmailJS not configured" when no usable configuration is available.
 - **Admin routes return 401?** You're not signed in as admin — use the admin
   email + password, or re-login after a password change.

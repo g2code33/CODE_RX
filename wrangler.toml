@@ -28,12 +28,15 @@ PHANTOM_EMAIL = "coderxsociety@gmail.com"
 TELEGRAM_LINK = "https://t.me/+EdRpfR1GTGNjM2Q0"
 # SITE_URL = "https://coderxsociety.pages.dev"
 
-# EmailJS (optional) — enables email notifications for new applications,
-# contact messages, and application approvals. Leave empty to disable.
+# EmailJS (optional) — enables email notifications. Leave empty to disable.
+# EMAILJS_TEMPLATE_ID_GENERAL is an optional reusable template for contact,
+# application review, password reset, and activation notifications on plans
+# with limited template slots. Event-specific IDs override it when configured.
 # Create templates and credentials at https://www.emailjs.com
 EMAILJS_PUBLIC_KEY = ""
 EMAILJS_SERVICE_ID = ""
 EMAILJS_TEMPLATE_ID_JOIN = ""
+EMAILJS_TEMPLATE_ID_GENERAL = ""
 EMAILJS_TEMPLATE_ID_CONTACT = ""
 EMAILJS_TEMPLATE_ID_APPROVAL = ""
 EMAILJS_TEMPLATE_ID_RESET = ""
