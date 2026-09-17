@@ -19,6 +19,7 @@ import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parse
 import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLevel, type CalLevelDefinition, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
+import { registerClientRoutes } from './client-routes';
 
 type AppEnv = { Bindings: Env; Variables: { user: JwtPayload; actor: Awaited<ReturnType<typeof getActor>> } };
 
@@ -1149,6 +1150,11 @@ app.use('/api/*', async (c, next) => {
   }
   await next();
 });
+
+// Client Project Portal (additive): public client API + PHANTOM management API.
+// Registered once, before the remaining route groups, exactly like any other
+// route block. No existing handler, guard, or helper is modified.
+registerClientRoutes(app);
 
 // ---------- Health ----------
 app.get('/api/health', (c) => {
@@ -5235,6 +5241,9 @@ app.put('/api/phantom/members/:id/permissions', requireAuth, requirePhantom, asy
 const WEBSITE_PERMISSION_KEYS = [
   'pages.edit', 'announcements.manage', 'events.manage', 'projects.manage',
   'media.upload', 'resources.manage', 'content.manage',
+  // Client Project Portal delegation. PHANTOM remains implicitly allowed and
+  // no member receives these until PHANTOM grants them explicitly.
+  'clients.manage', 'clients.publish', 'clients.links', 'clients.preview',
 ] as const;
 
 app.get('/api/phantom/website-admins', requireAuth, requirePhantom, async (c) => {

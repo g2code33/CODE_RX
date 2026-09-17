@@ -836,6 +836,201 @@ CREATE INDEX IF NOT EXISTS idx_vault_tasks_project ON vault_tasks(project_id, st
 CREATE INDEX IF NOT EXISTS idx_meetings_project ON meetings(project_id, held_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_subject ON audit_logs(subject_type, subject_id);
+
+-- =========================================================================
+-- CLIENT PROJECT PORTAL (additive foundation)
+--
+-- Clients are deliberately NOT members: they never appear in users,
+-- members, or member_profiles, so they cannot leak into member listings,
+-- leaderboards, notification audiences, community membership, or Vault
+-- permission checks. No existing table, column, index, or constraint is
+-- modified by any statement below.
+--
+-- Credentials follow the platform's existing Vault-share discipline: only a
+-- SHA-256 verifier is persisted, and a raw passkey is returned to an
+-- authorized operator exactly once at generation time. Deliberately no
+-- ciphertext column exists here (unlike vault_shares.token_ciphertext), so a
+-- client passkey can never be recovered from the database.
+-- =========================================================================
+
+CREATE TABLE IF NOT EXISTS clients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  contact_name TEXT,
+  contact_email TEXT,
+  contact_phone TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived','revoked')),
+  notes TEXT NOT NULL DEFAULT '',
+  suspended_at DATETIME,
+  archived_at DATETIME,
+  revoked_at DATETIME,
+  created_by_user_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS client_projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  reference_code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','archived')),
+  -- Mirrors vault_projects: a soft archive flag alongside the workflow status,
+  -- so archiving never destroys the row or its documents.
+  is_archived INTEGER NOT NULL DEFAULT 0,
+  archived_at DATETIME,
+  created_by_user_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_id) REFERENCES clients(id)
+);
+
+-- A client document is a PUBLICATION record, not a copy of the internal Vault
+-- row. When it is linked to the Vault it pins the exact internal version, so a
+-- later internal edit cannot silently change what a client sees.
+CREATE TABLE IF NOT EXISTS client_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER NOT NULL,
+  category TEXT NOT NULL DEFAULT 'document' CHECK (category IN ('document','letter','agreement','report','deliverable','update')),
+  reference_code TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '1.0',
+  lifecycle_status TEXT NOT NULL DEFAULT 'draft' CHECK (lifecycle_status IN ('draft','in_review','approved','published','unpublished','archived')),
+  client_visible INTEGER NOT NULL DEFAULT 0,
+  allow_view INTEGER NOT NULL DEFAULT 1,
+  allow_download INTEGER NOT NULL DEFAULT 0,
+  is_archived INTEGER NOT NULL DEFAULT 0,
+  vault_document_id INTEGER,
+  vault_version_number INTEGER,
+  content_snapshot TEXT,
+  content_snapshot_format TEXT NOT NULL DEFAULT 'blocks',
+  -- R2 key of the watermarked client-facing artifact produced by the stamping
+  -- pipeline. An internal vault/... key must never be stored or served here.
+  storage_reference TEXT,
+  published_at DATETIME,
+  published_by_user_id INTEGER,
+  unpublished_at DATETIME,
+  created_by_user_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id),
+  FOREIGN KEY(vault_document_id) REFERENCES vault_documents(id)
+);
+
+CREATE TABLE IF NOT EXISTS client_access_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER,
+  key_hash TEXT NOT NULL UNIQUE,
+  -- Last four characters only, for operator recognition in the UI. Never the
+  -- full credential and never enough to reconstruct it.
+  key_hint TEXT,
+  label TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  expires_at DATETIME,
+  last_used_at DATETIME,
+  revoked_at DATETIME,
+  revoked_by_user_id INTEGER,
+  created_by_user_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id)
+);
+
+-- ONE session table for both credential types. A session is always bound to a
+-- client AND a project; the credential that created it is either an access key
+-- or a temporary link, never both.
+CREATE TABLE IF NOT EXISTS client_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER NOT NULL,
+  access_key_id INTEGER,
+  client_link_id INTEGER,
+  session_hash TEXT NOT NULL UNIQUE,
+  expires_at DATETIME NOT NULL,
+  revoked_at DATETIME,
+  last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  ip_hash TEXT,
+  user_agent_hash TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  CHECK (access_key_id IS NOT NULL OR client_link_id IS NOT NULL),
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id),
+  FOREIGN KEY(access_key_id) REFERENCES client_access_keys(id),
+  FOREIGN KEY(client_link_id) REFERENCES client_links(id)
+);
+
+-- Temporary links. MODE 'passkey' still requires a client session. MODE
+-- 'direct' mints a scoped, short-lived client_sessions row (client_link_id) and re-validates
+-- the link on every request. Direct tokens are high-entropy and stored hashed.
+CREATE TABLE IF NOT EXISTS client_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER NOT NULL,
+  client_document_id INTEGER,
+  destination_type TEXT NOT NULL CHECK (destination_type IN ('project','overview','documents','letters','agreements','reports','deliverables','updates','document')),
+  destination_id TEXT,
+  mode TEXT NOT NULL DEFAULT 'passkey' CHECK (mode IN ('passkey','direct')),
+  token_hash TEXT NOT NULL UNIQUE,
+  allow_view INTEGER NOT NULL DEFAULT 1,
+  allow_download INTEGER NOT NULL DEFAULT 0,
+  max_uses INTEGER,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked','expired')),
+  expires_at DATETIME,
+  last_used_at DATETIME,
+  revoked_at DATETIME,
+  created_by_user_id INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id),
+  FOREIGN KEY(client_document_id) REFERENCES client_documents(id)
+);
+
+
+-- Durable brute-force throttle for the passkey endpoint. The existing
+-- in-memory checkRateLimit() is per-isolate, so this gives the same policy a
+-- surviving window in D1 without replacing that helper.
+CREATE TABLE IF NOT EXISTS client_auth_throttle (
+  scope_key TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  window_started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  locked_until DATETIME
+);
+
+-- Per-kind, per-year readable reference sequences (CRX-PROJ-2026-001, ...).
+-- Same atomic UPDATE ... RETURNING pattern as member_sequences.
+CREATE TABLE IF NOT EXISTS client_reference_sequences (
+  kind TEXT NOT NULL,
+  year INTEGER NOT NULL,
+  next_value INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(kind, year)
+);
+
+CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status);
+CREATE INDEX IF NOT EXISTS idx_client_projects_client ON client_projects(client_id, status, is_archived);
+CREATE INDEX IF NOT EXISTS idx_client_documents_project ON client_documents(client_project_id, is_archived, lifecycle_status, client_visible);
+CREATE INDEX IF NOT EXISTS idx_client_documents_client ON client_documents(client_id, is_archived, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_client_documents_vault ON client_documents(vault_document_id);
+CREATE INDEX IF NOT EXISTS idx_client_access_keys_client ON client_access_keys(client_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_client_sessions_client ON client_sessions(client_id, revoked_at, expires_at);
+CREATE INDEX IF NOT EXISTS idx_client_sessions_key ON client_sessions(access_key_id, revoked_at);
+CREATE INDEX IF NOT EXISTS idx_client_links_scope ON client_links(client_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_client_links_project ON client_links(client_project_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_client_sessions_link ON client_sessions(client_link_id, revoked_at, expires_at);
+-- Client activity is written to the existing audit_logs table, so this index
+-- supports both the PHANTOM audit view and the client activity view.
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action, created_at DESC);
 `;
 
 // These are intentionally separate from CREATE TABLE so live D1 databases
@@ -888,7 +1083,10 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
 ] as const;
 
-const VAULT_SCHEMA_VERSION = '2026-08-15-code-rx11-brand-21';
+// Bumped so the additive client-portal tables, indexes and feature flags above
+// are applied once on an existing live database. The migration path only ever
+// adds objects; it never alters or drops an existing table, column, or row.
+const VAULT_SCHEMA_VERSION = '2026-09-17-code-rx12-client-portal-2';
 
 
 // Role codes stay stable for member history and permissions. Their visible
@@ -1072,6 +1270,13 @@ const seedFeatureSettings = async (db: D1Database) => {
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_sharing_enabled', '0', CURRENT_TIMESTAMP)"),
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_downloads_enabled', '0', CURRENT_TIMESTAMP)"),
+    // The Client Project Portal is disabled until PHANTOM deliberately enables
+    // it, and client downloads are blocked even then until separately enabled.
+    // These are its own switches: pausing Vault sharing must never pause (or
+    // fail to pause) the client portal.
+    db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('client_portal_enabled', '0', CURRENT_TIMESTAMP)"),
+    db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('client_downloads_enabled', '0', CURRENT_TIMESTAMP)"),
+    db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('client_all_links_enabled', '1', CURRENT_TIMESTAMP)"),
   ]);
 };
 
@@ -1311,7 +1516,16 @@ export async function ensureSchema(env: Env): Promise<void> {
 
   const initialize = (async () => {
     const db = env.DB;
-    const statements = SCHEMA.split(';').map((statement) => statement.trim()).filter(Boolean);
+    // Whole-line SQL comments are removed before splitting. Without this, a
+    // semicolon inside a comment would split one statement into a comment
+    // fragment plus an orphaned remainder and break every cold start.
+    const statements = SCHEMA
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
     // One D1 batch avoids dozens of sequential network round trips on a cold
     // login. Both normal and UNIQUE indexes must wait until ALTER migrations
     // add any referenced columns to an older live D1 database.

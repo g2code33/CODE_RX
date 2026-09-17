@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:client-portal": "node --experimental-sqlite scripts/client-portal-tests.mjs"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",
