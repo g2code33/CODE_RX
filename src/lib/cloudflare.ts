@@ -3,7 +3,7 @@
 // same domain (relative URLs). For local dev, set VITE_API_URL in .env to
 // your local server (e.g. http://localhost:8788).
 
-const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+export const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 const TOKEN_KEY = 'codeRx_token';
 const USER_KEY = 'codeRx_user';
 
@@ -478,4 +478,192 @@ export const healthCheck = async (): Promise<boolean> => {
   } catch {
     return false;
   }
+};
+
+// ===========================================================================
+// CLIENT PROJECT PORTAL (Phase 3)
+// ---------------------------------------------------------------------------
+// A client session is NOT the member session: a separate header, a separate
+// lifetime, and a separate browser store. The member token is deliberately
+// never attached to these calls, and the raw access key is never stored —
+// it lives in component state for the moment it takes to exchange it for a
+// session, and is then dropped.
+// ===========================================================================
+
+const CLIENT_SESSION_KEY = 'codeRx_clientSession';
+export const CLIENT_SESSION_HEADER = 'X-Code-Rx-Client-Session';
+
+export interface ClientPortalSession {
+  token: string;
+  expiresAt: string;
+}
+
+/**
+ * The safest store the app supports for this credential: sessionStorage is
+ * scoped to one tab and cleared when that tab closes, so a client session
+ * cannot outlive the browsing session or be picked up by another tab. It is
+ * never written to localStorage.
+ */
+export const clientPortalSession = {
+  read: (): ClientPortalSession | null => {
+    try {
+      const raw = sessionStorage.getItem(CLIENT_SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as ClientPortalSession;
+      if (!parsed?.token) return null;
+      if (parsed.expiresAt && new Date(parsed.expiresAt).getTime() <= Date.now()) {
+        sessionStorage.removeItem(CLIENT_SESSION_KEY);
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  },
+  write: (session: ClientPortalSession) => {
+    try {
+      sessionStorage.setItem(CLIENT_SESSION_KEY, JSON.stringify(session));
+    } catch {
+      /* Private mode or a full quota: the session still works until reload. */
+    }
+  },
+  clear: () => {
+    try {
+      sessionStorage.removeItem(CLIENT_SESSION_KEY);
+    } catch {
+      /* nothing to clear */
+    }
+  },
+};
+
+export class ClientPortalError extends Error {
+  status: number;
+  code: string | null;
+  constructor(message: string, status: number, code: string | null = null) {
+    super(message);
+    this.name = 'ClientPortalError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+interface ClientCallOptions {
+  method?: 'GET' | 'POST';
+  body?: unknown;
+  token?: string | null;
+  signal?: AbortSignal;
+}
+
+/**
+ * One request helper for every client-portal route. It sends the client session
+ * header only, surfaces the server's non-technical `code` for the access screen,
+ * and never forwards anything else about the failure to the UI.
+ */
+async function clientCall<T = any>(endpoint: string, options: ClientCallOptions = {}): Promise<T> {
+  const headers = new Headers({ Accept: 'application/json' });
+  const token = options.token ?? clientPortalSession.read()?.token ?? null;
+  if (token) headers.set(CLIENT_SESSION_HEADER, token);
+  if (options.body !== undefined) headers.set('Content-Type', 'application/json');
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${endpoint}`, {
+      method: options.method || 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: options.signal,
+    });
+  } catch {
+    throw new ClientPortalError('We could not reach Code Rx Society. Check your connection and try again.', 0, 'offline');
+  }
+
+  let payload: any = null;
+  try {
+    payload = await response.json();
+  } catch {
+    /* a non-JSON response is treated as an unavailable service below */
+  }
+
+  if (!response.ok || payload?.success === false) {
+    const code = typeof payload?.code === 'string' ? payload.code : null;
+    throw new ClientPortalError(payload?.error || '', response.status, code);
+  }
+  if (payload === null) {
+    throw new ClientPortalError('', response.status, 'server_error');
+  }
+  return payload as T;
+}
+
+export const clientPortal = {
+  /** Exchanges a raw access key for a short-lived client session. */
+  exchangeAccessKey: (accessKey: string) =>
+    clientCall<{ data: { session: ClientPortalSession; client: any; project: any; permissions: any } }>(
+      '/api/client/auth/login',
+      { method: 'POST', body: { passkey: accessKey } },
+    ),
+
+  /** Exchanges a temporary link token for a client session. */
+  redeemLink: (linkToken: string) =>
+    clientCall<{ data: { session: ClientPortalSession; client: any; project: any; permissions: any } }>(
+      `/api/client/link/${encodeURIComponent(linkToken)}`,
+      { method: 'POST' },
+    ),
+
+  me: () => clientCall<{ data: any }>('/api/client/me'),
+
+  logout: () => clientCall<{ success: boolean }>('/api/client/auth/logout', { method: 'POST' }),
+
+  project: (projectId: string) =>
+    clientCall<{ data: { project: any; sections: any[]; recent: any[] } }>(
+      `/api/client/project/${encodeURIComponent(projectId)}`,
+    ),
+
+  section: (projectId: string, section: string) =>
+    clientCall<{ data: { project: any; section: string; documents: any[] } }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/sections/${encodeURIComponent(section)}`,
+    ),
+
+  document: (projectId: string, documentId: string) =>
+    clientCall<{ data: { project: any; document: any } }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}`,
+    ),
+
+  /**
+   * Downloads the client-safe artifact. Only a published, client-visible
+   * document that explicitly allows downloads and has a stamped artifact is
+   * ever served; everything else is refused by the server.
+   */
+  download: async (projectId: string, documentId: string, fileName: string) => {
+    const token = clientPortalSession.read()?.token ?? null;
+    const response = await fetch(
+      `${API_BASE}/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/download`,
+      {
+        headers: token ? { [CLIENT_SESSION_HEADER]: token } : {},
+        credentials: 'omit',
+        cache: 'no-store',
+      },
+    );
+    if (!response.ok) {
+      let code: string | null = null;
+      try {
+        code = (await response.json())?.code ?? null;
+      } catch {
+        /* not JSON */
+      }
+      throw new ClientPortalError('', response.status, code);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = match?.[1] || fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
 };

@@ -6,6 +6,7 @@ import { Dashboard } from './components/Dashboard';
 import { CodenameBallot } from './components/CodenameBallot';
 import { Vault } from './components/Vault';
 import { VaultSharedDocument } from './components/VaultSharedDocument';
+import { ClientPortal } from './components/ClientPortal';
 import { ResetPassword } from './components/ResetPassword';
 import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
@@ -40,6 +41,9 @@ function App() {
   const [isResetView, setIsResetView] = useState(() => window.location.hash.startsWith('#reset'));
   const [isActivationView, setIsActivationView] = useState(() => window.location.hash.startsWith('#activate'));
   const [isSharedVaultView, setIsSharedVaultView] = useState(() => window.location.hash.startsWith('#vault-share'));
+  // The client portal is its own workspace, like the shared Vault document: it
+  // is reachable by hash and never renders inside the member shell.
+  const [isClientPortalView, setIsClientPortalView] = useState(() => window.location.hash.startsWith('#client-portal'));
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
   useEffect(() => {
@@ -138,6 +142,7 @@ function App() {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(false);
         setIsSharedVaultView(false);
+        setIsClientPortalView(false);
         setIsActivationView(false);
         setIsResetView(false);
         setIsMemberVault(false);
@@ -157,6 +162,16 @@ function App() {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(true);
         setIsSharedVaultView(false);
+        setIsClientPortalView(false);
+        setIsActivationView(false);
+        setIsResetView(false);
+        return;
+      }
+      if (window.location.hash.startsWith('#client-portal')) {
+        setIsCommunityWorkspace(false);
+        setIsClientPortalView(true);
+        setIsSharedVaultView(false);
+        setIsCodenameBallotView(false);
         setIsActivationView(false);
         setIsResetView(false);
         return;
@@ -164,6 +179,7 @@ function App() {
       if (window.location.hash.startsWith('#vault-share')) {
         setIsCommunityWorkspace(false);
         setIsSharedVaultView(true);
+        setIsClientPortalView(false);
         setIsCodenameBallotView(false);
         setIsActivationView(false);
         setIsResetView(false);
@@ -173,6 +189,7 @@ function App() {
         setIsCommunityWorkspace(false);
         setIsMemberVault(true);
         setIsSharedVaultView(false);
+        setIsClientPortalView(false);
         setIsCodenameBallotView(false);
         setIsActivationView(false);
         setIsResetView(false);
@@ -183,6 +200,7 @@ function App() {
         setIsActivationView(true);
         setIsResetView(false);
         setIsSharedVaultView(false);
+        setIsClientPortalView(false);
         setIsCodenameBallotView(false);
         return;
       }
@@ -191,12 +209,14 @@ function App() {
         setIsResetView(true);
         setIsActivationView(false);
         setIsSharedVaultView(false);
+        setIsClientPortalView(false);
         setIsCodenameBallotView(false);
         return;
       }
       setIsResetView(false);
       setIsActivationView(false);
       setIsSharedVaultView(false);
+      setIsClientPortalView(false);
       setIsCodenameBallotView(false);
       setIsMemberVault(false);
       const id = idFromHash();
@@ -384,6 +404,12 @@ function App() {
       setTimeout(() => document.getElementById(tabId)?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 80);
     }
   };
+
+  // The client portal is a standalone workspace: no public navbar, no member
+  // session, no dashboard chrome. A client is not a member of Code Rx Society.
+  if (isClientPortalView) {
+    return <ClientPortal />;
+  }
 
   if (isSharedVaultView) {
     return <VaultSharedDocument onClose={() => { window.location.hash = ''; setIsSharedVaultView(false); window.scrollTo({ top: 0, behavior: 'instant' }); }} />;

@@ -164,6 +164,69 @@ export const clientForbidden = () => clientJson({ success: false, error: 'Not fo
 
 export const clientError = (message: string, status = 400) => clientJson({ success: false, error: message }, status);
 
+/**
+ * Access-screen failure states.
+ *
+ * Phase 2 answered every credential failure with one identical message, which is
+ * the strongest anti-enumeration position. Phase 3 needs actionable states on the
+ * access screen, so a distinction is drawn ONLY after the presented passkey has
+ * matched a stored row (or the presented link token has matched a stored hash).
+ * A key that does not exist therefore still produces exactly one response, for
+ * every input, so nothing about the client base can be enumerated. A person who
+ * already holds a real key learns only the state of their own access — which
+ * they could establish anyway, since they hold the credential.
+ *
+ * Messages are written for a client, never a developer: no status codes, table
+ * names, ids or internal detail reach the browser.
+ */
+export const CLIENT_FAILURE_STATES = {
+  invalid_key: 'This project access key was not recognised. Check the key and try again.',
+  key_expired: 'This project access key has expired. Please contact Code Rx Society for a new one.',
+  key_revoked: 'This project access key has been revoked. Please contact Code Rx Society if you still need access.',
+  client_suspended: 'Access for this client is currently suspended. Please contact Code Rx Society.',
+  client_archived: 'This client account has been archived, so access is closed.',
+  client_revoked: 'Access for this client has been withdrawn. Please contact Code Rx Society.',
+  project_unavailable: 'The project linked to this access key is not available at the moment.',
+  no_project: 'This access key is not linked to a project yet. Please contact Code Rx Society.',
+  link_invalid: 'This access link was not recognised. Please ask Code Rx Society for a new one.',
+  link_expired: 'This access link has expired. Please ask Code Rx Society for a new one.',
+  link_revoked: 'This access link has been revoked. Please ask Code Rx Society for a new one.',
+  link_exhausted: 'This access link has already been used the maximum number of times.',
+  rate_limited: 'Too many attempts. Please wait a moment and try again.',
+  unavailable: 'Client access is not available right now. Please try again shortly.',
+} as const;
+
+export type ClientFailureState = keyof typeof CLIENT_FAILURE_STATES;
+
+/** The state a browser sees for a given server-side (audit) reason. */
+export const CLIENT_FAILURE_STATE_FOR_REASON: Record<string, ClientFailureState> = {
+  unknown_key: 'invalid_key',
+  malformed_passkey: 'invalid_key',
+  key_revoked: 'key_revoked',
+  key_expired: 'key_expired',
+  client_suspended: 'client_suspended',
+  client_archived: 'client_archived',
+  client_revoked: 'client_revoked',
+  no_usable_project: 'no_project',
+  link_invalid: 'link_invalid',
+  link_expired: 'link_expired',
+  link_revoked: 'link_revoked',
+  link_exhausted: 'link_exhausted',
+};
+
+export const clientFailureStateFor = (reason: string): ClientFailureState => {
+  const mapped = CLIENT_FAILURE_STATE_FOR_REASON[reason];
+  if (mapped) return mapped;
+  // Every project-side refusal is reported as one client-facing state.
+  if (reason.startsWith('project_')) return 'project_unavailable';
+  return 'invalid_key';
+};
+
+export const clientFailure = (state: string) => {
+  const key = (state in CLIENT_FAILURE_STATES ? state : 'unavailable') as ClientFailureState;
+  return { error: CLIENT_FAILURE_STATES[key], code: key };
+};
+
 // ---------------------------------------------------------------------------
 // Session principal
 // ---------------------------------------------------------------------------

@@ -983,6 +983,163 @@ const main = async () => {
   const memberTokens = db.query('SELECT COUNT(*) AS c FROM member_profiles')[0].c;
   check('no client was ever added to member_profiles', Number(memberTokens) === 2, `${memberTokens} profiles (PHANTOM + harness member)`);
 
+  // =========================================================================
+  group('12. Access-screen states (Phase 3 contract)');
+  // =========================================================================
+
+  // --- unknown keys: one response for every input ---------------------------
+  const unknownKey = await clientLogin('CRX-AAAA-BBBB-CCCC-DDDD');
+  const unknownKeyB = await clientLogin('CRX-ZZZZ-9999-YYYY-8888');
+  const malformedKey = await request('POST', '/api/client/auth/login', { body: { passkey: 'not-a-real-key' } });
+  check('an unknown key reports the invalid_key state',
+    unknownKey.status === 401 && unknownKey.json.code === 'invalid_key', JSON.stringify(unknownKey.json));
+  check('two different unknown keys are byte-identical (nothing can be enumerated)',
+    JSON.stringify(unknownKey.json) === JSON.stringify(unknownKeyB.json));
+  check('a malformed key is indistinguishable from an unknown one',
+    JSON.stringify(malformedKey.json) === JSON.stringify(unknownKey.json));
+  check('the failure message never mentions a table, id or status code',
+    !/sql|d1|table|client_|_[0-9a-f]{12}|\b[45]\d\d\b/i.test(JSON.stringify(unknownKey.json)));
+
+  // --- a matched key is told exactly what is wrong with its own access ------
+  const clientD = await createClient(phantomToken, 'State Coverage Ltd');
+  const projectD = await createProject(phantomToken, clientD.id, 'State Coverage Project');
+  const keyD = await createKey(phantomToken, clientD.id, projectD.id);
+
+  const phaseThreeExpiredKey = await createKey(phantomToken, clientD.id, projectD.id, { label: 'Expires now' });
+  db.execute('UPDATE client_access_keys SET expires_at = ? WHERE public_id = ?', new Date(Date.now() - 60000).toISOString(), phaseThreeExpiredKey.id);
+  const phaseThreeExpiredLogin = await clientLogin(phaseThreeExpiredKey.passkey);
+  check('an expired key reports the key_expired state',
+    phaseThreeExpiredLogin.status === 401 && phaseThreeExpiredLogin.json.code === 'key_expired', JSON.stringify(phaseThreeExpiredLogin.json));
+
+  const phaseThreeRevokedKey = await createKey(phantomToken, clientD.id, projectD.id, { label: 'Revoked now' });
+  await request('POST', `/api/phantom/client-keys/${phaseThreeRevokedKey.id}/revoke`, { token: phantomToken });
+  const phaseThreeRevokedLogin = await clientLogin(phaseThreeRevokedKey.passkey);
+  check('a revoked key reports the key_revoked state',
+    phaseThreeRevokedLogin.status === 401 && phaseThreeRevokedLogin.json.code === 'key_revoked', JSON.stringify(phaseThreeRevokedLogin.json));
+
+  // --- suspended client (holding a real key) --------------------------------
+  const clientE = await createClient(phantomToken, 'Suspension States Ltd');
+  const projectE = await createProject(phantomToken, clientE.id, 'Suspension Project');
+  const keyE = await createKey(phantomToken, clientE.id, projectE.id);
+  db.execute("UPDATE clients SET status = 'suspended' WHERE public_id = ?", clientE.id);
+  const suspendedState = await clientLogin(keyE.passkey);
+  check('a suspended client reports the client_suspended state',
+    suspendedState.status === 401 && suspendedState.json.code === 'client_suspended', JSON.stringify(suspendedState.json));
+
+  db.execute("UPDATE clients SET status = 'archived' WHERE public_id = ?", clientE.id);
+  const archivedState = await clientLogin(keyE.passkey);
+  check('an archived client reports the client_archived state',
+    archivedState.status === 401 && archivedState.json.code === 'client_archived', JSON.stringify(archivedState.json));
+
+  // --- archived project (client and key both still healthy) -----------------
+  const clientF = await createClient(phantomToken, 'Project States Ltd');
+  const projectF = await createProject(phantomToken, clientF.id, 'Archived Project');
+  const keyF = await createKey(phantomToken, clientF.id, projectF.id);
+  const archiveProject = await request('PATCH', `/api/phantom/client-projects/${projectF.id}`, {
+    token: phantomToken, body: { status: 'archived', archive: true },
+  });
+  check('PHANTOM can archive a project', archiveProject.status === 200, JSON.stringify(archiveProject.json));
+  const archivedProjectLogin = await clientLogin(keyF.passkey);
+  check('an archived project reports the project_unavailable state',
+    archivedProjectLogin.status === 401 && archivedProjectLogin.json.code === 'project_unavailable', JSON.stringify(archivedProjectLogin.json));
+
+  // --- rate limiting carries its own state ----------------------------------
+  const throttleIp = '203.0.113.44';
+  let throttleState = null;
+  for (let index = 0; index < 14 && !throttleState; index += 1) {
+    const attempt = await request('POST', '/api/client/auth/login', { body: { passkey: uniquePasskey() }, ip: throttleIp });
+    if (attempt.status === 429) throttleState = attempt.json.code;
+  }
+  check('a throttled attempt reports the rate_limited state', throttleState === 'rate_limited', String(throttleState));
+
+  // --- session expiry and logout, as the screen sees them -------------------
+  const clientG = await createClient(phantomToken, 'Session States Ltd');
+  const projectG = await createProject(phantomToken, clientG.id, 'Session Project');
+  const keyG = await createKey(phantomToken, clientG.id, projectG.id);
+  const sessionG = await clientSession(keyG.passkey, 'session states');
+  check('a live session loads the client context for the room',
+    (await request('GET', '/api/client/me', { clientSession: sessionG })).status === 200);
+  const logoutG = await request('POST', '/api/client/auth/logout', { clientSession: sessionG });
+  check('client logout succeeds', logoutG.status === 200);
+  const afterLogoutG = await request('GET', '/api/client/me', { clientSession: sessionG });
+  check('logout invalidates the client session immediately',
+    afterLogoutG.status === 401 || afterLogoutG.status === 404, `got ${afterLogoutG.status}`);
+
+  // --- link states ----------------------------------------------------------
+  const mysteryLink = await request('POST', '/api/client/link/' + uniquePasskey().replace(/-/g, ''));
+  check('an unknown link reports the link_invalid state',
+    mysteryLink.status === 404 && mysteryLink.json.code === 'link_invalid', JSON.stringify(mysteryLink.json));
+
+  const linkStates = await request('POST', `/api/phantom/clients/${clientG.id}/links`, {
+    token: phantomToken, body: { projectId: projectG.id, maxUses: 1 },
+  });
+  const linkStatesToken = linkStates.json.data.token;
+  await request('POST', `/api/phantom/client-links/${linkStates.json.data.id}/revoke`, { token: phantomToken });
+  const revokedLinkState = await request('POST', `/api/client/link/${linkStatesToken}`);
+  check('a revoked link reports the link_revoked state',
+    revokedLinkState.status === 404 && revokedLinkState.json.code === 'link_revoked', JSON.stringify(revokedLinkState.json));
+
+  const expiringLinkState = await request('POST', `/api/phantom/clients/${clientG.id}/links`, {
+    token: phantomToken, body: { projectId: projectG.id },
+  });
+  db.execute('UPDATE client_links SET expires_at = ? WHERE public_id = ?', new Date(Date.now() - 1000).toISOString(), expiringLinkState.json.data.id);
+  const expiredLinkState = await request('POST', `/api/client/link/${expiringLinkState.json.data.token}`);
+  check('an expired link reports the link_expired state',
+    expiredLinkState.status === 404 && expiredLinkState.json.code === 'link_expired', JSON.stringify(expiredLinkState.json));
+
+  const usedLinkState = await request('POST', `/api/phantom/clients/${clientG.id}/links`, {
+    token: phantomToken, body: { projectId: projectG.id, maxUses: 1 },
+  });
+  await request('POST', `/api/client/link/${usedLinkState.json.data.token}`);
+  const exhaustedLinkState = await request('POST', `/api/client/link/${usedLinkState.json.data.token}`);
+  check('an exhausted link reports the link_exhausted state',
+    exhaustedLinkState.status === 404 && exhaustedLinkState.json.code === 'link_exhausted', JSON.stringify(exhaustedLinkState.json));
+
+  // --- what the browser is allowed to receive -------------------------------
+  const freshKey = await createKey(phantomToken, clientG.id, projectG.id, { label: 'Payload hygiene' });
+  const freshLogin = await clientLogin(freshKey.passkey);
+  const freshSession = freshLogin.json.data.session.token;
+  const forbidden = ['client_id', 'clientId', 'client_project_id', 'projectId', 'access_key_id', 'accessKeyId',
+    'linkId', 'sessionId', 'key_hash', 'keyHash', 'storage_reference', 'storageReference', 'vault_document_id',
+    'vaultDocumentId', 'notes', 'created_by_user_id'];
+  const keysSeen = new Set();
+  const collectKeys = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach(collectKeys); return; }
+    Object.keys(value).forEach((key) => { keysSeen.add(key); collectKeys(value[key]); });
+  };
+  collectKeys(freshLogin.json);
+  const leaked = forbidden.filter((key) => keysSeen.has(key));
+  check('a login response carries no internal identifiers or storage keys', leaked.length === 0, leaked.join(','));
+  check('a login response never echoes the access key',
+    !JSON.stringify(freshLogin.json).includes(normalise(freshKey.passkey).slice(0, 8)));
+  check('the browser receives an opaque project id, not a row id',
+    /^prj_[0-9a-f]{24}$/.test(freshLogin.json.data.project.id) && /^cli_[0-9a-f]{24}$/.test(freshLogin.json.data.client.id));
+
+  // --- the exact call sequence the project room performs --------------------
+  const roomProject = await request('GET', `/api/client/project/${freshLogin.json.data.project.id}`, { clientSession: freshSession });
+  check('the room can load the project, its sections and recent documents',
+    roomProject.status === 200
+    && roomProject.json.data.project.reference === freshLogin.json.data.project.reference
+    && roomProject.json.data.sections.some((section) => section.id === 'overview' && typeof section.count === 'number')
+    && Array.isArray(roomProject.json.data.recent));
+  check('every room section is one of the seven published sections',
+    roomProject.json.data.sections.map((section) => section.id).join(',') === 'overview,documents,letters,agreements,reports,deliverables,updates');
+
+  const roomDoc = await createDocument(phantomToken, clientG.id, projectG.id, { title: 'Room reader check', category: 'report', contentText: 'Client-visible body.' });
+  await publish(phantomToken, roomDoc.id, 'published');
+  const roomSection = await request('GET', `/api/client/project/${projectG.id}/sections/reports`, { clientSession: freshSession });
+  check('a section lists the published document', roomSection.status === 200 && roomSection.json.data.documents.some((document) => document.id === roomDoc.id));
+  const roomReader = await request('GET', `/api/client/project/${projectG.id}/documents/${roomDoc.id}`, { clientSession: freshSession });
+  check('the document reader receives renderable content',
+    roomReader.status === 200
+    && Array.isArray(roomReader.json.data.document.content?.blocks)
+    && roomReader.json.data.document.content.blocks.length > 0
+    && roomReader.json.data.document.reference === roomDoc.reference);
+  check('the viewer shape is exactly what the room renders',
+    ['id', 'reference', 'title', 'summary', 'category', 'version', 'publishedAt', 'updatedAt', 'permissions', 'content']
+      .every((field) => field in roomReader.json.data.document));
+
   // -------------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------------

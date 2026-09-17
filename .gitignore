@@ -38,3 +38,6 @@ build
 
 # Cloudflare / Wrangler local state
 .wrangler
+
+# Local Cloudflare dev state (wrangler pages dev)
+.wrangler

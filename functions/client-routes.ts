@@ -60,6 +60,8 @@ import {
   clientDocumentExposure,
   clientDownloadsEnabled,
   clientPortalEnabled,
+  clientFailure,
+  clientFailureStateFor,
   clientJson,
   clientNotFound,
   clientProjectUsable,
@@ -95,7 +97,6 @@ const SECTION_CATEGORY: Record<Exclude<ClientSection, 'overview'>, ClientDocumen
 };
 
 /** One neutral message for every credential failure. Never a reason. */
-const INVALID_KEY_MESSAGE = 'This project access key is not valid, has expired, or access has been withdrawn. Please contact Code Rx Society.';
 
 const asRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
   const result = await statement.all<T>();
@@ -194,7 +195,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     // Layer 1: the existing per-isolate limiter (unchanged helper).
     if (!checkRateLimit(c, 10, 60)) {
-      return clientJson({ success: false, error: 'Too many attempts. Please wait a minute.' }, 429);
+      return clientJson({ success: false, ...clientFailure('rate_limited') }, 429);
     }
 
     const body = await c.req.json().catch(() => ({}));
@@ -207,19 +208,19 @@ export const registerClientRoutes = (app: ClientApp) => {
     const ipThrottle = await consumeClientAuthThrottle(c.env.DB, throttleKeys.ipScope,
       CLIENT_AUTH_IP_LIMIT, CLIENT_AUTH_IP_WINDOW_SECONDS, CLIENT_AUTH_IP_LOCK_SECONDS);
     if (!ipThrottle.allowed) {
-      return clientJson({ success: false, error: 'Too many attempts. Please try again shortly.' }, 429);
+      return clientJson({ success: false, ...clientFailure('rate_limited') }, 429);
     }
     if (throttleKeys.keyScope) {
       const keyThrottle = await consumeClientAuthThrottle(c.env.DB, throttleKeys.keyScope,
         CLIENT_AUTH_KEY_LIMIT, CLIENT_AUTH_KEY_WINDOW_SECONDS, CLIENT_AUTH_KEY_LOCK_SECONDS);
       if (!keyThrottle.allowed) {
-        return clientJson({ success: false, error: 'Too many attempts. Please try again shortly.' }, 429);
+        return clientJson({ success: false, ...clientFailure('rate_limited') }, 429);
       }
     }
 
     if (!normalized) {
       await recordClientActivity(db, 'ACCESS_DENIED', { details: { reason: 'malformed_passkey' } });
-      return clientJson({ success: false, error: INVALID_KEY_MESSAGE }, 401);
+      return clientJson({ success: false, ...clientFailure(clientFailureStateFor('malformed_passkey')) }, 401);
     }
 
     const key = await one<any>(db.prepare(
@@ -231,14 +232,16 @@ export const registerClientRoutes = (app: ClientApp) => {
        WHERE k.key_hash = ?`
     ).bind(await clientPasskeyHash(normalized)));
 
-    // One uniform failure for unknown, revoked, expired, unbound, suspended and
-    // archived. The real reason is written to the audit log, server-side only.
+    // An unknown key produces exactly one response for every input (see
+    // clientFailureStateFor). A key that DOES match is reported with its own
+    // state, because the sender already holds that credential. The audit log
+    // always records the precise server-side reason.
     const deny = async (reason: string) => {
       await recordClientActivity(db, 'ACCESS_DENIED', {
         clientPublicId: key?.client_public_id ?? null,
         details: { reason },
       });
-      return clientJson({ success: false, error: INVALID_KEY_MESSAGE }, 401);
+      return clientJson({ success: false, ...clientFailure(clientFailureStateFor(reason)) }, 401);
     };
 
     if (!key) return deny('unknown_key');
@@ -414,8 +417,17 @@ export const registerClientRoutes = (app: ClientApp) => {
     const project = c.get('clientProject') as any;
     const document = c.get('clientDocument') as any;
     const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+    const db = c.env.DB;
 
-    await recordClientActivity(c.env.DB, 'DOCUMENT_VIEWED', {
+    // The authorization middleware deliberately loads a narrow row (no content,
+    // no storage keys), so the published snapshot is read here, scoped by the
+    // client/project/document ids that middleware already authorized.
+    const content = await one<{ content_snapshot: string | null; content_snapshot_format: string | null }>(db.prepare(
+      `SELECT content_snapshot, content_snapshot_format FROM client_documents
+       WHERE id = ? AND client_id = ? AND client_project_id = ?`
+    ).bind(Number(document.id), principal.clientId, Number(document.client_project_id)));
+
+    await recordClientActivity(db, 'DOCUMENT_VIEWED', {
       principal,
       details: { documentId: document.public_id, reference: document.reference_code, category: document.category },
     });
@@ -424,7 +436,15 @@ export const registerClientRoutes = (app: ClientApp) => {
       success: true,
       data: {
         project: publicProject(project),
-        document: publicDocument(document, exposure, { includeContent: true }),
+        document: publicDocument(
+          {
+            ...document,
+            content_snapshot: content?.content_snapshot ?? null,
+            content_snapshot_format: content?.content_snapshot_format ?? 'text',
+          },
+          exposure,
+          { includeContent: true },
+        ),
       },
     });
   });
@@ -499,22 +519,31 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     // Same first layer as the passkey endpoint: link tokens are credentials too.
     if (!checkRateLimit(c, 20, 60)) {
-      return clientJson({ success: false, error: 'Too many attempts. Please wait a minute.' }, 429);
+      return clientJson({ success: false, ...clientFailure('rate_limited') }, 429);
     }
 
     const token = String(c.req.param('token') || '').trim();
-    if (!token) return clientNotFound();
+    if (!token) return clientJson({ success: false, ...clientFailure('link_invalid') }, 404);
 
     const link = await resolveClientLink(db, token);
-    if (!link) return clientNotFound();
-    if (link.link_status !== 'active') return clientNotFound();
-    if (link.link_expires_at && new Date(link.link_expires_at).getTime() <= Date.now()) return clientNotFound();
-    if (!clientUsable({ status: link.client_status })) return clientNotFound();
-    if (!clientProjectUsable({ status: link.project_status, is_archived: link.project_is_archived })) return clientNotFound();
+    if (!link) return clientJson({ success: false, ...clientFailure('link_invalid') }, 404);
+    // A token that matched a stored link is reported with its own state; an
+    // unknown token always looks identical to a malformed one.
+    if (link.link_status === 'revoked') return clientJson({ success: false, ...clientFailure('link_revoked') }, 404);
+    if (link.link_status !== 'active') return clientJson({ success: false, ...clientFailure('link_expired') }, 404);
+    if (link.link_expires_at && new Date(link.link_expires_at).getTime() <= Date.now()) {
+      return clientJson({ success: false, ...clientFailure('link_expired') }, 404);
+    }
+    if (!clientUsable({ status: link.client_status })) return clientJson({ success: false, ...clientFailure('client_suspended') }, 404);
+    if (!clientProjectUsable({ status: link.project_status, is_archived: link.project_is_archived })) {
+      return clientJson({ success: false, ...clientFailure('project_unavailable') }, 404);
+    }
 
     // One-use-per-redemption, enforced in SQL so concurrent attempts cannot
     // both win. A link that is out of uses is not an authorized credential.
-    if (!await consumeClientLinkUse(db, Number(link.link_id))) return clientNotFound();
+    if (!await consumeClientLinkUse(db, Number(link.link_id))) {
+      return clientJson({ success: false, ...clientFailure('link_exhausted') }, 404);
+    }
 
     const fingerprints = await clientFingerprints(c);
     const sessionToken = generateClientSessionToken();
@@ -1067,7 +1096,9 @@ export const registerClientRoutes = (app: ClientApp) => {
       data: {
         id: publicId,
         token,
-        path: `/portal/link/${token}`,
+        // The client app is hash-routed, so the copyable path matches the
+        // existing #vault-share / #reset / #activate convention.
+        path: `/#client-portal/link/${token}`,
         expiresAt,
         maxUses,
         allowDownload,

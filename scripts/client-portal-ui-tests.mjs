@@ -1,0 +1,340 @@
+#!/usr/bin/env node
+/**
+ * CODE Rx SOCIETY — Phase 3 (Client Access Experience) verification harness.
+ *
+ * Covers the three things the Phase 3 brief asks to be tested:
+ *   1. the access-key rules (formatting, validation, failure messages),
+ *   2. the rendered access screen and project room for every state,
+ *   3. the browser-side security rules (where a session may live, and that a
+ *      raw access key is never stored anywhere).
+ *
+ * The React components are rendered with react-dom/server, so no DOM shim or
+ * extra dependency is needed. Nothing here is imported by the application.
+ *
+ * Usage:  node scripts/client-portal-ui-tests.mjs
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { build } from 'esbuild';
+
+const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
+// The bundle is emitted inside the repo so that the externalized React imports
+// resolve against the application's own node_modules. node_modules is ignored
+// by git, and the directory is removed again at the end of the run.
+const BUNDLE_ROOT = path.join(ROOT, 'node_modules', '.cache');
+fs.mkdirSync(BUNDLE_ROOT, { recursive: true });
+const OUT_DIR = fs.mkdtempSync(path.join(BUNDLE_ROOT, 'code-rx-ui-tests-'));
+
+// ---------------------------------------------------------------------------
+// Tiny test runner
+// ---------------------------------------------------------------------------
+
+const results = [];
+let currentSuite = '';
+const suite = (name) => { currentSuite = name; };
+
+const check = (name, condition, detail = '') => {
+  const passed = Boolean(condition);
+  results.push({ suite: currentSuite, name, passed, detail });
+  const mark = passed ? '\u001b[32mPASS\u001b[0m' : '\u001b[31mFAIL\u001b[0m';
+  console.log(`  ${mark}  ${name}${passed || !detail ? '' : ` — ${detail}`}`);
+  return passed;
+};
+
+const group = (title) => console.log(`\n\u001b[1m${title}\u001b[0m`);
+
+// ---------------------------------------------------------------------------
+// Bundle the real components and helpers
+// ---------------------------------------------------------------------------
+
+const bundle = async () => {
+  const outfile = path.join(OUT_DIR, 'phase3.mjs');
+  await build({
+    stdin: {
+      contents: `
+        export * from './src/lib/accessKey';
+        export { clientPortalSession } from './src/lib/cloudflare';
+        export { ClientAccessScreen } from './src/components/ClientAccessScreen';
+        export { ClientProjectRoom } from './src/components/ClientProjectRoom';
+      `,
+      resolveDir: ROOT,
+      loader: 'tsx',
+      sourcefile: 'phase3-entry.tsx',
+    },
+    outfile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    target: 'node22',
+    jsx: 'automatic',
+    // React must stay external so the components and the server renderer share
+    // one React instance (two copies breaks every hook).
+    external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/server', 'lucide-react'],
+    logLevel: 'error',
+    define: { 'import.meta.env': JSON.stringify({ PROD: false, DEV: true, VITE_API_URL: '' }) },
+  });
+  return import(pathToFileURL(outfile).href);
+};
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+const main = async () => {
+  const module = await bundle();
+  const {
+    formatAccessKey, validateAccessKey, accessKeyHint, messageForFailure, failureMessage,
+    FAILURE_MESSAGES, ACCESS_KEY_PLACEHOLDER, clientPortalSession,
+    ClientAccessScreen, ClientProjectRoom,
+  } = module;
+
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const React = await import('react');
+  const render = (element) => renderToStaticMarkup(element);
+
+  console.log('CODE Rx — Client Access Experience (Phase 3) verification');
+  console.log('='.repeat(64));
+
+  // =========================================================================
+  group('1. Access key formatting and validation');
+  // =========================================================================
+
+  const canonical = 'CRX-8K4P-X92M-7LQF-B3TD';
+  const canonicalBody = '8K4PX92M7LQFB3TD';
+
+  check('a canonical key is preserved exactly',
+    formatAccessKey(canonical).display === canonical && formatAccessKey(canonical).body === canonicalBody);
+  check('lowercase input is accepted and upper-cased',
+    formatAccessKey('crx-8k4p-x92m-7lqf-b3td').display === canonical);
+  check('a key pasted without dashes is grouped',
+    formatAccessKey(canonicalBody).display === canonical);
+  check('a key pasted with spaces is grouped',
+    formatAccessKey('8K4P X92M 7LQF B3TD').display === canonical);
+  check('a key pasted with the prefix only',
+    formatAccessKey('CRX8K4PX92M7LQFB3TD').display === canonical);
+  check('groups are four characters each',
+    canonicalBody.length === 16 && formatAccessKey(canonical).display.split('-').slice(1).every((group_) => group_.length === 4));
+  check('an incomplete key is grouped but not reported as complete',
+    formatAccessKey('8K4PX9').display === 'CRX-8K4P-X9' && formatAccessKey('8K4PX9').complete === false);
+
+  const ambiguous = formatAccessKey('CRX-0O1I-8K4P-X92M-7LQF');
+  check('the ambiguous glyphs 0, O, 1 and I are dropped',
+    !/[01OI]/.test(ambiguous.body), ambiguous.body);
+  check('dropped characters are reported so the screen can explain them',
+    ambiguous.ignored.join(',') === '0,1,I,O', ambiguous.ignored.join(','));
+  check('a long paste cannot exceed the server limit',
+    formatAccessKey('A'.repeat(120)).body.length === 32);
+  check('a canonical key is exactly four groups',
+    formatAccessKey(canonical).display.split('-').length === 5
+    && formatAccessKey(canonical).display.length === 23);
+  check('an over-long paste is still grouped in fours, never truncated mid-group',
+    formatAccessKey('A'.repeat(120)).display.split('-').length === 9, formatAccessKey('A'.repeat(120)).display);
+
+  check('validation accepts a complete canonical key',
+    validateAccessKey(canonical).ok === true && validateAccessKey(canonical).body === canonicalBody);
+  check('validation rejects an empty key with a plain-language prompt',
+    validateAccessKey('').ok === false && /enter the project access key/i.test(validateAccessKey('').problem));
+  check('validation rejects a short key without calling it invalid',
+    validateAccessKey('8K4PX92M').ok === false && /too short/i.test(validateAccessKey('8K4PX92M').problem));
+  check('validation explains the ambiguous characters',
+    validateAccessKey('CRX-0O1I-8K4P-X92M-7LQF').ok === false
+    && /never contain/i.test(validateAccessKey('CRX-0O1I-8K4P-X92M-7LQF').problem));
+
+  check('the hint stays quiet for a complete key', accessKeyHint(formatAccessKey(canonical)) === null);
+  check('the hint explains the ambiguous characters', /never contain/i.test(String(accessKeyHint(ambiguous))));
+  check('the hint guides an incomplete key', /four groups/i.test(String(accessKeyHint(formatAccessKey('8K4P')))));
+  check('there is no hint before anything is typed', accessKeyHint(formatAccessKey('')) === null);
+  check('the placeholder matches the brief', ACCESS_KEY_PLACEHOLDER === 'CRX-____-____-____');
+
+  // =========================================================================
+  group('2. Failure messages — the seven required states');
+  // =========================================================================
+
+  const requiredStates = {
+    invalid_key: /not recognised/i,
+    key_expired: /expired/i,
+    key_revoked: /revoked/i,
+    client_suspended: /suspended/i,
+    project_unavailable: /not available/i,
+    session_expired: /session has ended/i,
+    server_error: /went wrong/i,
+  };
+  for (const [code, pattern] of Object.entries(requiredStates)) {
+    check(`the ${code} state has its own client-facing message`, pattern.test(String(FAILURE_MESSAGES[code])), String(FAILURE_MESSAGES[code]));
+  }
+  check('every state message is distinct', new Set(Object.values(FAILURE_MESSAGES)).size === Object.keys(FAILURE_MESSAGES).length);
+
+  check('a transport failure becomes the offline message', messageForFailure(0, null) === FAILURE_MESSAGES.offline);
+  check('a 429 becomes the rate-limit message', messageForFailure(429, 'rate_limited') === FAILURE_MESSAGES.rate_limited);
+  check('a 500 becomes the generic server message', messageForFailure(500, null) === FAILURE_MESSAGES.server_error);
+  check('a 404 with a code shows the state message', messageForFailure(404, 'link_expired') === FAILURE_MESSAGES.link_expired);
+  check('an unexpected response falls back to a safe message', messageForFailure(418, null) === FAILURE_MESSAGES.unavailable);
+  check('an empty fallback never renders an empty box', failureMessage(undefined) === FAILURE_MESSAGES.unavailable);
+
+  const allMessages = Object.values(FAILURE_MESSAGES).join(' ');
+  check('no message leaks a status code, an endpoint or an internal name',
+    !/\b[1-5]\d\d\b|\/api\/|sql|d1|table|undefined|null|\[object/i.test(allMessages), allMessages.slice(0, 120));
+  check('no message contains markup', !/<[a-z]/i.test(allMessages));
+
+  // =========================================================================
+  group('3. Access screen — the rendered concept');
+  // =========================================================================
+
+  const screenHtml = render(React.createElement(ClientAccessScreen, { onSubmit: async () => {} }));
+
+  check('the brand line is rendered', screenHtml.includes('CODE Rx SOCIETY'));
+  check('the screen title is CLIENT ACCESS', screenHtml.includes('CLIENT ACCESS'));
+  check('the instruction is rendered', screenHtml.includes('Enter your project access key'));
+  check('the input carries the CRX placeholder', screenHtml.includes('CRX-____-____-____'));
+  check('the primary action is rendered', /Enter Project/i.test(screenHtml));
+  check('the assistance line is rendered', screenHtml.includes('Need assistance?'));
+  check('the contact line is rendered', screenHtml.includes('Contact Code Rx Society'));
+  check('the contact line is a mail link',
+    /href="mailto:coderxsociety@gmail\.com[^"]*"/.test(screenHtml));
+  check('the access key input is never pre-filled', /value=""/.test(screenHtml) || !/value="CRX/.test(screenHtml));
+  const inputTag = /<input[^>]*>/.exec(screenHtml)?.[0] || '';
+  check('the input opts out of browser autofill and autocorrect',
+    /\bautocomplete="off"/i.test(inputTag) && /\bautocorrect="off"/i.test(inputTag), inputTag.slice(0, 120));
+  check('the input asks for capitalised characters on mobile keyboards',
+    /\bautocapitalize="characters"/i.test(inputTag));
+  check('the input disables spellcheck', /\bspellcheck="false"/i.test(inputTag));
+  check('the input is labelled for screen readers', /id="client-access-key"/.test(screenHtml) && screenHtml.includes('for="client-access-key"'));
+  const submitTag = [...screenHtml.matchAll(/<button[^>]*>/g)].map((match) => match[0]).find((tag) => /type="submit"/.test(tag)) || '';
+  check('the submit button is enabled in the idle state',
+    Boolean(submitTag) && !/\sdisabled(\s|>|=)/.test(submitTag), submitTag.slice(0, 120));
+  check('the screen promises the key is not stored', /never stored in this browser/i.test(screenHtml));
+  check('the rendered screen contains no internal identifiers',
+    !/prj_|cli_|vault_|storage_reference|sessionId|key_hash/i.test(screenHtml));
+
+  // Every required failure state must be able to drive the screen.
+  const escapeForMarkup = (value) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/'/g, '&#x27;');
+  for (const code of Object.keys(requiredStates)) {
+    const message = FAILURE_MESSAGES[code];
+    const html = render(React.createElement(ClientAccessScreen, { onSubmit: async () => {}, notice: message }));
+    check(`the ${code} state renders on the screen`,
+      html.includes(message) || html.includes(escapeForMarkup(message)));
+  }
+
+  const errorHtml = render(React.createElement(ClientAccessScreen, {
+    onSubmit: async () => {},
+    notice: FAILURE_MESSAGES.key_expired,
+  }));
+  check('a failure is announced to assistive technology', /role="alert"/.test(errorHtml));
+  check('a failure marks the input as invalid', /aria-invalid="true"/.test(errorHtml));
+  check('a failure does not reveal why beyond the client-facing state', !/401|404|expired_at|status/i.test(errorHtml));
+
+  // =========================================================================
+  group('4. Project room — the authorized destination');
+  // =========================================================================
+
+  const context = {
+    client: { id: 'cli_0123456789abcdef01234567', name: 'Ashanti Pharmacy Ltd', contactName: 'Ama' },
+    project: { id: 'prj_89abcdef0123456789abcdef', reference: 'CRX-PROJ-2026-001', name: 'Pharmacy Digital Platform', description: 'Rollout' },
+    permissions: { view: true, download: false },
+  };
+  const roomHtml = render(React.createElement(ClientProjectRoom, {
+    context, notice: null, onNotice: () => {}, onSignedOut: () => {}, onSessionEnded: () => {},
+  }));
+
+  check('the room shows the client organisation', roomHtml.includes('Ashanti Pharmacy Ltd'));
+  check('the room shows the human project reference', roomHtml.includes('CRX-PROJ-2026-001'));
+  check('the room offers a way out', /Log out/i.test(roomHtml));
+  check('the room shows a loading state before data arrives', /Opening your secure project room|Loading your project/i.test(roomHtml));
+  check('the room never renders the opaque client id', !roomHtml.includes(context.client.id));
+  check('the room never renders the opaque project id', !roomHtml.includes(context.project.id));
+  check('the room never renders storage or vault identifiers',
+    !/storage_reference|vault_document_id|key_hash|access_key_id/i.test(roomHtml));
+  check('the room footer scopes visibility to this client', /only shows documents published to Ashanti Pharmacy Ltd/i.test(roomHtml));
+
+  const noticeRoom = render(React.createElement(ClientProjectRoom, {
+    context, notice: 'This document is not available to download yet.', onNotice: () => {}, onSignedOut: () => {}, onSessionEnded: () => {},
+  }));
+  check('a download that is not ready is explained in plain language',
+    noticeRoom.includes('not available to download yet') && /Dismiss/.test(noticeRoom));
+
+  // =========================================================================
+  group('5. Browser-side session handling');
+  // =========================================================================
+
+  // A minimal sessionStorage stand-in, so the store can be exercised directly.
+  const store = new Map();
+  globalThis.sessionStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  };
+
+  check('no session is reported before one is written', clientPortalSession.read() === null);
+
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  clientPortalSession.write({ token: 'a'.repeat(64), expiresAt: future });
+  const stored = clientPortalSession.read();
+  check('a written session is readable', stored?.token === 'a'.repeat(64));
+  check('the session is kept in sessionStorage (one tab, not the whole browser)',
+    [...store.keys()].some((key) => key.includes('clientSession')));
+
+  clientPortalSession.clear();
+  check('clearing really clears', clientPortalSession.read() === null);
+
+  clientPortalSession.write({ token: 'b'.repeat(64), expiresAt: new Date(Date.now() - 1000).toISOString() });
+  check('an expired session is never handed back', clientPortalSession.read() === null);
+  check('an expired session is removed from storage', store.size === 0);
+
+  // Static guarantee: the portal never reaches for localStorage, and the raw
+  // access key is never written to any browser store.
+  const portalFiles = [
+    'src/lib/accessKey.ts',
+    'src/lib/cloudflare.ts',
+    'src/components/ClientAccessScreen.tsx',
+    'src/components/ClientProjectRoom.tsx',
+    'src/components/ClientPortal.tsx',
+  ];
+  const sources = portalFiles.map((file) => ({ file, text: fs.readFileSync(path.join(ROOT, file), 'utf8') }));
+  // cloudflare.ts is the shared API client: the member token has always used
+  // localStorage, so only its client-portal section is checked here.
+  const portalSection = (file, text) => (file.endsWith('cloudflare.ts')
+    ? text.slice(text.indexOf('CLIENT PROJECT PORTAL (Phase 3)'))
+    : text);
+
+  // Only real usage counts: a comment that names the API is not a call.
+  const withoutComments = (text) => text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  check('no portal file reads or writes localStorage',
+    sources.every(({ file, text }) => !/\blocalStorage\s*[.[]/.test(withoutComments(portalSection(file, text)))),
+    sources.map(({ file, text }) => `${file}:${/\blocalStorage\s*[.[]/.test(withoutComments(portalSection(file, text)))}`).join(' '));
+  check('the access key is never written to sessionStorage',
+    !sources.some(({ text }) => /sessionStorage\.setItem\([^)]*[Pp]asskey/.test(text)));
+  check('only the session token is persisted',
+    sources.some(({ text }) => text.includes("'codeRx_clientSession'")));
+  check('the access screen clears the key from state after a successful exchange',
+    /setValue\(''\)/.test(sources.find(({ file }) => file.endsWith('ClientAccessScreen.tsx')).text));
+  check('key material is never put in the URL',
+    !sources.some(({ text }) => /location\.(hash|href)\s*=[^;]*[Pp]asskey/.test(text)));
+  check('the link token is stripped from the URL after exchange',
+    /replaceState/.test(sources.find(({ file }) => file.endsWith('ClientPortal.tsx')).text));
+
+  // -------------------------------------------------------------------------
+  const passed = results.filter((result) => result.passed).length;
+  const failed = results.length - passed;
+  console.log('\n' + '='.repeat(64));
+  console.log(`TOTAL: ${results.length}   PASSED: ${passed}   FAILED: ${failed}`);
+  if (failed) {
+    console.log('\nFailures:');
+    for (const result of results.filter((entry) => !entry.passed)) {
+      console.log(`  - [${result.suite}] ${result.name}${result.detail ? ` — ${result.detail}` : ''}`);
+    }
+  }
+  console.log(`SUCCESS RATE: ${((passed / results.length) * 100).toFixed(1)}%`);
+  console.log('='.repeat(64));
+
+  fs.rmSync(OUT_DIR, { recursive: true, force: true });
+  process.exit(failed ? 1 : 0);
+};
+
+main().catch((error) => {
+  console.error('\nHarness error:', error);
+  process.exit(2);
+});
