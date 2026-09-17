@@ -380,7 +380,11 @@ export const requireClientProjectAccess = async (c: any, next: Next) => {
   if (!requested) return clientNotFound();
 
   const rows = await asRows<any>(c.env.DB.prepare(
-    `SELECT p.id, p.public_id, p.reference_code, p.name, p.status, p.is_archived,
+    // The project's own client-facing fields, so the room's overview can show
+    // the description, status and dates without a second query. Internal notes
+    // and every admin-side column stay out of this shape.
+    `SELECT p.id, p.public_id, p.reference_code, p.name, p.description, p.status,
+            p.is_archived, p.created_at, p.updated_at,
             cl.status AS client_status
      FROM client_projects p
      JOIN clients cl ON cl.id = p.client_id
@@ -408,9 +412,10 @@ export const requireClientDocumentAccess = async (c: any, next: Next) => {
   if (!requested) return clientNotFound();
 
   const rows = await asRows<ClientDocumentRow>(c.env.DB.prepare(
-    `SELECT d.id, d.public_id, d.client_id, d.client_project_id, d.reference_code, d.title,
+    `SELECT d.id, d.public_id, d.client_id, d.client_project_id, d.reference_code, d.title, d.summary,
             d.category, d.version, d.lifecycle_status, d.client_visible, d.allow_view, d.allow_download,
-            d.is_archived, d.vault_document_id, d.vault_version_number
+            d.is_archived, d.published_at, d.updated_at,
+            d.vault_document_id, d.vault_version_number
      FROM client_documents d
      WHERE d.public_id = ? AND d.client_id = ? AND d.client_project_id = ?`
   ).bind(requested, principal.clientId, Number(project.id)));
@@ -550,6 +555,9 @@ export const publicProject = (row: any) => ({
   name: row.name,
   description: row.description || '',
   status: row.status,
+  // The client's own project dates. Internal notes, delegation details and
+  // every other admin-side field are deliberately absent from this shape.
+  createdAt: row.created_at || null,
   updatedAt: row.updated_at || null,
 });
 

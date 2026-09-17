@@ -55,6 +55,7 @@ const bundle = async () => {
     stdin: {
       contents: `
         export * from './src/lib/accessKey';
+        export * from './src/lib/projectRoom';
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom } from './src/components/ClientProjectRoom';
@@ -88,6 +89,9 @@ const main = async () => {
     formatAccessKey, validateAccessKey, accessKeyHint, messageForFailure, failureMessage,
     FAILURE_MESSAGES, ACCESS_KEY_PLACEHOLDER, clientPortalSession,
     ClientAccessScreen, ClientProjectRoom,
+    visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
+    permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
+    documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
   } = module;
 
   const { renderToStaticMarkup } = await import('react-dom/server');
@@ -315,6 +319,125 @@ const main = async () => {
     !sources.some(({ text }) => /location\.(hash|href)\s*=[^;]*[Pp]asskey/.test(text)));
   check('the link token is stripped from the URL after exchange',
     /replaceState/.test(sources.find(({ file }) => file.endsWith('ClientPortal.tsx')).text));
+
+  // =========================================================================
+  group('6. Project Room — sections, visibility and empty states');
+  // =========================================================================
+
+  const sectionList = [
+    { id: 'overview', label: 'Overview', count: 3 },
+    { id: 'documents', label: 'Documents', count: 0 },
+    { id: 'letters', label: 'Letters', count: 1 },
+    { id: 'agreements', label: 'Agreements', count: 0 },
+    { id: 'reports', label: 'Reports', count: 2 },
+    { id: 'deliverables', label: 'Deliverables', count: 0 },
+    { id: 'updates', label: 'Updates', count: 1 },
+  ];
+
+  const shown = visibleSections(sectionList, 3).map((section) => section.id);
+  check('only sections with authorized content are shown', shown.join(',') === 'overview,letters,reports,updates', shown.join(','));
+  check('Project Overview is always shown, even when empty',
+    visibleSections([{ id: 'overview', label: 'Overview', count: 0 }], 0).map((section) => section.id).join(',') === 'overview');
+  check('an empty project shows no category sections',
+    visibleSections(sectionList.map((section) => ({ ...section, count: 0 })), 0).length === 1);
+  check('a section with content is kept even when the overview is empty',
+    visibleSections([{ id: 'updates', label: 'Updates', count: 1 }], 0).map((section) => section.id).join(',') === 'overview,updates');
+  check('the room defines exactly the seven required sections',
+    ROOM_SECTIONS.map((section) => section.id).join(',') === 'overview,documents,letters,agreements,reports,deliverables,updates');
+  check('the sections render in the required order and wording',
+    ROOM_SECTIONS.map((section) => section.label).join('|') === 'Project Overview|Documents|Letters|Agreements|Reports|Deliverables|Updates');
+
+  check('no documents available', emptyMessageFor('documents') === 'No documents available.');
+  check('no agreements available', emptyMessageFor('agreements') === 'No agreements available.');
+  check('no reports available', emptyMessageFor('reports') === 'No reports available.');
+  check('no updates available', emptyMessageFor('updates') === 'No updates available.');
+  check('no letters available', emptyMessageFor('letters') === 'No letters available.');
+  check('no deliverables available', emptyMessageFor('deliverables') === 'No deliverables available.');
+  check('an overview with nothing published explains itself',
+    /nothing has been published/i.test(emptyMessageFor('overview')));
+  check('an unknown section still returns a safe message', emptyMessageFor('nope') === 'No documents available.');
+
+  check('a project with published content is detected',
+    hasAnyPublishedContent(sectionList) === true);
+  check('a project with only an empty overview is reported as empty',
+    hasAnyPublishedContent([{ id: 'overview', label: 'Overview', count: 5 }]) === false);
+  check('an indefinite count is never rendered as a leak',
+    !/draft|internal|hidden|unpublished/i.test([...Object.values(CATEGORY_LABELS), ...Object.values(PROJECT_STATUS_LABELS)].join(' ')));
+
+  // =========================================================================
+  group('7. View and download are independent permissions');
+  // =========================================================================
+
+  const viewOnly = { id: 'doc_1', title: 'View only report', category: 'report', reference: 'CRX-RPT-2026-001', version: '1.0', permissions: { view: true, download: false } };
+  const downloadable = { id: 'doc_2', title: 'Downloadable letter', category: 'letter', reference: 'CRX-LTR-2026-001', version: '2.0', permissions: { view: true, download: true } };
+  const deniedBoth = { id: 'doc_3', title: 'Hidden', category: 'report', permissions: { view: false, download: false } };
+  const noPermissions = { id: 'doc_4', title: 'No permission block', category: 'report' };
+
+  check('view is allowed on a view-only document', canView(viewOnly) === true);
+  check('download is denied on a view-only document', canDownload(viewOnly) === false);
+  check('view does NOT imply download', canView(viewOnly) && !canDownload(viewOnly));
+  check('a document with no permission block is treated as view-only', canDownload(noPermissions) === false);
+  check('download is allowed only when the server says so', canDownload(downloadable) === true);
+  check('a document denied both permissions is not viewable', canView(deniedBoth) === false);
+  check('the permission label is client-facing', permissionLabel(viewOnly) === 'View only' && permissionLabel(downloadable) === 'View and download');
+  check('download flags are derived per document',
+    documentFlags(viewOnly, 4).viewOnly === true && documentFlags(downloadable, 4).downloadable === true
+    && documentFlags(downloadable, 1).soleDocument === true);
+
+  const roomWithMix = render(React.createElement(ClientProjectRoom, {
+    context: {
+      client: { id: 'cli_1', name: 'Ashanti Pharmacy Ltd' },
+      project: { id: 'prj_1', reference: 'CRX-PROJ-2026-001', name: 'Pharmacy Digital Platform', status: 'active' },
+      permissions: { view: true, download: false },
+    },
+    notice: null, onNotice: () => {}, onSignedOut: () => {}, onSessionEnded: () => {},
+  }));
+  check('the empty room offers Project Overview', roomWithMix.includes('Project Overview'));
+
+  // =========================================================================
+  group('8. Publication information and overview facts');
+  // =========================================================================
+
+  // Formatting follows the viewer's own locale, so the expectations are built
+  // with the same API instead of hard-coding one language or date order.
+  const expectedDate = (iso) => new Date(iso).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+  const PUBLISHED = '2026-09-01T09:00:00.000Z';
+  const UPDATED = '2026-09-10T09:00:00.000Z';
+
+  check('a document published and never updated shows one date',
+    publicationInfo({ ...downloadable, publishedAt: PUBLISHED, updatedAt: PUBLISHED }).primary === `Published ${expectedDate(PUBLISHED)}`);
+  const changed = publicationInfo({ ...downloadable, publishedAt: PUBLISHED, updatedAt: UPDATED });
+  check('a document changed after publication shows both dates',
+    changed.primary === `Published ${expectedDate(PUBLISHED)}` && changed.secondary === `Updated ${expectedDate(UPDATED)}`);
+  check('a document with only an update date says so',
+    publicationInfo({ ...downloadable, updatedAt: UPDATED }).primary === `Updated ${expectedDate(UPDATED)}`);
+  check('a document with no dates never renders an invalid date',
+    publicationInfo({ ...downloadable }).primary === 'Date unavailable');
+  // SQLite stores `YYYY-MM-DD HH:MM:SS` in UTC; the parser must read it as UTC.
+  check('a SQL-style timestamp is understood',
+    formatDate('2026-09-01 09:00:00') === expectedDate('2026-09-01T09:00:00.000Z'),
+    formatDate('2026-09-01 09:00:00'));
+  check('a missing date renders an em dash', formatDate(null) === '—' && formatDate('not a date') === '—');
+
+  const facts = overviewFacts({ reference: 'CRX-PROJ-2026-001', status: 'active', createdAt: '2026-08-01 10:00:00', updatedAt: '2026-09-10 10:00:00', publishedCount: 5 });
+  check('the overview shows the project reference', facts.some((fact) => fact.value === 'CRX-PROJ-2026-001'));
+  check('the overview shows a client-facing status', facts[0].value === 'Active');
+  check('the overview shows when the project opened',
+    facts.some((fact) => fact.label === 'Opened' && fact.value === expectedDate('2026-08-01T10:00:00.000Z')));
+  check('the overview shows the last update',
+    facts.some((fact) => fact.label === 'Last updated' && fact.value === expectedDate('2026-09-10T10:00:00.000Z')));
+  check('the overview counts published documents in client language',
+    facts.some((fact) => fact.value === '5 documents') && overviewFacts({ reference: 'r', status: 'active', publishedCount: 1 }).some((fact) => fact.value === '1 document'));
+  check('a suspended project is described in client language, not internal state',
+    overviewFacts({ reference: 'r', status: 'suspended', publishedCount: 0 })[0].value === 'On hold');
+  check('an unknown status falls back to Active rather than showing a raw value',
+    overviewFacts({ reference: 'r', status: 'weird_internal_state', publishedCount: 0 })[0].value === 'Active');
+
+  check('the download filename prefers the document reference',
+    downloadFileName({ id: 'd', title: 'Phase 1 report', category: 'report', reference: 'CRX-RPT-2026-001' }) === 'CRX-RPT-2026-001.pdf');
+  check('the download filename is safe when a title is used',
+    downloadFileName({ id: 'd', title: 'Phase 1 / report: draft?', category: 'report' }) === 'Phase-1-report-draft.pdf');
+  check('the download filename always ends in .pdf', downloadFileName({ id: 'd', title: '', category: 'report' }).endsWith('.pdf'));
 
   // -------------------------------------------------------------------------
   const passed = results.filter((result) => result.passed).length;

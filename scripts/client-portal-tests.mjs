@@ -1140,6 +1140,195 @@ const main = async () => {
     ['id', 'reference', 'title', 'summary', 'category', 'version', 'publishedAt', 'updatedAt', 'permissions', 'content']
       .every((field) => field in roomReader.json.data.document));
 
+  // =========================================================================
+  group('13. Project Room end-to-end (Phase 4 requirements)');
+  // =========================================================================
+
+  // Two fully independent clients, each with a project and a credential.
+  const roomA = await createClient(phantomToken, 'Room Client A');
+  const roomB = await createClient(phantomToken, 'Room Client B');
+  const roomProjectA = await createProject(phantomToken, roomA.id, 'Room Project A');
+  await request('PATCH', `/api/phantom/client-projects/${roomProjectA.id}`, {
+    token: phantomToken,
+    body: { description: 'Rollout of the room demo across three branches.' },
+  });
+  const roomProjectB = await createProject(phantomToken, roomB.id, 'Room Project B');
+  const roomKeyA = await createKey(phantomToken, roomA.id, roomProjectA.id, { label: 'Room A key' });
+  const roomKeyB = await createKey(phantomToken, roomB.id, roomProjectB.id, { label: 'Room B key' });
+  const roomSessionA = await clientSession(roomKeyA.passkey, 'room client A');
+  const roomSessionB = await clientSession(roomKeyB.passkey, 'room client B');
+
+  // Client A: one published letter (view + download), one view-only report,
+  // one unpublished draft, one archived report, one published update.
+  const publishedLetter = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'Published letter', category: 'letter', contentText: 'Letter body for the room.',
+  });
+  await publish(phantomToken, publishedLetter.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${publishedLetter.id}`, { token: phantomToken, body: { allowDownload: true } });
+  await request('PATCH', `/api/phantom/client-documents/${publishedLetter.id}`, {
+    token: phantomToken, body: { storageReference: 'client-exports/room/letter.pdf' },
+  });
+  await ENV.BUCKET.put('client-exports/room/letter.pdf', 'STAMPED ROOM LETTER', { httpMetadata: { contentType: 'application/pdf' } });
+
+  const viewOnlyReport = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'View only report', category: 'report', contentText: 'Readable, never downloadable.',
+  });
+  await publish(phantomToken, viewOnlyReport.id, 'published');
+
+  const unpublishedDraft = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'UNPUBLISHED DRAFT', category: 'report', contentText: 'Must never reach the client.',
+  });
+  await publish(phantomToken, unpublishedDraft.id, 'in_review');
+
+  const archivedReport = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'ARCHIVED REPORT', category: 'report', contentText: 'Withdrawn from the client.',
+  });
+  await publish(phantomToken, archivedReport.id, 'published');
+  await publish(phantomToken, archivedReport.id, 'archived');
+
+  const publishedUpdate = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'Published update', category: 'update', contentText: 'Progress update body.',
+  });
+  await publish(phantomToken, publishedUpdate.id, 'published');
+
+  // Client B: its own private report.
+  const bPrivate = await createDocument(phantomToken, roomB.id, roomProjectB.id, {
+    title: 'CLIENT B PRIVATE', category: 'report', contentText: 'Only client B may read this.',
+  });
+  await publish(phantomToken, bPrivate.id, 'published');
+
+  // --- the room loads -------------------------------------------------------
+  const room = await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomSessionA });
+  const roomSections = room.json.data.sections;
+  const countFor = (id) => roomSections.find((section) => section.id === id)?.count ?? -1;
+
+  check('the room lists exactly the seven sections',
+    roomSections.map((section) => section.id).join(',') === 'overview,documents,letters,agreements,reports,deliverables,updates');
+  check('the room shows the project name, reference and description',
+    room.json.data.project.name === 'Room Project A'
+    && /^CRX-PROJ-\d{4}-\d{3}$/.test(room.json.data.project.reference)
+    && room.json.data.project.description.length > 0
+    && !/internal/i.test(room.json.data.project.description));
+  check('the room reports the project status and its own dates',
+    typeof room.json.data.project.status === 'string'
+    && Boolean(room.json.data.project.createdAt)
+    && Boolean(room.json.data.project.updatedAt),
+    JSON.stringify({ createdAt: room.json.data.project.createdAt, updatedAt: room.json.data.project.updatedAt }));
+  check('the project payload carries no internal notes or admin fields',
+    !/notes|created_by|is_archived|storage_reference|vault_document_id/.test(JSON.stringify(room.json.data.project)));
+
+  check('only published, client-visible documents are counted (letters = 1)', countFor('letters') === 1, `letters=${countFor('letters')}`);
+  check('the report count excludes the unpublished draft and the archived report', countFor('reports') === 1, `reports=${countFor('reports')}`);
+  check('the update count reflects the published update', countFor('updates') === 1);
+  check('empty categories report zero, so the room can hide them',
+    countFor('documents') === 0 && countFor('agreements') === 0 && countFor('deliverables') === 0);
+  check('the recent list returns published documents only',
+    room.json.data.recent.every((document) => [publishedLetter.id, viewOnlyReport.id, publishedUpdate.id].includes(document.id)));
+  check('no hidden document appears anywhere in the room payload',
+    !/UNPUBLISHED DRAFT|ARCHIVED REPORT|CLIENT B PRIVATE/.test(JSON.stringify(room.json)));
+
+  // --- every document shown carries the fields the room renders -------------
+  const sectionReports = await request('GET', `/api/client/project/${roomProjectA.id}/sections/reports`, { clientSession: roomSessionA });
+  const listedReport = sectionReports.json.data.documents.find((document) => document.id === viewOnlyReport.id);
+  check('a listed document carries title, reference, category and version',
+    listedReport.title === 'View only report'
+    && /^CRX-RPT-\d{4}-\d{3}$/.test(listedReport.reference)
+    && listedReport.category === 'report'
+    && Boolean(listedReport.version));
+  check('a listed document carries its publication information',
+    'publishedAt' in listedReport && 'updatedAt' in listedReport && Boolean(listedReport.publishedAt),
+    JSON.stringify({ publishedAt: listedReport.publishedAt, updatedAt: listedReport.updatedAt }));
+  check('a view-only document reports download = false', listedReport.permissions.download === false);
+  check('the letters section reports the letter as downloadable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/letters`, { clientSession: roomSessionA }))
+      .json.data.documents.find((document) => document.id === publishedLetter.id).permissions.download === true);
+
+  const readerReport = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${viewOnlyReport.id}`, { clientSession: roomSessionA });
+  check('the reader carries the publication information the room shows',
+    Boolean(readerReport.json.data.document.publishedAt), JSON.stringify(readerReport.json.data.document.publishedAt));
+
+  // --- requirement 4: view and download are independent ----------------------
+  check('a view-only document is readable', readerReport.status === 200 && readerReport.json.data.document.permissions.view === true);
+  check('a view-only document is NOT downloadable even though it is readable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${viewOnlyReport.id}/download`, { clientSession: roomSessionA })).status === 404);
+
+  // A view-only document must stay undownloadable even when a stamped artifact
+  // exists for it. Without this case, "view only" would look protected purely
+  // because no artifact happened to exist, and a future change could quietly
+  // start serving it.
+  const viewOnlyWithArtifact = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'View only with artifact', category: 'report', contentText: 'Readable, with a stamped copy that must stay locked.',
+  });
+  await publish(phantomToken, viewOnlyWithArtifact.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${viewOnlyWithArtifact.id}`, {
+    token: phantomToken, body: { storageReference: 'client-exports/room/view-only.pdf' },
+  });
+  await ENV.BUCKET.put('client-exports/room/view-only.pdf', 'STAMPED BUT LOCKED', { httpMetadata: { contentType: 'application/pdf' } });
+  check('the view-only document really does have a stamped artifact waiting',
+    db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', viewOnlyWithArtifact.id)[0].storage_reference === 'client-exports/room/view-only.pdf');
+  check('a view-only document with an artifact is still readable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${viewOnlyWithArtifact.id}`, { clientSession: roomSessionA })).status === 200);
+  const lockedDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${viewOnlyWithArtifact.id}/download`, { clientSession: roomSessionA });
+  check('a view-only document with an artifact is still refused for download',
+    lockedDownload.status === 404, `got ${lockedDownload.status}`);
+  check('the locked artifact was never served', !lockedDownload.text.includes('STAMPED BUT LOCKED'));
+
+  const authorisedDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: roomSessionA });
+  check('an authorized download works', authorisedDownload.status === 200 && authorisedDownload.text === 'STAMPED ROOM LETTER');
+  check('an authorized download is private and named from the reference',
+    authorisedDownload.headers.get('cache-control') === 'private, no-store'
+    && String(authorisedDownload.headers.get('content-disposition')).includes(publishedLetter.reference));
+
+  // --- requirement 5: isolation, never fetch-then-hide -----------------------
+  const crossRoom = await request('GET', `/api/client/project/${roomProjectB.id}`, { clientSession: roomSessionA });
+  check('client A cannot open client B project room', crossRoom.status === 404);
+  const crossSectionB = await request('GET', `/api/client/project/${roomProjectB.id}/sections/reports`, { clientSession: roomSessionA });
+  check('client A cannot list client B reports', crossSectionB.status === 404);
+  const crossDocB = await request('GET', `/api/client/project/${roomProjectB.id}/documents/${bPrivate.id}`, { clientSession: roomSessionA });
+  check('client A cannot read a client B document', crossDocB.status === 404);
+  const crossDocViaOwnProject = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${bPrivate.id}`, { clientSession: roomSessionA });
+  check('a client B document id inside client A own project path is refused', crossDocViaOwnProject.status === 404);
+  const crossDownloadB = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${bPrivate.id}/download`, { clientSession: roomSessionA });
+  check('client A cannot download a client B document', crossDownloadB.status === 404);
+
+  const bRoom = await request('GET', `/api/client/project/${roomProjectB.id}`, { clientSession: roomSessionB });
+  check('client B sees only its own document', bRoom.status === 200 && bRoom.json.data.recent.length === 1 && bRoom.json.data.recent[0].id === bPrivate.id);
+  check('client B never sees client A documents', !JSON.stringify(bRoom.json).includes(roomA.id) && !/Published letter|View only report/.test(JSON.stringify(bRoom.json)));
+
+  // --- requirement 8: unpublished and archived stay hidden -------------------
+  check('an unpublished document is not readable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${unpublishedDraft.id}`, { clientSession: roomSessionA })).status === 404);
+  check('an unpublished document is not downloadable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${unpublishedDraft.id}/download`, { clientSession: roomSessionA })).status === 404);
+  check('an archived document is not readable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${archivedReport.id}`, { clientSession: roomSessionA })).status === 404);
+  check('an archived document is not downloadable',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${archivedReport.id}/download`, { clientSession: roomSessionA })).status === 404);
+  check('an archived document does not appear in its section',
+    !(await request('GET', `/api/client/project/${roomProjectA.id}/sections/reports`, { clientSession: roomSessionA }))
+      .json.data.documents.some((document) => document.id === archivedReport.id));
+
+  // --- requirement 3: direct URL manipulation --------------------------------
+  const rowIdA = db.query('SELECT id FROM client_projects WHERE public_id = ?', roomProjectB.id)[0].id;
+  check('a raw numeric project id from another client is refused',
+    (await request('GET', `/api/client/project/${rowIdA}`, { clientSession: roomSessionA })).status === 404);
+  check('a raw numeric document id is refused',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${db.query('SELECT id FROM client_documents WHERE public_id = ?', bPrivate.id)[0].id}`, { clientSession: roomSessionA })).status === 404);
+  check('an injection-shaped project id is refused',
+    (await request('GET', `/api/client/project/${encodeURIComponent("' OR '1'='1")}`, { clientSession: roomSessionA })).status === 404);
+  check('an injection-shaped document id is refused',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${encodeURIComponent('%')}`, { clientSession: roomSessionA })).status === 404);
+  check('a section outside the allowed list is refused',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/invoices`, { clientSession: roomSessionA })).status === 404);
+  check('the room cannot be opened without a session',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, {})).status === 401);
+
+  // --- every room interaction is recorded against the right client -----------
+  const activityA = await request('GET', `/api/phantom/clients/${roomA.id}/activity`, { token: phantomToken });
+  const eventNames = activityA.json.data.map((entry) => entry.event);
+  check('opening the room is recorded as PROJECT_OPENED', eventNames.includes('PROJECT_OPENED'));
+  check('opening a section is recorded as SECTION_OPENED', eventNames.includes('SECTION_OPENED'));
+
   // -------------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------------

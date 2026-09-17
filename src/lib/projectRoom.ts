@@ -1,0 +1,176 @@
+/**
+ * Project Room presentation rules.
+ *
+ * Pure functions with no React or DOM dependency, so the rules the room obeys
+ * — which sections may be shown, what an empty section says, how a permission
+ * is labelled — are unit tested directly rather than inferred from markup.
+ *
+ * Nothing here decides access. The server has already authorized every document
+ * that reaches these functions; these helpers only decide how to present it.
+ */
+
+export interface RoomSection {
+  id: string;
+  label: string;
+  count: number;
+}
+
+export interface RoomDocument {
+  id: string;
+  reference?: string | null;
+  title: string;
+  summary?: string;
+  category: string;
+  version?: string | null;
+  publishedAt?: string | null;
+  updatedAt?: string | null;
+  permissions?: { view?: boolean; download?: boolean };
+}
+
+/** The seven sections of a project room, in the order the client sees them. */
+export const ROOM_SECTIONS = [
+  { id: 'overview', label: 'Project Overview', empty: 'Nothing has been published to this project yet.' },
+  { id: 'documents', label: 'Documents', empty: 'No documents available.' },
+  { id: 'letters', label: 'Letters', empty: 'No letters available.' },
+  { id: 'agreements', label: 'Agreements', empty: 'No agreements available.' },
+  { id: 'reports', label: 'Reports', empty: 'No reports available.' },
+  { id: 'deliverables', label: 'Deliverables', empty: 'No deliverables available.' },
+  { id: 'updates', label: 'Updates', empty: 'No updates available.' },
+] as const;
+
+export const CATEGORY_LABELS: Record<string, string> = {
+  document: 'Document',
+  letter: 'Letter',
+  agreement: 'Agreement',
+  report: 'Report',
+  deliverable: 'Deliverable',
+  update: 'Update',
+};
+
+/** Client-facing wording for a project status. Never leaks internal state names. */
+export const PROJECT_STATUS_LABELS: Record<string, string> = {
+  active: 'Active',
+  suspended: 'On hold',
+  archived: 'Archived',
+};
+
+export const sectionLabel = (id: string): string =>
+  ROOM_SECTIONS.find((section) => section.id === id)?.label || 'Project';
+
+export const emptyMessageFor = (id: string): string =>
+  ROOM_SECTIONS.find((section) => section.id === id)?.empty || 'No documents available.';
+
+/**
+ * A section is shown only when it actually contains content the client may see.
+ * Project Overview is always shown, because it carries the project itself.
+ *
+ * `counts` come from the server and are computed from authorized rows only
+ * (published + client-visible + viewable), so a hidden draft can never make a
+ * section appear — and can never inflate a count.
+ */
+export const visibleSections = (
+  sections: RoomSection[] | null | undefined,
+  recentCount: number,
+): RoomSection[] => {
+  const byId = new Map<string, RoomSection>();
+  for (const section of sections || []) byId.set(section.id, section);
+
+  return ROOM_SECTIONS
+    .map((definition) => {
+      const fromServer = byId.get(definition.id);
+      const count = definition.id === 'overview' ? recentCount : fromServer?.count ?? 0;
+      return { id: definition.id, label: definition.label, count };
+    })
+    .filter((section) => section.id === 'overview' || section.count > 0);
+};
+
+export const hasAnyPublishedContent = (sections: RoomSection[] | null | undefined): boolean =>
+  (sections || []).some((section) => section.id !== 'overview' && section.count > 0);
+
+/**
+ * View and Download are independent permissions. A document is only offered for
+ * download when the server explicitly said so; viewing never implies downloading.
+ */
+export const canDownload = (document: RoomDocument): boolean => document.permissions?.download === true;
+export const canView = (document: RoomDocument): boolean => document.permissions?.view !== false;
+
+/** Short label describing the permission the client has on one document. */
+export const permissionLabel = (document: RoomDocument): string =>
+  canDownload(document) ? 'View and download' : 'View only';
+
+export interface RoomDocumentFlags {
+  /** True when this is the only document in its section. */
+  soleDocument: boolean;
+  downloadable: boolean;
+  viewOnly: boolean;
+}
+
+export const documentFlags = (document: RoomDocument, sectionSize: number): RoomDocumentFlags => ({
+  soleDocument: sectionSize === 1,
+  downloadable: canDownload(document),
+  viewOnly: !canDownload(document),
+});
+
+const parseDate = (value?: string | null): Date | null => {
+  if (!value) return null;
+  const text = String(value);
+  const normalised = text.includes('T') ? text : `${text.replace(' ', 'T')}Z`;
+  const parsed = new Date(normalised);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+/** `17 Sep 2026`, or an em dash when there is nothing meaningful to show. */
+export const formatDate = (value?: string | null): string => {
+  const parsed = parseDate(value);
+  if (!parsed) return '—';
+  return parsed.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+/**
+ * Publication information for one document. A document that has been updated
+ * after publication shows both, so the client can tell "new" from "changed".
+ */
+export const publicationInfo = (document: RoomDocument): { primary: string; secondary: string | null } => {
+  const published = parseDate(document.publishedAt);
+  const updated = parseDate(document.updatedAt);
+
+  if (!published && !updated) return { primary: 'Date unavailable', secondary: null };
+  if (!published) return { primary: `Updated ${formatDate(document.updatedAt)}`, secondary: null };
+  if (!updated) return { primary: `Published ${formatDate(document.publishedAt)}`, secondary: null };
+
+  const sameMoment = Math.abs(updated.getTime() - published.getTime()) < 60_000;
+  if (sameMoment) return { primary: `Published ${formatDate(document.publishedAt)}`, secondary: null };
+  return {
+    primary: `Published ${formatDate(document.publishedAt)}`,
+    secondary: `Updated ${formatDate(document.updatedAt)}`,
+  };
+};
+
+/** The project facts shown on the overview. All of them are the client's own. */
+export interface ProjectOverviewInput {
+  reference: string;
+  status: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  publishedCount: number;
+}
+
+export const overviewFacts = (project: ProjectOverviewInput): Array<{ label: string; value: string }> => [
+  { label: 'Status', value: PROJECT_STATUS_LABELS[project.status] || 'Active' },
+  { label: 'Project reference', value: project.reference },
+  { label: 'Opened', value: formatDate(project.createdAt) },
+  { label: 'Last updated', value: formatDate(project.updatedAt) },
+  {
+    label: 'Documents available',
+    value: project.publishedCount === 1 ? '1 document' : `${project.publishedCount} documents`,
+  },
+];
+
+/** A safe filename for a downloaded copy, derived only from client-facing data. */
+export const downloadFileName = (document: RoomDocument): string => {
+  const base = (document.reference || document.title || 'code-rx-document')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return `${base || 'code-rx-document'}.pdf`;
+};
