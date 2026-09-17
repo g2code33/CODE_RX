@@ -71,7 +71,6 @@ import {
   recordClientActivity,
   referenceKindForCategory,
   requireClientDocumentAccess,
-  requireClientPermission,
   requireClientPortalEnabled,
   requireClientProjectAccess,
   requireClientSession,
@@ -81,6 +80,24 @@ import {
   type ClientDocumentLifecycle,
   type ClientPrincipal,
 } from './lib/client-portal';
+import {
+  assertClientCapability,
+  auditPermissionChange,
+  capabilityForClientStatus,
+  capabilityForLifecycleState,
+  capabilityForProjectUpdate,
+  CLIENT_CAPABILITIES,
+  diffPermissionSets,
+  effectiveClientCapabilities,
+  isClientCapabilityKey,
+  isClientPortalPermissionKey,
+  CLIENT_PORTAL_PERMISSION_KEYS,
+  LEGACY_CLIENT_PERMISSION_EXPANSIONS,
+  LEGACY_CLIENT_PERMISSION_KEYS,
+  permissionChangeRefusal,
+  requireClientCapability,
+} from './lib/client-permissions';
+import { moveToRecycleBin } from './lib/recycle';
 
 type ClientApp = Hono<any>;
 
@@ -600,11 +617,30 @@ export const registerClientRoutes = (app: ClientApp) => {
   // CLIENT ACCESS CENTER — PHANTOM, or a member PHANTOM has delegated to
   // =========================================================================
 
-  const manage = requireClientPermission('clients.manage');
-  const publish = requireClientPermission('clients.publish');
-  const links = requireClientPermission('clients.links');
+  // Phase 6: every route below is guarded by exactly one granular capability.
+  // The Phase 5 umbrella keys still work because the engine expands them.
+  const view = requireClientCapability('clients.view');
+  const create = requireClientCapability('clients.create');
+  const edit = requireClientCapability('clients.edit');
+  const suspend = requireClientCapability('clients.suspend');
+  const archive = requireClientCapability('clients.archive');
+  const projectView = requireClientCapability('clients.projects.view');
+  const projectCreate = requireClientCapability('clients.projects.create');
+  const documentView = requireClientCapability('clients.documents.view');
+  const documentCreate = requireClientCapability('clients.documents.create');
+  const documentEdit = requireClientCapability('clients.documents.edit');
+  const documentDelete = requireClientCapability('clients.documents.delete');
+  const keyCreate = requireClientCapability('clients.keys.create');
+  const keyRegenerate = requireClientCapability('clients.keys.regenerate');
+  const keyRevoke = requireClientCapability('clients.keys.revoke');
+  const linkCreate = requireClientCapability('clients.links.create');
+  const linkRevoke = requireClientCapability('clients.links.revoke');
+  const linkManage = requireClientCapability('clients.links.manage');
+  const activityView = requireClientCapability('clients.activity.view');
+  const settingsManage = requireClientCapability('clients.settings.manage');
+  const permissionsManage = requireClientCapability('clients.permissions.manage');
 
-  app.get('/api/phantom/clients', requireAuth, manage, async (c: any) => {
+  app.get('/api/phantom/clients', requireAuth, view, async (c: any) => {
     const includeArchived = c.req.query('archived') === '1';
     const clients = await asRows<any>(c.env.DB.prepare(
       `SELECT cl.*, 
@@ -640,7 +676,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     });
   });
 
-  app.post('/api/phantom/clients', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/clients', requireAuth, create, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const body = await c.req.json().catch(() => ({}));
@@ -668,7 +704,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     return c.json({ success: true, data: { id: publicId } }, 201);
   });
 
-  app.get('/api/phantom/clients/:clientId', requireAuth, manage, async (c: any) => {
+  app.get('/api/phantom/clients/:clientId', requireAuth, view, async (c: any) => {
     const client = await findClientByPublicId(c.env.DB, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     const projects = await asRows<any>(c.env.DB.prepare(
@@ -702,7 +738,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     });
   });
 
-  app.patch('/api/phantom/clients/:clientId', requireAuth, manage, async (c: any) => {
+  app.patch('/api/phantom/clients/:clientId', requireAuth, edit, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
@@ -737,16 +773,21 @@ export const registerClientRoutes = (app: ClientApp) => {
    * Status control, including the emergency "SUSPEND CLIENT ACCESS".
    * Any state that denies access also runs the full credential cascade.
    */
-  app.post('/api/phantom/clients/:clientId/status', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/clients/:clientId/status', requireAuth, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
-    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
-    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     const body = await c.req.json().catch(() => ({}));
     const status = String(body.status || '').toLowerCase();
     if (!['active', 'suspended', 'archived', 'revoked'].includes(status)) {
       return c.json({ success: false, error: 'Choose active, suspended, archived, or revoked.' }, 400);
     }
+    // Suspending/revoking/reactivating and archiving are different capabilities.
+    // The check runs before the client is even read, so nothing is written for
+    // an unauthorized request.
+    const refusal = await assertClientCapability(c, capabilityForClientStatus(status));
+    if (refusal) return refusal;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
+    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
 
     await db.prepare(
       `UPDATE clients SET status = ?,
@@ -787,7 +828,7 @@ export const registerClientRoutes = (app: ClientApp) => {
    * access path while leaving the client record itself intact so PHANTOM can
    * re-issue a key later.
    */
-  app.post('/api/phantom/clients/:clientId/revoke-all', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/clients/:clientId/revoke-all', requireAuth, suspend, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
@@ -806,7 +847,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
   // ---------------- Projects ----------------
 
-  app.get('/api/phantom/clients/:clientId/projects', requireAuth, manage, async (c: any) => {
+  app.get('/api/phantom/clients/:clientId/projects', requireAuth, projectView, async (c: any) => {
     const client = await findClientByPublicId(c.env.DB, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     const projects = await asRows<any>(c.env.DB.prepare(
@@ -824,7 +865,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     })) });
   });
 
-  app.post('/api/phantom/clients/:clientId/projects', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/clients/:clientId/projects', requireAuth, projectCreate, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
@@ -852,12 +893,14 @@ export const registerClientRoutes = (app: ClientApp) => {
     return c.json({ success: true, data: { id: publicId, reference } }, 201);
   });
 
-  app.patch('/api/phantom/client-projects/:projectId', requireAuth, manage, async (c: any) => {
+  app.patch('/api/phantom/client-projects/:projectId', requireAuth, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
+    const body = await c.req.json().catch(() => ({}));
+    const refusal = await assertClientCapability(c, capabilityForProjectUpdate(body));
+    if (refusal) return refusal;
     const project = await findProjectByPublicId(db, String(c.req.param('projectId') || ''));
     if (!project) return c.json({ success: false, error: 'Project not found.' }, 404);
-    const body = await c.req.json().catch(() => ({}));
 
     const name = body.name === undefined ? project.name : cleanStr(body.name, 2, 200);
     if (!name) return c.json({ success: false, error: 'A valid project name is required.' }, 400);
@@ -896,7 +939,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
   // ---------------- Access keys ----------------
 
-  app.get('/api/phantom/clients/:clientId/keys', requireAuth, manage, async (c: any) => {
+  app.get('/api/phantom/clients/:clientId/keys', requireAuth, view, async (c: any) => {
     const client = await findClientByPublicId(c.env.DB, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     // key_hash is never selected: an operator can recognize a key by its hint,
@@ -922,7 +965,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     })) });
   });
 
-  app.post('/api/phantom/clients/:clientId/keys', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/clients/:clientId/keys', requireAuth, keyCreate, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
@@ -979,7 +1022,7 @@ export const registerClientRoutes = (app: ClientApp) => {
   });
 
   /** Rotates the credential in place and kills every session that used the old one. */
-  app.post('/api/phantom/client-keys/:keyId/regenerate', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/client-keys/:keyId/regenerate', requireAuth, keyRegenerate, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const keyId = String(c.req.param('keyId') || '').trim();
@@ -1013,7 +1056,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     });
   });
 
-  app.post('/api/phantom/client-keys/:keyId/revoke', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/client-keys/:keyId/revoke', requireAuth, keyRevoke, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const keyId = String(c.req.param('keyId') || '').trim();
@@ -1040,7 +1083,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     return c.json({ success: true, message: 'Access key revoked immediately.', data: { sessionsRevoked: sessions } });
   });
 
-  app.get('/api/phantom/clients/:clientId/links', requireAuth, links, async (c: any) => {
+  app.get('/api/phantom/clients/:clientId/links', requireAuth, linkManage, async (c: any) => {
     const db = c.env.DB;
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
@@ -1078,7 +1121,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     })) });
   });
 
-  app.post('/api/phantom/clients/:clientId/links', requireAuth, links, async (c: any) => {
+  app.post('/api/phantom/clients/:clientId/links', requireAuth, linkCreate, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     if (!await clientAllLinksEnabled(db)) {
@@ -1151,7 +1194,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     }, 201);
   });
 
-  app.post('/api/phantom/client-links/:linkId/revoke', requireAuth, links, async (c: any) => {
+  app.post('/api/phantom/client-links/:linkId/revoke', requireAuth, linkRevoke, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const link = await one<any>(db.prepare('SELECT * FROM client_links WHERE public_id = ?')
@@ -1173,7 +1216,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
   // ---------------- Client documents ----------------
 
-  app.get('/api/phantom/clients/:clientId/documents', requireAuth, manage, async (c: any) => {
+  app.get('/api/phantom/clients/:clientId/documents', requireAuth, documentView, async (c: any) => {
     const client = await findClientByPublicId(c.env.DB, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     const projectFilter = cleanOptionalStr(c.req.query('project'), 80);
@@ -1214,7 +1257,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     })) });
   });
 
-  app.post('/api/phantom/clients/:clientId/documents', requireAuth, manage, async (c: any) => {
+  app.post('/api/phantom/clients/:clientId/documents', requireAuth, documentCreate, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
@@ -1320,7 +1363,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     return c.json({ success: true, data: { id: publicId, reference, category } }, 201);
   });
 
-  app.patch('/api/phantom/client-documents/:documentId', requireAuth, manage, async (c: any) => {
+  app.patch('/api/phantom/client-documents/:documentId', requireAuth, documentEdit, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
     const documentPublicId = String(c.req.param('documentId') || '').trim();
@@ -1379,19 +1422,23 @@ export const registerClientRoutes = (app: ClientApp) => {
    * Lifecycle control. Only `published` documents are ever exposed to a client,
    * and publication additionally requires the explicit client-visibility flag.
    */
-  app.post('/api/phantom/client-documents/:documentId/lifecycle', requireAuth, publish, async (c: any) => {
+  app.post('/api/phantom/client-documents/:documentId/lifecycle', requireAuth, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
-    const documentPublicId = String(c.req.param('documentId') || '').trim();
-    if (!documentPublicId) return c.json({ success: false, error: 'Invalid document id.' }, 400);
-    const document = await findDocumentByPublicId(db, documentPublicId);
-    if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
-
     const body = await c.req.json().catch(() => ({}));
     const state = String(body.state || '').toLowerCase();
     if (!CLIENT_DOCUMENT_LIFECYCLE.includes(state as ClientDocumentLifecycle)) {
       return c.json({ success: false, error: 'Choose draft, in_review, approved, published, unpublished, or archived.' }, 400);
     }
+    // Publishing, unpublishing and archiving are separate capabilities, and the
+    // check happens before the document is read.
+    const refusal = await assertClientCapability(c, capabilityForLifecycleState(state));
+    if (refusal) return refusal;
+
+    const documentPublicId = String(c.req.param('documentId') || '').trim();
+    if (!documentPublicId) return c.json({ success: false, error: 'Invalid document id.' }, 400);
+    const document = await findDocumentByPublicId(db, documentPublicId);
+    if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
 
     const publishNow = state === 'published';
     const clientVisible = publishNow
@@ -1442,7 +1489,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
   // ---------------- Client activity (existing audit infrastructure) ----------------
 
-  app.get('/api/phantom/clients/:clientId/activity', requireAuth, manage, async (c: any) => {
+  app.get('/api/phantom/clients/:clientId/activity', requireAuth, activityView, async (c: any) => {
     const client = await findClientByPublicId(c.env.DB, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     const limit = Math.min(200, Math.max(1, Number(c.req.query('limit') || 60)));
@@ -1482,8 +1529,12 @@ export const registerClientRoutes = (app: ClientApp) => {
 // =============================================================================
 
 const registerClientAccessCenterRoutes = (app: ClientApp) => {
-  const preview = requireClientPermission('clients.preview');
-  const publish = requireClientPermission('clients.publish');
+  const preview = requireClientCapability('clients.preview');
+  const documentDelete = requireClientCapability('clients.documents.delete');
+  const settingsManage = requireClientCapability('clients.settings.manage');
+  const permissionsManage = requireClientCapability('clients.permissions.manage');
+  // The internal publishing picker belongs to the create flow and nothing else.
+  const vaultSources = requireClientCapability('clients.documents.create');
 
   /** The client's projects, as the operator needs them (no internal fields). */
   const previewProjects = async (db: D1Database, clientId: number) => asRows<any>(db.prepare(
@@ -1664,7 +1715,293 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
    * list to an operator never makes a document client-visible — that only
    * happens through the explicit publish action, which pins a version snapshot.
    */
-  app.get('/api/phantom/client-vault-sources', requireAuth, publish, async (c: any) => {
+  /**
+   * DELETE a client document.
+   *
+   * The record is removed from the portal and snapshotted into the platform's
+   * EXISTING Recycle Bin, so PHANTOM can restore it from the same place every
+   * other deleted record is restored from. A restored document comes back as a
+   * draft: nothing returns to a client without a deliberate publish.
+   */
+  app.delete('/api/phantom/client-documents/:documentId', requireAuth, documentDelete, async (c: any) => {
+    const db = c.env.DB;
+    const actor = await actorFromContext(c);
+    const documentPublicId = String(c.req.param('documentId') || '').trim();
+    if (!documentPublicId) return c.json({ success: false, error: 'Invalid document id.' }, 400);
+    const document = await findDocumentByPublicId(db, documentPublicId);
+    if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
+
+    await moveToRecycleBin(db, actor, 'client_document', document.id, `Client document · ${document.title}`, { document });
+    await db.prepare('DELETE FROM client_documents WHERE id = ?').bind(document.id).run();
+    await audit(db, actor, 'client.document.deleted', 'client_document', document.id, {
+      clientId: document.client_id,
+      documentPublicId: document.public_id,
+      reference: document.reference_code,
+      previousValue: { lifecycle: document.lifecycle_status, clientVisible: Number(document.client_visible) === 1 },
+      newValue: { deleted: true, recoverable: 'recycle_bin' },
+    });
+    await recordClientActivity(db, 'DOCUMENT_VIEWED', {
+      clientPublicId: null,
+      details: { note: 'document deleted', documentId: document.public_id, reference: document.reference_code },
+    });
+    return c.json({
+      success: true,
+      message: 'Client document deleted. It can be restored from PHANTOM → Recycle Bin.',
+    });
+  });
+
+  // =========================================================================
+  // CLIENT PORTAL SETTINGS (CLIENT_SETTINGS_MANAGE)
+  //
+  // The same three flags the client-facing routes already read. PHANTOM can
+  // also change them through the existing settings route; this route exists so
+  // the capability can be delegated without handing over platform settings.
+  // =========================================================================
+  const PORTAL_SETTING_KEYS = ['client_portal_enabled', 'client_downloads_enabled', 'client_all_links_enabled'];
+
+  app.get('/api/phantom/client-portal-settings', requireAuth, settingsManage, async (c: any) => {
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT setting_key, setting_value, updated_at FROM system_settings WHERE setting_key IN (${PORTAL_SETTING_KEYS.map(() => '?').join(',')})`
+    ).bind(...PORTAL_SETTING_KEYS));
+    const byKey = new Map(rows.map((row) => [String(row.setting_key), row]));
+    return c.json({
+      success: true,
+      data: PORTAL_SETTING_KEYS.map((key) => ({
+        key,
+        value: String(byKey.get(key)?.setting_value ?? '0') === '1',
+        updatedAt: byKey.get(key)?.updated_at ?? null,
+      })),
+    });
+  });
+
+  app.put('/api/phantom/client-portal-settings', requireAuth, settingsManage, async (c: any) => {
+    const db = c.env.DB;
+    const actor = await actorFromContext(c);
+    const body = await c.req.json().catch(() => ({}));
+    const changes = Array.isArray(body.settings) ? body.settings : [];
+    const applied: Array<{ key: string; previous: boolean; next: boolean }> = [];
+    for (const entry of changes) {
+      const key = String(entry?.key || '');
+      if (!PORTAL_SETTING_KEYS.includes(key)) {
+        return c.json({ success: false, error: 'Unknown client portal setting.' }, 400);
+      }
+      if (typeof entry.value !== 'boolean') {
+        return c.json({ success: false, error: 'A portal setting must be true or false.' }, 400);
+      }
+      const existing = await one<any>(db.prepare('SELECT setting_value FROM system_settings WHERE setting_key = ?').bind(key));
+      await db.prepare(
+        `INSERT INTO system_settings (setting_key, setting_value, updated_by_user_id, updated_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value,
+           updated_by_user_id = excluded.updated_by_user_id, updated_at = CURRENT_TIMESTAMP`
+      ).bind(key, entry.value ? '1' : '0', actor?.userId ?? null).run();
+      applied.push({ key, previous: String(existing?.setting_value ?? '0') === '1', next: entry.value });
+    }
+    if (applied.length) {
+      await audit(db, actor, 'client.portal_settings.updated', 'system_settings', 'client_portal', {
+        previousValue: Object.fromEntries(applied.map((entry) => [entry.key, entry.previous])),
+        newValue: Object.fromEntries(applied.map((entry) => [entry.key, entry.next])),
+      });
+    }
+    return c.json({ success: true, message: 'Client portal settings saved.', data: { applied } });
+  });
+
+  // =========================================================================
+  // PERMISSION MATRIX (CLIENT_PERMISSIONS_MANAGE)
+  //
+  // Reads the delegation state from the platform's existing tables and records
+  // every change — who, what, when, target, old value, new value — in the
+  // existing audit log.
+  // =========================================================================
+
+  /** The catalog plus the caller's own effective capabilities (any signed-in member). */
+  app.get('/api/phantom/client-capabilities', requireAuth, async (c: any) => {
+    const db = c.env.DB;
+    const actor = await actorFromContext(c);
+    if (!actor) return c.json({ success: false, error: 'Account not found' }, 404);
+    const mine = await effectiveClientCapabilities(db, actor);
+    return c.json({
+      success: true,
+      data: {
+        capabilities: CLIENT_CAPABILITIES,
+        legacy: LEGACY_CLIENT_PERMISSION_KEYS.map((key) => ({
+          key,
+          expandsTo: LEGACY_CLIENT_PERMISSION_EXPANSIONS[key] || [],
+          label: key === 'clients.manage' ? 'Phase 5 umbrella: full client management'
+            : key === 'clients.publish' ? 'Phase 5 umbrella: publishing workflow'
+              : key === 'clients.links' ? 'Phase 5 umbrella: temporary links'
+                : 'Preview as client',
+        })),
+        mine: Array.from(mine).sort(),
+        isPhantom: actor.isPhantom,
+      },
+    });
+  });
+
+  const permissionMatrix = async (db: D1Database) => {
+    const members = await asRows<any>(db.prepare(
+      `SELECT mp.id, mp.member_code, mp.status, mp.codename_path, u.name, u.email,
+              wa.id AS website_admin_id, wa.status AS website_admin_status,
+              r.code AS primary_role_code
+       FROM member_profiles mp
+       JOIN users u ON u.id = mp.user_id
+       LEFT JOIN roles r ON r.id = mp.primary_role_id
+       LEFT JOIN website_admins wa ON wa.member_profile_id = mp.id
+       WHERE mp.status <> 'archived'
+       ORDER BY mp.id`
+    ));
+    const granted = await asRows<any>(db.prepare(
+      'SELECT website_admin_id, permission_key FROM website_admin_permissions WHERE allowed = 1'
+    ));
+    const recent = await asRows<any>(db.prepare(
+      `SELECT a.id, a.action, a.created_at, a.details_json, a.subject_id,
+              u.name AS actor_name, mp.member_code AS actor_member_code
+       FROM audit_logs a
+       LEFT JOIN users u ON u.id = a.actor_user_id
+       LEFT JOIN member_profiles mp ON mp.id = a.actor_member_profile_id
+       WHERE a.subject_type = 'client_permission'
+          OR a.action IN ('client.permissions.updated', 'website_admin.permissions_updated', 'website_admin.assigned')
+       ORDER BY a.created_at DESC, a.id DESC LIMIT 25`
+    ));
+    const parse = (value: unknown) => {
+      try { return JSON.parse(String(value || '{}')); } catch { return {}; }
+    };
+    return {
+      members: members.map((member) => ({
+        id: Number(member.id),
+        name: member.name,
+        email: member.email,
+        memberCode: member.member_code,
+        status: member.status,
+        responsibility: member.primary_role_code,
+        codenamePath: member.codename_path,
+        websiteAdminId: member.website_admin_id === null ? null : Number(member.website_admin_id),
+        websiteAdminStatus: member.website_admin_status || null,
+        permissions: (member.website_admin_id === null || member.website_admin_id === undefined
+          ? []
+          : granted.filter((row) => Number(row.website_admin_id) === Number(member.website_admin_id))
+            .map((row) => String(row.permission_key))).sort(),
+      })),
+      recentChanges: recent.map((row) => {
+        const details = parse(row.details_json);
+        return {
+          id: row.id,
+          action: row.action,
+          at: row.created_at,
+          actor: row.actor_name || 'PHANTOM',
+          actorMemberCode: row.actor_member_code || null,
+          target: details.target?.name || details.target?.memberCode || row.subject_id || null,
+          targetMemberCode: details.target?.memberCode ?? null,
+          previousValue: details.previousValue ?? null,
+          newValue: details.newValue ?? null,
+          added: details.added ?? null,
+          removed: details.removed ?? null,
+          source: details.source ?? null,
+        };
+      }),
+      capabilities: CLIENT_CAPABILITIES,
+      legacy: LEGACY_CLIENT_PERMISSION_KEYS,
+    };
+  };
+
+  app.get('/api/phantom/client-permissions', requireAuth, permissionsManage, async (c: any) => {
+    const db = c.env.DB;
+    const actor = await actorFromContext(c);
+    const mine = await effectiveClientCapabilities(db, actor);
+    const matrix = await permissionMatrix(db);
+    return c.json({
+      success: true,
+      data: {
+        ...matrix,
+        mine: Array.from(mine).sort(),
+        isPhantom: Boolean(actor?.isPhantom),
+        canGrant: Array.from(mine).filter(isClientCapabilityKey).sort(),
+      },
+    });
+  });
+
+  /**
+   * Grant, remove or modify a member's client capabilities.
+   *
+   * PHANTOM is unrestricted. A delegated holder of CLIENT_PERMISSIONS_MANAGE is
+   * bound by the non-escalation rule in lib/client-permissions: client-portal
+   * capabilities only, never their own account, and never a capability they do
+   * not hold themselves.
+   */
+  app.post('/api/phantom/client-permissions', requireAuth, permissionsManage, async (c: any) => {
+    const db = c.env.DB;
+    const actor = await actorFromContext(c);
+    if (!actor) return c.json({ success: false, error: 'Account not found' }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const profileId = Number(body.memberProfileId);
+    if (!Number.isInteger(profileId) || profileId < 1) return c.json({ success: false, error: 'Choose a member.' }, 400);
+    if (!Array.isArray(body.permissions)) return c.json({ success: false, error: 'Send the full set of client permissions.' }, 400);
+
+    const requested: string[] = Array.from(new Set<string>((body.permissions as unknown[]).map((key) => String(key))));
+    const unknown = requested.filter((key) => !isClientPortalPermissionKey(key));
+    if (unknown.length) {
+      return c.json({ success: false, error: `Unknown client permission: ${unknown.join(', ')}.` }, 400);
+    }
+
+    const profiles = await asRows<any>(db.prepare(
+      'SELECT mp.id, mp.member_code, mp.status, u.name FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE mp.id = ?'
+    ).bind(profileId));
+    const profile = profiles[0];
+    if (!profile) return c.json({ success: false, error: 'Member not found.' }, 404);
+    if (profile.status !== 'active') {
+      return c.json({ success: false, error: 'Only an active member can hold client permissions.' }, 409);
+    }
+
+    const adminRows = await asRows<any>(db.prepare('SELECT id, status FROM website_admins WHERE member_profile_id = ?').bind(profileId));
+    const websiteAdminId = adminRows[0]?.id ?? null;
+    const beforeRows: Array<{ permission_key: string }> = websiteAdminId === null ? [] : await asRows<{ permission_key: string }>(db.prepare(
+      'SELECT permission_key FROM website_admin_permissions WHERE website_admin_id = ? AND allowed = 1'
+    ).bind(websiteAdminId));
+    const changes = diffPermissionSets(beforeRows.map((entry) => String(entry.permission_key)), requested);
+
+    const refusal = await permissionChangeRefusal(db, actor, profileId, changes);
+    if (refusal) return c.json({ success: false, error: refusal, code: 'permission_escalation_refused' }, 403);
+
+    if (websiteAdminId === null) {
+      await db.prepare(
+        `INSERT INTO website_admins (member_profile_id, status, assigned_by_user_id, assigned_at)
+         VALUES (?, 'active', ?, CURRENT_TIMESTAMP)`
+      ).bind(profileId, actor.userId ?? null).run();
+    } else if (String(adminRows[0].status) !== 'active') {
+      await db.prepare("UPDATE website_admins SET status = 'active', suspended_at = NULL WHERE id = ?").bind(websiteAdminId).run();
+    }
+    const activeAdminRows = await asRows<any>(db.prepare('SELECT id FROM website_admins WHERE member_profile_id = ?').bind(profileId));
+    const activeAdminId = Number(activeAdminRows[0]?.id);
+    // Only the client-portal family is rewritten: other website powers a member
+    // may hold are never touched by a client-permission change.
+    await db.prepare(
+      `DELETE FROM website_admin_permissions WHERE website_admin_id = ?
+       AND permission_key IN (${CLIENT_PORTAL_PERMISSION_KEYS.map(() => '?').join(',')})`
+    ).bind(activeAdminId, ...CLIENT_PORTAL_PERMISSION_KEYS).run();
+    for (const key of requested) {
+      await db.prepare('INSERT INTO website_admin_permissions (website_admin_id, permission_key, allowed) VALUES (?, ?, 1)')
+        .bind(activeAdminId, key).run();
+    }
+
+    await auditPermissionChange(db, actor, {
+      targetProfileId: profileId,
+      targetMemberCode: profile.member_code ?? null,
+      targetName: profile.name ?? null,
+      targetWebsiteAdminId: activeAdminId,
+      changes,
+      source: 'client_access_center.permissions',
+    });
+
+    return c.json({
+      success: true,
+      message: changes.added.length || changes.removed.length
+        ? `Client permissions updated for ${profile.name || 'member'}.`
+        : `No change: ${profile.name || 'member'} already had exactly those client permissions.`,
+      data: { memberProfileId: profileId, websiteAdminId: activeAdminId, ...changes },
+    });
+  });
+
+  app.get('/api/phantom/client-vault-sources', requireAuth, vaultSources, async (c: any) => {
     const search = cleanOptionalStr(c.req.query('search'), 80);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT d.id, d.document_code, d.title, d.status, d.visibility, d.updated_at,

@@ -20,6 +20,10 @@ import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLeve
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 import { registerClientRoutes } from './client-routes';
+import { moveToRecycleBin } from './lib/recycle';
+import {
+  auditPermissionChange, CLIENT_PORTAL_PERMISSION_KEYS, diffPermissionSets,
+} from './lib/client-permissions';
 
 type AppEnv = { Bindings: Env; Variables: { user: JwtPayload; actor: Awaited<ReturnType<typeof getActor>> } };
 
@@ -93,13 +97,9 @@ const recoverVaultShareUrl = async (env: Env, share: { id: number; token_hash: s
 
 type FounderActor = NonNullable<Awaited<ReturnType<typeof getActor>>>;
 
-const moveToRecycleBin = async (db: D1Database, actor: FounderActor | null, resourceType: string, resourceId: string | number, title: string, payload: unknown) => {
-  const serialized = JSON.stringify(payload).slice(0, 250_000);
-  const result = await db.prepare(
-    'INSERT INTO recycle_bin_items (resource_type, resource_id, title, payload_json, deleted_by_user_id, deleted_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
-  ).bind(resourceType.slice(0, 80), String(resourceId).slice(0, 120), title.slice(0, 240), serialized, actor?.userId ?? null).run();
-  return Number(result.meta.last_row_id);
-};
+// `moveToRecycleBin` now lives in functions/lib/recycle.ts so application
+// routes (PHANTOM's own and the client portal's document delete) share one
+// implementation. Behaviour is unchanged.
 
 type CodenamePath = 'member' | 'custom_founding' | 'direct_founding';
 
@@ -4512,6 +4512,33 @@ const restoreRecycleBinItem = async (db: D1Database, item: any) => {
     ).bind(notification.id, recipient.member_profile_id, recipient.status || 'unread', recipient.delivered_at ?? null, recipient.read_at ?? null)));
     return;
   }
+  if (item.resource_type === 'client_document') {
+    const row = payload?.document;
+    if (!row?.id || !row?.public_id) throw new Error('The client document snapshot is incomplete.');
+    const existing = await dbRows<any>(db.prepare('SELECT id FROM client_documents WHERE id = ? OR public_id = ? OR reference_code = ?')
+      .bind(row.id, row.public_id, row.reference_code));
+    if (existing[0]) throw new Error('This client document already exists.');
+    const project = await dbRows<any>(db.prepare('SELECT id FROM client_projects WHERE id = ?').bind(row.client_project_id));
+    if (!project[0]) throw new Error('The project this document belonged to no longer exists.');
+    await db.prepare(
+      `INSERT INTO client_documents
+       (id, public_id, client_id, client_project_id, category, reference_code, title, summary, version,
+        lifecycle_status, client_visible, allow_view, allow_download, is_archived, vault_document_id,
+        vault_version_number, content_snapshot, content_snapshot_format, storage_reference, published_at,
+        published_by_user_id, unpublished_at, created_by_user_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      row.id, row.public_id, row.client_id, row.client_project_id, row.category || 'document', row.reference_code,
+      row.title, row.summary || '', row.version || '1.0',
+      // A restored document never returns to the client automatically: it comes
+      // back as a draft that PHANTOM must publish again deliberately.
+      'draft', 0, row.allow_view === null || row.allow_view === undefined ? 1 : row.allow_view, 0, 0,
+      row.vault_document_id ?? null, row.vault_version_number ?? null, row.content_snapshot ?? null,
+      row.content_snapshot_format || 'blocks', null, null, null, null,
+      row.created_by_user_id ?? null, row.created_at ?? null, row.updated_at ?? null,
+    ).run();
+    return;
+  }
   if (item.resource_type === 'notification_recipient') {
     const recipient = payload?.recipient;
     if (!recipient?.notification_id || !recipient?.member_profile_id) throw new Error('The inbox notification snapshot is incomplete.');
@@ -5242,8 +5269,10 @@ const WEBSITE_PERMISSION_KEYS = [
   'pages.edit', 'announcements.manage', 'events.manage', 'projects.manage',
   'media.upload', 'resources.manage', 'content.manage',
   // Client Project Portal delegation. PHANTOM remains implicitly allowed and
-  // no member receives these until PHANTOM grants them explicitly.
-  'clients.manage', 'clients.publish', 'clients.links', 'clients.preview',
+  // no member receives any of these until PHANTOM grants them explicitly. The
+  // granular Phase 6 capabilities and the four Phase 5 umbrella keys are both
+  // listed here, sourced from the one registry in lib/client-permissions.
+  ...CLIENT_PORTAL_PERMISSION_KEYS,
 ] as const;
 
 app.get('/api/phantom/website-admins', requireAuth, requirePhantom, async (c) => {
@@ -5275,12 +5304,30 @@ app.post('/api/phantom/website-admins', requireAuth, requirePhantom, async (c) =
     ).bind(profileId, actor?.userId ?? null).run();
     const row = await dbRows<any>(c.env.DB.prepare('SELECT id FROM website_admins WHERE member_profile_id = ?').bind(profileId));
     const websiteAdminId = row[0]?.id;
+    const beforeRows = await dbRows<{ permission_key: string }>(c.env.DB.prepare(
+      'SELECT permission_key FROM website_admin_permissions WHERE website_admin_id = ? AND allowed = 1'
+    ).bind(websiteAdminId));
+    const changes = diffPermissionSets(beforeRows.map((entry) => entry.permission_key), permissionKeys);
     await c.env.DB.prepare('DELETE FROM website_admin_permissions WHERE website_admin_id = ?').bind(websiteAdminId).run();
     for (const permission of permissionKeys) {
       await c.env.DB.prepare('INSERT INTO website_admin_permissions (website_admin_id, permission_key, allowed) VALUES (?, ?, 1)').bind(websiteAdminId, permission).run();
     }
-    await audit(c.env.DB, actor, 'website_admin.assigned', 'member_profile', profileId, { permissions: permissionKeys });
-    return c.json({ success: true, message: 'Website Admin assigned.' });
+    await audit(c.env.DB, actor, 'website_admin.assigned', 'member_profile', profileId, {
+      permissions: permissionKeys, previousValue: changes.previous, newValue: changes.next,
+      added: changes.added, removed: changes.removed,
+    });
+    const target = await dbRows<any>(c.env.DB.prepare(
+      'SELECT u.name, mp.member_code FROM member_profiles mp LEFT JOIN users u ON u.id = mp.user_id WHERE mp.id = ?'
+    ).bind(profileId));
+    await auditPermissionChange(c.env.DB, actor, {
+      targetProfileId: profileId,
+      targetMemberCode: target[0]?.member_code ?? null,
+      targetName: target[0]?.name ?? null,
+      targetWebsiteAdminId: websiteAdminId ?? null,
+      changes,
+      source: 'website_admin.assign',
+    });
+    return c.json({ success: true, message: 'Website Admin assigned.', data: { changes } });
   } catch (error) {
     console.error('[code-rx] assign website admin error:', error);
     return c.json({ success: false, error: 'Could not assign Website Admin' }, 500);
@@ -5299,13 +5346,32 @@ app.patch('/api/phantom/website-admins/:id', requireAuth, requirePhantom, async 
       await c.env.DB.prepare("UPDATE website_admins SET status = ?, suspended_at = CASE WHEN ? = 'suspended' THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id = ?")
         .bind(status, status, id).run();
     }
+    let changes = null;
     if (Array.isArray(body.permissions)) {
       const permissionKeys = body.permissions.filter((key: unknown) => typeof key === 'string' && (WEBSITE_PERMISSION_KEYS as readonly string[]).includes(key));
+      const beforeRows = await dbRows<{ permission_key: string }>(c.env.DB.prepare(
+        'SELECT permission_key FROM website_admin_permissions WHERE website_admin_id = ? AND allowed = 1'
+      ).bind(id));
+      changes = diffPermissionSets(beforeRows.map((entry) => entry.permission_key), permissionKeys);
       await c.env.DB.prepare('DELETE FROM website_admin_permissions WHERE website_admin_id = ?').bind(id).run();
       for (const permission of permissionKeys) await c.env.DB.prepare('INSERT INTO website_admin_permissions (website_admin_id, permission_key, allowed) VALUES (?, ?, 1)').bind(id, permission).run();
+      const targetRows = await dbRows<any>(c.env.DB.prepare(
+        'SELECT wa.member_profile_id, u.name, mp.member_code FROM website_admins wa LEFT JOIN member_profiles mp ON mp.id = wa.member_profile_id LEFT JOIN users u ON u.id = mp.user_id WHERE wa.id = ?'
+      ).bind(id));
+      await auditPermissionChange(c.env.DB, actor, {
+        targetProfileId: Number(targetRows[0]?.member_profile_id || 0),
+        targetMemberCode: targetRows[0]?.member_code ?? null,
+        targetName: targetRows[0]?.name ?? null,
+        targetWebsiteAdminId: id,
+        changes,
+        source: 'website_admin.update',
+      });
     }
-    await audit(c.env.DB, actor, `website_admin.${status || 'permissions_updated'}`, 'website_admin', id, { permissions: body.permissions || null });
-    return c.json({ success: true, message: 'Website Admin updated.' });
+    await audit(c.env.DB, actor, `website_admin.${status || 'permissions_updated'}`, 'website_admin', id, {
+      permissions: body.permissions || null,
+      ...(changes ? { previousValue: changes.previous, newValue: changes.next, added: changes.added, removed: changes.removed } : {}),
+    });
+    return c.json({ success: true, message: 'Website Admin updated.', data: changes ? { changes } : null });
   } catch (error) {
     console.error('[code-rx] update website admin error:', error);
     return c.json({ success: false, error: 'Could not update Website Admin' }, 500);

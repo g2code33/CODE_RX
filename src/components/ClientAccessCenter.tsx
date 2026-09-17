@@ -116,7 +116,8 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [documents, setDocuments] = useState<any[]>([]);
   const [links, setLinks] = useState<any[]>([]);
   const [activity, setActivity] = useState<any[]>([]);
-  const [delegates, setDelegates] = useState<any>({ admins: [], availablePermissions: [] });
+  const [capabilities, setCapabilities] = useState<any>({ capabilities: [], legacy: [], mine: [] });
+  const [portalSettings, setPortalSettings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,22 +169,47 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
     }
   }, []);
 
-  const loadDelegates = useCallback(async () => {
+  /**
+   * The caller's own effective capabilities. Rendering follows this set so an
+   * operator is not offered an action the server would refuse — but the server
+   * remains the authority for every request (Phase 6, requirement 6).
+   */
+  const loadCapabilities = useCallback(async () => {
+    try {
+      setCapabilities(await clientAccessCenter.capabilities());
+    } catch {
+      // A member with no client capability still needs a usable page; the
+      // empty set below simply hides every action.
+      setCapabilities({ capabilities: [], legacy: [], mine: [] });
+    }
+  }, []);
+
+  const loadPermissionMatrix = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      const { db } = await import('../lib/cloudflare');
-      setDelegates(await db.phantom.websiteAdmins());
+      const [matrix, settings] = await Promise.all([
+        clientAccessCenter.permissionMatrix(),
+        clientAccessCenter.portalSettings().catch(() => []),
+      ]);
+      setCapabilities((current: any) => ({ ...current, ...matrix, mine: matrix.mine ?? current.mine }));
+      setPortalSettings(settings || []);
     } catch (failure: any) {
-      setError(failure?.message || 'Delegated permissions could not be loaded.');
+      setError(failure?.message || 'Client permissions could not be loaded.');
     } finally {
       setBusy(false);
     }
   }, []);
 
-  useEffect(() => { void loadClients(); }, [loadClients]);
+  useEffect(() => { void loadCapabilities(); void loadClients(); }, [loadCapabilities, loadClients]);
   useEffect(() => { if (selectedClientId) void loadClientWorkspace(selectedClientId); }, [selectedClientId, loadClientWorkspace]);
-  useEffect(() => { if (section === 'permissions') void loadDelegates(); }, [section, loadDelegates]);
+  useEffect(() => { if (section === 'permissions') void loadPermissionMatrix(); }, [section, loadPermissionMatrix]);
+
+  /** Does the operator hold this capability? PHANTOM always does. */
+  const can = (capability: string) => Boolean(capabilities.isPhantom || (capabilities.mine || []).includes(capability));
+
+  /** Re-read the operator's own capabilities after a permission change. */
+  const reloadMine = async () => { await loadCapabilities(); };
 
   const refresh = async (message: string) => {
     if (selectedClientId) await loadClientWorkspace(selectedClientId);
@@ -269,9 +295,11 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => setShowClientForm({ mode: 'create' })} className="mini-button mini-button--primary">
-            <Plus className="h-4 w-4" /> Create client
-          </button>
+          {can('clients.create') ? (
+            <button onClick={() => setShowClientForm({ mode: 'create' })} className="mini-button mini-button--primary">
+              <Plus className="h-4 w-4" /> Create client
+            </button>
+          ) : null}
           <button onClick={() => void loadClients(includeArchived)} disabled={busy} className="mini-button">
             <RefreshCw className="h-4 w-4" /> Refresh
           </button>
@@ -296,6 +324,13 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
       {error ? (
         <p role="alert" className="mt-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-800">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {error}
+        </p>
+      ) : null}
+
+      {!can('clients.view') ? (
+        <p role="alert" className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-6 text-sm font-semibold text-amber-900">
+          You do not have permission to view client records. PHANTOM can grant CLIENT_VIEW (or the granular
+          capabilities you need) in the Permissions section of this workspace.
         </p>
       ) : null}
 
@@ -346,6 +381,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
               {section === 'clients' && (
                 <ClientsPanel
                   client={detail} keyCount={keys.length} projectCount={projects.length}
+                  can={can}
                   lastActivityAt={clients.find((entry) => entry.id === detail.id)?.lastActivityAt || null}
                   publishedCount={documents.filter((doc) => doc.lifecycle === 'published' && doc.clientVisible).length}
                   onEdit={() => setShowClientForm({ mode: 'edit', client: detail })}
@@ -360,7 +396,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
 
               {section === 'projects' && (
                 <ProjectsPanel
-                  client={detail} projects={projects} documents={documents} keys={keys}
+                  can={can} client={detail} projects={projects} documents={documents} keys={keys}
                   onCreate={() => setShowProjectForm({ mode: 'create' })}
                   onEdit={(project: any) => setShowProjectForm({ mode: 'edit', project })}
                   onArchive={(project: any) => void setProjectArchived(project, true, refresh, setError)}
@@ -371,17 +407,18 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
 
               {section === 'documents' && (
                 <DocumentsPanel
-                  client={detail} documents={documents} projects={projects}
+                  can={can} client={detail} documents={documents} projects={projects}
                   onPublish={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id })}
                   onLifecycle={(document: any, state: string) => void changeLifecycle(document, state, refresh, setError)}
-                  onEdit={(document: any) => setPublishFlow({ clientId: detail.id, projectId: document.projectId, document })}
+                  onEdit={(document: any) => setPublishFlow({ clientId: detail.id, projectId: document.project?.id, document })}
+                  onDelete={(document: any) => void deleteDocument(document, refresh, setError)}
                   busy={busy}
                 />
               )}
 
               {section === 'links' && (
                 <LinksPanel
-                  client={detail} links={links}
+                  can={can} client={detail} links={links}
                   onCreate={() => setLinkDialog({ clientId: detail.id })}
                   onRevoke={(link: any) => void revokeLink(link, refresh, setError)}
                   busy={busy}
@@ -391,7 +428,12 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
               {section === 'activity' && <ActivityPanel client={detail} activity={activity} />}
 
               {section === 'permissions' && (
-                <PermissionsPanel data={delegates} onSaved={() => { void loadDelegates(); onMessage('Delegated permissions updated.'); }} />
+                <PermissionsPanel
+                  data={capabilities} settings={portalSettings}
+                  onSaved={async (message) => { await loadPermissionMatrix(); await reloadMine(); onMessage(message); }}
+                  onSettingsSaved={async (message) => { await loadPermissionMatrix(); onMessage(message); }}
+                  onError={(message) => { if (message) onMessage(message); }}
+                />
               )}
             </>
           )}
@@ -464,8 +506,9 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
 // ---------------------------------------------------------------------------
 
 const ClientsPanel = ({
-  client, keyCount, projectCount, publishedCount, lastActivityAt, onEdit, onSuspend, onReactivate, onArchive, onRevokeAll, onPreview, busy,
+  can, client, keyCount, projectCount, publishedCount, lastActivityAt, onEdit, onSuspend, onReactivate, onArchive, onRevokeAll, onPreview, busy,
 }: {
+  can: (capability: string) => boolean;
   client: any; keyCount: number; projectCount: number; publishedCount: number; lastActivityAt: string | null;
   onEdit: () => void; onSuspend: () => void; onReactivate: () => void; onArchive: () => void;
   onRevokeAll: () => void; onPreview: () => void; busy: boolean;
@@ -487,10 +530,12 @@ const ClientsPanel = ({
           {client.notes ? <p className="mt-3 rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs font-medium text-slate-600">Internal note: {client.notes}</p> : null}
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={onEdit} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button>
-          <button onClick={onPreview} disabled={busy} className="mini-button !border-emerald-200 !bg-emerald-50 !text-emerald-800">
-            <Eye className="h-4 w-4" /> Preview as client
-          </button>
+          {can('clients.edit') ? <button onClick={onEdit} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
+          {can('clients.preview') ? (
+            <button onClick={onPreview} disabled={busy} className="mini-button !border-emerald-200 !bg-emerald-50 !text-emerald-800">
+              <Eye className="h-4 w-4" /> Preview as client
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -512,30 +557,40 @@ const ClientsPanel = ({
       </div>
 
       <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
-        <button onClick={onSuspend} disabled={busy || client.status === 'suspended'} className="mini-button border border-amber-200 bg-amber-50 !text-amber-800">
-          <ShieldAlert className="h-4 w-4" /> Suspend client access
-        </button>
-        <button onClick={onReactivate} disabled={busy || client.status === 'active'} className="mini-button border border-emerald-200 bg-emerald-50 !text-emerald-800">
-          <CheckCircle2 className="h-4 w-4" /> Reactivate client
-        </button>
-        <button onClick={onArchive} disabled={busy || client.status === 'archived'} className="mini-button border border-slate-200">
-          <Archive className="h-4 w-4" /> Archive client
-        </button>
-        <button onClick={onRevokeAll} disabled={busy} className="mini-button border border-rose-200 bg-rose-50 !text-rose-700">
-          <KeyRound className="h-4 w-4" /> Revoke all client access
-        </button>
+        {can('clients.suspend') ? (
+          <button onClick={onSuspend} disabled={busy || client.status === 'suspended'} className="mini-button border border-amber-200 bg-amber-50 !text-amber-800">
+            <ShieldAlert className="h-4 w-4" /> Suspend client access
+          </button>
+        ) : null}
+        {can('clients.suspend') ? (
+          <button onClick={onReactivate} disabled={busy || client.status === 'active'} className="mini-button border border-emerald-200 bg-emerald-50 !text-emerald-800">
+            <CheckCircle2 className="h-4 w-4" /> Reactivate client
+          </button>
+        ) : null}
+        {can('clients.archive') ? (
+          <button onClick={onArchive} disabled={busy || client.status === 'archived'} className="mini-button border border-slate-200">
+            <Archive className="h-4 w-4" /> Archive client
+          </button>
+        ) : null}
+        {can('clients.suspend') ? (
+          <button onClick={onRevokeAll} disabled={busy} className="mini-button border border-rose-200 bg-rose-50 !text-rose-700">
+            <KeyRound className="h-4 w-4" /> Revoke all client access
+          </button>
+        ) : null}
       </div>
       <p className="mt-3 text-[11px] font-medium text-slate-500">
         Suspending or archiving a client revokes every access key, session and temporary link on the server immediately.
         Reactivating never restores a revoked key — issue a new one.
+        {" "}Every action is refused server-side unless you hold the matching client permission.
       </p>
     </div>
   </div>
 );
 
 const ProjectsPanel = ({
-  client, projects, documents, keys, onCreate, onEdit, onArchive, onRestore, busy,
+  can, client, projects, documents, keys, onCreate, onEdit, onArchive, onRestore, busy,
 }: {
+  can: (capability: string) => boolean;
   client: any; projects: any[]; documents: any[]; keys: any[]; onCreate: () => void; onEdit: (project: any) => void;
   onArchive: (project: any) => void; onRestore: (project: any) => void; busy: boolean;
 }) => (
@@ -545,7 +600,9 @@ const ProjectsPanel = ({
         <h4 className="text-lg font-black text-slate-900">Projects</h4>
         <p className="text-xs font-medium text-slate-500">Projects for {client.name}. Each project is bound to this client only.</p>
       </div>
-      <button onClick={onCreate} className="mini-button mini-button--primary" disabled={busy}><Plus className="h-4 w-4" /> Create project</button>
+      {can('clients.projects.create') ? (
+        <button onClick={onCreate} className="mini-button mini-button--primary" disabled={busy}><Plus className="h-4 w-4" /> Create project</button>
+      ) : null}
     </div>
     <div className="mt-4 space-y-3">
       {projects.length ? projects.map((project) => (
@@ -563,10 +620,10 @@ const ProjectsPanel = ({
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button onClick={() => onEdit(project)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button>
-              {project.isArchived
+              {can('clients.projects.edit') ? <button onClick={() => onEdit(project)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
+              {can('clients.projects.archive') ? (project.isArchived
                 ? <button onClick={() => onRestore(project)} className="mini-button border border-emerald-200 bg-emerald-50 !text-emerald-800">Restore</button>
-                : <button onClick={() => onArchive(project)} className="mini-button text-rose-600">Archive</button>}
+                : <button onClick={() => onArchive(project)} className="mini-button text-rose-600">Archive</button>) : null}
             </div>
           </div>
         </article>
@@ -576,10 +633,12 @@ const ProjectsPanel = ({
 );
 
 const DocumentsPanel = ({
-  client, documents, projects, onPublish, onLifecycle, onEdit, busy,
+  can, client, documents, projects, onPublish, onLifecycle, onEdit, onDelete, busy,
 }: {
+  can: (capability: string) => boolean;
   client: any; documents: any[]; projects: any[]; onPublish: () => void;
-  onLifecycle: (document: any, state: string) => void; onEdit: (document: any) => void; busy: boolean;
+  onLifecycle: (document: any, state: string) => void; onEdit: (document: any) => void;
+  onDelete: (document: any) => void; busy: boolean;
 }) => {
   const projectName = (document: any) => projects.find((project) => project.id === document.project?.id)?.name || '';
   return (
@@ -591,9 +650,11 @@ const DocumentsPanel = ({
           Only PUBLISHED documents reach the client. Internal Vault documents are never exposed automatically.
         </p>
       </div>
-      <button onClick={onPublish} className="mini-button mini-button--primary" disabled={busy || !projects.length}>
-        <Plus className="h-4 w-4" /> Publish to client
-      </button>
+      {can('clients.documents.create') ? (
+        <button onClick={onPublish} className="mini-button mini-button--primary" disabled={busy || !projects.length}>
+          <Plus className="h-4 w-4" /> Publish to client
+        </button>
+      ) : null}
     </div>
     <div className="mt-4 space-y-3">
       {documents.length ? documents.map((document) => (
@@ -618,14 +679,21 @@ const DocumentsPanel = ({
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <button onClick={() => onEdit(document)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button>
+              {can('clients.documents.edit') ? <button onClick={() => onEdit(document)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
+              {can('clients.documents.delete') ? (
+                <button onClick={() => onDelete(document)} className="mini-button text-rose-600" disabled={busy}>Delete</button>
+              ) : null}
               <select
                 value={document.lifecycle}
                 onChange={(event) => onLifecycle(document, event.target.value)}
                 className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-[11px] font-black uppercase tracking-wider text-slate-700"
                 aria-label={`Lifecycle for ${document.title}`}
+                disabled={!can('clients.documents.publish') && !can('clients.documents.unpublish')}
               >
-                {LIFECYCLE_ALL.map((state) => (
+                {LIFECYCLE_ALL.filter((state) => {
+                  const publishing = !['unpublished', 'archived'].includes(state);
+                  return can(publishing ? 'clients.documents.publish' : 'clients.documents.unpublish');
+                }).map((state) => (
                   <option key={state} value={state}>{LIFECYCLE_LABELS[state] || state}</option>
                 ))}
               </select>
@@ -639,8 +707,9 @@ const DocumentsPanel = ({
 };
 
 const LinksPanel = ({
-  client, links, onCreate, onRevoke, busy,
+  can, client, links, onCreate, onRevoke, busy,
 }: {
+  can: (capability: string) => boolean;
   client: any; links: any[];
   onCreate: () => void; onRevoke: (link: any) => void; busy: boolean;
 }) => (
@@ -652,7 +721,9 @@ const LinksPanel = ({
           Links are exchanged for a short-lived client session. A link token is never stored — it is shown once.
         </p>
       </div>
-      <button onClick={onCreate} className="mini-button mini-button--primary" disabled={busy}><Link2 className="h-4 w-4" /> Create temporary link</button>
+      {can('clients.links.create') ? (
+        <button onClick={onCreate} className="mini-button mini-button--primary" disabled={busy}><Link2 className="h-4 w-4" /> Create temporary link</button>
+      ) : null}
     </div>
     <div className="mt-4 space-y-3">
       {links.length ? links.map((link) => (
@@ -671,9 +742,9 @@ const LinksPanel = ({
                 <span>View {link.allowView ? 'allowed' : 'denied'} · Download {link.allowDownload ? 'allowed' : 'denied'}</span>
               </p>
             </div>
-            {link.status === 'active' ? (
+            {link.status === 'active' && can('clients.links.revoke') ? (
               <button onClick={() => onRevoke(link)} className="mini-button text-rose-600" disabled={busy}>Revoke</button>
-            ) : <Pill>inactive</Pill>}
+            ) : <Pill>{link.status === 'active' ? 'active' : 'inactive'}</Pill>}
           </div>
         </article>
       )) : <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">No temporary links have been issued for {client.name}.</p>}
@@ -709,91 +780,252 @@ const ActivityPanel = ({ client, activity }: { client: any; activity: any[] }) =
   </div>
 );
 
-const CLIENT_PERMISSION_KEYS = ['clients.manage', 'clients.publish', 'clients.links', 'clients.preview'];
+/**
+ * The client permission matrix.
+ *
+ * Reads the capabilities, the members and the recorded changes from the server;
+ * writes go through the same server route, which enforces the non-escalation
+ * rule and records WHO / WHAT / WHEN / TARGET / OLD / NEW in the existing audit
+ * log. Toggling here only expresses an intent — the server decides.
+ */
+const PermissionsPanel = ({
+  data, settings, onSaved, onSettingsSaved, onError,
+}: {
+  data: any; settings: any[];
+  onSaved: (message: string) => void | Promise<void>;
+  onSettingsSaved: (message: string) => void | Promise<void>;
+  onError: (message: string | null) => void;
+}) => {
+  void onError;
+  const capabilities: any[] = data.capabilities || [];
+  const members: any[] = data.members || [];
+  const changes: any[] = data.recentChanges || [];
+  const mine: string[] = data.mine || [];
+  const isPhantom = Boolean(data.isPhantom);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<Record<string, boolean>>({});
+  const [savingSettings, setSavingSettings] = useState(false);
 
-const PermissionsPanel = ({ data, onSaved }: { data: any; onSaved: () => void }) => {
-  const admins = data.admins || [];
-  const permissionRows = data.permissions || [];
-  const [saving, setSaving] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const selected = members.find((member: any) => member.id === selectedId) || null;
+  const groups = Array.from(new Set(capabilities.map((entry: any) => entry.group)));
+  const mayGrantAll = isPhantom;
 
-  const permissionsFor = (adminId: number) =>
-    permissionRows.filter((row: any) => Number(row.website_admin_id) === Number(adminId)).map((row: any) => row.permission_key);
+  useEffect(() => {
+    setDraft(selected ? [...(selected.permissions || [])] : []);
+  }, [selectedId, JSON.stringify(selected?.permissions || [])]);
 
-  const toggle = async (admin: any, key: string) => {
-    const current = permissionsFor(admin.id);
-    const next = current.includes(key) ? current.filter((entry: string) => entry !== key) : [...current, key];
-    setSaving(`${admin.id}:${key}`);
-    setMessage(null);
+  useEffect(() => {
+    setSettingsDraft(Object.fromEntries((settings || []).map((entry: any) => [entry.key, Boolean(entry.value)])));
+  }, [JSON.stringify(settings || [])]);
+
+  const dirty = selected
+    ? JSON.stringify([...draft].sort()) !== JSON.stringify([...(selected.permissions || [])].sort())
+    : false;
+
+  const save = async () => {
+    if (!selected) return;
+    setSaving(true);
+    setNotice(null);
     try {
-      const { db } = await import('../lib/cloudflare');
-      await db.phantom.updateWebsiteAdmin(admin.id, { permissions: next });
-      setMessage(`${admin.member_name || 'Member'} updated.`);
-      onSaved();
+      const result = await clientAccessCenter.setMemberPermissions(selected.id, draft);
+      const added = result.data?.added || [];
+      const removed = result.data?.removed || [];
+      setNotice(added.length || removed.length
+        ? `${selected.name}: granted ${added.length}, removed ${removed.length}. Recorded in the audit log.`
+        : `${selected.name} already had exactly those client permissions.`);
+      await onSaved(result.message || 'Client permissions updated.');
     } catch (failure: any) {
-      setMessage(failure?.message || 'That permission could not be changed.');
+      setNotice(failure?.message || 'Those permissions could not be saved.');
     } finally {
-      setSaving(null);
+      setSaving(false);
+    }
+  };
+
+  const saveSettings = async () => {
+    setSavingSettings(true);
+    setNotice(null);
+    try {
+      const payload = (settings || []).map((entry: any) => ({ key: entry.key, value: Boolean(settingsDraft[entry.key]) }));
+      const result = await clientAccessCenter.savePortalSettings(payload);
+      setNotice(result.message || 'Portal settings saved.');
+      await onSettingsSaved(result.message || 'Client portal settings saved.');
+    } catch (failure: any) {
+      setNotice(failure?.message || 'Those settings could not be saved.');
+    } finally {
+      setSavingSettings(false);
     }
   };
 
   return (
     <div>
-      <h4 className="text-lg font-black text-slate-900">Client portal permissions</h4>
+      <h4 className="text-lg font-black text-slate-900">Client permissions</h4>
       <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">
-        PHANTOM has full control of the client portal. Founding members receive nothing automatically — each capability
-        below must be granted explicitly, and the server refuses any client-portal action without it.
+        PHANTOM has full control of the client portal. A founding identity — NEXUS, GHOST, FALCON, QUANTUM, MATRIX —
+        grants nothing on its own: every capability below must be granted explicitly, and the server refuses every
+        client-portal action without it. {isPhantom
+          ? 'As PHANTOM you may grant or remove any client capability.'
+          : 'You may only manage client capabilities you hold yourself, and never your own account.'}
       </p>
-      <div className="mt-4 grid gap-2 sm:grid-cols-2">
-        {CLIENT_PERMISSION_KEYS.map((key) => (
-          <div key={key} className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
-            <p className="font-mono text-xs font-black text-emerald-800">{key}</p>
-            <p className="mt-1 text-[11px] font-medium text-slate-600">
-              {key === 'clients.manage' && 'Clients, projects, keys, documents and links.'}
-              {key === 'clients.publish' && 'Move documents through the workflow and publish to a client.'}
-              {key === 'clients.links' && 'Create and revoke temporary access links.'}
-              {key === 'clients.preview' && 'Open PREVIEW AS CLIENT for any client.'}
-            </p>
+
+      {notice ? <p className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">{notice}</p> : null}
+
+      <div className="mt-5 grid gap-6 xl:grid-cols-[260px_minmax(0,1fr)]">
+        <aside className="h-fit rounded-2xl border border-slate-100 bg-slate-50/60 p-3">
+          <p className="px-2 pb-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Members</p>
+          <div className="space-y-1">
+            {members.map((member: any) => (
+              <button
+                key={member.id}
+                onClick={() => setSelectedId(member.id)}
+                className={`flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left transition ${member.id === selectedId ? 'bg-white ring-1 ring-emerald-200' : 'hover:bg-white/70'}`}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-bold text-slate-800">{member.name}</span>
+                  <span className="block truncate text-[11px] font-semibold text-slate-500">
+                    {member.memberCode || '—'} · {(member.permissions || []).length} client permission{(member.permissions || []).length === 1 ? '' : 's'}
+                  </span>
+                </span>
+                <Pill tone={member.status}>{member.status}</Pill>
+              </button>
+            ))}
+            {!members.length ? <p className="px-2 py-6 text-xs font-semibold text-slate-500">No members yet.</p> : null}
           </div>
-        ))}
-      </div>
+        </aside>
 
-      {message ? <p className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">{message}</p> : null}
+        <div className="min-w-0">
+          {!selected ? (
+            <p className="rounded-2xl border border-slate-100 bg-white px-5 py-10 text-center text-sm font-semibold text-slate-500">
+              Select a member to see and change their client permissions.
+            </p>
+          ) : (
+            <div className="space-y-5">
+              <div className="rounded-2xl border border-slate-100 bg-white p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-black text-slate-900">{selected.name}</p>
+                    <p className="text-[11px] font-semibold text-slate-500">
+                      {selected.memberCode || '—'} · {selected.responsibility || 'member'} · status {selected.status}
+                      {selected.codenamePath && selected.codenamePath !== 'member' ? ` · ${String(selected.codenamePath).replace(/_/g, ' ')}` : ''}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => setDraft([])} className="mini-button" disabled={saving || !draft.length}>Remove all</button>
+                    <button onClick={save} className="mini-button mini-button--primary" disabled={saving || !dirty}>
+                      {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                      {dirty ? 'Save permissions' : 'Saved'}
+                    </button>
+                  </div>
+                </div>
 
-      <div className="mt-5 space-y-3">
-        {admins.length ? admins.map((admin: any) => (
-          <article key={admin.id} className="rounded-2xl border border-slate-100 bg-white p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="font-bold text-slate-900">{admin.member_name || admin.member_code || `Member ${admin.id}`}</p>
-                <p className="text-[11px] font-semibold text-slate-500">{admin.member_email || ''} · status {admin.status}</p>
+                <div className="mt-4 space-y-4">
+                  {groups.map((group) => (
+                    <div key={group}>
+                      <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">{group}</p>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {capabilities.filter((entry: any) => entry.group === group).map((entry: any) => {
+                          const granted = draft.includes(entry.key);
+                          const heldByMe = mayGrantAll || mine.includes(entry.key);
+                          return (
+                            <label
+                              key={entry.key}
+                              className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 transition ${
+                                granted ? 'border-emerald-200 bg-emerald-50' : 'border-slate-100 bg-white hover:bg-slate-50'
+                              } ${heldByMe ? '' : 'opacity-60'}`}
+                              title={heldByMe ? entry.description : 'You do not hold this capability, so you cannot grant or remove it.'}
+                            >
+                              <input
+                                type="checkbox"
+                                className="mt-0.5 rounded border-slate-300"
+                                checked={granted}
+                                disabled={!heldByMe || saving}
+                                onChange={(event) => setDraft((current) => event.target.checked
+                                  ? Array.from(new Set([...current, entry.key]))
+                                  : current.filter((key) => key !== entry.key))}
+                              />
+                              <span className="min-w-0">
+                                <span className="block text-xs font-black uppercase tracking-wider text-slate-800">{entry.brief}</span>
+                                <span className="block text-[11px] font-semibold text-slate-500">{entry.label} · <span className="font-mono">{entry.key}</span></span>
+                                <span className="mt-0.5 block text-[11px] font-medium text-slate-500">{entry.description}</span>
+                                {!heldByMe ? <span className="mt-0.5 block text-[11px] font-bold text-amber-700">Not held by you — cannot be granted.</span> : null}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-100 bg-white p-4">
+                <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Client portal settings</p>
+                <p className="mt-1 text-xs font-medium text-slate-500">
+                  The three switches the client routes already check. PHANTOM can also change them in Settings.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  {(settings || []).map((entry: any) => (
+                    <label key={entry.key} className="flex items-center gap-2 rounded-xl border border-slate-100 px-3.5 py-2.5">
+                      <input
+                        type="checkbox"
+                        className="rounded border-slate-300"
+                        checked={Boolean(settingsDraft[entry.key])}
+                        disabled={savingSettings}
+                        onChange={(event) => setSettingsDraft((current) => ({ ...current, [entry.key]: event.target.checked }))}
+                      />
+                      <span className="font-mono text-[11px] font-bold text-slate-700">{entry.key}</span>
+                    </label>
+                  ))}
+                </div>
+                <button onClick={saveSettings} disabled={savingSettings} className="mini-button mini-button--primary mt-3">
+                  {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save portal settings
+                </button>
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {CLIENT_PERMISSION_KEYS.map((key) => {
-                const granted = permissionsFor(admin.id).includes(key);
-                return (
-                  <button
-                    key={key}
-                    onClick={() => void toggle(admin, key)}
-                    disabled={saving === `${admin.id}:${key}`}
-                    className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-black uppercase tracking-wider transition ${
-                      granted ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500 ring-1 ring-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    {saving === `${admin.id}:${key}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : granted ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
-                    {key}
-                  </button>
-                );
-              })}
-            </div>
-          </article>
-        )) : (
-          <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">
-            No delegated website administrators. Use PHANTOM → Website Admins to delegate client portal access to a member.
-          </p>
-        )}
+          )}
+        </div>
       </div>
+
+      <div className="mt-6">
+        <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Recent permission changes</p>
+        <div className="mt-3 overflow-hidden rounded-2xl border border-slate-100 bg-white">
+          {changes.length ? (
+            <ul className="divide-y divide-slate-100">
+              {changes.map((entry: any) => (
+                <li key={entry.id} className="px-4 py-3">
+                  <p className="text-sm font-bold text-slate-800">
+                    {entry.actor}{entry.actorMemberCode ? ` · ${entry.actorMemberCode}` : ''} → {entry.target || 'member'}
+                  </p>
+                  <p className="mt-1 text-[11px] font-semibold text-slate-500">{formatWhen(entry.at)}</p>
+                  {entry.added?.length || entry.removed?.length ? (
+                    <p className="mt-1 text-[11px] font-medium text-slate-600">
+                      {entry.added?.length ? <span className="text-emerald-700">granted: {entry.added.join(', ')}</span> : null}
+                      {entry.added?.length && entry.removed?.length ? ' · ' : null}
+                      {entry.removed?.length ? <span className="text-rose-700">removed: {entry.removed.join(', ')}</span> : null}
+                    </p>
+                  ) : null}
+                  {entry.previousValue || entry.newValue ? (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-[11px] font-bold text-slate-500">Old and new values</summary>
+                      <p className="mt-1 break-words font-mono text-[10px] font-semibold text-slate-500">
+                        old: {JSON.stringify(entry.previousValue)}<br />new: {JSON.stringify(entry.newValue)}
+                      </p>
+                    </details>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : <p className="px-5 py-8 text-center text-sm font-semibold text-slate-500">No permission changes recorded yet.</p>}
+        </div>
+      </div>
+
+      <p className="mt-4 text-[11px] font-medium text-slate-500">
+        The four Phase 5 umbrella keys (<span className="font-mono">clients.manage</span>, <span className="font-mono">clients.publish</span>,
+        {' '}<span className="font-mono">clients.links</span>, <span className="font-mono">clients.preview</span>) still work exactly as granted:
+        each one resolves to the granular capabilities it always meant, so no existing grant changed meaning.
+      </p>
     </div>
   );
 };
@@ -1370,6 +1602,20 @@ const revokeAll = async (
     await refresh('All client access revoked: keys, sessions and temporary links are dead.');
   } catch (failure: any) {
     setError(failure?.message || 'Access could not be revoked.');
+  }
+};
+
+const deleteDocument = async (
+  document: any,
+  refresh: (message: string) => Promise<void>,
+  setError: (message: string | null) => void,
+) => {
+  if (!window.confirm(`Delete "${document.title}"? It moves to the PHANTOM Recycle Bin and leaves the client portal immediately.`)) return;
+  try {
+    await clientAccessCenter.deleteDocument(document.id);
+    await refresh('Client document deleted. PHANTOM → Recycle Bin can restore it.');
+  } catch (failure: any) {
+    setError(failure?.message || 'That document could not be deleted.');
   }
 };
 

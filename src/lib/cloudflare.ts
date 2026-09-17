@@ -738,6 +738,27 @@ export const clientAccessCenter = {
     return (await apiCall<{ data: any[] }>(`/api/phantom/client-vault-sources${query}`)).data || [];
   },
 
+  /** Delete a client document. It is snapshotted into the existing Recycle Bin. */
+  deleteDocument: (documentId: string) =>
+    apiCall<{ message: string }>(`/api/phantom/client-documents/${documentId}`, { method: 'DELETE' }),
+
+  /** The granular capability catalog plus the caller's own effective set. */
+  capabilities: async () => (await apiCall<{ data: any }>('/api/phantom/client-capabilities')).data,
+
+  /** The client permission matrix (PHANTOM, or a delegated permission manager). */
+  permissionMatrix: async () => (await apiCall<{ data: any }>('/api/phantom/client-permissions')).data,
+  setMemberPermissions: (memberProfileId: number, permissions: string[]) =>
+    apiCall<{ data: any; message: string }>('/api/phantom/client-permissions', {
+      method: 'POST', body: JSON.stringify({ memberProfileId, permissions }),
+    }),
+
+  /** The three client portal switches. */
+  portalSettings: async () => (await apiCall<{ data: any[] }>('/api/phantom/client-portal-settings')).data || [],
+  savePortalSettings: (settings: Array<{ key: string; value: boolean }>) =>
+    apiCall<{ data: any; message: string }>('/api/phantom/client-portal-settings', {
+      method: 'PUT', body: JSON.stringify({ settings }),
+    }),
+
   /** PREVIEW AS CLIENT — the same payloads the client API returns. */
   preview: async (clientId: string, projectId?: string) => {
     const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';

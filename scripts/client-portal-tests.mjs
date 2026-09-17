@@ -1704,6 +1704,435 @@ const main = async () => {
     && (await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, { token: phantomToken, body: { state: 'published' } })).status === 200
     && (await request('POST', `/api/phantom/clients/${managedClient.id}/links`, { token: phantomToken, body: { projectId: managedProject.id, expiresInMinutes: 30 } })).status === 201);
 
+  // =========================================================================
+  group('16. Granular client permissions — every capability tested independently (Phase 6)');
+  // =========================================================================
+
+  // --- the registry and the brief's names -----------------------------------
+  const catalogResponse = await request('GET', '/api/phantom/client-capabilities', { token: phantomToken });
+  const catalog = catalogResponse.json.data;
+  const BRIEF_NAMES = [
+    'CLIENT_VIEW', 'CLIENT_CREATE', 'CLIENT_EDIT', 'CLIENT_SUSPEND', 'CLIENT_ARCHIVE',
+    'CLIENT_PROJECT_VIEW', 'CLIENT_PROJECT_CREATE', 'CLIENT_PROJECT_EDIT', 'CLIENT_PROJECT_ARCHIVE',
+    'CLIENT_DOCUMENT_VIEW', 'CLIENT_DOCUMENT_CREATE', 'CLIENT_DOCUMENT_EDIT', 'CLIENT_DOCUMENT_PUBLISH',
+    'CLIENT_DOCUMENT_UNPUBLISH', 'CLIENT_DOCUMENT_DELETE',
+    'CLIENT_ACCESS_KEY_CREATE', 'CLIENT_ACCESS_KEY_REGENERATE', 'CLIENT_ACCESS_KEY_REVOKE',
+    'CLIENT_LINK_CREATE', 'CLIENT_LINK_REVOKE', 'CLIENT_LINK_MANAGE',
+    'CLIENT_ACTIVITY_VIEW', 'CLIENT_SETTINGS_MANAGE', 'CLIENT_PERMISSIONS_MANAGE',
+    // already existed before this phase, so it was not added again:
+    'CLIENT_PREVIEW',
+  ];
+  const catalogBrief = (catalog.capabilities || []).map((entry) => entry.brief);
+  check('every capability named in the brief exists in the registry',
+    BRIEF_NAMES.every((name) => catalogBrief.includes(name)), BRIEF_NAMES.filter((name) => !catalogBrief.includes(name)).join(','));
+  check('the registry adds no capability beyond the brief plus the one that already existed',
+    catalogBrief.length === BRIEF_NAMES.length && new Set(catalogBrief).size === catalogBrief.length, `${catalogBrief.length} capabilities`);
+  check('no capability re-creates a Phase 5 key under a new name',
+    !catalogBrief.map((brief) => brief.toLowerCase()).some((brief) => ['clients.manage', 'clients.publish', 'clients.links'].includes(brief))
+    && (catalog.capabilities || []).every((entry) => !['clients.manage', 'clients.publish', 'clients.links'].includes(entry.key)));
+  check('the four Phase 5 umbrella keys are preserved and explained',
+    (catalog.legacy || []).map((entry) => entry.key).join(',') === 'clients.manage,clients.publish,clients.links,clients.preview',
+    JSON.stringify(catalog.legacy));
+  check('PHANTOM holds the whole capability set implicitly',
+    catalog.isPhantom === true && catalog.mine.length === catalog.capabilities.length);
+  check('the capability catalog exposes no client data',
+    !/Ashanti|Kumasi|Room Client|cli_|prj_/.test(JSON.stringify(catalog)));
+
+  // --- a second member who will hold exactly one capability at a time -------
+  const holderPasswordHash = await (async () => {
+    const p6Salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode('HolderPassword1'), 'PBKDF2', false, ['deriveBits']);
+    const p6Bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: p6Salt, iterations: 100000, hash: 'SHA-256' }, key, 256);
+    const p6B64url = (bytes) => Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return `pbkdf2$100000$${p6B64url(p6Salt)}$${p6B64url(new Uint8Array(p6Bits))}`;
+  })();
+  db.execute("INSERT INTO users (email, name, password_hash, role) VALUES ('holder@example.test', 'Permission Holder', ?, 'member')", holderPasswordHash);
+  const holderLogin = await request('POST', '/api/auth/login', { body: { identifier: 'holder@example.test', password: 'HolderPassword1' } });
+  const holderToken = holderLogin.json?.token;
+  const holderProfile = db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'holder@example.test'")[0];
+  check('a second member exists to hold exactly one capability at a time',
+    holderLogin.status === 200 && Boolean(holderToken) && Boolean(holderProfile));
+  check('a member with no grant holds nothing',
+    (catalog.mine || []).length > 0 && (await request('GET', '/api/phantom/client-capabilities', { token: holderToken })).json.data.mine.length === 0);
+
+  const grantHolder = async (permissions) => request('POST', '/api/phantom/client-permissions', {
+    token: phantomToken, body: { memberProfileId: holderProfile.id, permissions },
+  });
+  const firstGrant = await grantHolder([]);
+  check('PHANTOM can reach the permission matrix endpoint', firstGrant.status === 200, JSON.stringify(firstGrant.json).slice(0, 160));
+  const matrix = await request('GET', '/api/phantom/client-permissions', { token: phantomToken });
+  check('the matrix lists the members, the capabilities and the recorded changes',
+    matrix.status === 200 && Array.isArray(matrix.json.data.members) && matrix.json.data.capabilities.length === BRIEF_NAMES.length
+    && Array.isArray(matrix.json.data.recentChanges));
+  check('the matrix never exposes a credential or a client access key',
+    !/passkey|key_hash/.test(JSON.stringify(matrix.json))
+    && !/CRX(-[0-9A-Z]{4}){4}/.test(JSON.stringify(matrix.json)));
+
+  // --- the probe table: one direct API call per capability ------------------
+  let probeCounter = 0;
+  const uniqueName = (label) => `P6 ${label} ${++probeCounter}`;
+
+  const makeProbeFixture = async () => {
+    const client = await createClient(phantomToken, uniqueName('probe client'));
+    const project = await createProject(phantomToken, client.id, uniqueName('probe project'));
+    const document_ = await createDocument(phantomToken, client.id, project.id, {
+      title: uniqueName('probe document'), contentText: 'Probe body.',
+    });
+    const primaryKey = await createKey(phantomToken, client.id, project.id, { label: 'Probe primary' });
+    const secondaryKey = await createKey(phantomToken, client.id, project.id, { label: 'Probe secondary' });
+    const link = await request('POST', `/api/phantom/clients/${client.id}/links`, {
+      token: phantomToken, body: { projectId: project.id, expiresInMinutes: 30, maxUses: 2 },
+    });
+    return { client, project, document: document_, key: primaryKey, secondaryKey, link: link.json.data };
+  };
+
+  const PROBES = [
+    ['clients.view', 'CLIENT_VIEW', (f, token) => request('GET', '/api/phantom/clients', { token })],
+    ['clients.projects.view', 'CLIENT_PROJECT_VIEW', (f, token) => request('GET', `/api/phantom/clients/${f.client.id}/projects`, { token })],
+    ['clients.documents.view', 'CLIENT_DOCUMENT_VIEW', (f, token) => request('GET', `/api/phantom/clients/${f.client.id}/documents`, { token })],
+    ['clients.activity.view', 'CLIENT_ACTIVITY_VIEW', (f, token) => request('GET', `/api/phantom/clients/${f.client.id}/activity`, { token })],
+    ['clients.links.manage', 'CLIENT_LINK_MANAGE', (f, token) => request('GET', `/api/phantom/clients/${f.client.id}/links`, { token })],
+    ['clients.settings.manage', 'CLIENT_SETTINGS_MANAGE', (f, token) => request('GET', '/api/phantom/client-portal-settings', { token })],
+    ['clients.permissions.manage', 'CLIENT_PERMISSIONS_MANAGE', (f, token) => request('GET', '/api/phantom/client-permissions', { token })],
+    ['clients.preview', 'CLIENT_PREVIEW', (f, token) => request('GET', `/api/phantom/clients/${f.client.id}/preview`, { token })],
+    ['clients.create', 'CLIENT_CREATE', (f, token) => request('POST', '/api/phantom/clients', { token, body: { name: uniqueName('created client') } })],
+    ['clients.projects.create', 'CLIENT_PROJECT_CREATE', (f, token) => request('POST', `/api/phantom/clients/${f.client.id}/projects`, { token, body: { name: uniqueName('created project') } })],
+    ['clients.documents.create', 'CLIENT_DOCUMENT_CREATE', (f, token) => request('POST', `/api/phantom/clients/${f.client.id}/documents`, { token, body: { projectId: f.project.id, category: 'report', title: uniqueName('created document'), contentText: 'Body.' } })],
+    ['clients.edit', 'CLIENT_EDIT', (f, token) => request('PATCH', `/api/phantom/clients/${f.client.id}`, { token, body: { name: uniqueName('edited client') } })],
+    ['clients.projects.edit', 'CLIENT_PROJECT_EDIT', (f, token) => request('PATCH', `/api/phantom/client-projects/${f.project.id}`, { token, body: { name: uniqueName('edited project') } })],
+    ['clients.documents.edit', 'CLIENT_DOCUMENT_EDIT', (f, token) => request('PATCH', `/api/phantom/client-documents/${f.document.id}`, { token, body: { title: uniqueName('edited document') } })],
+    ['clients.keys.create', 'CLIENT_ACCESS_KEY_CREATE', (f, token) => request('POST', `/api/phantom/clients/${f.client.id}/keys`, { token, body: { projectId: f.project.id, label: 'Probe issued key' } })],
+    ['clients.keys.regenerate', 'CLIENT_ACCESS_KEY_REGENERATE', (f, token) => request('POST', `/api/phantom/client-keys/${f.secondaryKey.id}/regenerate`, { token })],
+    ['clients.keys.revoke', 'CLIENT_ACCESS_KEY_REVOKE', (f, token) => request('POST', `/api/phantom/client-keys/${f.secondaryKey.id}/revoke`, { token })],
+    ['clients.links.create', 'CLIENT_LINK_CREATE', (f, token) => request('POST', `/api/phantom/clients/${f.client.id}/links`, { token, body: { projectId: f.project.id, expiresInMinutes: 30, maxUses: 2 } })],
+    ['clients.links.revoke', 'CLIENT_LINK_REVOKE', (f, token) => request('POST', `/api/phantom/client-links/${f.link.id}/revoke`, { token })],
+    ['clients.documents.publish', 'CLIENT_DOCUMENT_PUBLISH', (f, token) => request('POST', `/api/phantom/client-documents/${f.document.id}/lifecycle`, { token, body: { state: 'published' } })],
+    ['clients.documents.unpublish', 'CLIENT_DOCUMENT_UNPUBLISH', (f, token) => request('POST', `/api/phantom/client-documents/${f.document.id}/lifecycle`, { token, body: { state: 'unpublished' } })],
+    ['clients.documents.delete', 'CLIENT_DOCUMENT_DELETE', (f, token) => request('DELETE', `/api/phantom/client-documents/${f.document.id}`, { token })],
+    ['clients.projects.archive', 'CLIENT_PROJECT_ARCHIVE', (f, token) => request('PATCH', `/api/phantom/client-projects/${f.project.id}`, { token, body: { archive: true } })],
+    ['clients.suspend', 'CLIENT_SUSPEND', (f, token) => request('POST', `/api/phantom/clients/${f.client.id}/status`, { token, body: { status: 'suspended' } })],
+    ['clients.archive', 'CLIENT_ARCHIVE', (f, token) => request('POST', `/api/phantom/clients/${f.client.id}/status`, { token, body: { status: 'archived' } })],
+  ];
+  check('the probe table covers every capability exactly once',
+    PROBES.length === BRIEF_NAMES.length && new Set(PROBES.map((entry) => entry[0])).size === PROBES.length);
+
+  // Every capability is granted on its own, and then EVERY capability's action
+  // is attempted directly against the API. Exactly one may succeed.
+  let matrixFailures = 0;
+  for (const [grantedKey, grantedBrief, probe] of PROBES) {
+    const fixture = await makeProbeFixture();
+    const granted = await grantHolder([grantedKey]);
+    if (granted.status !== 200) {
+      check(`${grantedBrief} can be granted on its own`, false, JSON.stringify(granted.json));
+      matrixFailures += 1;
+      continue;
+    }
+    for (const [attemptedKey, attemptedBrief, attempt] of PROBES) {
+      const isOwn = attemptedKey === grantedKey;
+      const p6Response = await attempt(fixture, holderToken);
+      if (isOwn) {
+        check(`${grantedBrief} alone authorizes its own action`, p6Response.status !== 403,
+          `${p6Response.status} ${JSON.stringify(p6Response.json).slice(0, 90)}`);
+      } else {
+        check(`${grantedBrief} does NOT authorize ${attemptedBrief}`, p6Response.status === 403,
+          `${attemptedBrief} returned ${p6Response.status}`);
+      }
+    }
+    await grantHolder([]);
+  }
+  check('every capability was exercised against every other capability', matrixFailures === 0, `${matrixFailures} grants failed`);
+
+  // =========================================================================
+  group('17. Phase 5 keys keep working, founding identities get nothing, changes are audited');
+  // =========================================================================
+
+  // --- the Phase 5 umbrella keys still mean exactly what they meant ---------
+  const manageProbe = async (token) => ({
+    view: await request('GET', '/api/phantom/clients', { token }),
+    create: await request('POST', '/api/phantom/clients', { token, body: { name: uniqueName('legacy created') } }),
+    key: await request('POST', `/api/phantom/clients/${legacyClient.id}/keys`, { token, body: { projectId: legacyProject.id } }),
+    publish: await request('POST', `/api/phantom/client-documents/${legacyDocument.id}/lifecycle`, { token, body: { state: 'published' } }),
+    permissions: await request('GET', '/api/phantom/client-permissions', { token }),
+    settings: await request('GET', '/api/phantom/client-portal-settings', { token }),
+    preview: await request('GET', `/api/phantom/clients/${legacyClient.id}/preview`, { token }),
+  });
+  const legacyClient = await createClient(phantomToken, uniqueName('legacy client'));
+  const legacyProject = await createProject(phantomToken, legacyClient.id, uniqueName('legacy project'));
+  const legacyDocument = await createDocument(phantomToken, legacyClient.id, legacyProject.id, {
+    title: uniqueName('legacy document'), contentText: 'Legacy body.',
+  });
+
+  await grantHolder([]);
+  const noGrant = await manageProbe(holderToken);
+  check('with no grant at all, every management action is refused (403)',
+    noGrant.view.status === 403 && noGrant.create.status === 403 && noGrant.key.status === 403
+    && noGrant.publish.status === 403 && noGrant.permissions.status === 403 && noGrant.settings.status === 403
+    && noGrant.preview.status === 403,
+    JSON.stringify(Object.fromEntries(Object.entries(noGrant).map(([key, value]) => [key, value.status]))));
+
+  await grantHolder(['clients.manage']);
+  const legacyManage = await manageProbe(holderToken);
+  check('a Phase 5 clients.manage grant still authorizes the management actions it always did',
+    legacyManage.view.status === 200 && legacyManage.create.status === 201 && legacyManage.key.status === 201,
+    JSON.stringify({ view: legacyManage.view.status, create: legacyManage.create.status, key: legacyManage.key.status }));
+  check('a Phase 5 clients.manage grant does NOT widen into permission management',
+    legacyManage.permissions.status === 403 && legacyManage.settings.status === 403 && legacyManage.preview.status === 403);
+  check('a Phase 5 clients.manage grant does NOT include publishing (that was always a separate key)',
+    legacyManage.publish.status === 403);
+
+  await grantHolder(['clients.publish']);
+  const legacyPublish = await manageProbe(holderToken);
+  check('a Phase 5 clients.publish grant authorizes publishing and unpublishing only',
+    legacyPublish.publish.status === 200 && legacyPublish.view.status === 403 && legacyPublish.key.status === 403
+    && legacyPublish.permissions.status === 403);
+
+  await grantHolder(['clients.links']);
+  const legacyLinks = await manageProbe(holderToken);
+  check('a Phase 5 clients.links grant authorizes creating and listing links',
+    (await request('GET', `/api/phantom/clients/${legacyClient.id}/links`, { token: holderToken })).status === 200
+    && (await request('POST', `/api/phantom/clients/${legacyClient.id}/links`, { token: holderToken, body: { projectId: legacyProject.id, expiresInMinutes: 30 } })).status === 201
+    && legacyLinks.view.status === 403 && legacyLinks.publish.status === 403);
+
+  await grantHolder(['clients.preview']);
+  const legacyPreview = await manageProbe(holderToken);
+  check('a Phase 5 clients.preview grant still opens the preview and nothing else',
+    legacyPreview.preview.status === 200 && legacyPreview.view.status === 403 && legacyPreview.create.status === 403);
+
+  await grantHolder(['clients.preview', 'clients.documents.publish']);
+  check('granting two capabilities works independently on the same member',
+    (await request('GET', `/api/phantom/clients/${legacyClient.id}/preview`, { token: holderToken })).status === 200
+    && (await request('POST', `/api/phantom/client-documents/${legacyDocument.id}/lifecycle`, { token: holderToken, body: { state: 'published' } })).status === 200
+    && (await request('GET', '/api/phantom/clients', { token: holderToken })).status === 403);
+  await grantHolder([]);
+
+  // --- requirement 3: founding identities receive nothing automatically -----
+  const foundingRoles = ['nexus', 'ghost', 'falcon', 'quantum', 'matrix'];
+  const foundingResults = [];
+  for (const code of foundingRoles) {
+    const email = `founding-${code}@example.test`;
+    db.execute('INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, ?)', email, `Founding ${code.toUpperCase()}`, holderPasswordHash, 'member');
+    const login = await request('POST', '/api/auth/login', { body: { identifier: email, password: 'HolderPassword1' } });
+    const roleId = db.query('SELECT id FROM roles WHERE code = ?', code)[0].id;
+    db.execute("UPDATE member_profiles SET primary_role_id = ?, codename_path = 'custom_founding' WHERE user_id = (SELECT id FROM users WHERE email = ?)", roleId, email);
+    const token = login.json?.token;
+    const probe = await request('GET', `/api/phantom/clients`, { token });
+    const probeCreate = await request('POST', '/api/phantom/clients', { token, body: { name: uniqueName('founding attempt') } });
+    const probeKey = await request('POST', `/api/phantom/clients/${legacyClient.id}/keys`, { token, body: { projectId: legacyProject.id } });
+    const probePermissions = await request('GET', '/api/phantom/client-permissions', { token });
+    const ownCapabilities = (await request('GET', '/api/phantom/client-capabilities', { token })).json.data;
+    const noPermissionsInMatrix = db.query(
+      `SELECT COUNT(*) AS c FROM website_admin_permissions p
+       JOIN website_admins wa ON wa.id = p.website_admin_id
+       JOIN member_profiles mp ON mp.id = wa.member_profile_id
+       JOIN users u ON u.id = mp.user_id
+       WHERE u.email = ? AND p.allowed = 1`, email,
+    )[0].c;
+    foundingResults.push({
+      code,
+      token: Boolean(token),
+      role: Boolean(roleId),
+      login: login.status,
+      list: probe.status,
+      create: probeCreate.status,
+      key: probeKey.status,
+      permissions: probePermissions.status,
+      mine: ownCapabilities.mine.length,
+      stored: Number(noPermissionsInMatrix),
+    });
+  }
+  check('all five founding identities exist and can sign in',
+    foundingResults.every((entry) => entry.token && entry.role), JSON.stringify(foundingResults.map((entry) => [entry.code, entry.login])));
+  for (const entry of foundingResults) {
+    check(`${entry.code.toUpperCase()} holds no client permission automatically (0 effective, 0 stored, 403 on every action)`,
+      entry.mine === 0 && entry.stored === 0 && entry.list === 403 && entry.create === 403
+      && entry.key === 403 && entry.permissions === 403,
+      JSON.stringify(entry));
+  }
+  const foundingGrant = await request('POST', '/api/phantom/client-permissions', {
+    token: phantomToken,
+    body: { memberProfileId: db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'founding-nexus@example.test'")[0].id, permissions: ['clients.view'] },
+  });
+  check('PHANTOM can grant a founding identity selected permissions', foundingGrant.status === 200);
+  const nexusToken = (await request('POST', '/api/auth/login', { body: { identifier: 'founding-nexus@example.test', password: 'HolderPassword1' } })).json.token;
+  check('the granted founding identity can then do exactly that one thing',
+    (await request('GET', '/api/phantom/clients', { token: nexusToken })).status === 200
+    && (await request('POST', '/api/phantom/clients', { token: nexusToken, body: { name: uniqueName('nexus attempt') } })).status === 403);
+  await request('POST', '/api/phantom/client-permissions', {
+    token: phantomToken,
+    body: { memberProfileId: db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'founding-nexus@example.test'")[0].id, permissions: [] },
+  });
+  check('PHANTOM can remove it again',
+    (await request('GET', '/api/phantom/clients', { token: nexusToken })).status === 403);
+
+  // --- requirement 4: grant / remove / modify, and the non-escalation rule --
+  const grantOne = await grantHolder(['clients.view']);
+  check('granting a capability reports the added key and the previous value',
+    grantOne.status === 200 && grantOne.json.data.added.includes('clients.view')
+    && Array.isArray(grantOne.json.data.previous) && Array.isArray(grantOne.json.data.next));
+  const addAnother = await grantHolder(['clients.view', 'clients.documents.publish']);
+  check('modifying a grant reports exactly the added key',
+    addAnother.json.data.added.join(',') === 'clients.documents.publish' && addAnother.json.data.removed.length === 0);
+  const removeOne = await grantHolder(['clients.documents.publish']);
+  check('removing a capability reports exactly the removed key',
+    removeOne.json.data.removed.join(',') === 'clients.view' && removeOne.json.data.added.length === 0);
+  const noOp = await grantHolder(['clients.documents.publish']);
+  check('saving an unchanged set reports no change',
+    noOp.status === 200 && noOp.json.data.added.length === 0 && noOp.json.data.removed.length === 0
+    && /no change/i.test(noOp.json.message || ''), noOp.json.message);
+  const p6UnknownKey = await grantHolder(['clients.everything']);
+  check('an unknown capability is refused (400)', p6UnknownKey.status === 400, JSON.stringify(p6UnknownKey.json));
+  const nonClientPortalKey = await grantHolder(['pages.edit']);
+  check('a non-client-portal permission cannot be granted through the client matrix (400)', nonClientPortalKey.status === 400);
+
+  // a non-PHANTOM permission manager is bound by the non-escalation rule
+  await grantHolder(['clients.permissions.manage']);
+  const holderProfileId = holderProfile.id;
+  const selfChange = await request('POST', '/api/phantom/client-permissions', {
+    token: holderToken, body: { memberProfileId: holderProfileId, permissions: ['clients.permissions.manage', 'clients.view'] },
+  });
+  check('a delegated permission manager cannot change their own permissions (403)',
+    selfChange.status === 403 && /own/i.test(selfChange.json.error || ''), JSON.stringify(selfChange.json));
+  const escalation = await request('POST', '/api/phantom/client-permissions', {
+    token: holderToken, body: { memberProfileId: foundingResults[1].code === 'ghost' ? db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'founding-ghost@example.test'")[0].id : 0, permissions: ['clients.view'] },
+  });
+  check('a delegated permission manager cannot grant a capability they do not hold (403)',
+    escalation.status === 403 && /do not hold/i.test(escalation.json.error || ''), JSON.stringify(escalation.json));
+  await grantHolder(['clients.permissions.manage', 'clients.view']);
+  const allowedDelegation = await request('POST', '/api/phantom/client-permissions', {
+    token: holderToken,
+    body: { memberProfileId: db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'founding-quantum@example.test'")[0].id, permissions: ['clients.view'] },
+  });
+  check('a delegated permission manager CAN grant a capability they hold themselves',
+    allowedDelegation.status === 200 && allowedDelegation.json.data.added.includes('clients.view'), JSON.stringify(allowedDelegation.json));
+  const quantumToken = (await request('POST', '/api/auth/login', { body: { identifier: 'founding-quantum@example.test', password: 'HolderPassword1' } })).json.token;
+  check('the delegated grant really took effect for the receiving member',
+    (await request('GET', '/api/phantom/clients', { token: quantumToken })).status === 200);
+  await request('POST', '/api/phantom/client-permissions', {
+    token: holderToken,
+    body: { memberProfileId: db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'founding-quantum@example.test'")[0].id, permissions: [] },
+  });
+  await grantHolder([]);
+
+  // --- requirement 5: WHO / WHAT / WHEN / TARGET / OLD / NEW ----------------
+  await grantHolder(['clients.view']);
+  await grantHolder(['clients.view', 'clients.documents.publish']);
+  await grantHolder(['clients.documents.publish']);
+  await grantHolder([]);
+  const auditRows = db.query(
+    "SELECT actor_user_id, actor_member_profile_id, subject_type, subject_id, details_json, created_at FROM audit_logs WHERE action = 'client.permissions.updated' ORDER BY id DESC LIMIT 4",
+  );
+  check('every permission change is recorded in the existing audit log', auditRows.length === 4, `${auditRows.length} rows`);
+  const parsedAudit = auditRows.map((row) => ({ ...row, details: JSON.parse(row.details_json || '{}') }));
+  check('the audit records WHO made the change and WHEN',
+    parsedAudit.every((row) => Number(row.actor_user_id) > 0 && Boolean(row.created_at)));
+  check('the audit records WHAT changed, with the old and the new value',
+    parsedAudit[1].details.previousValue.join(',') === 'clients.documents.publish,clients.view'
+    && parsedAudit[1].details.newValue.join(',') === 'clients.documents.publish'
+    && parsedAudit[1].details.removed.join(',') === 'clients.view',
+    JSON.stringify(parsedAudit[1].details));
+  check('the newest row records the removal back to an empty set',
+    parsedAudit[0].details.newValue.length === 0 && parsedAudit[0].details.removed.join(',') === 'clients.documents.publish',
+    JSON.stringify(parsedAudit[0].details));
+  check('the audit records the TARGET member',
+    Number(parsedAudit[1].subject_id) === holderProfileId && parsedAudit[1].details.target.memberProfileId === holderProfileId
+    && Boolean(parsedAudit[1].details.target.name));
+  check('the audit keeps a grant history, not just the latest state',
+    parsedAudit.some((row) => row.details.added?.includes('clients.view'))
+    && parsedAudit.some((row) => row.details.added?.includes('clients.documents.publish'))
+    && parsedAudit.some((row) => row.details.removed?.includes('clients.view')));
+  check('no raw credential is ever written to the permission audit',
+    !/passkey|key_hash/.test(JSON.stringify(parsedAudit))
+    && !/CRX(-[0-9A-Z]{4}){4}/.test(JSON.stringify(parsedAudit)));
+  const matrixAfterAudit = await request('GET', '/api/phantom/client-permissions', { token: phantomToken });
+  check('the permission matrix shows the recorded changes back to PHANTOM',
+    matrixAfterAudit.json.data.recentChanges.length >= 4
+    && matrixAfterAudit.json.data.recentChanges[0].actor && matrixAfterAudit.json.data.recentChanges[0].target,
+    JSON.stringify(matrixAfterAudit.json.data.recentChanges[0] || {}).slice(0, 160));
+
+  // --- requirement 6: hiding a control in the UI is not authorization -------
+  const legacyLinksBefore = Number(db.query('SELECT COUNT(*) AS c FROM client_links WHERE client_id = (SELECT id FROM clients WHERE public_id = ?)', legacyClient.id)[0].c);
+  const hiddenButRefused = await (async () => {
+    // The workspace hides every action this member cannot perform. Driving the
+    // API directly must fail exactly the same way.
+    const token = holderToken;
+    const attempts = [
+      ['CLIENT_CREATE', request('POST', '/api/phantom/clients', { token, body: { name: uniqueName('hidden attempt') } })],
+      ['CLIENT_EDIT', request('PATCH', `/api/phantom/clients/${legacyClient.id}`, { token, body: { name: 'Hidden attempt' } })],
+      ['CLIENT_SUSPEND', request('POST', `/api/phantom/clients/${legacyClient.id}/status`, { token, body: { status: 'suspended' } })],
+      ['CLIENT_ARCHIVE', request('POST', `/api/phantom/clients/${legacyClient.id}/status`, { token, body: { status: 'archived' } })],
+      ['CLIENT_ACCESS_KEY_CREATE', request('POST', `/api/phantom/clients/${legacyClient.id}/keys`, { token, body: { projectId: legacyProject.id } })],
+      ['CLIENT_LINK_CREATE', request('POST', `/api/phantom/clients/${legacyClient.id}/links`, { token, body: { projectId: legacyProject.id, expiresInMinutes: 30 } })],
+      ['CLIENT_DOCUMENT_DELETE', request('DELETE', `/api/phantom/client-documents/${legacyDocument.id}`, { token })],
+      ['CLIENT_PERMISSIONS_MANAGE', request('POST', '/api/phantom/client-permissions', { token, body: { memberProfileId: holderProfileId, permissions: [] } })],
+      ['CLIENT_SETTINGS_MANAGE', request('PUT', '/api/phantom/client-portal-settings', { token, body: { settings: [{ key: 'client_portal_enabled', value: false }] } })],
+    ];
+    return Promise.all(attempts.map(async ([brief, promise]) => [brief, (await promise).status]));
+  })();
+  check('a hidden control is refused by the server, not merely hidden in the browser',
+    hiddenButRefused.every(([, status]) => status === 403), JSON.stringify(hiddenButRefused));
+  check('the refused attempts changed nothing on the server',
+    db.query('SELECT status FROM clients WHERE public_id = ?', legacyClient.id)[0].status === 'active'
+    && Number(db.query('SELECT COUNT(*) AS c FROM client_links WHERE client_id = (SELECT id FROM clients WHERE public_id = ?)', legacyClient.id)[0].c) === legacyLinksBefore
+    && Number(db.query("SELECT COUNT(*) AS c FROM client_documents WHERE public_id = ?", legacyDocument.id)[0].c) === 1);
+
+  // --- document delete is recoverable through the existing Recycle Bin ------
+  const deletable = await createDocument(phantomToken, legacyClient.id, legacyProject.id, {
+    title: uniqueName('deletable document'), contentText: 'Delete me.',
+  });
+  await publish(phantomToken, deletable.id, 'published');
+  const deleteResponse = await request('DELETE', `/api/phantom/client-documents/${deletable.id}`, { token: phantomToken });
+  check('PHANTOM can delete a client document', deleteResponse.status === 200, JSON.stringify(deleteResponse.json));
+  check('the deleted document is gone from the portal',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_documents WHERE public_id = ?', deletable.id)[0].c) === 0
+    && (await request('GET', `/api/phantom/clients/${legacyClient.id}/documents`, { token: phantomToken }))
+      .json.data.every((entry) => entry.id !== deletable.id));
+  const recycleRow = db.query("SELECT id, resource_type, payload_json FROM recycle_bin_items WHERE resource_type = 'client_document' ORDER BY id DESC LIMIT 1")[0];
+  check('the deleted document is recoverable from the existing Recycle Bin', Boolean(recycleRow));
+  const restoreResponse = await request('POST', `/api/phantom/recycle-bin/${recycleRow.id}/restore`, { token: phantomToken });
+  check('PHANTOM can restore it from the Recycle Bin', restoreResponse.status === 200, JSON.stringify(restoreResponse.json));
+  const restored = db.query('SELECT lifecycle_status, client_visible, is_archived FROM client_documents WHERE public_id = ?', deletable.id)[0];
+  check('a restored document comes back as a draft that the client cannot see',
+    restored && restored.lifecycle_status === 'draft' && Number(restored.client_visible) === 0);
+  check('the deletion and the restore are both recorded',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action IN ('client.document.deleted','client.recycle_bin.restored','recycle_bin.restored')")[0].c) >= 2);
+
+  // --- CLIENT_SETTINGS_MANAGE writes the switches the client routes read ----
+  const settingsRead = await request('GET', '/api/phantom/client-portal-settings', { token: phantomToken });
+  check('PHANTOM can read the client portal settings',
+    settingsRead.status === 200 && settingsRead.json.data.length === 3
+    && settingsRead.json.data.every((entry) => typeof entry.value === 'boolean'));
+  const settingsWrite = await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken, body: { settings: [{ key: 'client_downloads_enabled', value: false }] },
+  });
+  check('PHANTOM can change a client portal setting',
+    settingsWrite.status === 200 && settingsWrite.json.data.applied[0].previous === true
+    && settingsWrite.json.data.applied[0].next === false, JSON.stringify(settingsWrite.json));
+  check('the switch really changed what the client routes read',
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'client_downloads_enabled'")[0].setting_value === '0');
+  const settingsRestoreResponse = await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken, body: { settings: [{ key: 'client_downloads_enabled', value: true }] },
+  });
+  check('the change is reversible and recorded',
+    settingsRestoreResponse.status === 200
+    && Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.portal_settings.updated'")[0].c) >= 2);
+  const badSetting = await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken, body: { settings: [{ key: 'vault_sharing_enabled', value: true }] },
+  });
+  check('a setting outside the client portal is refused (400)', badSetting.status === 400);
+  check('the refusal left the platform setting untouched',
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_sharing_enabled'")[0].setting_value === '0');
+
+  // --- the client-facing portal is still exactly as it was ------------------
+  check('the client-facing room is unchanged by all of this',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomSessionA })).status === 200);
+  check('no delegated member ever becomes PHANTOM',
+    Number(db.query("SELECT COUNT(*) AS c FROM member_profiles WHERE primary_role_id = (SELECT id FROM roles WHERE code = 'phantom')")[0].c) === 1
+    && db.query(`SELECT u.email FROM member_profiles mp JOIN users u ON u.id = mp.user_id
+                 WHERE mp.primary_role_id = (SELECT id FROM roles WHERE code = 'phantom')`)[0].email === ENV.ADMIN_EMAIL
+    && Number(db.query("SELECT COUNT(*) AS c FROM website_admins WHERE status = 'active'")[0].c) >= 1,
+    JSON.stringify(db.query("SELECT u.email FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE mp.primary_role_id = (SELECT id FROM roles WHERE code = 'phantom')")));
+  await grantHolder([]);
+
   // -------------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------------

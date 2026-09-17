@@ -469,7 +469,8 @@ const main = async () => {
     && /3 · Section/.test(centerSource) && /4 · Client permissions/.test(centerSource));
   check('the key dialog states that a generated key is shown once',
     /shown once/i.test(centerSource) && /Generate key/.test(centerSource));
-  check('a client can be created from the workspace header', /Create client/.test(centerHtml));
+  check('the workspace offers client creation once the capability is loaded',
+    /Create client/.test(centerSource) && /can\('clients\.create'\)/.test(centerSource));
   check('the client rail can include archived clients on request', /Archived/.test(centerHtml));
   check('the workspace states what it manages before any client is chosen',
     /Select a client to manage their projects, documents, access keys and links\./.test(centerHtml));
@@ -551,6 +552,74 @@ const main = async () => {
     /Exit preview/.test(previewHtml) && !/Log out/.test(previewHtml));
   check('the previewed room is the same room component the client uses',
     /Project Overview/.test(previewHtml) && /Project sections/.test(previewHtml));
+
+  // =========================================================================
+  group('11. Granular client permissions in the workspace (Phase 6)');
+  // =========================================================================
+
+  // The header button is now capability-driven, so the static render (which has
+  // no capabilities loaded yet) shows no create button. That is the point.
+  check('an operator with no capabilities loaded is offered no mutating action',
+    !/Create client/.test(centerHtml) && !/Create project/.test(centerHtml) && !/Publish to client/.test(centerHtml));
+  check('the workspace explains which capability is missing instead of failing silently',
+    /permission to view client records/.test(centerHtml) && /CLIENT_VIEW/.test(centerHtml));
+
+  const guardedActions = [
+    ['creating a client', "can('clients.create')"],
+    ['editing a client', "can('clients.edit')"],
+    ['suspending a client', "can('clients.suspend')"],
+    ['archiving a client', "can('clients.archive')"],
+    ['previewing as the client', "can('clients.preview')"],
+    ['creating a project', "can('clients.projects.create')"],
+    ['editing a project', "can('clients.projects.edit')"],
+    ['archiving a project', "can('clients.projects.archive')"],
+    ['creating a client document', "can('clients.documents.create')"],
+    ['editing a client document', "can('clients.documents.edit')"],
+    ['deleting a client document', "can('clients.documents.delete')"],
+    ['publishing a client document', "can('clients.documents.publish')"],
+    ['unpublishing a client document', "can('clients.documents.unpublish')"],
+    ['creating a temporary link', "can('clients.links.create')"],
+    ['revoking a temporary link', "can('clients.links.revoke')"],
+  ];
+  for (const [action, guard] of guardedActions) {
+    check(`the UI hides ${action} behind its capability`, centerSource.includes(guard));
+  }
+  check('the UI never relies on hiding alone: the server refusal is explained in the workspace',
+    /refused server-side unless you hold the matching client permission/i.test(centerSource));
+
+  const panelSource = centerSource.slice(centerSource.indexOf('const PermissionsPanel'));
+  check('the permission panel renders the brief names from the server catalog',
+    /entry\.brief/.test(panelSource) && /capabilities\.filter/.test(panelSource));
+  check('the permission panel groups capabilities for the operator',
+    /groups = Array\.from\(new Set/.test(panelSource) && /entry\.group/.test(panelSource));
+  check('a capability the operator does not hold cannot be granted from the UI',
+    /heldByMe/.test(panelSource) && /disabled=\{!heldByMe/.test(panelSource));
+  check('the panel states the non-escalation rule to the operator',
+    /only manage client capabilities you hold yourself/i.test(panelSource) && /never your own account/i.test(panelSource));
+  check('the panel states that founding identities get nothing automatically',
+    /NEXUS, GHOST, FALCON, QUANTUM, MATRIX/.test(panelSource) && /grants nothing on its own/i.test(panelSource));
+  check('the panel records and displays WHO, WHAT, WHEN, TARGET, OLD and NEW',
+    /recentChanges/.test(panelSource) && /entry\.actor/.test(panelSource) && /entry\.target/.test(panelSource)
+    && /formatWhen\(entry\.at\)/.test(panelSource) && /previousValue/.test(panelSource) && /newValue/.test(panelSource));
+  check('the panel can grant, remove and modify in one place',
+    /Save permissions/.test(panelSource) && /Remove all/.test(panelSource) && /setDraft\(\[\]\)/.test(panelSource));
+  check('the panel exposes the client portal settings switches',
+    /Save portal settings/.test(centerSource) && /settingsDraft/.test(centerSource)
+    && /clientAccessCenter\.savePortalSettings/.test(centerSource));
+  check('the panel explains that the Phase 5 umbrella keys still work unchanged',
+    /umbrella keys/.test(panelSource) && /resolve[sd]? to the granular capabilities it always meant/i.test(panelSource));
+  check('the panel asks the server to record the change rather than changing state locally',
+    /clientAccessCenter\.setMemberPermissions/.test(panelSource));
+
+  const apiSource = fs.readFileSync(path.join(ROOT, 'src/lib/cloudflare.ts'), 'utf8');
+  check('the workspace reads capabilities and the matrix from the server',
+    /clientAccessCenter\s*=\s*\{/.test(apiSource) && /permissionMatrix:/.test(apiSource)
+    && /capabilities:/.test(apiSource) && /setMemberPermissions:/.test(apiSource)
+    && /portalSettings:/.test(apiSource) && /deleteDocument:/.test(apiSource));
+  check('the client portal helper is still a separate surface (no duplicated transport)',
+    /export const clientPortal = \{/.test(apiSource) && /export const clientAccessCenter = \{/.test(apiSource));
+  check('the workspace never renders the audit detail JSON as raw internal ids only',
+    !/subject_id|actor_user_id/.test(centerSource));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
