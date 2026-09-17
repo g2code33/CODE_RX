@@ -610,7 +610,11 @@ export const registerClientRoutes = (app: ClientApp) => {
       `SELECT cl.*, 
               (SELECT COUNT(*) FROM client_projects p WHERE p.client_id = cl.id AND p.is_archived = 0) AS project_count,
               (SELECT COUNT(*) FROM client_access_keys k WHERE k.client_id = cl.id AND k.status = 'active') AS active_key_count,
-              (SELECT COUNT(*) FROM client_documents d WHERE d.client_id = cl.id AND d.is_archived = 0) AS document_count
+              (SELECT COUNT(*) FROM client_documents d WHERE d.client_id = cl.id AND d.is_archived = 0) AS document_count,
+              (SELECT COUNT(*) FROM client_documents d WHERE d.client_id = cl.id AND d.lifecycle_status = 'published'
+                 AND d.client_visible = 1 AND d.allow_view = 1 AND d.is_archived = 0) AS published_count,
+              (SELECT MAX(a.created_at) FROM audit_logs a
+                 WHERE a.subject_type = 'client' AND a.subject_id = cl.public_id) AS last_activity_at
        FROM clients cl
        ${includeArchived ? '' : "WHERE cl.status <> 'archived'"}
        ORDER BY cl.updated_at DESC, cl.id DESC LIMIT 500`
@@ -628,6 +632,8 @@ export const registerClientRoutes = (app: ClientApp) => {
         projectCount: Number(client.project_count || 0),
         activeKeyCount: Number(client.active_key_count || 0),
         documentCount: Number(client.document_count || 0),
+        publishedCount: Number(client.published_count || 0),
+        lastActivityAt: client.last_activity_at || null,
         createdAt: client.created_at,
         updatedAt: client.updated_at,
       })),
@@ -1034,6 +1040,44 @@ export const registerClientRoutes = (app: ClientApp) => {
     return c.json({ success: true, message: 'Access key revoked immediately.', data: { sessionsRevoked: sessions } });
   });
 
+  app.get('/api/phantom/clients/:clientId/links', requireAuth, links, async (c: any) => {
+    const db = c.env.DB;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
+    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
+
+    // Link tokens are never returned: only their metadata, so an operator can
+    // see what is outstanding without being able to recover a credential.
+    const rows = await asRows<any>(db.prepare(
+      `SELECT l.public_id, l.destination_type, l.destination_id, l.mode, l.allow_view, l.allow_download,
+              l.max_uses, l.use_count, l.status, l.expires_at, l.last_used_at, l.created_at,
+              p.public_id AS project_public_id, p.name AS project_name, p.reference_code AS project_reference,
+              d.public_id AS document_public_id, d.title AS document_title, d.reference_code AS document_reference
+       FROM client_links l
+       JOIN client_projects p ON p.id = l.client_project_id
+       LEFT JOIN client_documents d ON d.id = l.client_document_id
+       WHERE l.client_id = ?
+       ORDER BY l.created_at DESC, l.id DESC LIMIT 100`
+    ).bind(Number(client.id)));
+
+    return c.json({ success: true, data: rows.map((row) => ({
+      id: row.public_id,
+      mode: row.mode,
+      destination: row.destination_type,
+      project: { id: row.project_public_id, name: row.project_name, reference: row.project_reference },
+      document: row.document_public_id
+        ? { id: row.document_public_id, title: row.document_title, reference: row.document_reference }
+        : null,
+      allowView: Number(row.allow_view) === 1,
+      allowDownload: Number(row.allow_download) === 1,
+      maxUses: row.max_uses === null ? null : Number(row.max_uses),
+      useCount: Number(row.use_count || 0),
+      status: row.status,
+      expiresAt: row.expires_at,
+      lastUsedAt: row.last_used_at,
+      createdAt: row.created_at,
+    })) });
+  });
+
   app.post('/api/phantom/clients/:clientId/links', requireAuth, links, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
@@ -1222,8 +1266,18 @@ export const registerClientRoutes = (app: ClientApp) => {
         vaultVersionNumber = Number(snapshotRow.version_number);
         snapshot = snapshotRow.content_json || JSON.stringify({ version: 1, blocks: [] });
       } else {
-        const live = await one<any>(db.prepare('SELECT content_json, content FROM vault_documents WHERE id = ?').bind(vaultId));
-        snapshot = live?.content_json || JSON.stringify({ version: 1, blocks: [] });
+        const live = await one<any>(db.prepare('SELECT content_json, content, content_format FROM vault_documents WHERE id = ?').bind(vaultId));
+        if (live?.content_json) {
+          snapshot = live.content_json;
+        } else if (live?.content) {
+          // A Vault document with no stored block snapshot is still a real
+          // document. Publish its text as a text snapshot instead of filing an
+          // empty client document that looks published but reads as blank.
+          snapshot = String(live.content);
+          snapshotFormat = 'text';
+        } else {
+          snapshot = JSON.stringify({ version: 1, blocks: [] });
+        }
       }
       vaultDocumentId = vaultId;
     } else {
@@ -1410,5 +1464,231 @@ export const registerClientRoutes = (app: ClientApp) => {
         details,
       };
     }) });
+  });
+
+  // PHANTOM-only preview and publishing support, registered by the same
+  // function so a single call still wires the whole portal surface.
+  registerClientAccessCenterRoutes(app);
+};
+
+// =============================================================================
+// CLIENT ACCESS CENTER — PREVIEW AND PUBLISHING SUPPORT
+//
+// These routes exist for the PHANTOM workspace only. They never serve a file,
+// never create a client session, and never bypass the client authorization
+// rules: every payload is produced by the SAME exposure decision and the SAME
+// serializers the public client API uses, so what an operator previews is
+// exactly what the client would see.
+// =============================================================================
+
+const registerClientAccessCenterRoutes = (app: ClientApp) => {
+  const preview = requireClientPermission('clients.preview');
+  const publish = requireClientPermission('clients.publish');
+
+  /** The client's projects, as the operator needs them (no internal fields). */
+  const previewProjects = async (db: D1Database, clientId: number) => asRows<any>(db.prepare(
+    `SELECT * FROM client_projects WHERE client_id = ? ORDER BY is_archived, id DESC LIMIT 100`
+  ).bind(clientId));
+
+  /**
+   * The project room payload, built exactly like the client route. `actor` only
+   * proves the operator is allowed to look; it never widens what is returned.
+   */
+  const previewRoom = async (db: D1Database, client: any, project: any) => {
+    const counts = await asRows<{ category: string; total: number }>(db.prepare(
+      `SELECT category, COUNT(*) AS total FROM client_documents
+       WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
+         AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
+       GROUP BY category`
+    ).bind(Number(client.id), Number(project.id)));
+
+    const byCategory: Record<string, number> = {};
+    for (const category of Object.values(SECTION_CATEGORY)) byCategory[category] = 0;
+    for (const row of counts) byCategory[String(row.category)] = Number(row.total || 0);
+
+    const recent = await asRows<any>(db.prepare(
+      `SELECT * FROM client_documents
+       WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
+         AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
+       ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 5`
+    ).bind(Number(client.id), Number(project.id)));
+
+    const clientState = { status: client.status };
+    return {
+      project: publicProject(project),
+      sections: CLIENT_SECTIONS.map((section) => ({
+        id: section,
+        label: section.charAt(0).toUpperCase() + section.slice(1),
+        count: section === 'overview' ? recent.length : byCategory[SECTION_CATEGORY[section]] || 0,
+      })),
+      recent: recent.map((row) => publicDocument(row, clientDocumentExposure(row, project, clientState))),
+    };
+  };
+
+  /**
+   * PRINCIPAL FOR PREVIEW. Resolves the client record and its project, then
+   * returns the room payload. Nothing about the request can select another
+   * client: the client id is read from the path and the project must belong to
+   * that client.
+   */
+  app.get('/api/phantom/clients/:clientId/preview', requireAuth, preview, async (c: any) => {
+    const db = c.env.DB;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
+    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
+
+    const projects = await previewProjects(db, Number(client.id));
+    const requestedProjectId = String(c.req.query('projectId') || '').trim();
+    const project = requestedProjectId
+      ? projects.find((row) => row.public_id === requestedProjectId) || null
+      : projects.find((row) => Number(row.is_archived) === 0 && row.status === 'active') || projects[0] || null;
+
+    if (!project) {
+      return c.json({
+        success: true,
+        data: {
+          client: { id: client.public_id, name: client.name, status: client.status },
+          projects: projects.map((row) => ({
+            id: row.public_id, name: row.name, reference: row.reference_code,
+            status: row.status, isArchived: Number(row.is_archived) === 1,
+          })),
+          room: null,
+          notice: 'This client has no project, so the client would see an empty portal.',
+        },
+      });
+    }
+
+    const room = await previewRoom(db, client, project);
+    return c.json({
+      success: true,
+      data: {
+        client: { id: client.public_id, name: client.name, status: client.status },
+        projects: projects.map((row) => ({
+          id: row.public_id, name: row.name, reference: row.reference_code,
+          status: row.status, isArchived: Number(row.is_archived) === 1,
+        })),
+        project: { id: project.public_id, name: project.name, reference: project.reference_code },
+        room,
+        notice: Number(project.is_archived) === 1 || project.status !== 'active'
+          ? 'This project is not active, so the client cannot open this room.'
+          : null,
+      },
+    });
+  });
+
+  app.get('/api/phantom/clients/:clientId/preview/projects/:projectId', requireAuth, preview, async (c: any) => {
+    const db = c.env.DB;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
+    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
+    const project = await one<any>(db.prepare(
+      'SELECT * FROM client_projects WHERE public_id = ? AND client_id = ?'
+    ).bind(String(c.req.param('projectId') || ''), Number(client.id)));
+    if (!project) return c.json({ success: false, error: 'Project not found for this client.' }, 404);
+
+    const room = await previewRoom(db, client, project);
+    return c.json({ success: true, data: { project: { id: project.public_id }, room } });
+  });
+
+  app.get('/api/phantom/clients/:clientId/preview/projects/:projectId/sections/:section', requireAuth, preview, async (c: any) => {
+    const db = c.env.DB;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
+    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
+    const project = await one<any>(db.prepare(
+      'SELECT * FROM client_projects WHERE public_id = ? AND client_id = ?'
+    ).bind(String(c.req.param('projectId') || ''), Number(client.id)));
+    if (!project) return c.json({ success: false, error: 'Project not found for this client.' }, 404);
+
+    const section = String(c.req.param('section') || '').toLowerCase() as ClientSection;
+    if (!CLIENT_SECTIONS.includes(section)) return c.json({ success: false, error: 'Unknown section.' }, 404);
+
+    const rows = section === 'overview'
+      ? await asRows<any>(db.prepare(
+        `SELECT * FROM client_documents
+         WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
+           AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
+         ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 50`
+      ).bind(Number(client.id), Number(project.id)))
+      : await asRows<any>(db.prepare(
+        `SELECT * FROM client_documents
+         WHERE client_id = ? AND client_project_id = ? AND category = ? AND is_archived = 0
+           AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
+         ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 200`
+      ).bind(Number(client.id), Number(project.id), SECTION_CATEGORY[section]));
+
+    return c.json({
+      success: true,
+      data: {
+        project: publicProject(project),
+        section,
+        documents: rows.map((row) => publicDocument(row, clientDocumentExposure(row, project, { status: client.status }))),
+      },
+    });
+  });
+
+  app.get('/api/phantom/clients/:clientId/preview/projects/:projectId/documents/:documentId', requireAuth, preview, async (c: any) => {
+    const db = c.env.DB;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
+    if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
+    const project = await one<any>(db.prepare(
+      'SELECT * FROM client_projects WHERE public_id = ? AND client_id = ?'
+    ).bind(String(c.req.param('projectId') || ''), Number(client.id)));
+    if (!project) return c.json({ success: false, error: 'Project not found for this client.' }, 404);
+
+    const document = await one<any>(db.prepare(
+      'SELECT * FROM client_documents WHERE public_id = ? AND client_id = ? AND client_project_id = ?'
+    ).bind(String(c.req.param('documentId') || ''), Number(client.id), Number(project.id)));
+    if (!document) return c.json({ success: false, error: 'Document not found for this client.' }, 404);
+
+    const exposure = clientDocumentExposure(document, project, { status: client.status });
+    if (!exposure.canView) {
+      return c.json({
+        success: false,
+        error: 'The client cannot see this document, so there is nothing to preview.',
+        code: 'not_client_visible',
+      }, 404);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        project: publicProject(project),
+        document: publicDocument(document, { ...exposure, canDownload: false }, { includeContent: true }),
+      },
+    });
+  });
+
+  /**
+   * Publishable Vault sources for the publishing workflow.
+   *
+   * This is an internal picker: it lists ACTIVE, non-sensitive, non-restricted
+   * Vault documents so an operator can choose what to publish. Exposing the
+   * list to an operator never makes a document client-visible — that only
+   * happens through the explicit publish action, which pins a version snapshot.
+   */
+  app.get('/api/phantom/client-vault-sources', requireAuth, publish, async (c: any) => {
+    const search = cleanOptionalStr(c.req.query('search'), 80);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT d.id, d.document_code, d.title, d.status, d.visibility, d.updated_at,
+              s.slug AS section_slug, s.title AS section_name, s.is_sensitive
+       FROM vault_documents d
+       JOIN vault_sections s ON s.id = d.section_id
+       WHERE d.is_archived = 0 AND s.is_archived = 0
+         AND d.visibility <> 'restricted' AND s.is_sensitive = 0
+         ${search ? 'AND (d.title LIKE ? OR d.document_code LIKE ?)' : ''}
+       ORDER BY d.updated_at DESC, d.id DESC LIMIT 100`
+    ).bind(...(search ? [`%${search}%`, `%${search}%`] : [])));
+
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id),
+        code: row.document_code,
+        title: row.title,
+        status: row.status,
+        section: row.section_name,
+        updatedAt: row.updated_at,
+        // Only documents that are ready to leave the Vault are offered.
+        publishable: ['approved', 'active'].includes(String(row.status)),
+      })),
+    });
   });
 };

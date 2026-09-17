@@ -34,6 +34,20 @@ export interface ClientPortalContext {
   permissions: { view: boolean; download: boolean };
 }
 
+/**
+ * The three reads the room performs. The signed-in client uses the client API;
+ * PHANTOM's preview passes an equivalent transport backed by the preview
+ * endpoints, which return the same payloads. Swapping the transport is what
+ * lets PREVIEW render the genuine component without inventing a second room.
+ */
+export interface RoomTransport {
+  project: (projectId: string) => Promise<{ data: { project?: any; sections?: any[]; recent?: any[] } }>;
+  section: (projectId: string, section: string) => Promise<{ data: { documents?: any[] } }>;
+  document: (projectId: string, documentId: string) => Promise<{ data: { document: any } }>;
+  /** Absent in preview: preview never serves a file. */
+  download?: (projectId: string, documentId: string, fileName: string) => Promise<void>;
+}
+
 interface ClientProjectRoomProps {
   context: ClientPortalContext;
   onSignedOut: () => void;
@@ -41,6 +55,12 @@ interface ClientProjectRoomProps {
   onSessionEnded: (message: string) => void;
   notice?: string | null;
   onNotice: (message: string | null) => void;
+  /** Defaults to the client API. Preview supplies its own. */
+  transport?: RoomTransport;
+  /** Preview mode: the room is read-only and never serves a file. */
+  preview?: boolean;
+  /** Label for the header action (Log out for clients, Exit preview for PHANTOM). */
+  exitLabel?: string;
 }
 
 /**
@@ -175,7 +195,10 @@ const DocumentRow = ({
  * never from the URL, and every request is re-authorized by the server. A
  * section is only offered when the server reports authorized content in it.
  */
-export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice, onNotice }: ClientProjectRoomProps) => {
+export const ClientProjectRoom = ({
+  context, onSignedOut, onSessionEnded, notice, onNotice,
+  transport = clientPortal, preview = false, exitLabel = 'Log out',
+}: ClientProjectRoomProps) => {
   const [sections, setSections] = useState<RoomSection[]>([]);
   const [recent, setRecent] = useState<RoomDocument[]>([]);
   const [projectStatus, setProjectStatus] = useState<string>(context.project.status || 'active');
@@ -206,7 +229,7 @@ export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice
     setLoading(true);
     setError(null);
     try {
-      const response = await clientPortal.project(projectId);
+      const response = await transport.project(projectId);
       const project = response.data.project || {};
       setSections(response.data.sections || []);
       setRecent(response.data.recent || []);
@@ -217,7 +240,7 @@ export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice
     } finally {
       setLoading(false);
     }
-  }, [projectId, handleFailure]);
+  }, [projectId, handleFailure, transport]);
 
   useEffect(() => { void loadProject(); }, [loadProject]);
 
@@ -232,7 +255,7 @@ export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice
     setBusy(true);
     setDocuments(null);
     try {
-      const response = await clientPortal.section(projectId, section);
+      const response = await transport.section(projectId, section);
       setDocuments(response.data.documents || []);
     } catch (failure) {
       handleFailure(failure);
@@ -245,7 +268,7 @@ export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice
     setBusy(true);
     setError(null);
     try {
-      const response = await clientPortal.document(projectId, documentId);
+      const response = await transport.document(projectId, documentId);
       setOpenDocument(response.data.document);
     } catch (failure) {
       handleFailure(failure);
@@ -256,9 +279,16 @@ export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice
 
   const download = async (document: RoomDocument) => {
     setError(null);
+    // Preview never serves a document: it shows the client's own experience,
+    // including the permission the client has, without handing a file to the
+    // operator's browser.
+    if (preview || !transport.download) {
+      onNotice('In preview, downloads are shown but not served. The client downloads this from their own session.');
+      return;
+    }
     setBusy(true);
     try {
-      await clientPortal.download(projectId, document.id, downloadFileName(document));
+      await transport.download(projectId, document.id, downloadFileName(document));
     } catch {
       // Downloads exist only once a stamped client copy has been produced, so a
       // refusal is explained rather than shown as a failure code.
@@ -322,13 +352,22 @@ export const ClientProjectRoom = ({ context, onSignedOut, onSessionEnded, notice
               className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60 sm:px-3.5"
             >
               {signingOut ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
-              <span className="hidden sm:inline">Log out</span>
+              <span className="hidden sm:inline">{exitLabel}</span>
             </button>
           </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-5 sm:py-8">
+        {preview ? (
+          <div className="mb-6 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900">
+            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Preview only — this is exactly what {context.client.name} sees. No client session was created,
+              no document is downloaded, and nothing on screen can change their access.
+            </span>
+          </div>
+        ) : null}
         {notice ? (
           <div className="mb-6 flex items-start justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
             <span className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{notice}</span>

@@ -667,3 +667,86 @@ export const clientPortal = {
     URL.revokeObjectURL(url);
   },
 };
+
+// ===========================================================================
+// CLIENT ACCESS CENTER (Phase 5) — PHANTOM workspace only.
+// Every call here is an internal management call. It uses the member bearer
+// token through the normal PHANTOM/admin authentication; it never creates or
+// uses a client session, and a member without the matching clients.*
+// permission is refused by the server.
+// ===========================================================================
+
+export const clientAccessCenter = {
+  clients: async (options: { archived?: boolean } = {}) => {
+    const result = await apiCall<{ data: any[] }>(`/api/phantom/clients${options.archived ? '?archived=1' : ''}`);
+    return result.data || [];
+  },
+  // The detail route returns { client, projects }; the workspace loads projects
+  // separately, so only the client record is unwrapped here.
+  client: async (clientId: string) =>
+    (await apiCall<{ data: { client: any } }>(`/api/phantom/clients/${clientId}`)).data.client,
+  createClient: (data: any) => apiCall<{ data: { id: string } }>('/api/phantom/clients', { method: 'POST', body: JSON.stringify(data) }),
+  updateClient: (clientId: string, data: any) => apiCall(`/api/phantom/clients/${clientId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  setClientStatus: (clientId: string, status: string) =>
+    apiCall<{ data: any; message: string }>(`/api/phantom/clients/${clientId}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+  revokeAllAccess: (clientId: string) =>
+    apiCall<{ data: any }>(`/api/phantom/clients/${clientId}/revoke-all`, { method: 'POST' }),
+
+  projects: async (clientId: string) => (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/projects`)).data || [],
+  createProject: (clientId: string, data: any) =>
+    apiCall<{ data: { id: string; reference: string } }>(`/api/phantom/clients/${clientId}/projects`, { method: 'POST', body: JSON.stringify(data) }),
+  updateProject: (projectId: string, data: any) =>
+    apiCall(`/api/phantom/client-projects/${projectId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  keys: async (clientId: string) => (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/keys`)).data || [],
+  createKey: (clientId: string, data: any) =>
+    apiCall<{ data: { id: string; passkey: string; hint: string; expiresAt: string | null }; message: string }>(
+      `/api/phantom/clients/${clientId}/keys`, { method: 'POST', body: JSON.stringify(data) },
+    ),
+  regenerateKey: (keyId: string) =>
+    apiCall<{ data: { id: string; passkey: string; hint: string; sessionsRevoked: number }; message: string }>(
+      `/api/phantom/client-keys/${keyId}/regenerate`, { method: 'POST' },
+    ),
+  revokeKey: (keyId: string) => apiCall<{ message: string }>(`/api/phantom/client-keys/${keyId}/revoke`, { method: 'POST' }),
+
+  documents: async (clientId: string, projectId?: string) => {
+    const query = projectId ? `?project=${encodeURIComponent(projectId)}` : '';
+    return (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/documents${query}`)).data || [];
+  },
+  createDocument: (clientId: string, data: any) =>
+    apiCall<{ data: { id: string; reference: string; category: string } }>(`/api/phantom/clients/${clientId}/documents`, { method: 'POST', body: JSON.stringify(data) }),
+  updateDocument: (documentId: string, data: any) =>
+    apiCall(`/api/phantom/client-documents/${documentId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  setDocumentLifecycle: (documentId: string, state: string, clientVisible?: boolean) =>
+    apiCall<{ data: { state: string; clientVisible: boolean }; message: string }>(
+      `/api/phantom/client-documents/${documentId}/lifecycle`, { method: 'POST', body: JSON.stringify({ state, clientVisible }) },
+    ),
+
+  links: async (clientId: string) => (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/links`)).data || [],
+  createLink: (clientId: string, data: any) =>
+    apiCall<{ data: { id: string; token: string; path: string; expiresAt: string; maxUses: number; allowDownload: boolean }; message: string }>(
+      `/api/phantom/clients/${clientId}/links`, { method: 'POST', body: JSON.stringify(data) },
+    ),
+  revokeLink: (linkId: string) => apiCall<{ message: string }>(`/api/phantom/client-links/${linkId}/revoke`, { method: 'POST' }),
+
+  activity: async (clientId: string, limit = 60) =>
+    (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/activity?limit=${limit}`)).data || [],
+
+  /** Publishable Vault sources for the publishing workflow (internal picker). */
+  vaultSources: async (search = '') => {
+    const query = search ? `?search=${encodeURIComponent(search)}` : '';
+    return (await apiCall<{ data: any[] }>(`/api/phantom/client-vault-sources${query}`)).data || [];
+  },
+
+  /** PREVIEW AS CLIENT — the same payloads the client API returns. */
+  preview: async (clientId: string, projectId?: string) => {
+    const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+    return (await apiCall<{ data: any }>(`/api/phantom/clients/${clientId}/preview${query}`)).data;
+  },
+  previewProject: async (clientId: string, projectId: string) =>
+    (await apiCall<{ data: { room: any } }>(`/api/phantom/clients/${clientId}/preview/projects/${projectId}`)).data,
+  previewSection: async (clientId: string, projectId: string, section: string) =>
+    (await apiCall<{ data: any }>(`/api/phantom/clients/${clientId}/preview/projects/${projectId}/sections/${section}`)).data,
+  previewDocument: async (clientId: string, projectId: string, documentId: string) =>
+    (await apiCall<{ data: any }>(`/api/phantom/clients/${clientId}/preview/projects/${projectId}/documents/${documentId}`)).data,
+};

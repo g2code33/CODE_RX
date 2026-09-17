@@ -1329,6 +1329,381 @@ const main = async () => {
   check('opening the room is recorded as PROJECT_OPENED', eventNames.includes('PROJECT_OPENED'));
   check('opening a section is recorded as SECTION_OPENED', eventNames.includes('SECTION_OPENED'));
 
+  // =========================================================================
+  group('14. Client Access Center — PHANTOM operations (Phase 5 requirements 1-5, 7)');
+  // =========================================================================
+
+  // --- requirement 2: the client list carries what the workspace renders -----
+  const accessClients = await request('GET', '/api/phantom/clients', { token: phantomToken });
+  const listedRoomA = accessClients.json.data.find((entry) => entry.id === roomA.id);
+  check('PHANTOM lists clients through the existing workspace API', accessClients.status === 200 && Boolean(listedRoomA));
+  check('a client entry carries name, contact, status and project count',
+    listedRoomA.name === 'Room Client A' && 'contactName' in listedRoomA
+    && listedRoomA.status === 'active' && listedRoomA.projectCount === 1);
+  check('the published count ignores drafts, archives and other clients',
+    listedRoomA.publishedCount === 4, `publishedCount=${listedRoomA.publishedCount}`);
+  check('a client entry reports last activity from the existing audit feed',
+    Boolean(listedRoomA.lastActivityAt), String(listedRoomA.lastActivityAt));
+
+  // --- requirements 2 and 3: client and project lifecycle --------------------
+  const managedClient = await createClient(phantomToken, 'Managed Client');
+  const editedClient = await request('PATCH', `/api/phantom/clients/${managedClient.id}`, {
+    token: phantomToken,
+    body: {
+      name: 'Managed Client (renamed)', contactName: 'Ama Boateng', contactEmail: 'ama@example.test',
+      contactPhone: '+233 20 000 0000', notes: 'Internal note visible to PHANTOM only.',
+    },
+  });
+  check('PHANTOM can edit a client record', editedClient.status === 200, JSON.stringify(editedClient.json));
+  const managedDetail = await request('GET', `/api/phantom/clients/${managedClient.id}`, { token: phantomToken });
+  check('the edited contact details are stored on the client',
+    managedDetail.json.data.client.name === 'Managed Client (renamed)'
+    && managedDetail.json.data.client.contactName === 'Ama Boateng'
+    && managedDetail.json.data.client.contactEmail === 'ama@example.test'
+    && String(managedDetail.json.data.client.contactPhone).includes('233'));
+  check('an internal client note stays on the internal record',
+    managedDetail.json.data.client.notes === 'Internal note visible to PHANTOM only.');
+  check('an invalid contact email is refused', 
+    (await request('PATCH', `/api/phantom/clients/${managedClient.id}`, { token: phantomToken, body: { contactEmail: 'not-an-email' } })).status === 400);
+
+  const managedProject = await createProject(phantomToken, managedClient.id, 'Managed Project');
+  const managedProjects = await request('GET', `/api/phantom/clients/${managedClient.id}/projects`, { token: phantomToken });
+  check('a new project is associated with exactly one client',
+    Boolean(managedProject.id) && managedProjects.json.data.some((project) => project.id === managedProject.id));
+  const foreignProjects = await request('GET', `/api/phantom/clients/${roomB.id}/projects`, { token: phantomToken });
+  check('a project is never listed under another client',
+    !foreignProjects.json.data.some((project) => project.id === managedProject.id));
+
+  const projectEdit = await request('PATCH', `/api/phantom/client-projects/${managedProject.id}`, {
+    token: phantomToken, body: { name: 'Managed Project (edited)', description: 'Client-facing description.', status: 'suspended' },
+  });
+  const editedProject = (await request('GET', `/api/phantom/clients/${managedClient.id}/projects`, { token: phantomToken }))
+    .json.data.find((project) => project.id === managedProject.id);
+  check('PHANTOM can edit a project name, description and status',
+    projectEdit.status === 200 && editedProject.name === 'Managed Project (edited)'
+    && editedProject.description === 'Client-facing description.' && editedProject.status === 'suspended');
+  const badProjectStatus = await request('PATCH', `/api/phantom/client-projects/${managedProject.id}`, {
+    token: phantomToken, body: { status: 'deleted' },
+  });
+  check('a project status outside the allowed set is refused', badProjectStatus.status === 400);
+
+  const phase5ArchiveProject = await request('PATCH', `/api/phantom/client-projects/${managedProject.id}`, { token: phantomToken, body: { archive: true } });
+  const afterProjectArchive = (await request('GET', `/api/phantom/clients/${managedClient.id}/projects`, { token: phantomToken }))
+    .json.data.find((project) => project.id === managedProject.id);
+  check('PHANTOM can archive a project', phase5ArchiveProject.status === 200 && afterProjectArchive.isArchived === true);
+  const intoArchived = await request('POST', `/api/phantom/clients/${managedClient.id}/documents`, {
+    token: phantomToken, body: { projectId: managedProject.id, category: 'document', title: 'Into an archived project', contentText: 'text' },
+  });
+  check('an archived project refuses new client documents (409)', intoArchived.status === 409, `got ${intoArchived.status}`);
+  const restoreProject = await request('PATCH', `/api/phantom/client-projects/${managedProject.id}`, { token: phantomToken, body: { archive: false, status: 'active' } });
+  const afterRestore = (await request('GET', `/api/phantom/clients/${managedClient.id}/projects`, { token: phantomToken }))
+    .json.data.find((project) => project.id === managedProject.id);
+  check('PHANTOM can restore an archived project', restoreProject.status === 200 && afterRestore.isArchived === false);
+
+  const archivableClient = await createClient(phantomToken, 'Archivable Client');
+  const archiveClient = await request('POST', `/api/phantom/clients/${archivableClient.id}/status`, { token: phantomToken, body: { status: 'archived' } });
+  const defaultList = await request('GET', '/api/phantom/clients', { token: phantomToken });
+  const archivedFilter = await request('GET', '/api/phantom/clients?archived=1', { token: phantomToken });
+  check('archiving a client withdraws it from the default workspace list',
+    archiveClient.status === 200 && !defaultList.json.data.some((entry) => entry.id === archivableClient.id));
+  check('archived clients stay reachable through the archived filter',
+    archivedFilter.json.data.some((entry) => entry.id === archivableClient.id && entry.status === 'archived'));
+
+  // --- requirement 4: access keys ------------------------------------------
+  const controlClient = await createClient(phantomToken, 'Access Center Client');
+  const controlProject = await createProject(phantomToken, controlClient.id, 'Control Project');
+  const issuedKey = await request('POST', `/api/phantom/clients/${controlClient.id}/keys`, {
+    token: phantomToken, body: { projectId: controlProject.id, label: 'Primary contact' },
+  });
+  check('a generated key is returned once, in the CRX format, with a short hint',
+    issuedKey.status === 201 && /^CRX(-[0-9A-Z]{4}){4}$/.test(issuedKey.json.data.passkey)
+    && issuedKey.json.data.hint === issuedKey.json.data.passkey.slice(-4));
+  check('the create response warns that the key cannot be shown again',
+    /cannot be shown again/i.test(issuedKey.json.message || ''), issuedKey.json.message);
+  const storedKey = db.query('SELECT key_hash, key_hint FROM client_access_keys WHERE public_id = ?', issuedKey.json.data.id)[0];
+  check('only a hash of the credential is stored',
+    storedKey.key_hash !== issuedKey.json.data.passkey && !String(storedKey.key_hash).includes(issuedKey.json.data.passkey.slice(4)));
+  const controlKeys = await request('GET', `/api/phantom/clients/${controlClient.id}/keys`, { token: phantomToken });
+  check('the key list never returns a passkey or a hash',
+    !/passkey|key_hash/.test(JSON.stringify(controlKeys.json)) && !JSON.stringify(controlKeys.json).includes(issuedKey.json.data.passkey.slice(4)));
+  check('the key list shows the hint, label, status and project',
+    controlKeys.json.data[0].hint === issuedKey.json.data.hint
+    && controlKeys.json.data[0].label === 'Primary contact'
+    && controlKeys.json.data[0].status === 'active'
+    && controlKeys.json.data[0].project.id === controlProject.id);
+  const keySession = await clientSession(issuedKey.json.data.passkey, 'control client');
+  const p5Regenerated = await request('POST', `/api/phantom/client-keys/${issuedKey.json.data.id}/regenerate`, { token: phantomToken });
+  check('regenerating issues a different credential, shown once',
+    p5Regenerated.status === 200 && p5Regenerated.json.data.passkey !== issuedKey.json.data.passkey
+    && /^CRX(-[0-9A-Z]{4}){4}$/.test(p5Regenerated.json.data.passkey));
+  const deadSession = await request('GET', `/api/client/project/${controlProject.id}`, { clientSession: keySession });
+  check('regenerating kills every session that used the old credential', deadSession.status !== 200, `got ${deadSession.status}`);
+  check('the replaced credential no longer signs in', (await clientLogin(issuedKey.json.data.passkey)).status === 401);
+  const p5FreshSession = await clientSession(p5Regenerated.json.data.passkey, 'p5Regenerated control client');
+  check('the regenerated credential works after the rotation', (await request('GET', `/api/client/project/${controlProject.id}`, { clientSession: p5FreshSession })).status === 200);
+
+  const p5ExpiringKey = await request('POST', `/api/phantom/clients/${controlClient.id}/keys`, {
+    token: phantomToken, body: { projectId: controlProject.id, expiresAt: new Date(Date.now() + 3_600_000).toISOString() },
+  });
+  check('an expiration can be attached to a key', p5ExpiringKey.status === 201 && Boolean(p5ExpiringKey.json.data.expiresAt));
+  const revokeKey = await request('POST', `/api/phantom/client-keys/${p5ExpiringKey.json.data.id}/revoke`, { token: phantomToken });
+  check('PHANTOM can revoke a key, which is then refused at sign-in',
+    revokeKey.status === 200 && (await clientLogin(p5ExpiringKey.json.data.passkey)).status === 401);
+  check('revoked keys are listed with their status so the workspace can show it',
+    (await request('GET', `/api/phantom/clients/${controlClient.id}/keys`, { token: phantomToken }))
+      .json.data.some((key) => key.id === p5ExpiringKey.json.data.id && key.status === 'revoked'));
+
+  // --- requirement 5: the controlled publishing workflow --------------------
+  const workflowKey = await createKey(phantomToken, managedClient.id, managedProject.id, { label: 'Workflow key' });
+  const workflowSession = await clientSession(workflowKey.passkey, 'workflow client');
+  const workflowDoc = await createDocument(phantomToken, managedClient.id, managedProject.id, {
+    title: 'Workflow document', contentText: 'Client-facing workflow text.',
+  });
+  const workflowRoom = () => request('GET', `/api/client/project/${managedProject.id}`, { clientSession: workflowSession });
+  const workflowRead = () => request('GET', `/api/client/project/${managedProject.id}/documents/${workflowDoc.id}`, { clientSession: workflowSession });
+  check('a new client document starts as a draft and is invisible to the client',
+    (await workflowRoom()).json.data.recent.length === 0 && (await workflowRead()).status === 404);
+  await publish(phantomToken, workflowDoc.id, 'in_review');
+  check('a document under review is still invisible to the client', (await workflowRead()).status === 404);
+  await publish(phantomToken, workflowDoc.id, 'approved');
+  check('an approved but unpublished document is still invisible to the client', (await workflowRead()).status === 404);
+  await publish(phantomToken, workflowDoc.id, 'published');
+  check('publishing makes the document visible in the client room',
+    (await workflowRead()).status === 200
+    && (await workflowRoom()).json.data.recent.some((document) => document.id === workflowDoc.id));
+  check('a published document reaches the client with its text snapshot',
+    (await workflowRead()).json.data.document.content.blocks[0].content.includes('Client-facing workflow text'));
+  await publish(phantomToken, workflowDoc.id, 'unpublished');
+  check('unpublishing withdraws the document again', (await workflowRead()).status === 404);
+  const hiddenPublish = await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, {
+    token: phantomToken, body: { state: 'published', clientVisible: false },
+  });
+  check('a published document without the client-visibility flag stays hidden',
+    hiddenPublish.status === 200 && hiddenPublish.json.data.clientVisible === false && (await workflowRead()).status === 404);
+  await publish(phantomToken, workflowDoc.id, 'published');
+  check('the same document becomes visible once visibility is granted', (await workflowRead()).status === 200);
+  check('an unknown lifecycle state is refused',
+    (await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, { token: phantomToken, body: { state: 'almost' } })).status === 400);
+
+  // --- requirement 5: internal documents are never exposed automatically -----
+  db.execute("INSERT INTO vault_sections (slug, title, description, is_sensitive, sort_order, is_archived) VALUES ('phase5-open', 'Phase 5 Open', 'Harness section', 0, 900, 0)");
+  db.execute("INSERT INTO vault_sections (slug, title, description, is_sensitive, sort_order, is_archived) VALUES ('phase5-sensitive', 'Phase 5 Sensitive', 'Harness section', 1, 901, 0)");
+  const openSectionId = db.query("SELECT id FROM vault_sections WHERE slug = 'phase5-open'")[0].id;
+  const sensitiveSectionId = db.query("SELECT id FROM vault_sections WHERE slug = 'phase5-sensitive'")[0].id;
+  const insertVaultDocument = (code, sectionId, title, content, status, visibility, archived = 0) => {
+    db.execute(
+      `INSERT INTO vault_documents (document_code, section_id, title, content, status, visibility, is_archived)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      code, sectionId, title, content, status, visibility, archived,
+    );
+    return db.query('SELECT id FROM vault_documents WHERE document_code = ?', code)[0].id;
+  };
+  const openVaultDoc = insertVaultDocument('PH5-OPEN', openSectionId, 'Phase 5 approved source', 'PHASE 5 VAULT SOURCE TEXT', 'approved', 'members');
+  const draftVaultDoc = insertVaultDocument('PH5-DRAFT', openSectionId, 'Phase 5 draft source', 'Draft text', 'draft', 'members');
+  const restrictedVaultDoc = insertVaultDocument('PH5-RESTRICTED', openSectionId, 'Phase 5 restricted source', 'Restricted text', 'approved', 'restricted');
+  const sensitiveVaultDoc = insertVaultDocument('PH5-SENSITIVE', sensitiveSectionId, 'Phase 5 sensitive source', 'Sensitive text', 'approved', 'members');
+  const archivedVaultDoc = insertVaultDocument('PH5-ARCHIVED', openSectionId, 'Phase 5 archived source', 'Archived text', 'approved', 'members', 1);
+
+  const vaultSources = await request('GET', '/api/phantom/client-vault-sources', { token: phantomToken });
+  const sourceIds = vaultSources.json.data.map((source) => source.id);
+  check('the publishing picker lists an approved internal document as publishable',
+    vaultSources.status === 200 && sourceIds.includes(openVaultDoc)
+    && vaultSources.json.data.find((source) => source.id === openVaultDoc).publishable === true);
+  check('a draft internal document is listed but not offered for publishing',
+    sourceIds.includes(draftVaultDoc) && vaultSources.json.data.find((source) => source.id === draftVaultDoc).publishable === false);
+  check('restricted, sensitive and archived internal documents are never offered',
+    !sourceIds.includes(restrictedVaultDoc) && !sourceIds.includes(sensitiveVaultDoc) && !sourceIds.includes(archivedVaultDoc));
+  check('listing internal documents exposes nothing to any client',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_documents WHERE vault_document_id IS NOT NULL')[0].c) === 0);
+
+  const vaultPublish = await request('POST', `/api/phantom/clients/${managedClient.id}/documents`, {
+    token: phantomToken, body: { projectId: managedProject.id, category: 'report', title: 'Vault backed report', vaultDocumentId: openVaultDoc },
+  });
+  check('an operator can publish an internal document by pinning a snapshot', vaultPublish.status === 201, JSON.stringify(vaultPublish.json));
+  await publish(phantomToken, vaultPublish.json.data.id, 'published');
+  const vaultRead = await request('GET', `/api/client/project/${managedProject.id}/documents/${vaultPublish.json.data.id}`, { clientSession: workflowSession });
+  check('the client receives the pinned copy of the internal document',
+    vaultRead.status === 200 && JSON.stringify(vaultRead.json.data.document).includes('PHASE 5 VAULT SOURCE TEXT'));
+  check('the client payload carries no Vault identifier or storage key',
+    !/vault_document_id|vaultDocumentId|storage_reference|storageReference/.test(JSON.stringify(vaultRead.json)));
+  const vaultAfter = db.query('SELECT status, visibility, is_archived FROM vault_documents WHERE id = ?', openVaultDoc)[0];
+  check('publishing a snapshot changes nothing inside the Vault',
+    vaultAfter.status === 'approved' && vaultAfter.visibility === 'members' && Number(vaultAfter.is_archived) === 0);
+  check('a sensitive internal document can never be published to a client',
+    (await request('POST', `/api/phantom/clients/${managedClient.id}/documents`, {
+      token: phantomToken, body: { projectId: managedProject.id, category: 'report', title: 'Sensitive attempt', vaultDocumentId: sensitiveVaultDoc },
+    })).status === 409);
+
+  // --- requirement 7: emergency controls, server-side ------------------------
+  const emergencyClient = await createClient(phantomToken, 'Emergency Client');
+  const emergencyProject = await createProject(phantomToken, emergencyClient.id, 'Emergency Project');
+  const emergencyKey = await createKey(phantomToken, emergencyClient.id, emergencyProject.id, { label: 'Emergency key' });
+  const emergencySession = await clientSession(emergencyKey.passkey, 'emergency client');
+  const emergencyLink = await request('POST', `/api/phantom/clients/${emergencyClient.id}/links`, {
+    token: phantomToken, body: { projectId: emergencyProject.id, expiresInMinutes: 60, maxUses: 3 },
+  });
+  check('the emergency fixture has a working key, session and link',
+    (await request('GET', `/api/client/project/${emergencyProject.id}`, { clientSession: emergencySession })).status === 200
+    && emergencyLink.status === 201);
+
+  const suspend = await request('POST', `/api/phantom/clients/${emergencyClient.id}/status`, { token: phantomToken, body: { status: 'suspended' } });
+  check('SUSPEND CLIENT ACCESS is performed on the server', suspend.status === 200 && suspend.json.data.keys >= 1 && suspend.json.data.links >= 1,
+    JSON.stringify(suspend.json));
+  check('suspending a client kills the live session',
+    (await request('GET', `/api/client/project/${emergencyProject.id}`, { clientSession: emergencySession })).status !== 200);
+  check('suspending a client revokes the access key at sign-in',
+    (await clientLogin(emergencyKey.passkey)).status === 401);
+  check('suspending a client revokes outstanding temporary links',
+    db.query("SELECT status FROM client_links WHERE public_id = ?", emergencyLink.json.data.id)[0].status === 'revoked');
+  check('suspension revokes the stored access key row, not only the sign-in path',
+    db.query('SELECT status FROM client_access_keys WHERE public_id = ?', emergencyKey.id)[0].status === 'revoked');
+  check('suspension revokes the stored session row on the server',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_sessions WHERE client_id = ? AND revoked_at IS NULL',
+      db.query('SELECT id FROM clients WHERE public_id = ?', emergencyClient.id)[0].id)[0].c) === 0);
+  check('the suspension is recorded in the audit log',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action IN ('client.client_suspended','client.suspended') AND subject_id = ?", emergencyClient.id)[0].c) >= 1);
+
+  const reactivate = await request('POST', `/api/phantom/clients/${emergencyClient.id}/status`, { token: phantomToken, body: { status: 'active' } });
+  check('a suspended client can be reactivated deliberately', reactivate.status === 200 && reactivate.json.data.keys === 0);
+  check('reactivation never restores the old key', (await clientLogin(emergencyKey.passkey)).status === 401);
+  check('reactivation never restores the old session',
+    (await request('GET', `/api/client/project/${emergencyProject.id}`, { clientSession: emergencySession })).status !== 200);
+  const emergencyKey2 = await createKey(phantomToken, emergencyClient.id, emergencyProject.id, { label: 'Post-reactivation key' });
+  check('a new key can be issued after reactivation', (await clientLogin(emergencyKey2.passkey)).status === 200);
+
+  const phase5RevokeAll = await request('POST', `/api/phantom/clients/${emergencyClient.id}/revoke-all`, { token: phantomToken });
+  check('REVOKE ALL CLIENT ACCESS runs the full credential cascade server-side',
+    phase5RevokeAll.status === 200 && phase5RevokeAll.json.data.keys >= 1, JSON.stringify(phase5RevokeAll.json));
+  check('revoke-all leaves the client record itself intact and still manageable',
+    (await request('GET', `/api/phantom/clients/${emergencyClient.id}`, { token: phantomToken })).status === 200
+    && (await clientLogin(emergencyKey2.passkey)).status === 401);
+  check('revoke-all is recorded in the audit log',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.access_revoked_all'")[0].c) >= 1);
+  check('no revoked key keeps a live session on the server',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_sessions WHERE client_id = ? AND revoked_at IS NULL',
+      db.query('SELECT id FROM clients WHERE public_id = ?', emergencyClient.id)[0].id)[0].c) === 0);
+
+  // =========================================================================
+  group('15. Preview as client + delegation (Phase 5 requirements 6, 8)');
+  // =========================================================================
+
+  const sessionsBeforePreview = Number(db.query('SELECT COUNT(*) AS c FROM client_sessions')[0].c);
+  const preview = await request('GET', `/api/phantom/clients/${roomA.id}/preview`, { token: phantomToken });
+  check('PREVIEW AS CLIENT returns the client, its projects and the project room',
+    preview.status === 200 && preview.json.data.client.id === roomA.id
+    && preview.json.data.room && preview.json.data.projects.length === 1, JSON.stringify(preview.json).slice(0, 200));
+  check('the preview room never leaks an unpublished, archived or foreign document',
+    !/UNPUBLISHED DRAFT|ARCHIVED REPORT|CLIENT B PRIVATE/.test(JSON.stringify(preview.json)));
+  check('the preview never returns a credential or a session token',
+    !/session|token|passkey/i.test(JSON.stringify(preview.json)));
+  check('opening a preview creates no client session',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_sessions')[0].c) === sessionsBeforePreview);
+
+  const clientRoomPayload = (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomSessionA })).json.data;
+  check('the preview payload is identical to what the client actually receives',
+    JSON.stringify(preview.json.data.room) === JSON.stringify(clientRoomPayload),
+    JSON.stringify(preview.json.data.room).slice(0, 160));
+
+  const previewReports = await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/sections/reports`, { token: phantomToken });
+  check('a previewed section returns the same documents the client sees',
+    previewReports.status === 200
+    && previewReports.json.data.documents.map((document) => document.id).join(',')
+      === (await request('GET', `/api/client/project/${roomProjectA.id}/sections/reports`, { clientSession: roomSessionA }))
+        .json.data.documents.map((document) => document.id).join(','));
+  check('previewing a section never serves download permission',
+    previewReports.json.data.documents.every((document) => document.permissions.download === false));
+  const previewLetter = await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/documents/${publishedLetter.id}`, { token: phantomToken });
+  check('a previewed document carries the client-readable snapshot',
+    previewLetter.status === 200 && JSON.stringify(previewLetter.json.data.document.content).includes('Letter body for the room.'));
+  check('the client can download the letter but the preview cannot',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: roomSessionA }))
+      .json.data.document.permissions.download === true
+    && previewLetter.json.data.document.permissions.download === false);
+  check('the preview serves no file bytes or storage reference at all',
+    !/client-exports|storageReference|storage_reference|application\/pdf/.test(JSON.stringify(previewLetter.json)));
+
+  const previewDraft = await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/documents/${unpublishedDraft.id}`, { token: phantomToken });
+  check('the preview refuses a document the client cannot see (404 not_client_visible)',
+    previewDraft.status === 404 && previewDraft.json.code === 'not_client_visible', JSON.stringify(previewDraft.json));
+  const hiddenTitles = /UNPUBLISHED DRAFT|ARCHIVED REPORT|CLIENT B PRIVATE/;
+  check('no preview response body ever carries a hidden document',
+    [preview, previewReports, previewLetter, previewDraft]
+      .every((response) => !hiddenTitles.test(JSON.stringify(response.json))));
+  check('the preview refuses an archived document',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/documents/${archivedReport.id}`, { token: phantomToken })).status === 404);
+  check('the preview refuses a document belonging to another client',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/documents/${bPrivate.id}`, { token: phantomToken })).status === 404);
+  check('the preview refuses another client project id in the path',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview?projectId=${roomProjectB.id}`, { token: phantomToken })).json.data.room === null);
+  check('the preview refuses an unknown section',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/sections/invoices`, { token: phantomToken })).status === 404);
+  check('the preview cannot be opened without a member token',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview`, {})).status === 401);
+
+  // A non-active project is previewable but only with the same warning the
+  // client would meet: the room itself is unchanged.
+  await request('PATCH', `/api/phantom/client-projects/${managedProject.id}`, { token: phantomToken, body: { status: 'suspended' } });
+  const suspendedPreview = await request('GET', `/api/phantom/clients/${managedClient.id}/preview?projectId=${managedProject.id}`, { token: phantomToken });
+  check('previewing a project that is not active reports it instead of pretending', Boolean(suspendedPreview.json.data.notice));
+  await request('PATCH', `/api/phantom/client-projects/${managedProject.id}`, { token: phantomToken, body: { status: 'active' } });
+
+  // --- requirement 8: delegation is explicit, never implied -----------------
+  const websiteAdminData = await request('GET', '/api/phantom/website-admins', { token: phantomToken });
+  const availableKeys = websiteAdminData.json.data.availablePermissions || [];
+  check('the four client-portal permissions are delegatable through the existing website-admin system',
+    ['clients.manage', 'clients.publish', 'clients.links', 'clients.preview'].every((key) => availableKeys.includes(key)), availableKeys.join(','));
+  const memberProfile = db.query("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'member@example.test'")[0];
+  check('the delegated member has a member profile (not a client record)', Boolean(memberProfile));
+  check('PHANTOM holds no website-admin grant and still controls the portal',
+    Number(db.query('SELECT COUNT(*) AS c FROM website_admins wa JOIN member_profiles mp ON mp.id = wa.member_profile_id JOIN users u ON u.id = mp.user_id WHERE u.role = ?', 'phantom')[0].c) === 0
+    && (await request('GET', '/api/phantom/clients', { token: phantomToken })).status === 200);
+
+  const grant = async (permissions) => request('POST', '/api/phantom/website-admins', {
+    token: phantomToken, body: { memberProfileId: memberProfile.id, permissions },
+  });
+
+  await grant([]);
+  check('a founding member with no client permission cannot preview a client',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview`, { token: memberToken })).status === 403);
+  check('a member without clients.manage cannot list clients',
+    (await request('GET', '/api/phantom/clients', { token: memberToken })).status === 403);
+  check('a member without clients.manage cannot create a client',
+    (await request('POST', '/api/phantom/clients', { token: memberToken, body: { name: 'Unauthorized' } })).status === 403);
+
+  const grantPreviewOnly = await grant(['clients.preview']);
+  check('PHANTOM can grant exactly one client capability', grantPreviewOnly.status === 200, JSON.stringify(grantPreviewOnly.json));
+  check('the granted member can now preview a client',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview`, { token: memberToken })).status === 200);
+  check('preview-only delegation still cannot list clients',
+    (await request('GET', '/api/phantom/clients', { token: memberToken })).status === 403);
+  check('preview-only delegation still cannot create a client',
+    (await request('POST', '/api/phantom/clients', { token: memberToken, body: { name: 'Unauthorized' } })).status === 403);
+  check('preview-only delegation still cannot issue an access key',
+    (await request('POST', `/api/phantom/clients/${roomA.id}/keys`, { token: memberToken, body: { projectId: roomProjectA.id } })).status === 403);
+  check('preview-only delegation still cannot publish a document',
+    (await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, { token: memberToken, body: { state: 'published' } })).status === 403);
+  check('preview-only delegation still cannot create a temporary link',
+    (await request('POST', `/api/phantom/clients/${roomA.id}/links`, { token: memberToken, body: { projectId: roomProjectA.id } })).status === 403);
+  check('preview-only delegation still cannot revoke all client access',
+    (await request('POST', `/api/phantom/clients/${roomA.id}/revoke-all`, { token: memberToken })).status === 403);
+  check('a read-only preview leaves the client untouched',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomSessionA })).status === 200);
+
+  await grant(['clients.publish']);
+  check('publishing delegation is scoped: publishing allowed, management still refused',
+    (await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, { token: memberToken, body: { state: 'published' } })).status === 200
+    && (await request('GET', '/api/phantom/clients', { token: memberToken })).status === 403);
+  await grant([]);
+  check('revoking the delegation withdraws the capability immediately',
+    (await request('GET', `/api/phantom/clients/${roomA.id}/preview`, { token: memberToken })).status === 403);
+
+  check('PHANTOM itself can perform every client-portal action',
+    (await request('GET', '/api/phantom/clients', { token: phantomToken })).status === 200
+    && (await request('GET', `/api/phantom/clients/${roomA.id}/preview`, { token: phantomToken })).status === 200
+    && (await request('POST', `/api/phantom/clients/${managedClient.id}/keys`, { token: phantomToken, body: { projectId: managedProject.id } })).status === 201
+    && (await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, { token: phantomToken, body: { state: 'published' } })).status === 200
+    && (await request('POST', `/api/phantom/clients/${managedClient.id}/links`, { token: phantomToken, body: { projectId: managedProject.id, expiresInMinutes: 30 } })).status === 201);
+
   // -------------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------------
@@ -1339,7 +1714,7 @@ const main = async () => {
   console.log(`TOTAL: ${results.length}   PASSED: ${passed}   FAILED: ${failed}`);
   if (failed) {
     console.log('\nFailures:');
-    for (const result of results.filter((entry) => !entry.passed)) {
+    for (const result of results.filter((entry) => !entry.p5Passed)) {
       console.log(`  - [${result.suite}] ${result.name}${result.detail ? ` — ${result.detail}` : ''}`);
     }
   }

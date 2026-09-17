@@ -59,6 +59,7 @@ const bundle = async () => {
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom } from './src/components/ClientProjectRoom';
+        export { ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
       `,
       resolveDir: ROOT,
       loader: 'tsx',
@@ -88,7 +89,7 @@ const main = async () => {
   const {
     formatAccessKey, validateAccessKey, accessKeyHint, messageForFailure, failureMessage,
     FAILURE_MESSAGES, ACCESS_KEY_PLACEHOLDER, clientPortalSession,
-    ClientAccessScreen, ClientProjectRoom,
+    ClientAccessScreen, ClientProjectRoom, ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext,
     visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
     permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
     documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
@@ -440,6 +441,117 @@ const main = async () => {
   check('the download filename always ends in .pdf', downloadFileName({ id: 'd', title: '', category: 'report' }).endsWith('.pdf'));
 
   // -------------------------------------------------------------------------
+
+  // =========================================================================
+  group('9. Client Access Center — the PHANTOM workspace (Phase 5)');
+  // =========================================================================
+
+  const centerHtml = render(React.createElement(ClientAccessCenter, { onMessage: () => {} }));
+  check('the workspace renders inside the existing PHANTOM shell', /CLIENT ACCESS CENTER/.test(centerHtml));
+  const centerSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessCenter.tsx'), 'utf8');
+  const orderedSections = centerSource.match(/const SECTIONS:[\s\S]*?\];/)[0];
+  check('the workspace defines exactly the six required sections in order',
+    (orderedSections.match(/'([a-z]+)'(?=,)/g) || []).join(',') === "'clients','projects','documents','links','activity','permissions'",
+    orderedSections.replace(/\s+/g, ' ').slice(0, 160));
+  for (const label of ['Clients', 'Projects', 'Documents', 'Temporary Links', 'Activity', 'Permissions']) {
+    check(`the ${label} section is offered in the workspace navigation`, centerHtml.includes(label));
+  }
+  check('the client list shows name, contact summary, status and activity',
+    /client\.name/.test(centerSource) && /publishedCount/.test(centerSource)
+    && /client\.status/.test(centerSource) && /lastActivityAt/.test(centerSource));
+  check('the client panel shows the last activity the list reported',
+    /lastActivityAt=\{clients\.find/.test(centerSource) && /formatWhen\(lastActivityAt\)/.test(centerSource));
+  check('archiving, suspending and revoking all access are offered on the client',
+    /Suspend client access/.test(centerSource) && /Revoke all client access/.test(centerSource)
+    && /Archive client/.test(centerSource));
+  check('the publishing dialog walks source, project, section and permissions',
+    /1 · Write the client copy/.test(centerSource) && /2 · Project/.test(centerSource)
+    && /3 · Section/.test(centerSource) && /4 · Client permissions/.test(centerSource));
+  check('the key dialog states that a generated key is shown once',
+    /shown once/i.test(centerSource) && /Generate key/.test(centerSource));
+  check('a client can be created from the workspace header', /Create client/.test(centerHtml));
+  check('the client rail can include archived clients on request', /Archived/.test(centerHtml));
+  check('the workspace states what it manages before any client is chosen',
+    /Select a client to manage their projects, documents, access keys and links\./.test(centerHtml));
+
+  const centerLeaks = [
+    ['an API path', /\/api\//],
+    ['an internal table name', /client_access_keys|client_documents|client_projects|client_links|client_sessions|audit_logs/],
+    ['a stored credential field', /key_hash|session_hash|token_hash/],
+    ['an internal storage key', /storage_reference|client-exports|vault_document_id/],
+    ['a database row id', /\b(rowid|last_row_id|subject_id)\b/],
+  ];
+  for (const [what, pattern] of centerLeaks) {
+    check(`the workspace markup never renders ${what}`, !pattern.test(centerHtml), String(centerHtml.match(pattern)));
+  }
+  check('the workspace never renders a stored passkey field', !/passkey_hash|key_value|plain_passkey/i.test(centerHtml));
+  check('the internal client note is labelled and never sent to the client',
+    /Internal note/.test(centerSource) && /never sent to the client/.test(centerSource));
+
+  const phantomSource = fs.readFileSync(path.join(ROOT, 'src/components/PhantomControlCenter.tsx'), 'utf8');
+  check('the workspace is a tab of the existing PHANTOM navigation',
+    /'clients', 'Client Access Center'/.test(phantomSource) && /<ClientAccessCenter/.test(phantomSource));
+  check('the workspace reuses the existing admin shell rather than a second one',
+    !/ClientAccessCenter[\s\S]{0,400}min-h-screen/.test(phantomSource)
+    && /import \{ ClientAccessCenter \}/.test(phantomSource));
+
+  // =========================================================================
+  group('10. Preview as client — the promise holds');
+  // =========================================================================
+
+  const previewCalls = [];
+  const previewApi = {
+    previewSection: async (clientId, projectId, section) => {
+      previewCalls.push(['section', clientId, projectId, section]);
+      return { project: { id: projectId }, section, documents: [{ id: 'doc_server' }] };
+    },
+    previewDocument: async (clientId, projectId, documentId) => {
+      previewCalls.push(['document', clientId, projectId, documentId]);
+      return { project: { id: projectId }, document: { id: documentId, permissions: { view: true, download: false } } };
+    },
+  };
+  const previewRoomPayload = { project: { id: 'prj_1', name: 'Pharmacy Digital Platform' }, sections: [], recent: [] };
+  const previewTransport = buildPreviewTransport(previewApi, previewRoomPayload, 'cli_1', 'prj_1');
+
+  check('the preview transport exposes only read calls',
+    Object.keys(previewTransport).sort().join(',') === 'document,project,section', Object.keys(previewTransport).join(','));
+  check('the preview transport has no download capability at all',
+    previewTransport.download === undefined && !('download' in previewTransport));
+  check('the preview room payload is the one the server authorized',
+    (await previewTransport.project('prj_1')).data.project.name === 'Pharmacy Digital Platform');
+  const previewedSection = await previewTransport.section('prj_1', 'reports');
+  check('a previewed section is fetched from the preview endpoint for that client only',
+    previewCalls[0].join(',') === 'section,cli_1,prj_1,reports' && previewedSection.data.documents[0].id === 'doc_server');
+  const previewedDocument = await previewTransport.document('prj_1', 'doc_server');
+  check('a previewed document is fetched from the preview endpoint for that client only',
+    previewCalls[1].join(',') === 'document,cli_1,prj_1,doc_server' && previewedDocument.data.document.id === 'doc_server');
+  check('the preview transport can only ever address the client it was built for',
+    previewCalls.every((call) => call[1] === 'cli_1'));
+
+  const previewContext = buildPreviewRoomContext({ id: 'cli_1', name: 'Ashanti Pharmacy Ltd' }, previewRoomPayload);
+  check('the preview room shows the client its own name',
+    previewContext.client.name === 'Ashanti Pharmacy Ltd' && previewContext.project.name === 'Pharmacy Digital Platform');
+  check('the preview room can view but never download',
+    previewContext.permissions.view === true && previewContext.permissions.download === false);
+  check('a preview with no room renders no context',
+    buildPreviewRoomContext({ id: 'cli_1', name: 'x' }, null) === null
+    && buildPreviewRoomContext(null, previewRoomPayload) === null);
+
+  const previewHtml = render(React.createElement(ClientProjectRoom, {
+    context: previewContext,
+    transport: previewTransport,
+    preview: true,
+    exitLabel: 'Exit preview',
+    notice: null, onNotice: () => {}, onSignedOut: () => {}, onSessionEnded: () => {},
+  }));
+  check('the previewed room says it is a preview', /Preview only/.test(previewHtml));
+  check('the previewed room explains that no session, download or change is possible',
+    /No client session was created/.test(previewHtml) && /no document is downloaded/i.test(previewHtml));
+  check('the previewed room offers to leave the preview instead of logging a client out',
+    /Exit preview/.test(previewHtml) && !/Log out/.test(previewHtml));
+  check('the previewed room is the same room component the client uses',
+    /Project Overview/.test(previewHtml) && /Project sections/.test(previewHtml));
+
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
   console.log('\n' + '='.repeat(64));
