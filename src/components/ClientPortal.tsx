@@ -5,7 +5,7 @@ import { ClientLinkState } from './ClientLinkState';
 import { ClientProjectRoom, type ClientPortalContext } from './ClientProjectRoom';
 import { clientPortal, clientPortalSession, ClientPortalError } from '../lib/cloudflare';
 import { messageForFailure } from '../lib/accessKey';
-import { linkStateScreen, type LinkStateScreen } from '../lib/linkAccess';
+import { clientContact, linkStateScreen, type LinkStateScreen } from '../lib/linkAccess';
 
 /**
  * Reads a temporary link token out of `#client-portal/link/<token>`.
@@ -33,7 +33,10 @@ const stripLinkTokenFromUrl = () => {
  * stored copy of the client's identity — the context always comes back from the
  * server.
  */
-export const ClientPortal = () => {
+export const ClientPortal = ({ links }: { links?: Record<string, string> } = {}) => {
+  // The society's contact details come from the published site content, so the
+  // client screens and the public footer always agree.
+  const contact = clientContact(links);
   const [context, setContext] = useState<ClientPortalContext | null>(null);
   const [checking, setChecking] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -153,6 +156,7 @@ export const ClientPortal = () => {
     return (
       <ClientLinkState
         state={linkState}
+        contact={contact}
         onContinue={() => {
           setLinkState(null);
           setPendingLink(null);
@@ -167,6 +171,7 @@ export const ClientPortal = () => {
       <ClientAccessScreen
         onSubmit={signIn}
         notice={notice}
+        contact={contact}
         // A passkey-required link explains itself before the key is typed.
         eyebrow={pendingLink ? 'Temporary project link' : undefined}
         heading={pendingLink ? 'SIGN IN TO CONTINUE' : undefined}

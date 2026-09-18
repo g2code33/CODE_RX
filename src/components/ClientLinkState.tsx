@@ -1,5 +1,6 @@
-import { AlertTriangle, Ban, Clock, Mail, ShieldCheck, Timer } from 'lucide-react';
-import { linkContactHref, type LinkStateScreen } from '../lib/linkAccess';
+import { AlertTriangle, Ban, Clock, ShieldCheck, Timer } from 'lucide-react';
+import { clientContact, linkContactHref, type ClientContact, type LinkStateScreen } from '../lib/linkAccess';
+import { ClientSupportContact } from './ClientSupportContact';
 
 interface ClientLinkStateProps {
   state: LinkStateScreen;
@@ -7,6 +8,8 @@ interface ClientLinkStateProps {
   onContinue?: () => void;
   /** Wording for the secondary action, when offered. */
   continueLabel?: string;
+  /** Published site contact details; defaults to the society's own values. */
+  contact?: ClientContact;
 }
 
 /**
@@ -17,7 +20,8 @@ interface ClientLinkStateProps {
  * and no retry against the same token. The only routes forward are a new link
  * from Code Rx Society, or the client's own access key.
  */
-export const ClientLinkState = ({ state, onContinue, continueLabel }: ClientLinkStateProps) => {
+export const ClientLinkState = ({ state, onContinue, continueLabel, contact }: ClientLinkStateProps) => {
+  const details = contact ?? clientContact(null);
   const expired = state.headline === 'THIS LINK HAS EXPIRED';
   const revoked = state.headline === 'ACCESS REVOKED';
   const Icon = expired ? Timer : revoked ? Ban : AlertTriangle;
@@ -62,14 +66,17 @@ export const ClientLinkState = ({ state, onContinue, continueLabel }: ClientLink
             <p className="mt-2 text-sm font-semibold text-slate-700">{state.guidance}</p>
           </div>
 
-          <div className="mt-7 flex flex-col items-stretch gap-3 sm:flex-row sm:justify-center">
-            <a
-              href={linkContactHref(state.headline)}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-3.5 text-sm font-black uppercase tracking-[0.16em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100"
-            >
-              <Mail className="h-4 w-4" /> Contact Code Rx Society
-            </a>
-            {onContinue ? (
+          <div className="mt-7">
+            <ClientSupportContact
+              contact={details}
+              mailtoHref={linkContactHref(state.headline, details.email)}
+              message={state.guidance}
+              actionLabel="Contact Code Rx Society"
+            />
+          </div>
+
+          {onContinue ? (
+            <div className="mt-4 flex flex-col items-stretch gap-3">
               <button
                 type="button"
                 onClick={onContinue}
@@ -77,8 +84,8 @@ export const ClientLinkState = ({ state, onContinue, continueLabel }: ClientLink
               >
                 {continueLabel || 'Use my access key'}
               </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </div>
 
         <p className="mt-6 max-w-md text-center text-xs font-medium leading-5 text-slate-500">

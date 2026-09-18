@@ -17,7 +17,7 @@ export const ACCESS_KEY_BODY_LENGTH = 16;
 export const ACCESS_KEY_MIN_BODY_LENGTH = 12;
 export const ACCESS_KEY_MAX_BODY_LENGTH = 32;
 export const ACCESS_KEY_PREFIX = 'CRX';
-export const ACCESS_KEY_PLACEHOLDER = 'CRX-____-____-____';
+export const ACCESS_KEY_PLACEHOLDER = 'CRX-____-____-____-____';
 
 /** Characters that are NOT in the alphabet but are commonly mistyped. */
 const AMBIGUOUS = ['0', 'O', '1', 'I'];

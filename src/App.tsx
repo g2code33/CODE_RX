@@ -408,7 +408,7 @@ function App() {
   // The client portal is a standalone workspace: no public navbar, no member
   // session, no dashboard chrome. A client is not a member of Code Rx Society.
   if (isClientPortalView) {
-    return <ClientPortal />;
+    return <ClientPortal links={siteContent.links} />;
   }
 
   if (isSharedVaultView) {

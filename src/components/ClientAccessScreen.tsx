@@ -1,13 +1,15 @@
-import { FormEvent, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AlertCircle, ArrowRight, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
+import { FormEvent, useEffect, useRef, useState, type ClipboardEvent, type ReactNode } from 'react';
+import { AlertCircle, ArrowRight, CheckCircle2, ClipboardPaste, KeyRound, Loader2, ShieldCheck, X } from 'lucide-react';
 import {
+  ACCESS_KEY_BODY_LENGTH,
   ACCESS_KEY_PLACEHOLDER,
-  accessKeyHint,
   formatAccessKey,
   messageForFailure,
   validateAccessKey,
 } from '../lib/accessKey';
+import { clientContact, clientSupportMailto, type ClientContact } from '../lib/linkAccess';
 import { ClientPortalError } from '../lib/cloudflare';
+import { ClientSupportContact } from './ClientSupportContact';
 
 interface ClientAccessScreenProps {
   /** Exchanges the raw access key for a client session. */
@@ -25,7 +27,12 @@ interface ClientAccessScreenProps {
   /** Offered when the screen was reached from a link the client can drop. */
   onAbandon?: () => void;
   abandonLabel?: string;
+  /** Published site contact details; defaults to the society's own values. */
+  contact?: ClientContact;
 }
+
+/** Longest text the field accepts: the server's own maximum body plus separators. */
+const MAX_TYPED_LENGTH = 40;
 
 /**
  * CLIENT ACCESS — the entry point of the client portal.
@@ -33,50 +40,75 @@ interface ClientAccessScreenProps {
  * The raw access key never leaves this component: it is held in state only for
  * the moment it takes to exchange it for a session, then cleared, and it is
  * never written to localStorage, sessionStorage, a URL or an analytics sink.
+ *
+ * The field is a plain text input that is never rewritten under the caret:
+ * characters are only tidied into the canonical `CRX-XXXX-XXXX-XXXX-XXXX`
+ * shape when the client leaves the field, pastes a key or submits. Guidance is
+ * live, and a complete pasted key is verified immediately.
  */
 export const ClientAccessScreen = ({
-  onSubmit, notice, eyebrow, heading, helper, noticeIcon, onAbandon, abandonLabel,
+  onSubmit, notice, eyebrow, heading, helper, noticeIcon, onAbandon, abandonLabel, contact,
 }: ClientAccessScreenProps) => {
   const [value, setValue] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [hint, setHint] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [touched, setTouched] = useState(false);
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
   // A notice (an ended session, a failed link) is shown until the client starts
   // editing the field. It is derived rather than copied into state through an
   // effect, so the very first render already shows the correct state.
   const [noticeDismissed, setNoticeDismissed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const shownError = error ?? (noticeDismissed ? null : notice ?? null);
+  const details = contact ?? clientContact(null);
+
+  const formatted = formatAccessKey(value);
+  const ambiguous = formatted.ignored;
+  const filled = Math.min(formatted.body.length, ACCESS_KEY_BODY_LENGTH);
+  const ready = validateAccessKey(value).ok;
+  const showPasteButton = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.readText);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
+  /**
+   * What the field shows while the client types: exactly their characters, in
+   * the order they entered them. Grouping and upper-casing wait for blur, so
+   * the caret never jumps and nothing silently disappears mid-word.
+   */
   const handleChange = (raw: string) => {
-    const next = formatAccessKey(raw);
-    setValue(next.display);
-    setHint(accessKeyHint(next));
-    // Feedback belongs to the key that produced it: clear it as soon as the
-    // client edits the field, so a stale failure never sits under a new key.
+    const next = raw.replace(/[^A-Za-z0-9-]/g, '').slice(0, MAX_TYPED_LENGTH);
+    setValue(next);
+    setPasteHint(null);
     if (error) setError(null);
     if (notice) setNoticeDismissed(true);
   };
 
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (submitting) return;
+  /** Tidies the key into its canonical groups once the field loses focus. */
+  const handleBlur = () => {
+    setFocused(false);
+    setTouched(true);
+    const parsed = formatAccessKey(value);
+    // Never drop the characters the client typed: when the key contains a glyph
+    // a key can never contain, keep it visible and let the guidance explain.
+    if (!parsed.ignored.length && parsed.display !== value) setValue(parsed.display);
+  };
 
-    const validation = validateAccessKey(value);
+  const submitKey = async (raw: string) => {
+    if (submitting) return;
+    const validation = validateAccessKey(raw);
     if (!validation.ok) {
       setError(validation.problem);
-      setHint(null);
+      inputRef.current?.focus();
       return;
     }
-
     setSubmitting(true);
     setError(null);
-    setHint(null);
+    setPasteHint(null);
     setNoticeDismissed(true);
+    setTouched(false);
     try {
       await onSubmit(validation.body);
       // Success hands control to the project room; the key is dropped here.
@@ -89,6 +121,62 @@ export const ClientAccessScreen = ({
       setSubmitting(false);
     }
   };
+
+  const handleSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    void submitKey(value);
+  };
+
+  /**
+   * A paste is an intention to use that key: the whole text is tidied at once
+   * and, when it is a complete key, verified without another tap.
+   */
+  const applyPasted = (text: string) => {
+    const parsed = formatAccessKey(text);
+    if (!parsed.body) return false;
+    setValue(parsed.display);
+    setNoticeDismissed(true);
+    setPasteHint(null);
+    const validation = validateAccessKey(text);
+    if (validation.ok) {
+      void submitKey(text);
+      return true;
+    }
+    if (parsed.ignored.length) setError(validateAccessKey(text).problem);
+    inputRef.current?.focus();
+    return true;
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
+    const text = event.clipboardData?.getData('text') ?? '';
+    if (!text || !applyPasted(text)) return; // an empty paste is left to the browser
+    event.preventDefault();
+  };
+
+  const pasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text || !applyPasted(text)) {
+        setPasteHint('Nothing to paste — copy your access key first, or type it in.');
+        inputRef.current?.focus();
+      }
+    } catch {
+      // Safari and some embedded browsers refuse clipboard reads without a prompt.
+      setPasteHint('Press and hold the field, then choose Paste.');
+      inputRef.current?.focus();
+    }
+  };
+
+  // Guidance is one line, in one place, with the most useful message first.
+  const hint = shownError
+    ? null
+    : ambiguous.length && touched
+      ? `Access keys never contain ${ambiguous.join(', ')} — check the key.`
+      : value && !ready
+        ? `${filled} of ${ACCESS_KEY_BODY_LENGTH} characters — the key has four groups of four.`
+        : ready
+          ? `Looks complete${touched ? '' : ' — press Enter Project'}.`
+          : null;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -120,45 +208,114 @@ export const ClientAccessScreen = ({
 
           <form onSubmit={handleSubmit} className="mt-8" noValidate aria-busy={submitting}>
             <label htmlFor="client-access-key" className="sr-only">Project access key</label>
-            <input
-              id="client-access-key"
-              ref={inputRef}
-              value={value}
-              onChange={(event) => handleChange(event.target.value)}
-              placeholder={ACCESS_KEY_PLACEHOLDER}
-              inputMode="text"
-              enterKeyHint="go"
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="characters"
-              spellCheck={false}
-              disabled={submitting}
-              aria-invalid={Boolean(shownError)}
-              aria-describedby={shownError ? 'client-access-error' : hint ? 'client-access-hint' : undefined}
-              className={`w-full rounded-xl border-2 bg-white px-4 py-4 text-center font-mono text-lg font-bold uppercase tracking-[0.18em] text-slate-900 outline-none transition placeholder:font-mono placeholder:tracking-[0.18em] placeholder:text-slate-300 disabled:bg-slate-50 disabled:text-slate-400 sm:text-xl ${
-                shownError
-                  ? 'border-rose-300 focus:border-rose-400'
-                  : 'border-slate-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50'
-              }`}
-            />
 
-            <div className="min-h-[46px] pt-3">
-              {shownError ? (
-                <p id="client-access-error" role="alert" className="flex items-start gap-2 text-sm font-semibold text-rose-700">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{shownError}</span>
-                </p>
-              ) : notice && !noticeDismissed && noticeIcon ? (
-                <p className="flex items-start gap-2 text-sm font-semibold text-slate-600">{noticeIcon}<span>{notice}</span></p>
-              ) : hint ? (
-                <p id="client-access-hint" className="text-sm font-medium text-slate-500">{hint}</p>
+            <div className="relative">
+              <KeyRound className="pointer-events-none absolute left-3.5 top-1/2 hidden h-5 w-5 -translate-y-1/2 text-slate-300 sm:block" aria-hidden="true" />
+              <input
+                id="client-access-key"
+                ref={inputRef}
+                value={value}
+                onChange={(event) => handleChange(event.target.value)}
+                onBlur={handleBlur}
+                onFocus={() => setFocused(true)}
+                onPaste={handlePaste}
+                placeholder={ACCESS_KEY_PLACEHOLDER}
+                inputMode="text"
+                enterKeyHint="go"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                maxLength={MAX_TYPED_LENGTH}
+                disabled={submitting}
+                aria-invalid={Boolean(shownError)}
+                aria-describedby={shownError ? 'client-access-error' : hint || pasteHint ? 'client-access-hint' : undefined}
+                className={`w-full rounded-2xl border-2 bg-slate-50/70 py-4 pl-3.5 pr-11 text-center font-mono text-[15px] font-bold uppercase tracking-[0.05em] text-slate-900 shadow-inner outline-none transition placeholder:font-mono placeholder:normal-case placeholder:tracking-[0.05em] placeholder:text-slate-300 disabled:opacity-60 sm:py-5 sm:pl-11 sm:text-xl sm:tracking-[0.12em] ${
+                  shownError
+                    ? 'border-rose-300 bg-rose-50/40 focus:border-rose-400 focus:bg-white'
+                    : ready && touched
+                      ? 'border-emerald-300 bg-white focus:border-emerald-500 focus:ring-4 focus:ring-emerald-50'
+                      : 'border-slate-200 focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50'
+                }`}
+              />
+              {value && !submitting ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setValue('');
+                    setError(null);
+                    setPasteHint(null);
+                    inputRef.current?.focus();
+                  }}
+                  aria-label="Clear the access key"
+                  title="Clear"
+                  className="absolute right-2.5 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               ) : null}
             </div>
+
+            {/* Four group markers: the key's shape, filled as the client types. */}
+            <div className="mt-3 flex items-center gap-2" aria-hidden="true">
+              {[0, 1, 2, 3].map((group) => {
+                const done = filled >= (group + 1) * 4;
+                const active = filled > group * 4 && !done;
+                return (
+                  <span
+                    key={group}
+                    className={`h-1.5 flex-1 rounded-full transition-colors ${
+                      done ? 'bg-emerald-500' : active ? 'bg-emerald-200' : 'bg-slate-200'
+                    }`}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="flex min-h-[46px] items-start justify-between gap-3 pt-3">
+              <div className="min-w-0 flex-1">
+                {shownError ? (
+                  <p id="client-access-error" role="alert" className="flex items-start gap-2 text-sm font-semibold text-rose-700">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>{shownError}</span>
+                  </p>
+                ) : notice && !noticeDismissed && noticeIcon ? (
+                  <p className="flex items-start gap-2 text-sm font-semibold text-slate-600">{noticeIcon}<span>{notice}</span></p>
+                ) : pasteHint ? (
+                  <p id="client-access-hint" role="status" className="text-sm font-medium text-slate-500">{pasteHint}</p>
+                ) : hint ? (
+                  <p
+                    id="client-access-hint"
+                    className={`flex items-start gap-2 text-sm font-medium ${ambiguous.length && touched ? 'text-amber-700' : ready ? 'text-emerald-700' : 'text-slate-500'}`}
+                  >
+                    {ready && !ambiguous.length ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : null}
+                    <span>{hint}</span>
+                  </p>
+                ) : focused ? (
+                  <p className="text-sm font-medium text-slate-400">Type or paste the key Code Rx Society gave you.</p>
+                ) : null}
+              </div>
+              {value && !ready ? (
+                <span className="shrink-0 pt-0.5 font-mono text-[11px] font-bold text-slate-400" aria-hidden="true">
+                  {filled}/{ACCESS_KEY_BODY_LENGTH}
+                </span>
+              ) : null}
+            </div>
+
+            {showPasteButton && !value && !submitting ? (
+              <button
+                type="button"
+                onClick={() => void pasteFromClipboard()}
+                className="mt-1 inline-flex items-center gap-2 text-xs font-black uppercase tracking-[0.12em] text-slate-500 underline-offset-4 transition hover:text-emerald-700 hover:underline"
+              >
+                <ClipboardPaste className="h-3.5 w-3.5" aria-hidden="true" /> Paste from clipboard
+              </button>
+            ) : null}
 
             <button
               type="submit"
               disabled={submitting}
-              className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-4 text-sm font-black uppercase tracking-[0.2em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-emerald-600/70"
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-4 text-sm font-black uppercase tracking-[0.2em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-emerald-600/70"
             >
               {submitting ? (
                 <>
@@ -184,14 +341,11 @@ export const ClientAccessScreen = ({
             </div>
           ) : null}
 
-          <div className="mt-8 border-t border-slate-100 pt-6 text-center">
-            <p className="text-sm font-semibold text-slate-700">Need assistance?</p>
-            <a
-              href="mailto:coderxsociety@gmail.com?subject=Client%20portal%20access"
-              className="mt-1 inline-block text-sm font-bold text-emerald-700 underline-offset-4 hover:underline"
-            >
-              Contact Code Rx Society
-            </a>
+          <div className="mt-8 border-t border-slate-100 pt-6">
+            <ClientSupportContact
+              contact={details}
+              mailtoHref={clientSupportMailto(details.email, 'Client portal access')}
+            />
           </div>
         </div>
 

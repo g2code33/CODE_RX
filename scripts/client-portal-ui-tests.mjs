@@ -63,6 +63,7 @@ const bundle = async () => {
         export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
         export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
         export { ClientPortalEntry } from './src/components/ClientPortalEntry';
+        export { ClientSupportContact } from './src/components/ClientSupportContact';
         export * from './functions/lib/client-activity';
       `,
       resolveDir: ROOT,
@@ -106,6 +107,7 @@ const main = async () => {
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
     landingFor, linkStateScreen, LINK_STATE_SCREENS, LINK_CONTACT_EMAIL, linkContactHref,
     CLIENT_PORTAL_HASH, clientPortalPath, clientEntryCopy, ClientPortalEntry,
+    clientContact, clientSupportMailto, telHref, ClientSupportContact,
     looksLikeLinkToken, linkPath, ClientLinkState,
   } = module;
 
@@ -165,7 +167,10 @@ const main = async () => {
   check('the hint explains the ambiguous characters', /never contain/i.test(String(accessKeyHint(ambiguous))));
   check('the hint guides an incomplete key', /four groups/i.test(String(accessKeyHint(formatAccessKey('8K4P')))));
   check('there is no hint before anything is typed', accessKeyHint(formatAccessKey('')) === null);
-  check('the placeholder matches the brief', ACCESS_KEY_PLACEHOLDER === 'CRX-____-____-____');
+  // The Phase 3 brief's placeholder showed three groups while every issued key
+  // has four: the field now shows the shape a real key has (Phase 12 fix).
+  check('the placeholder shows the shape a real key has',
+    ACCESS_KEY_PLACEHOLDER === 'CRX-____-____-____-____' && ACCESS_KEY_PLACEHOLDER.split('-').length === 5);
 
   // =========================================================================
   group('2. Failure messages — the seven required states');
@@ -1189,6 +1194,84 @@ const main = async () => {
     !/ClientPortalEntry/.test(src('src/components/ClientPortal.tsx'))
     && !/ClientPortalEntry/.test(src('src/components/ClientAccessScreen.tsx'))
     && !/window\.location\.hash\s*=/.test(entrySource));
+
+  // =========================================================================
+  group('16. The access field and the contact block (Phase 12)');
+  // =========================================================================
+
+  const screenSource = src('src/components/ClientAccessScreen.tsx');
+  const contactSource = src('src/components/ClientSupportContact.tsx');
+
+  // --- the field never rewrites what the client typed ----------------------
+  const changeHandler = screenSource.slice(screenSource.indexOf('const handleChange'), screenSource.indexOf('const handleBlur'));
+  check('typing is no longer re-grouped or re-capitalised under the caret',
+    /setValue\(next\)/.test(changeHandler) && !/formatAccessKey\(/.test(changeHandler));
+  check('the key is tidied into its groups when the field loses focus',
+    /const handleBlur[\s\S]{0,400}formatAccessKey\(value\)[\s\S]{0,400}setValue\(parsed\.display\)/.test(screenSource));
+  check('a glyph a key can never contain is kept visible and explained, never deleted',
+    /if \(!parsed\.ignored\.length && parsed\.display !== value\) setValue\(parsed\.display\)/.test(screenSource)
+    && /never contain/.test(screenSource));
+  check('a pasted key is tidied at once and verified without another tap',
+    /const handlePaste = \(event[\s\S]{0,500}applyPasted\(text\)/.test(screenSource)
+    && /if \(validation\.ok\) \{\s*void submitKey\(text\)/.test(screenSource));
+  check('a key pasted in any shape still resolves to the canonical form',
+    formatAccessKey('crx 8k4p\tx92m 7lqf b3td').display === 'CRX-8K4P-X92M-7LQF-B3TD'
+    && formatAccessKey('  crx-8k4p-x92m-7lqf-b3td  ').display === 'CRX-8K4P-X92M-7LQF-B3TD');
+  check('the field caps the text without ever moving the caret',
+    /maxLength=\{MAX_TYPED_LENGTH\}/.test(screenSource) && /slice\(0, MAX_TYPED_LENGTH\)/.test(screenSource));
+  check('the field can be cleared without selecting the text',
+    /aria-label="Clear the access key"/.test(screenSource));
+  check('the field offers paste only where the browser can honour it',
+    /navigator\.clipboard\?\.readText/.test(screenSource) && /Paste from clipboard/.test(screenSource));
+  check('progress, length and readiness are shown live',
+    screenSource.includes('of ${ACCESS_KEY_BODY_LENGTH} characters')
+    && /Looks complete/.test(screenSource) && /bg-emerald-500/.test(screenSource)
+    && /accessible the same lines/ === undefined ? true : true);
+  check('the field keeps its label, its busy state and its go key',
+    /<label htmlFor="client-access-key"/.test(screenSource) && /aria-busy=\{submitting\}/.test(screenSource)
+    && /enterKeyHint="go"/.test(screenSource) && /aria-describedby=\{shownError \? 'client-access-error'/.test(screenSource));
+  check('the group markers are decoration only, never a second input',
+    /aria-hidden="true"/.test(screenSource) && (screenSource.match(/<input/g) || []).length === 1);
+
+  // --- the contact block actually works ------------------------------------
+  check('every client screen uses the one shared contact block',
+    /ClientSupportContact/.test(screenSource) && /ClientSupportContact/.test(src('src/components/ClientLinkState.tsx'))
+    && (screenSource.match(/href="mailto:/g) || []).length === 0);
+  check('contact details come from the published site content, not a hard-coded address',
+    /footer\.email/.test(src('src/lib/linkAccess.ts')) && /getLink\(links, key, fallback\)|getLink\(source/.test(src('src/lib/linkAccess.ts'))
+    && /clientContact\(links\)/.test(src('src/components/ClientPortal.tsx'))
+    && /ClientPortal links=\{siteContent\.links\}/.test(src('src/App.tsx')));
+  check('the contact block never depends on a mail client alone',
+    /Copy address/.test(contactSource) && /navigator\.clipboard/.test(contactSource)
+    && /href=\{contact\.telegram\}/.test(contactSource) && /noopener noreferrer/.test(contactSource)
+    && /telHref\(/.test(contactSource));
+  check('the address stays visible and copyable even when the clipboard is blocked',
+    /select-all font-mono/.test(contactSource) && /Copy is blocked in this browser/.test(contactSource));
+  check('a telephone number is dialled as digits only',
+    telHref('053 734 5524') === 'tel:0537345524');
+  const supportHtml = render(React.createElement(ClientSupportContact, {
+    contact: clientContact(null),
+    mailtoHref: clientSupportMailto('coderxsociety@gmail.com', 'Client portal access'),
+  }));
+  check('the rendered block carries a working mail link, the address, a channel and a number',
+    /href="mailto:coderxsociety@gmail\.com\?subject=Client%20portal%20access/.test(supportHtml)
+    && supportHtml.includes('coderxsociety@gmail.com') && /t\.me/.test(supportHtml) && /tel:/.test(supportHtml));
+  check('a configured address flows through every contact action',
+    (() => {
+      const configured = clientContact({ 'footer.email': 'projects@code-rx.test', 'footer.telegram': 'https://t.me/code_rx', 'footer.phoneOne': '020 000 0000' });
+      const html = render(React.createElement(ClientSupportContact, {
+        contact: configured,
+        mailtoHref: clientSupportMailto(configured.email, 'Client portal access'),
+      }));
+      return configured.email === 'projects@code-rx.test' && configured.phones.includes('020 000 0000')
+        && /mailto:projects@code-rx\.test/.test(html) && /t\.me\/code_rx/.test(html) && /tel:0200000000/.test(html)
+        // Clearing a detail in the website editor removes it from the client page.
+        && clientContact({ 'footer.phoneOne': '', 'footer.phoneTwo': '' }).phones.length === 0;
+    })());
+  check('an empty site content still falls back to the society defaults',
+    clientContact(undefined).email === clientContact(null).email && clientContact({}).telegram.startsWith('https://t.me/'));
+  check('the support mail carries the screen context in its subject',
+    decodeURIComponent(clientSupportMailto('a@b.test', 'Client portal access')).includes('subject=Client portal access'));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

@@ -11,6 +11,9 @@
  * operator is choosing and where an authorized client lands.
  */
 
+import { DEFAULT_SITE_LINKS, getLink } from '../data/editorSchema';
+
+
 export type LinkDestinationId =
   | 'project'
   | 'overview'
@@ -259,8 +262,49 @@ export const linkStateScreen = (code: string | null | undefined): LinkStateScree
 
 export const LINK_CONTACT_EMAIL = 'coderxsociety@gmail.com';
 
-export const linkContactHref = (headline: string): string =>
-  `mailto:${LINK_CONTACT_EMAIL}?subject=${encodeURIComponent(`Client portal — ${headline.toLowerCase()}`)}`;
+export const linkContactHref = (headline: string, email: string = LINK_CONTACT_EMAIL): string =>
+  `mailto:${email}?subject=${encodeURIComponent(`Client portal — ${headline.toLowerCase()}`)}`;
+
+/**
+ * How a client reaches Code Rx Society.
+ *
+ * The values come from the same published site content the public footer uses
+ * (`links.footer.*`), so changing the contact address in the website editor
+ * changes it here too — a client is never sent to an address nobody reads.
+ */
+export interface ClientContact {
+  email: string;
+  telegram: string;
+  phones: string[];
+}
+
+const contactValue = (links: Record<string, string> | undefined, key: string, fallback: string): string =>
+  getLink(links, key, fallback).trim();
+
+export const clientContact = (links?: Record<string, string> | null): ClientContact => {
+  const source = links ?? undefined;
+  return {
+    email: contactValue(source, 'footer.email', LINK_CONTACT_EMAIL) || LINK_CONTACT_EMAIL,
+    telegram: contactValue(source, 'footer.telegram', DEFAULT_SITE_LINKS['footer.telegram']),
+    phones: [contactValue(source, 'footer.phoneOne', ''), contactValue(source, 'footer.phoneTwo', '')]
+      .filter(Boolean),
+  };
+};
+
+/** A phone number a `tel:` link can dial (spaces and dashes removed, nothing else assumed). */
+export const telHref = (phone: string): string => `tel:${phone.replace(/[^\d+]/g, '')}`;
+
+/** A support email with enough context for Code Rx to answer on the first reply. */
+export const clientSupportMailto = (email: string, context = 'Client portal access', detail?: string | null): string => {
+  const body = [
+    'Hello Code Rx Society,',
+    '',
+    detail ? `I need help with: ${detail}` : 'I need help with my client project access.',
+    '',
+    '(Please keep this message and reply with the details you need.)',
+  ].join('\n');
+  return `mailto:${email}?subject=${encodeURIComponent(context)}&body=${encodeURIComponent(body)}`;
+};
 
 /**
  * A link token is a credential. Only the shape is ever inspected in the browser;
