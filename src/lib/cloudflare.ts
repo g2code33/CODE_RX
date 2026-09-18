@@ -622,6 +622,26 @@ export interface ClientPortalSessionPayload {
   expiresAt?: string | null;
 }
 
+/**
+ * The server's description of the stamped client copy: what exists, what it is
+ * called, and which endpoints the client may use. It carries no storage key and
+ * no bytes — those only ever arrive through `stampedCopy`/`download`.
+ */
+export interface ClientDelivery {
+  available: boolean;
+  kind: string | null;
+  sourceKind: string | null;
+  label: string;
+  contentType: string;
+  designation: string;
+  stamped: boolean;
+  message: string;
+  reason: string | null;
+  viewerPath: string | null;
+  printPath: string | null;
+  downloadPath: string | null;
+}
+
 export const clientPortal = {
   /**
    * Exchanges a raw access key for a short-lived client session.
@@ -662,9 +682,45 @@ export const clientPortal = {
     ),
 
   document: (projectId: string, documentId: string) =>
-    clientCall<{ data: { project: any; document: any } }>(
+    clientCall<{ data: { project: any; document: any; delivery: ClientDelivery } }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}`,
     ),
+
+  /**
+   * Fetches the STAMPED client copy and returns it as a local object URL.
+   *
+   * The portal never re-types the document: the viewer, the print window and the
+   * download all read the artifact the server produced, which is why the Code Rx
+   * watermark is present in each of them. The object URL is created from an
+   * authenticated response body, so the file is never given a public address.
+   */
+  stampedCopy: async (projectId: string, documentId: string, action: 'preview' | 'print' = 'preview') => {
+    const token = clientPortalSession.read()?.token ?? null;
+    const response = await fetch(
+      `${API_BASE}/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/${action}`,
+      {
+        headers: token ? { [CLIENT_SESSION_HEADER]: token } : {},
+        credentials: 'omit',
+        cache: 'no-store',
+      },
+    );
+    if (!response.ok) {
+      let code: string | null = null;
+      let message = '';
+      try {
+        const body = await response.json();
+        code = body?.code ?? null;
+        message = body?.error ?? '';
+      } catch {
+        /* not JSON */
+      }
+      throw new ClientPortalError(message, response.status, code);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    return { url: URL.createObjectURL(blob), filename: match?.[1] || 'code-rx-client-copy.pdf' };
+  },
 
   /**
    * Downloads the client-safe artifact. Only a published, client-visible
@@ -753,6 +809,20 @@ export const clientAccessCenter = {
     apiCall<{ data: { id: string; reference: string; category: string } }>(`/api/phantom/clients/${clientId}/documents`, { method: 'POST', body: JSON.stringify(data) }),
   updateDocument: (documentId: string, data: any) =>
     apiCall(`/api/phantom/client-documents/${documentId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  /**
+   * PHANTOM: prepare (or refresh) the stamped client copy.
+   *
+   * The server renders the watermarked artifact from the document's own source
+   * and caches it; a source that cannot be stamped answers with a controlled
+   * error instead of any file. Response:
+   * `{ available, kind, label, contentType, filename, sizeBytes, sha256, cached }`.
+   */
+  prepareDelivery: (documentId: string, refresh = false) =>
+    apiCall<{ data: { available: boolean; kind: string; label: string; filename: string; sizeBytes: number; cached: boolean } }>(
+      `/api/phantom/client-documents/${encodeURIComponent(documentId)}/delivery`,
+      { method: 'POST', body: JSON.stringify({ refresh }) },
+    ),
+
   setDocumentLifecycle: (documentId: string, state: string, clientVisible?: boolean) =>
     apiCall<{ data: { state: string; clientVisible: boolean }; message: string }>(
       `/api/phantom/client-documents/${documentId}/lifecycle`, { method: 'POST', body: JSON.stringify({ state, clientVisible }) },

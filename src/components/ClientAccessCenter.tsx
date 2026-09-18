@@ -425,6 +425,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
               {section === 'documents' && (
                 <DocumentsPanel
                   can={can} client={detail} documents={documents} projects={projects}
+                  onPrepare={(document: any) => void prepareStampedCopy(document, refresh, onMessage, setError)}
                   onPublish={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id })}
                   onLifecycle={(document: any, state: string) => void changeLifecycle(document, state, refresh, setError)}
                   onEdit={(document: any) => setPublishFlow({ clientId: detail.id, projectId: document.project?.id, document })}
@@ -653,12 +654,15 @@ const ProjectsPanel = ({
 );
 
 const DocumentsPanel = ({
-  can, client, documents, projects, onPublish, onLifecycle, onEdit, onDelete, busy,
+  can, client, documents, projects, onPublish, onLifecycle, onEdit, onDelete, onPrepare, busy,
 }: {
   can: (capability: string) => boolean;
   client: any; documents: any[]; projects: any[]; onPublish: () => void;
   onLifecycle: (document: any, state: string) => void; onEdit: (document: any) => void;
-  onDelete: (document: any) => void; busy: boolean;
+  onDelete: (document: any) => void;
+  /** Renders (or refreshes) the stamped client copy on the server. */
+  onPrepare: (document: any) => void;
+  busy: boolean;
 }) => {
   const projectName = (document: any) => projects.find((project) => project.id === document.project?.id)?.name || '';
   return (
@@ -699,6 +703,11 @@ const DocumentsPanel = ({
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {can('clients.documents.edit') ? (
+                <button onClick={() => onPrepare(document)} className="mini-button border border-emerald-200 !bg-emerald-50 !text-emerald-800" disabled={busy}>
+                  <ShieldCheck className="h-4 w-4" /> {document.hasClientArtifact ? 'Refresh stamped copy' : 'Prepare stamped copy'}
+                </button>
+              ) : null}
               {can('clients.documents.edit') ? <button onClick={() => onEdit(document)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
               {can('clients.documents.delete') ? (
                 <button onClick={() => onDelete(document)} className="mini-button text-rose-600" disabled={busy}>Delete</button>
@@ -1610,8 +1619,9 @@ const LinkDialogHost = ({
             ) : null}
             {isFile && chosenDocument && !chosenDocument.hasClientArtifact ? (
               <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11px] font-semibold text-amber-900">
-                This document has no stamped client copy yet. Code Rx Society never hands over an unstamped original,
-                so the server will refuse a file link until the client-ready file exists.
+                This document has no stamped client copy cached yet. That is expected — the server renders the
+                watermarked copy the first time it is delivered, and never hands over an unstamped original. Use
+                “Prepare stamped copy” to create it now.
               </p>
             ) : null}
             {isFile && chosenDocument && Number(chosenDocument.allowDownload) !== 1 ? (
@@ -1782,6 +1792,31 @@ const revokeAll = async (
     await refresh('All client access revoked: keys, sessions and temporary links are dead.');
   } catch (failure: any) {
     setError(failure?.message || 'Access could not be revoked.');
+  }
+};
+
+/**
+ * Prepares the stamped client copy of a document on the server.
+ *
+ * Nothing is generated in the browser: the request returns the artifact's kind,
+ * size and cache state, or the server's controlled refusal — in which case the
+ * operator sees the reason and no file is produced.
+ */
+const prepareStampedCopy = async (
+  document: any,
+  refresh: (message: string) => Promise<void> | void,
+  onMessage: (message: string) => void,
+  setError: (message: string | null) => void,
+) => {
+  try {
+    const result = await clientAccessCenter.prepareDelivery(document.id);
+    const kilobytes = Math.max(1, Math.round(Number(result.data?.sizeBytes || 0) / 1024));
+    const message = `Stamped client copy ready — ${result.data?.label || 'client copy'} (${kilobytes} KB, `
+      + `${result.data?.cached ? 'already cached' : 'newly rendered'}).`;
+    onMessage(message);
+    await refresh(message);
+  } catch (failure: any) {
+    setError(failure?.message || 'A stamped client copy cannot be prepared for this source.');
   }
 };
 

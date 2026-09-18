@@ -27,6 +27,62 @@ export interface RoomDocument {
   permissions?: { view?: boolean; download?: boolean };
 }
 
+/**
+ * The stamped client copy of a document.
+ *
+ * A room document no longer carries the internal text: what the client reads is
+ * the artifact the server produced, and this is the server's description of it.
+ * `available` false means the server refused to produce a copy — the client is
+ * told so, and is never shown the internal original instead.
+ */
+export interface RoomDelivery {
+  available: boolean;
+  kind?: string | null;
+  sourceKind?: string | null;
+  label?: string;
+  contentType?: string;
+  designation?: string;
+  stamped?: boolean;
+  message?: string;
+  reason?: string | null;
+  viewerPath?: string | null;
+  printPath?: string | null;
+  downloadPath?: string | null;
+}
+
+/** Normalises whatever the server sent into a room-safe delivery descriptor. */
+export const parseDelivery = (value: unknown): RoomDelivery => {
+  const source = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  // Fail closed, twice over: the server has to say a copy is available, and it
+  // has to confirm that copy is stamped. A response that admits to serving an
+  // unstamped file is treated as no delivery at all, never rendered.
+  const available = source.available === true && source.stamped !== false;
+  return {
+    available,
+    kind: typeof source.kind === 'string' ? source.kind : null,
+    sourceKind: typeof source.sourceKind === 'string' ? source.sourceKind : null,
+    label: typeof source.label === 'string' ? source.label : available ? 'Stamped copy' : 'Unavailable',
+    contentType: typeof source.contentType === 'string' ? source.contentType : 'application/pdf',
+    designation: typeof source.designation === 'string' ? source.designation : 'CLIENT PROJECT DOCUMENT',
+    stamped: source.stamped !== false,
+    message: typeof source.message === 'string' ? source.message : '',
+    reason: typeof source.reason === 'string' ? source.reason : null,
+    viewerPath: typeof source.viewerPath === 'string' ? source.viewerPath : null,
+    printPath: typeof source.printPath === 'string' ? source.printPath : null,
+    downloadPath: typeof source.downloadPath === 'string' ? source.downloadPath : null,
+  };
+};
+
+/** A document can be opened in the viewer or printed when a stamped copy exists. */
+export const deliveryAvailable = (delivery: RoomDelivery | null | undefined): boolean => delivery?.available === true;
+export const canPrint = (document: RoomDocument, delivery: RoomDelivery | null | undefined): boolean =>
+  canView(document) && deliveryAvailable(delivery);
+
+/** The client-facing explanation shown when no stamped copy can be produced. */
+export const deliveryMessage = (delivery: RoomDelivery | null | undefined): string =>
+  delivery?.message
+  || 'A stamped Code Rx copy of this document is not available yet. Please contact Code Rx Society.';
+
 /** The seven sections of a project room, in the order the client sees them. */
 export const ROOM_SECTIONS = [
   { id: 'overview', label: 'Project Overview', empty: 'Nothing has been published to this project yet.' },

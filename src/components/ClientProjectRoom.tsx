@@ -22,6 +22,10 @@ import {
 import {
   CATEGORY_LABELS,
   canDownload,
+  canPrint,
+  deliveryAvailable,
+  deliveryMessage,
+  parseDelivery,
   sectionForCategory,
   downloadFileName,
   emptyMessageFor,
@@ -30,10 +34,10 @@ import {
   publicationInfo,
   sectionLabel,
   visibleSections,
+  type RoomDelivery,
   type RoomDocument,
   type RoomSection,
 } from '../lib/projectRoom';
-import { parseDocumentContent, sanitizeVaultRichText, type VaultBlock } from '../data/vaultEditor';
 
 export interface ClientPortalContext {
   client: { id: string; name: string; contactName?: string | null };
@@ -64,9 +68,11 @@ export interface ClientPortalContext {
 export interface RoomTransport {
   project: (projectId: string) => Promise<{ data: { project?: any; sections?: any[]; recent?: any[]; scope?: any } }>;
   section: (projectId: string, section: string) => Promise<{ data: { documents?: any[] } }>;
-  document: (projectId: string, documentId: string) => Promise<{ data: { document: any } }>;
+  document: (projectId: string, documentId: string) => Promise<{ data: { document: any; delivery?: unknown } }>;
   /** Absent in preview: preview never serves a file. */
   download?: (projectId: string, documentId: string, fileName: string) => Promise<void>;
+  /** Fetches the stamped client copy as a local object URL. Absent in preview. */
+  stampedCopy?: (projectId: string, documentId: string, action: 'preview' | 'print') => Promise<{ url: string; filename: string }>;
 }
 
 interface ClientProjectRoomProps {
@@ -85,58 +91,103 @@ interface ClientProjectRoomProps {
 }
 
 /**
- * Renders one stored content block. Every block passes through the existing Vault
- * rich-text sanitiser, so a malformed snapshot can never inject markup here.
+ * The stamped client copy.
+ *
+ * The portal renders the artifact the server produced — a watermarked Code Rx
+ * document — instead of re-typing the stored text. That is what makes the
+ * watermark part of the viewer and of anything printed from it. When the server
+ * says no stamped copy can be produced, this panel says so and shows nothing
+ * else: the internal original is never a fallback.
  */
-const ContentBlock = ({ block }: { block: VaultBlock }) => {
-  const html = block.content ? sanitizeVaultRichText(block.content) : '';
-  if (block.type === 'heading') {
-    const Tag = block.level === 1 ? 'h2' : 'h3';
+export const StampedCopyPanel = ({
+  delivery, copy, busy, preview, printable, onLoadCopy, onPrint,
+}: {
+  delivery: RoomDelivery;
+  copy: { url: string; filename: string } | null;
+  busy: boolean;
+  preview: boolean;
+  printable: boolean;
+  onLoadCopy: () => void;
+  onPrint: () => void;
+}) => {
+  if (!deliveryAvailable(delivery)) {
     return (
-      <Tag
-        className={block.level === 1 ? 'mt-8 text-xl font-black tracking-tight text-slate-900 sm:text-2xl' : 'mt-7 text-lg font-black text-slate-900'}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    );
-  }
-  if (block.type === 'bulletList' || block.type === 'numberedList' || block.type === 'checklist') {
-    const List = block.type === 'numberedList' ? 'ol' : 'ul';
-    return (
-      <List className={`mt-4 space-y-2 pl-6 text-[15px] leading-7 text-slate-700 ${block.type === 'numberedList' ? 'list-decimal' : 'list-disc'}`}>
-        {(block.items || []).map((item, index) => (
-          <li key={item.id || index} className={item.checked ? 'text-slate-400 line-through' : ''} dangerouslySetInnerHTML={{ __html: sanitizeVaultRichText(item.text) }} />
-        ))}
-      </List>
-    );
-  }
-  if (block.type === 'quote') {
-    return <blockquote className="mt-5 border-l-4 border-emerald-300 bg-emerald-50/60 px-5 py-4 text-[15px] leading-7 text-emerald-950" dangerouslySetInnerHTML={{ __html: html }} />;
-  }
-  if (block.type === 'callout') {
-    return <aside className="mt-5 rounded-xl border border-emerald-100 bg-emerald-50 p-5 text-[15px] leading-7 text-emerald-950" dangerouslySetInnerHTML={{ __html: html }} />;
-  }
-  if (block.type === 'code') {
-    return <pre className="mt-5 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 p-4 text-[13px] leading-6 text-slate-800"><code>{block.content || ''}</code></pre>;
-  }
-  if (block.type === 'divider') return <hr className="my-8 border-slate-200" />;
-  if (block.type === 'table') {
-    return (
-      <div className="mt-5 overflow-x-auto rounded-xl border border-slate-200">
-        <table className="min-w-full border-collapse text-sm">
-          <tbody>
-            {(block.rows || []).map((row, rowIndex) => (
-              <tr key={rowIndex} className={rowIndex === 0 ? 'bg-slate-50 font-bold text-slate-900' : 'text-slate-700'}>
-                {row.map((cell, cellIndex) => (
-                  <td key={cellIndex} className="border border-slate-200 p-3 align-top" dangerouslySetInnerHTML={{ __html: sanitizeVaultRichText(cell) }} />
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm font-semibold text-amber-900">
+        {deliveryMessage(delivery)}
       </div>
     );
   }
-  return <p className="mt-4 text-[15px] leading-8 text-slate-700" dangerouslySetInnerHTML={{ __html: html }} />;
+
+  return (
+    <div className="mt-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-100 bg-emerald-50/70 px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-emerald-800">
+            {delivery.designation || 'CLIENT PROJECT DOCUMENT'}
+          </p>
+          <p className="mt-1 text-xs font-semibold text-emerald-900">
+            {delivery.label || 'Stamped copy'} · watermarked by Code Rx Society
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {printable ? (
+          <button
+            type="button"
+            onClick={onPrint}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.16em] text-emerald-800 ring-1 ring-emerald-200 transition hover:bg-emerald-50"
+          >
+            <Eye className="h-3.5 w-3.5" /> Print
+          </button>
+          ) : null}
+          {copy ? (
+            <a
+              href={copy.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.16em] text-emerald-800 ring-1 ring-emerald-200 transition hover:bg-emerald-50"
+            >
+              <FileText className="h-3.5 w-3.5" /> Open in a new tab
+            </a>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
+        {preview ? (
+          <p className="px-4 py-10 text-center text-sm font-semibold text-slate-500">
+            Preview shows the client&apos;s room, not their files. In their own session the stamped
+            {' '}{delivery.label || 'client copy'} opens here.
+          </p>
+        ) : copy ? (
+          <object
+            data={copy.url}
+            type={delivery.contentType || 'application/pdf'}
+            aria-label={`${delivery.label || 'Stamped client copy'} for this document`}
+            className="h-[70vh] w-full bg-white"
+          >
+            <p className="px-4 py-10 text-center text-sm font-semibold text-slate-500">
+              Your browser cannot display this file inline.{' '}
+              <a className="underline" href={copy.url} target="_blank" rel="noreferrer">Open the stamped copy</a>.
+            </p>
+          </object>
+        ) : (
+          <div className="px-4 py-12 text-center">
+            <button
+              type="button"
+              onClick={onLoadCopy}
+              disabled={busy}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-[11px] font-black uppercase tracking-[0.16em] text-white transition hover:bg-emerald-700 disabled:opacity-70"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />} Open stamped copy
+            </button>
+            <p className="mt-3 text-xs font-medium text-slate-500">
+              Every copy is stamped with the Code Rx watermark, your project reference and the version.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 };
 
 const DocumentAction = ({
@@ -283,7 +334,10 @@ export const ClientProjectRoom = ({
   const [activeSection, setActiveSection] = useState('overview');
   const [documents, setDocuments] = useState<RoomDocument[] | null>(null);
   const [openDocument, setOpenDocument] = useState<any | null>(null);
+  const [openDelivery, setOpenDelivery] = useState<RoomDelivery>(() => parseDelivery(null));
+  const [copy, setCopy] = useState<{ url: string; filename: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [copyBusy, setCopyBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
@@ -346,6 +400,8 @@ export const ClientProjectRoom = ({
   const openSection = async (section: string) => {
     setActiveSection(section);
     setOpenDocument(null);
+    setOpenDelivery(parseDelivery(null));
+    setCopy(null);
     setError(null);
     if (section === 'overview') {
       setDocuments(null);
@@ -366,13 +422,70 @@ export const ClientProjectRoom = ({
   const openDocumentById = async (documentId: string) => {
     setBusy(true);
     setError(null);
+    setCopy(null);
     try {
       const response = await transport.document(projectId, documentId);
       setOpenDocument(response.data.document);
+      const delivery = parseDelivery(response.data.delivery);
+      setOpenDelivery(delivery);
+      // The stamped copy is fetched eagerly only when the viewer can show it.
+      if (!preview && delivery.available && transport.stampedCopy) {
+        void loadStampedCopy(documentId);
+      }
     } catch (failure) {
       handleFailure(failure);
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * Loads the stamped artifact for the viewer. The bytes come from the server
+   * under the client session; the portal holds them in an object URL for as long
+   * as the document is open, and revokes it when the viewer closes.
+   */
+  const loadStampedCopy = async (documentId: string, action: 'preview' | 'print' = 'preview') => {
+    if (!transport.stampedCopy) return null;
+    try {
+      return await transport.stampedCopy(projectId, documentId, action);
+    } catch (failure) {
+      handleFailure(failure);
+      return null;
+    }
+  };
+
+  const openStampedCopy = async () => {
+    if (!openDocument) return;
+    setCopyBusy(true);
+    setError(null);
+    try {
+      const loaded = await loadStampedCopy(String(openDocument.id), 'preview');
+      if (loaded) setCopy(loaded);
+    } finally {
+      setCopyBusy(false);
+    }
+  };
+
+  /**
+   * Printing goes through the same artifact. A blank window is opened first so
+   * the browser's user gesture is preserved, then pointed at the stamped file —
+   * what the client prints is the watermarked document, not the page's markup.
+   */
+  const printStampedCopy = async () => {
+    if (!openDocument) return;
+    setError(null);
+    const opened = !preview ? window.open('', '_blank', 'noopener') : null;
+    setCopyBusy(true);
+    try {
+      const loaded = await loadStampedCopy(String(openDocument.id), 'print');
+      if (!loaded) {
+        if (opened) opened.close();
+        return;
+      }
+      if (opened) opened.location.href = loaded.url;
+      else if (!preview) window.open(loaded.url, '_blank', 'noopener');
+    } finally {
+      setCopyBusy(false);
     }
   };
 
@@ -397,6 +510,15 @@ export const ClientProjectRoom = ({
     }
   };
 
+  useEffect(() => () => {
+    // Object URLs hold the stamped bytes in memory; release them when the room
+    // goes away so a closed session leaves nothing behind in the browser.
+    setCopy((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+  }, []);
+
   const signOut = async () => {
     setSigningOut(true);
     try {
@@ -408,11 +530,6 @@ export const ClientProjectRoom = ({
       onSignedOut();
     }
   };
-
-  const blocks = useMemo(
-    () => (openDocument ? parseDocumentContent(openDocument.content, openDocument.summary || '') : []),
-    [openDocument],
-  );
 
   // Only sections holding authorized content are offered, plus the overview.
   const shownSections = useMemo(() => visibleSections(sections, recent.length), [sections, recent.length]);
@@ -561,11 +678,15 @@ export const ClientProjectRoom = ({
                 {openDocument.summary ? (
                   <p className="mt-5 rounded-xl bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">{openDocument.summary}</p>
                 ) : null}
-                <div className="mt-4 border-t border-slate-100 pt-2">
-                  {blocks.length ? blocks.map((block, index) => <ContentBlock key={block.id || index} block={block} />) : (
-                    <p className="mt-4 text-sm font-medium text-slate-500">This document has no published content yet.</p>
-                  )}
-                </div>
+                <StampedCopyPanel
+                  delivery={openDelivery}
+                  copy={copy}
+                  busy={copyBusy}
+                  preview={!!preview}
+                  printable={canPrint(openDocument as RoomDocument, openDelivery)}
+                  onLoadCopy={() => void openStampedCopy()}
+                  onPrint={() => void printStampedCopy()}
+                />
                 {canDownload(openDocument as RoomDocument) ? (
                   <div className="mt-8 flex flex-col gap-3 border-t border-slate-100 pt-6 sm:flex-row sm:items-center">
                     <button
@@ -576,7 +697,9 @@ export const ClientProjectRoom = ({
                     >
                       {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Download copy
                     </button>
-                    <p className="text-xs font-medium text-slate-500">Your download is watermarked with your project reference.</p>
+                    <p className="text-xs font-medium text-slate-500">
+                      Your download is the stamped Code Rx copy of this document — watermarked and print-safe.
+                    </p>
                   </div>
                 ) : (
                   <p className="mt-8 flex items-center gap-2 border-t border-slate-100 pt-6 text-xs font-bold uppercase tracking-[0.12em] text-slate-400">

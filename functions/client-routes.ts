@@ -56,6 +56,16 @@ import {
   expireClientLinks,
 } from './lib/client-auth';
 import {
+  loadClientDeliveryContext,
+  recordArtifactReference,
+  resolveClientDelivery,
+  type ClientDeliveryContext,
+  type DeliveryResolution,
+} from './lib/client-delivery-context';
+import {
+  isDeliveryArtifactKey,
+} from './lib/client-document-delivery';
+import {
   allocateClientReference,
   clampLinkTtlMinutes,
   clientAllLinksEnabled,
@@ -157,6 +167,35 @@ const parseDate = (value: unknown): string | null => {
   const time = new Date(text).getTime();
   if (!Number.isFinite(time)) return null;
   return new Date(time).toISOString();
+};
+
+/**
+ * The client-facing view of a delivery: what is available, what it is called,
+ * and where the viewer fetches it. It carries no storage key, no internal row id
+ * and no bytes — the stamped file itself is only ever served by the preview,
+ * print and download endpoints, under their own authorization.
+ */
+const clientDeliveryPayload = (
+  delivery: DeliveryResolution,
+  exposure: { canView: boolean; canDownload: boolean },
+  ids: { projectId: string; documentId: string },
+) => {
+  const base = `/api/client/project/${encodeURIComponent(ids.projectId)}/documents/${encodeURIComponent(ids.documentId)}`;
+  const available = !!delivery.artifact;
+  return {
+    available,
+    kind: delivery.plan.kind,
+    sourceKind: delivery.plan.sourceKind,
+    label: delivery.plan.label,
+    contentType: delivery.plan.contentType,
+    designation: 'CLIENT PROJECT DOCUMENT',
+    stamped: true,
+    message: available ? '' : delivery.message,
+    reason: available ? null : delivery.reason,
+    viewerPath: available && exposure.canView ? `${base}/preview` : null,
+    printPath: available && exposure.canView ? `${base}/print` : null,
+    downloadPath: available && exposure.canDownload ? `${base}/download` : null,
+  };
 };
 
 const safeDownloadName = (document: any) => {
@@ -607,34 +646,150 @@ export const registerClientRoutes = (app: ClientApp) => {
     // link, or a download-only link). Reading the text is a separate permission.
     if (!exposure.canView) return clientNotFound();
 
-    // The authorization middleware deliberately loads a narrow row (no content,
-    // no storage keys), so the published snapshot is read here, scoped by the
-    // client/project/document ids that middleware already authorized.
-    const content = await one<{ content_snapshot: string | null; content_snapshot_format: string | null }>(db.prepare(
-      `SELECT content_snapshot, content_snapshot_format FROM client_documents
-       WHERE id = ? AND client_id = ? AND client_project_id = ?`
-    ).bind(Number(document.id), principal.clientId, Number(document.client_project_id)));
+    // The raw snapshot is deliberately NOT returned. It is the internal text of
+    // the document; what a client receives is the stamped representation the
+    // delivery pipeline produces, fetched from the preview endpoint. The read
+    // therefore answers with the stamped-copy descriptor only.
+    const context = await loadClientDeliveryContext(db, {
+      documentRowId: Number(document.id),
+      clientId: principal.clientId,
+      projectId: Number(document.client_project_id),
+    });
+    if (!context) return clientNotFound();
+
+    const delivery = await resolveClientDelivery({ db, bucket: c.env.BUCKET, context });
 
     await recordClientActivity(db, 'DOCUMENT_VIEWED', {
       principal,
-      details: { documentId: document.public_id, reference: document.reference_code, category: document.category },
+      details: {
+        documentId: document.public_id,
+        reference: document.reference_code,
+        category: document.category,
+        delivery: delivery.plan.kind,
+      },
     });
 
     return clientJson({
       success: true,
       data: {
         project: publicProject(project),
-        document: publicDocument(
-          {
-            ...document,
-            content_snapshot: content?.content_snapshot ?? null,
-            content_snapshot_format: content?.content_snapshot_format ?? 'text',
-          },
-          exposure,
-          { includeContent: true },
-        ),
+        document: publicDocument(document, exposure),
+        delivery: clientDeliveryPayload(delivery, exposure, {
+          projectId: String(project.public_id),
+          documentId: String(document.public_id),
+        }),
       },
     });
+  });
+
+  /**
+   * Serves the stamped artifact for a document.
+   *
+   * Shared by the viewer, the download and the print endpoints, so all three
+   * hand back the same pipeline output — a client can never receive the source
+   * file, and the watermark is present whichever route they take. Rendering
+   * happens server-side and only after the client/project/document scope, the
+   * document's own flags and the temporary link's scope have all been checked.
+   */
+  const serveStampedArtifact = async (
+    c: any,
+    options: {
+      principal: ClientPrincipal;
+      document: any;
+      exposure: { canView: boolean; canDownload: boolean };
+      disposition: 'inline' | 'attachment';
+      event: 'DOCUMENT_VIEWED' | 'DOCUMENT_DOWNLOADED';
+      deny: (reason: string) => Promise<Response>;
+    },
+  ): Promise<Response> => {
+    const db = c.env.DB;
+    const context = await loadClientDeliveryContext(db, {
+      documentRowId: Number(options.document.id),
+      clientId: options.principal.clientId,
+      projectId: Number(options.document.client_project_id),
+    });
+    if (!context) return options.deny('document_not_found');
+
+    const delivery = await resolveClientDelivery({ db, bucket: c.env.BUCKET, context });
+    if (!delivery.artifact) {
+      await recordClientActivity(db, 'ACCESS_DENIED', {
+        principal: options.principal,
+        details: { reason: delivery.reason || 'delivery_unavailable', documentId: options.document.public_id },
+      });
+      // A controlled refusal: the client is told the stamped copy is not
+      // available, and never receives the underlying file instead.
+      return clientJson({
+        success: false,
+        error: delivery.message || 'A stamped Code Rx copy is not available for this document.',
+        code: 'delivery_unavailable',
+        data: { document: options.document.public_id, reason: delivery.reason || 'delivery_unavailable' },
+      }, 409);
+    }
+
+    await recordArtifactReference(db, context, delivery.artifact.key);
+
+    const object = await c.env.BUCKET.get(delivery.artifact.key);
+    if (!object) {
+      return clientJson({
+        success: false,
+        error: 'The stamped Code Rx copy could not be read. Contact Code Rx Society.',
+        code: 'delivery_unavailable',
+      }, 503);
+    }
+
+    await recordClientActivity(db, options.event, {
+      principal: options.principal,
+      details: {
+        documentId: options.document.public_id,
+        reference: options.document.reference_code,
+        category: options.document.category,
+        delivery: delivery.plan.kind,
+        artifact: delivery.artifact.key,
+      },
+    });
+
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': object.httpMetadata?.contentType || delivery.artifact.contentType || 'application/pdf',
+        'Content-Disposition': `${options.disposition}; filename="${delivery.artifact.filename || safeDownloadName(options.document)}"`,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'X-Code-Rx-Delivery': delivery.artifact.kind || 'stamped',
+      },
+    });
+  };
+
+  /**
+   * Client viewer and print.
+   *
+   * The portal renders the stamped artifact itself rather than re-typing the
+   * document text, which is what makes the watermark part of what the client
+   * sees and prints. The response is inline so the browser's PDF viewer can
+   * display it, and printing that viewer prints the stamped file.
+   */
+  app.get('/api/client/project/:projectId/documents/:documentId/preview', requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess, async (c: any) => {
+    const principal = c.get('client') as ClientPrincipal;
+    const document = c.get('clientDocument') as any;
+    const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+    const deny = async (reason: string) => {
+      await recordClientActivity(c.env.DB, 'ACCESS_DENIED', { principal, details: { reason, documentId: document.public_id } });
+      return clientNotFound();
+    };
+    if (!exposure.canView) return deny('view_not_permitted');
+    return serveStampedArtifact(c, { principal, document, exposure, disposition: 'inline', event: 'DOCUMENT_VIEWED', deny });
+  });
+
+  app.get('/api/client/project/:projectId/documents/:documentId/print', requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess, async (c: any) => {
+    const principal = c.get('client') as ClientPrincipal;
+    const document = c.get('clientDocument') as any;
+    const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+    const deny = async (reason: string) => {
+      await recordClientActivity(c.env.DB, 'ACCESS_DENIED', { principal, details: { reason, documentId: document.public_id } });
+      return clientNotFound();
+    };
+    if (!exposure.canView) return deny('view_not_permitted');
+    return serveStampedArtifact(c, { principal, document, exposure, disposition: 'inline', event: 'DOCUMENT_VIEWED', deny });
   });
 
   /**
@@ -663,34 +818,13 @@ export const registerClientRoutes = (app: ClientApp) => {
     if (!exposure.canDownload) return deny('download_not_permitted');
     if (!await clientDownloadsEnabled(db)) return deny('downloads_disabled');
 
-    // The authorization middleware keeps storage identifiers out of the shared
-    // request context on purpose, so the artifact reference is re-read here,
-    // scoped by the client/project/document the middleware already authorised.
-    // A document can therefore never reach R2 through a tampered path.
-    const artifact = await one<{ storage_reference: string | null }>(db.prepare(
-      `SELECT storage_reference FROM client_documents
-       WHERE id = ? AND client_id = ? AND client_project_id = ?`
-    ).bind(Number(document.id), principal.clientId, Number(document.client_project_id)));
-    const storageReference = String(artifact?.storage_reference || '').trim();
-    if (!storageReference) return deny('no_client_artifact');
-    if (!storageReference.startsWith('client-exports/')) return deny('unsafe_storage_reference');
-
-    const object = await c.env.BUCKET.get(storageReference);
-    if (!object) return deny('artifact_missing');
-
-    await recordClientActivity(db, 'DOCUMENT_DOWNLOADED', {
+    return serveStampedArtifact(c, {
       principal,
-      details: { documentId: document.public_id, reference: document.reference_code, category: document.category },
-    });
-
-    return new Response(object.body, {
-      headers: {
-        'Content-Type': object.httpMetadata?.contentType || 'application/pdf',
-        'Content-Disposition': `attachment; filename="${safeDownloadName(document)}"`,
-        'Cache-Control': 'private, no-store',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
-      },
+      document,
+      exposure,
+      disposition: 'attachment',
+      event: 'DOCUMENT_DOWNLOADED',
+      deny,
     });
   });
 
@@ -1412,7 +1546,7 @@ export const registerClientRoutes = (app: ClientApp) => {
     if (intent === 'file' && !document) {
       return c.json({ success: false, error: 'Choose the document whose file this link delivers.' }, 400);
     }
-    if (intent === 'file' && !String(document.storage_reference || '').trim()) {
+    if (intent === 'file' && !isDeliveryArtifactKey(document.storage_reference, String(client.public_id), String(document.public_id))) {
       // The watermarking pipeline has not produced a client copy for this
       // document, so there is no client-safe file to deliver. An untouched
       // original is never exposed, and a dead link is never issued.
@@ -1684,6 +1818,73 @@ export const registerClientRoutes = (app: ClientApp) => {
     return c.json({ success: true, data: { id: publicId, reference, category } }, 201);
   });
 
+  /**
+   * PHANTOM: prepare (or refresh) the stamped client copy of a document.
+   *
+   * Rendering is server-side and deterministic; this action makes it explicit
+   * and auditable, and it is the same pipeline the client endpoints use. A
+   * source that cannot be stamped answers 409 with the reason and no bytes —
+   * the internal original is never returned as a fallback.
+   */
+  app.post('/api/phantom/client-documents/:documentId/delivery', requireAuth, documentEdit, async (c: any) => {
+    const db = c.env.DB;
+    const actor = await actorFromContext(c);
+    const documentPublicId = String(c.req.param('documentId') || '').trim();
+    const document = await findDocumentByPublicId(db, documentPublicId);
+    if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const refresh = body.refresh === true;
+
+    const context = await loadClientDeliveryContext(db, {
+      documentRowId: Number(document.id),
+      clientId: Number(document.client_id),
+      projectId: Number(document.client_project_id),
+    });
+    if (!context) return c.json({ success: false, error: 'Client document not found.' }, 404);
+
+    const delivery = await resolveClientDelivery({ db, bucket: c.env.BUCKET, context, refresh });
+    if (!delivery.artifact) {
+      await audit(db, actor, 'client.document.delivery.failed', 'client_document', Number(document.id), {
+        publicId: documentPublicId,
+        reason: delivery.reason || 'delivery_unavailable',
+      });
+      return c.json({
+        success: false,
+        error: delivery.message || 'A stamped Code Rx copy cannot be prepared for this source.',
+        code: 'delivery_unavailable',
+        data: { reason: delivery.reason || 'delivery_unavailable', sourceKind: delivery.plan.sourceKind },
+      }, 409);
+    }
+
+    await recordArtifactReference(db, context, delivery.artifact.key);
+    await audit(db, actor, 'client.document.delivery.prepared', 'client_document', Number(document.id), {
+      publicId: documentPublicId,
+      kind: delivery.plan.kind,
+      sourceKind: delivery.plan.sourceKind,
+      storageReference: delivery.artifact.key,
+      sizeBytes: delivery.artifact.size,
+      sha256: delivery.artifact.sha256,
+      refreshed: refresh,
+    });
+
+    return c.json({
+      success: true,
+      data: {
+        id: documentPublicId,
+        reference: document.reference_code,
+        available: true,
+        kind: delivery.plan.kind,
+        sourceKind: delivery.plan.sourceKind,
+        label: delivery.plan.label,
+        contentType: delivery.artifact.contentType,
+        filename: delivery.artifact.filename,
+        sizeBytes: delivery.artifact.size,
+        sha256: delivery.artifact.sha256,
+        cached: delivery.artifact.cached,
+      },
+    });
+  });
+
   app.patch('/api/phantom/client-documents/:documentId', requireAuth, documentEdit, async (c: any) => {
     const db = c.env.DB;
     const actor = await actorFromContext(c);
@@ -1710,11 +1911,28 @@ export const registerClientRoutes = (app: ClientApp) => {
     }
     // Download without view is not a state the client portal can express.
     const effectiveAllowDownload = allowView === 1 ? allowDownload : 0;
-    const storageReference = body.storageReference === undefined
-      ? document.storage_reference
-      : cleanOptionalStr(body.storageReference, 700);
-    if (storageReference && !String(storageReference).startsWith('client-exports/')) {
-      return c.json({ success: false, error: 'A client artifact must live under client-exports/.' }, 400);
+    // `storage_reference` is the stamping pipeline's cache pointer, not a field a
+    // caller may aim at a file. Setting it by hand is refused: a document can
+    // never be pointed at an object the pipeline did not produce, so there is no
+    // path — not even an operator path — to serve an unstamped file.
+    let storageReference = document.storage_reference;
+    if (body.storageReference !== undefined) {
+      const requested = cleanOptionalStr(body.storageReference, 700);
+      if (requested === null) {
+        storageReference = null;
+      } else {
+        const clientRow = await one<any>(
+          db.prepare('SELECT public_id FROM clients WHERE id = ?').bind(document.client_id),
+        );
+        if (!isDeliveryArtifactKey(requested, String(clientRow?.public_id || ''), String(document.public_id))) {
+          return c.json({
+            success: false,
+            error: 'The stamped client copy is produced by the delivery pipeline; storage_reference cannot be set by hand.',
+            code: 'storage_reference_managed',
+          }, 400);
+        }
+        storageReference = requested;
+      }
     }
 
     await db.prepare(
@@ -2025,11 +2243,31 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
       }, 404);
     }
 
+    // The operator sees exactly what the client sees. The preview transport
+    // never fetches file bytes (see `buildPreviewTransport`), so this descriptor
+    // carries the delivered kind and label only — the artifact itself stays on
+    // the server, and the client's own viewer is the only way to see the bytes.
+    const context = await loadClientDeliveryContext(db, {
+      documentRowId: Number(document.id),
+      clientId: Number(client.id),
+      projectId: Number(project.id),
+    });
+    const delivery = context ? await resolveClientDelivery({ db, bucket: c.env.BUCKET, context }) : null;
+
     return c.json({
       success: true,
       data: {
         project: publicProject(project),
-        document: publicDocument(document, { ...exposure, canDownload: false }, { includeContent: true }),
+        document: publicDocument(document, { ...exposure, canDownload: false }),
+        delivery: delivery
+          // No paths at all: the preview never fetches a file, so it never
+          // advertises one. The operator sees the delivered kind and label
+          // only, which is what keeps "preview" from becoming a second way in.
+          ? clientDeliveryPayload(delivery, { canView: false, canDownload: false }, {
+            projectId: String(project.public_id),
+            documentId: String(document.public_id),
+          })
+          : null,
       },
     });
   });

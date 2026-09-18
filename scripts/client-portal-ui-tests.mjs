@@ -60,7 +60,7 @@ const bundle = async () => {
         export { ClientLinkState } from './src/components/ClientLinkState';
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
-        export { ClientProjectRoom } from './src/components/ClientProjectRoom';
+        export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
         export { ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
       `,
       resolveDir: ROOT,
@@ -91,10 +91,11 @@ const main = async () => {
   const {
     formatAccessKey, validateAccessKey, accessKeyHint, messageForFailure, failureMessage,
     FAILURE_MESSAGES, ACCESS_KEY_PLACEHOLDER, clientPortalSession,
-    ClientAccessScreen, ClientProjectRoom, ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext,
+    ClientAccessScreen, ClientProjectRoom, StampedCopyPanel, ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext,
     visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
     permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
     documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
+    parseDelivery, deliveryAvailable, canPrint, deliveryMessage,
     LINK_DESTINATIONS, LINK_DESTINATION_IDS, LINK_ACCESS_MODES, LINK_TTL_PRESETS,
     LINK_TTL_MINUTES_FALLBACK, LINK_TTL_MIN_MINUTES, LINK_TTL_MAX_MINUTES, LINK_MAX_USES_LIMIT,
     linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
@@ -819,6 +820,112 @@ const main = async () => {
     /hashed on the server and shown once/i.test(linksPanelSource));
   check('the operator surfaces never render a link token from the list',
     !/link\.token/.test(centerSource));
+
+
+  // =========================================================================
+  group('13. Watermarked client delivery in the viewer (Phase 8)');
+  // =========================================================================
+
+  const src = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8');
+  const roomSource = src('src/components/ClientProjectRoom.tsx');
+  const transportSource = src('src/lib/cloudflare.ts');
+  const workspaceSource = src('src/components/ClientAccessCenter.tsx');
+
+  // --- the delivery descriptor fails closed --------------------------------
+  check('a missing delivery descriptor is treated as nothing to show',
+    deliveryAvailable(parseDelivery(null)) === false && deliveryAvailable(parseDelivery(undefined)) === false
+    && deliveryAvailable(parseDelivery({})) === false && deliveryAvailable(parseDelivery({ available: 'yes' })) === false);
+  check('a descriptor that admits to an unstamped file is refused, not rendered',
+    deliveryAvailable(parseDelivery({ available: true, stamped: false })) === false);
+  check('a stamped descriptor is accepted', deliveryAvailable(parseDelivery({ available: true, stamped: true })) === true);
+  check('an omitted stamp flag is accepted (the server only sends stamped copies)',
+    deliveryAvailable(parseDelivery({ available: true })) === true);
+  check('the descriptor defaults to the client-document designation',
+    parseDelivery({ available: true }).designation === 'CLIENT PROJECT DOCUMENT'
+    && parseDelivery({ available: true }).label === 'Stamped copy'
+    && parseDelivery({}).label === 'Unavailable');
+  check('the server descriptor is carried through untouched',
+    parseDelivery({
+      available: true, kind: 'stamped_pdf', label: 'Stamped PDF', contentType: 'application/pdf',
+      viewerPath: '/api/client/project/p1/documents/d1/preview', printPath: '/api/client/project/p1/documents/d1/print',
+      downloadPath: '/api/client/project/p1/documents/d1/download',
+    }).viewerPath.endsWith('/preview'));
+
+  // --- what the viewer is allowed to offer ---------------------------------
+  const stampedDelivery = parseDelivery({ available: true, kind: 'stamped_pdf', label: 'Stamped PDF' });
+  const refusedDelivery = parseDelivery({ available: false, reason: 'source_restricted', message: 'This document is not available for download. Contact Code Rx Society.' });
+  check('printing is offered for a viewable document with a stamped copy',
+    canPrint(viewOnly, stampedDelivery) === true && canPrint(downloadable, stampedDelivery) === true);
+  check('printing is never offered without a stamped copy',
+    canPrint(downloadable, refusedDelivery) === false && canPrint(downloadable, parseDelivery(null)) === false);
+  check('printing is never offered for a document the client may not view',
+    canPrint(deniedBoth, stampedDelivery) === false);
+  check('the refusal message tells the client to contact Code Rx Society',
+    /Contact Code Rx Society/.test(deliveryMessage(refusedDelivery)));
+  check('a refusal without a server message still explains itself',
+    /contact Code Rx Society/i.test(deliveryMessage(parseDelivery({ available: false }))));
+
+  // --- the panel the client actually gets ----------------------------------
+  const panel = (props) => render(React.createElement(StampedCopyPanel, {
+    delivery: stampedDelivery, copy: null, busy: false, preview: false, printable: true,
+    onLoadCopy: () => {}, onPrint: () => {}, ...props,
+  }));
+  const availablePanel = panel({ copy: { url: 'blob:code-rx-stamped-copy', filename: 'CRX-RPT-2026-001.pdf' } });
+  check('the viewer embeds the stamped copy the server produced',
+    availablePanel.includes('<object') && availablePanel.includes('blob:code-rx-stamped-copy')
+    && availablePanel.includes('type="application/pdf"'));
+  check('the viewer states the watermarked designation and origin',
+    availablePanel.includes('CLIENT PROJECT DOCUMENT') && /watermarked by Code Rx Society/i.test(availablePanel));
+  check('the viewer offers print and a new-tab copy of the same artifact',
+    availablePanel.includes('Print') && /Open in a new tab/.test(availablePanel));
+  check('the viewer never tells the client a watermark can be turned off',
+    !/turn off|disable|remove.{0,20}watermark|without.{0,12}watermark|no watermark/i.test(availablePanel));
+  const loadingPanel = panel({ copy: null });
+  check('before the copy is fetched the panel offers to open the stamped copy',
+    /Open stamped copy/.test(loadingPanel) && !loadingPanel.includes('<object'));
+  check('the empty state promises the stamp rather than the original',
+    /stamped with the Code Rx watermark/i.test(loadingPanel));
+  const refusedPanel = panel({ delivery: refusedDelivery, printable: false });
+  check('a refused delivery shows the reason and nothing else',
+    /Contact Code Rx Society/.test(refusedPanel)
+    && !refusedPanel.includes('<object') && !/Open stamped copy/.test(refusedPanel) && !/>\s*Print\s*</.test(refusedPanel));
+  const viewOnlyPanel = panel({ printable: false, copy: null });
+  check('a document that cannot be printed shows no print control',
+    !/>\s*Print\s*</.test(viewOnlyPanel));
+  const previewPanel = panel({ preview: true });
+  check('the operator preview never embeds a client file',
+    !previewPanel.includes('<object') && /Preview shows the client/.test(previewPanel));
+
+  // --- the source rules behind the panel -----------------------------------
+  check('the room no longer renders stored document text',
+    !/parseDocumentContent|sanitizeVaultRichText|VaultBlock|\.content\.blocks|content\.blocks/.test(roomSource));
+  check('the room never reaches for an internal original',
+    !/storageReference|storage_reference|\/original|\braw=1\b/.test(roomSource));
+  check('the stamped copy is fetched through the authenticated transport',
+    /transport\.stampedCopy/.test(roomSource)
+    && /CLIENT_SESSION_HEADER/.test(transportSource)
+    && /stampedCopy:[\s\S]{0,700}credentials: 'omit'/.test(transportSource)
+    && /stampedCopy:[\s\S]{0,700}cache: 'no-store'/.test(transportSource));
+  check('the transport asks for the server preview/print route, never a raw file',
+    /stampedCopy[\s\S]{0,420}\/\$\{action\}/.test(transportSource)
+    && /action: 'preview' \| 'print'/.test(transportSource)
+    && /URL\.createObjectURL\(blob\)/.test(transportSource)
+    && !/stampedCopy[\s\S]{0,420}\/download/.test(transportSource));
+  check('the object URL is released when the room unmounts',
+    /URL\.revokeObjectURL/.test(roomSource));
+  check('printing keeps the user gesture by opening the window before the fetch',
+    /printStampedCopy[\s\S]{0,700}window\.open/.test(roomSource));
+  check('no client component can switch the watermark off',
+    !/watermark(Enabled|_enabled|Disabled)?\s*[:=]\s*(false|0)\b/i.test(roomSource + workspaceSource + transportSource)
+    && !/(disable|turn off|remove)[^\n]{0,24}watermark/i.test(roomSource + workspaceSource));
+  check('the preview transport still serves no file at all',
+    !('download' in buildPreviewTransport()) && !('stampedCopy' in buildPreviewTransport()));
+  check('PHANTOM can produce the stamped copy from the documents panel',
+    /prepareDelivery/.test(workspaceSource) && /Prepare stamped copy/.test(workspaceSource) && /Refresh stamped copy/.test(workspaceSource));
+  check('the workspace explains that a missing client copy is normal until delivery runs',
+    /renders\s+the\s+watermarked\s+copy\s+the\s+first\s+time\s+it\s+is\s+delivered/i.test(workspaceSource));
+  check('the download blurb promises the stamped copy, never the original',
+    /stamped Code Rx copy of this document/i.test(roomSource));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

@@ -16,6 +16,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import zlib from 'node:zlib';
 import { build } from 'esbuild';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -42,7 +43,169 @@ const check = (name, condition, detail = '') => {
   return passed;
 };
 
-const group = (title) => console.log(`\n\u001b[1m${title}\u001b[0m`);
+const group = (title) => {
+  currentSuite = title;
+  console.log(`\n\u001b[1m${title}\u001b[0m`);
+};
+
+/**
+ * PHASE 8 — reading a deliverable the way a reviewer would.
+ *
+ * A stamped artifact is a real PDF whose text lives inside (often Flate
+ * compressed) content streams. `artifactText` returns the raw bytes as latin1
+ * plus every stream it can inflate, so a test can prove what the client
+ * actually received instead of trusting a status code.
+ */
+const artifactText = (bytes) => {
+  const latin = Buffer.from(bytes || []).toString('latin1');
+  let out = latin;
+  const stream = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let match;
+  while ((match = stream.exec(latin)) !== null) {
+    try {
+      out += `\n${zlib.inflateSync(Buffer.from(match[1], 'latin1')).toString('latin1')}`;
+    } catch { /* not a Flate stream */ }
+  }
+  return out;
+};
+
+const isPdf = (bytes) => Buffer.from(bytes || []).slice(0, 5).toString('latin1') === '%PDF-';
+
+/**
+ * The deliverable carries the mandatory Code Rx watermark and footer: the
+ * society name, the client-document designation, the do-not-redistribute line
+ * and — as the brief requires — the project, reference and version metadata,
+ * plus the embedded Code Rx mark itself.
+ */
+const stampGaps = (bytes, meta = {}) => {
+  const text = artifactText(bytes);
+  const needs = ['CODE Rx SOCIETY', 'CLIENT PROJECT DOCUMENT', 'Watermarked client copy'];
+  if (meta.projectName) needs.push(meta.projectName);
+  if (meta.reference) needs.push(meta.reference);
+  if (meta.version) needs.push(`v${meta.version}`);
+  if (meta.clientName) needs.push(meta.clientName);
+  const missing = needs.filter((needle) => !text.includes(needle));
+  if (!text.includes('/Subtype /Image') || !text.includes('CrxWatermarkLogo')) missing.push('Code Rx mark');
+  // The diagonal watermark layer is the only thing that uses an ExtGState, so
+  // its presence is proof that the watermark — not only the header mark — was
+  // painted onto the page.
+  if (!/(\/(GS1|CrxGS1) gs)/.test(text)) missing.push('watermark layer (ExtGState)');
+  if (!isPdf(bytes)) missing.push('%PDF header');
+  return missing;
+};
+
+const isStampedFor = (bytes, meta = {}) => stampGaps(bytes, meta).length === 0;
+
+
+const pngChunk = (type, data) => {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(zlib.crc32(body) >>> 0, 0);
+  return Buffer.concat([length, body, crc]);
+};
+
+/** A genuine RGBA PNG so the image delivery path is exercised on a real file. */
+const buildPng = (width, height, colour = [200, 30, 40]) => {
+  const stride = width * 4 + 1;
+  const raw = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y += 1) {
+    raw[y * stride] = 0; // filter: none
+    for (let x = 0; x < width; x += 1) {
+      const at = y * stride + 1 + x * 4;
+      raw[at] = colour[0]; raw[at + 1] = colour[1]; raw[at + 2] = colour[2]; raw[at + 3] = 255;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+};
+
+/** A stored (uncompressed) ZIP — exactly what a .docx is. */
+const buildZip = (entries) => {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(entries)) {
+    const nameBytes = Buffer.from(name, 'latin1');
+    const data = Buffer.from(text, 'utf8');
+    const crc = zlib.crc32(data) >>> 0;
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt32LE(crc, 14);
+    header.writeUInt32LE(data.length, 18);
+    header.writeUInt32LE(data.length, 22);
+    header.writeUInt16LE(nameBytes.length, 26);
+    locals.push(header, nameBytes, data);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameBytes);
+    offset += header.length + nameBytes.length + data.length;
+  }
+  const centralDir = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(Object.keys(entries).length, 8);
+  eocd.writeUInt16LE(Object.keys(entries).length, 10);
+  eocd.writeUInt32LE(centralDir.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, centralDir, eocd]);
+};
+
+/** A minimal Word file with real WordprocessingML text. */
+const buildDocx = (bodyText) => buildZip({
+  '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+  '_rels/.rels': '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+  'word/document.xml': `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${bodyText}</w:t></w:r></w:p></w:body></w:document>`,
+});
+
+/** PHANTOM's prepare action, which is the same pipeline the client endpoints use. */
+const prepareDelivery = (phantomToken, documentId, refresh = false) =>
+  request('POST', `/api/phantom/client-documents/${documentId}/delivery`, { token: phantomToken, body: { refresh } });
+
+/**
+ * A small but genuinely valid internal PDF, used as the "protected original" of
+ * a Vault document. The sentinel comment only exists in the source file: a
+ * stamped client copy must never contain it, which is how the harness proves
+ * the original was not simply forwarded.
+ */
+const buildSourcePdf = (bodyText) => {
+  const content = `BT /F1 14 Tf 72 700 Td (${bodyText}) Tj ET\n`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${content.length} >>\nstream\n${content}endstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let pdf = '%PDF-1.4\n%RAW-ORIGINAL-SENTINEL-42\n';
+  const offsets = [];
+  objects.forEach((object, index) => {
+    offsets.push(pdf.length);
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const startxref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+    + offsets.map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
+    + `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${startxref}\n%%EOF\n`;
+  return Buffer.from(pdf, 'latin1');
+};
 
 // ---------------------------------------------------------------------------
 // D1 adapter over node:sqlite (matches the Cloudflare D1 interface surface)
@@ -155,10 +318,25 @@ class ShimBucket {
     return { key };
   }
 
+  /**
+   * Mirrors the R2 object surface the routes use. `arrayBuffer()` matters from
+   * Phase 8 on: the delivery pipeline reads an artifact back to hash it, so a
+   * bucket stub that only returned a body would hide a real bug.
+   */
   async get(key) {
     const stored = this.objects.get(key);
     if (!stored) return null;
-    return { key, body: stored.value, httpMetadata: stored.httpMetadata };
+    const bytes = typeof stored.value === 'string' ? Buffer.from(stored.value, 'utf8') : stored.value;
+    return {
+      key,
+      body: bytes,
+      size: bytes.length,
+      httpMetadata: stored.httpMetadata,
+      httpEtag: '"shim"',
+      async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
+      async text() { return Buffer.from(bytes).toString('utf8'); },
+      async json() { return JSON.parse(Buffer.from(bytes).toString('utf8')); },
+    };
   }
 
   async delete(key) { this.objects.delete(key); }
@@ -202,7 +380,10 @@ const request = async (method, url, { body, headers = {}, token, clientSession, 
   let json = null;
   const text = await response.clone().text();
   try { json = JSON.parse(text); } catch { /* non-JSON (file stream) */ }
-  return { status: response.status, json, headers: response.headers, text };
+  // A deliverable is a binary file, so the raw bytes are kept alongside the
+  // decoded text: Phase 8 asserts on what was served, not only on the status.
+  const bytes = new Uint8Array(await response.clone().arrayBuffer());
+  return { status: response.status, json, headers: response.headers, text, bytes };
 };
 
 const uniquePasskey = () => helpers.generateClientPasskey();
@@ -266,6 +447,12 @@ const main = async () => {
   const appBundle = path.join(OUT_DIR, 'api.mjs');
   const authBundle = path.join(OUT_DIR, 'client-auth.mjs');
   const portalBundle = path.join(OUT_DIR, 'client-portal.mjs');
+  const deliveryBundleUrl = pathToFileURL(path.join(OUT_DIR, 'client-delivery.mjs')).href;
+  await build({
+    entryPoints: [path.join(ROOT, 'functions/lib/client-delivery.ts')],
+    bundle: true, format: 'esm', platform: 'neutral', logLevel: 'warning',
+    outfile: path.join(OUT_DIR, 'client-delivery.mjs'),
+  });
 
   await build({
     entryPoints: [path.join(ROOT, 'functions/[[path]].ts')],
@@ -586,25 +773,41 @@ const main = async () => {
   check('download is refused when the document does not allow it', downloadWithoutPermission.status === 404);
 
   await request('PATCH', `/api/phantom/client-documents/${docLetter.id}`, { token: phantomToken, body: { allowDownload: true } });
-  const downloadWithoutArtifact = await request('GET', `/api/client/project/${projectA.id}/documents/${docLetter.id}/download`, { clientSession: sessionA });
-  check('download is refused when no watermarked artifact exists yet (never the original)', downloadWithoutArtifact.status === 404);
-
-  const unsafeReference = await request('PATCH', `/api/phantom/client-documents/${docLetter.id}`, {
-    token: phantomToken, body: { storageReference: 'vault/society/1/secret.pdf' },
-  });
-  check('an internal vault/ storage reference is rejected outright', unsafeReference.status === 400);
-
-  await request('PATCH', `/api/phantom/client-documents/${docLetter.id}`, {
-    token: phantomToken, body: { storageReference: 'client-exports/harness/letter.pdf' },
-  });
-  await ENV.BUCKET.put('client-exports/harness/letter.pdf', 'STAMPED', { httpMetadata: { contentType: 'application/pdf' } });
   const downloadPermitted = await request('GET', `/api/client/project/${projectA.id}/documents/${docLetter.id}/download`, { clientSession: sessionA });
-  check('download succeeds for a client-safe artifact with permission',
+  check('download succeeds for a document with view AND download permission',
     downloadPermitted.status === 200, `got ${downloadPermitted.status}`);
   check('download is private and never cached', downloadPermitted.headers.get('cache-control') === 'private, no-store');
   check('download carries the reference as the filename',
     String(downloadPermitted.headers.get('content-disposition')).includes(docLetter.reference), String(downloadPermitted.headers.get('content-disposition')));
-  check('the internal original is never served', downloadPermitted.text === 'STAMPED');
+  // Phase 8: the bytes are the stamping pipeline's own output, rendered on
+  // demand from the document's content — never a file that was merely pointed at.
+  check('the downloaded file is a stamped Code Rx PDF, not the internal source',
+    isStampedFor(downloadPermitted.bytes, {
+      projectName: 'Pharmacy Digital Platform', reference: docLetter.reference, version: '1.0',
+    }),
+    `${downloadPermitted.bytes.length} bytes`);
+  check('the delivered artifact is registered under client-exports/ as a pipeline artifact',
+    /^client-exports\/cli_[0-9a-f]{24}\/doc_[0-9a-f]{24}\/crx-stamped-[0-9a-f]{16}\.pdf$/.test(
+      db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', docLetter.id)[0].storage_reference || ''),
+    db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', docLetter.id)[0].storage_reference);
+
+  // A hand-aimed pointer is refused outright, so no operator (and no client)
+  // can name a file for delivery — only the pipeline can produce one.
+  const unsafeReference = await request('PATCH', `/api/phantom/client-documents/${docLetter.id}`, {
+    token: phantomToken, body: { storageReference: 'vault/society/1/secret.pdf' },
+  });
+  check('an internal vault/ storage reference is rejected outright', unsafeReference.status === 400);
+  const handAimed = await request('PATCH', `/api/phantom/client-documents/${docLetter.id}`, {
+    token: phantomToken, body: { storageReference: 'client-exports/harness/letter.pdf' },
+  });
+  check('storage_reference cannot be aimed at a hand-picked object at all',
+    handAimed.status === 400 && handAimed.json?.code === 'storage_reference_managed', JSON.stringify(handAimed.json));
+  ENV.BUCKET.put('client-exports/harness/letter.pdf', 'UNSTAMPED HAND-MADE EXPORT', { httpMetadata: { contentType: 'application/pdf' } });
+  const afterHandAimed = await request('GET', `/api/client/project/${projectA.id}/documents/${docLetter.id}/download`, { clientSession: sessionA });
+  check('an object placed in client-exports/ by hand is never what the client receives',
+    afterHandAimed.status === 200 && !afterHandAimed.text.includes('UNSTAMPED HAND-MADE EXPORT'));
+  check('the client still receives the pipeline artifact after the refused pointer',
+    isStampedFor(afterHandAimed.bytes, { reference: docLetter.reference }));
 
   // Even if an internal Vault key somehow reached the column (the PATCH route
   // refuses it, but assume a future bug or manual SQL), the download route must
@@ -614,9 +817,12 @@ const main = async () => {
   db.execute("UPDATE client_documents SET allow_download = 1, storage_reference = 'vault/society/1/secret.pdf' WHERE public_id = ?", smuggled.id);
   await ENV.BUCKET.put('vault/society/1/secret.pdf', 'INTERNAL-ORIGINAL', { httpMetadata: { contentType: 'application/pdf' } });
   const smuggledDownload = await request('GET', `/api/client/project/${projectA.id}/documents/${smuggled.id}/download`, { clientSession: sessionA });
-  check('an internal vault/ artifact can never be downloaded even if the column is wrong',
-    smuggledDownload.status === 404, `got ${smuggledDownload.status}`);
+  check('a smuggled vault/ pointer is not consulted for delivery at all (the pipeline renders instead)',
+    smuggledDownload.status === 200 && isStampedFor(smuggledDownload.bytes, { reference: smuggled.reference }),
+    `got ${smuggledDownload.status}`);
   check('the internal original was not proxied to the client', !smuggledDownload.text.includes('INTERNAL-ORIGINAL'));
+  check('delivering the document rewrote the column to a real pipeline artifact',
+    /^client-exports\//.test(db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', smuggled.id)[0].storage_reference || ''));
 
   const downloadDisabled = await request('PUT', '/api/phantom/settings/client_downloads_enabled', { token: phantomToken, body: { value: '0' } });
   check('client downloads have their own master switch (not the Vault switch)', downloadDisabled.status === 200);
@@ -1133,14 +1339,20 @@ const main = async () => {
   const roomSection = await request('GET', `/api/client/project/${projectG.id}/sections/reports`, { clientSession: freshSession });
   check('a section lists the published document', roomSection.status === 200 && roomSection.json.data.documents.some((document) => document.id === roomDoc.id));
   const roomReader = await request('GET', `/api/client/project/${projectG.id}/documents/${roomDoc.id}`, { clientSession: freshSession });
-  check('the document reader receives renderable content',
+  check('the document reader receives the stamped-copy descriptor, not raw content',
     roomReader.status === 200
-    && Array.isArray(roomReader.json.data.document.content?.blocks)
-    && roomReader.json.data.document.content.blocks.length > 0
-    && roomReader.json.data.document.reference === roomDoc.reference);
+    && !('content' in roomReader.json.data.document)
+    && roomReader.json.data.document.reference === roomDoc.reference
+    && roomReader.json.data.delivery.available === true
+    && roomReader.json.data.delivery.stamped === true);
   check('the viewer shape is exactly what the room renders',
-    ['id', 'reference', 'title', 'summary', 'category', 'version', 'publishedAt', 'updatedAt', 'permissions', 'content']
-      .every((field) => field in roomReader.json.data.document));
+    ['id', 'reference', 'title', 'summary', 'category', 'version', 'publishedAt', 'updatedAt', 'permissions']
+      .every((field) => field in roomReader.json.data.document)
+    && ['available', 'kind', 'label', 'contentType', 'designation', 'stamped', 'viewerPath', 'printPath', 'downloadPath']
+      .every((field) => field in roomReader.json.data.delivery));
+  check('the raw internal text snapshot is never returned to the client',
+    !JSON.stringify(roomReader.json).includes('Client-visible body.')
+    && !('content_snapshot' in roomReader.json.data.document));
 
   // =========================================================================
   group('13. Project Room end-to-end (Phase 4 requirements)');
@@ -1167,10 +1379,10 @@ const main = async () => {
   });
   await publish(phantomToken, publishedLetter.id, 'published');
   await request('PATCH', `/api/phantom/client-documents/${publishedLetter.id}`, { token: phantomToken, body: { allowDownload: true } });
-  await request('PATCH', `/api/phantom/client-documents/${publishedLetter.id}`, {
-    token: phantomToken, body: { storageReference: 'client-exports/room/letter.pdf' },
-  });
-  await ENV.BUCKET.put('client-exports/room/letter.pdf', 'STAMPED ROOM LETTER', { httpMetadata: { contentType: 'application/pdf' } });
+  // The stamped client copy is produced by the pipeline itself (the Phantom
+  // action below is the same path the client endpoints use).
+  check('PHANTOM can prepare the stamped client copy explicitly',
+    (await prepareDelivery(phantomToken, publishedLetter.id)).status === 200);
 
   const viewOnlyReport = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
     title: 'View only report', category: 'report', contentText: 'Readable, never downloadable.',
@@ -1262,21 +1474,21 @@ const main = async () => {
     title: 'View only with artifact', category: 'report', contentText: 'Readable, with a stamped copy that must stay locked.',
   });
   await publish(phantomToken, viewOnlyWithArtifact.id, 'published');
-  await request('PATCH', `/api/phantom/client-documents/${viewOnlyWithArtifact.id}`, {
-    token: phantomToken, body: { storageReference: 'client-exports/room/view-only.pdf' },
-  });
-  await ENV.BUCKET.put('client-exports/room/view-only.pdf', 'STAMPED BUT LOCKED', { httpMetadata: { contentType: 'application/pdf' } });
+  await prepareDelivery(phantomToken, viewOnlyWithArtifact.id);
   check('the view-only document really does have a stamped artifact waiting',
-    db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', viewOnlyWithArtifact.id)[0].storage_reference === 'client-exports/room/view-only.pdf');
+    /^client-exports\/cli_[0-9a-f]{24}\/doc_[0-9a-f]{24}\/crx-stamped-[0-9a-f]{16}\.pdf$/.test(
+      db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', viewOnlyWithArtifact.id)[0].storage_reference || ''),
+    db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', viewOnlyWithArtifact.id)[0].storage_reference);
   check('a view-only document with an artifact is still readable',
     (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${viewOnlyWithArtifact.id}`, { clientSession: roomSessionA })).status === 200);
   const lockedDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${viewOnlyWithArtifact.id}/download`, { clientSession: roomSessionA });
   check('a view-only document with an artifact is still refused for download',
     lockedDownload.status === 404, `got ${lockedDownload.status}`);
-  check('the locked artifact was never served', !lockedDownload.text.includes('STAMPED BUT LOCKED'));
+  check('the locked artifact was never served', !isPdf(lockedDownload.bytes) || lockedDownload.bytes.length === 0);
 
   const authorisedDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: roomSessionA });
-  check('an authorized download works', authorisedDownload.status === 200 && authorisedDownload.text === 'STAMPED ROOM LETTER');
+  check('an authorized download works and is watermarked',
+    authorisedDownload.status === 200 && isStampedFor(authorisedDownload.bytes, { reference: publishedLetter.reference }));
   check('an authorized download is private and named from the reference',
     authorisedDownload.headers.get('cache-control') === 'private, no-store'
     && String(authorisedDownload.headers.get('content-disposition')).includes(publishedLetter.reference));
@@ -1473,8 +1685,11 @@ const main = async () => {
   check('publishing makes the document visible in the client room',
     (await workflowRead()).status === 200
     && (await workflowRoom()).json.data.recent.some((document) => document.id === workflowDoc.id));
-  check('a published document reaches the client with its text snapshot',
-    (await workflowRead()).json.data.document.content.blocks[0].content.includes('Client-facing workflow text'));
+  const workflowDelivery = (await workflowRead()).json.data;
+  check('a published document reaches the client as a stamped copy, not as its text',
+    !('content' in workflowDelivery.document)
+    && workflowDelivery.delivery.available === true
+    && workflowDelivery.delivery.viewerPath.endsWith(`/documents/${workflowDoc.id}/preview`));
   await publish(phantomToken, workflowDoc.id, 'unpublished');
   check('unpublishing withdraws the document again', (await workflowRead()).status === 404);
   const hiddenPublish = await request('POST', `/api/phantom/client-documents/${workflowDoc.id}/lifecycle`, {
@@ -1524,8 +1739,15 @@ const main = async () => {
   check('an operator can publish an internal document by pinning a snapshot', vaultPublish.status === 201, JSON.stringify(vaultPublish.json));
   await publish(phantomToken, vaultPublish.json.data.id, 'published');
   const vaultRead = await request('GET', `/api/client/project/${managedProject.id}/documents/${vaultPublish.json.data.id}`, { clientSession: workflowSession });
-  check('the client receives the pinned copy of the internal document',
-    vaultRead.status === 200 && JSON.stringify(vaultRead.json.data.document).includes('PHASE 5 VAULT SOURCE TEXT'));
+  check('the client receives the pinned document as a stamped descriptor, not as raw text',
+    vaultRead.status === 200
+    && !JSON.stringify(vaultRead.json).includes('PHASE 5 VAULT SOURCE TEXT')
+    && vaultRead.json.data.delivery.available === true);
+  const vaultCopy = await request('GET', `/api/client/project/${managedProject.id}/documents/${vaultPublish.json.data.id}/preview`, { clientSession: workflowSession });
+  check('the stamped copy carries the pinned internal text under the Code Rx watermark',
+    vaultCopy.status === 200
+    && artifactText(vaultCopy.bytes).includes('PHASE 5 VAULT SOURCE TEXT')
+    && isStampedFor(vaultCopy.bytes, { reference: vaultPublish.json.data.reference }));
   check('the client payload carries no Vault identifier or storage key',
     !/vault_document_id|vaultDocumentId|storage_reference|storageReference/.test(JSON.stringify(vaultRead.json)));
   const vaultAfter = db.query('SELECT status, visibility, is_archived FROM vault_documents WHERE id = ?', openVaultDoc)[0];
@@ -1615,14 +1837,23 @@ const main = async () => {
   check('previewing a section never serves download permission',
     previewReports.json.data.documents.every((document) => document.permissions.download === false));
   const previewLetter = await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/documents/${publishedLetter.id}`, { token: phantomToken });
-  check('a previewed document carries the client-readable snapshot',
-    previewLetter.status === 200 && JSON.stringify(previewLetter.json.data.document.content).includes('Letter body for the room.'));
+  const clientLetter = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: roomSessionA });
+  check('a previewed document describes the same stamped copy the client receives',
+    previewLetter.status === 200
+    && !('content' in previewLetter.json.data.document)
+    && previewLetter.json.data.delivery.available === true
+    && previewLetter.json.data.delivery.kind === clientLetter.json.data.delivery.kind
+    && previewLetter.json.data.delivery.label === clientLetter.json.data.delivery.label);
+  check('the preview never carries the internal snapshot text',
+    !JSON.stringify(previewLetter.json).includes('Letter body for the room.'));
   check('the client can download the letter but the preview cannot',
-    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: roomSessionA }))
-      .json.data.document.permissions.download === true
-    && previewLetter.json.data.document.permissions.download === false);
-  check('the preview serves no file bytes or storage reference at all',
-    !/client-exports|storageReference|storage_reference|application\/pdf/.test(JSON.stringify(previewLetter.json)));
+    clientLetter.json.data.document.permissions.download === true
+    && previewLetter.json.data.document.permissions.download === false
+    && previewLetter.json.data.delivery.downloadPath === null
+    && typeof clientLetter.json.data.delivery.downloadPath === 'string');
+  check('the preview exposes no storage key, no bytes and no download route',
+    !/client-exports|storageReference|storage_reference/.test(JSON.stringify(previewLetter.json))
+    && previewLetter.json.data.delivery.viewerPath === null);
 
   const previewDraft = await request('GET', `/api/phantom/clients/${roomA.id}/preview/projects/${roomProjectA.id}/documents/${unpublishedDraft.id}`, { token: phantomToken });
   check('the preview refuses a document the client cannot see (404 not_client_visible)',
@@ -2149,9 +2380,9 @@ const main = async () => {
   const p7Key = await createKey(phantomToken, roomA.id, roomProjectA.id, { label: 'Phase 7 key' });
   const p7Passkey = p7Key.passkey;
   await request('PATCH', `/api/phantom/client-documents/${publishedUpdate.id}`, {
-    token: phantomToken, body: { allowDownload: true, storageReference: 'client-exports/room/update.pdf' },
+    token: phantomToken, body: { allowDownload: true },
   });
-  await ENV.BUCKET.put('client-exports/room/update.pdf', 'STAMPED ROOM UPDATE', { httpMetadata: { contentType: 'application/pdf' } });
+  await prepareDelivery(phantomToken, publishedUpdate.id);
   await request('PUT', '/api/phantom/settings/client_downloads_enabled', { token: phantomToken, body: { value: '1' } });
 
   // A published, downloadable document whose stamped client copy does not exist
@@ -2169,10 +2400,7 @@ const main = async () => {
   });
   await publish(phantomToken, publishedDocument.id, 'published');
   await request('PATCH', `/api/phantom/client-documents/${publishedDocument.id}`, { token: phantomToken, body: { allowDownload: true } });
-  await request('PATCH', `/api/phantom/client-documents/${publishedDocument.id}`, {
-    token: phantomToken, body: { storageReference: 'client-exports/room/document.pdf' },
-  });
-  await ENV.BUCKET.put('client-exports/room/document.pdf', 'STAMPED ROOM DOCUMENT', { httpMetadata: { contentType: 'application/pdf' } });
+  await prepareDelivery(phantomToken, publishedDocument.id);
 
   const createLinkFor = (clientId, body) => request('POST', `/api/phantom/clients/${clientId}/links`, { token: phantomToken, body });
   const redeemLink = (token) => request('POST', `/api/client/link/${token}`);
@@ -2333,8 +2561,9 @@ const main = async () => {
   check('a file link cannot read the document text',
     (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: fileSession })).status === 404);
   const fileDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: fileSession });
-  check('a file link delivers exactly its file', fileDownload.status === 200 && fileDownload.text === 'STAMPED ROOM LETTER',
-    `${fileDownload.status} ${fileDownload.text.slice(0, 40)}`);
+  check('a file link delivers exactly its stamped file',
+    fileDownload.status === 200 && isStampedFor(fileDownload.bytes, { reference: publishedLetter.reference }),
+    `${fileDownload.status} missing: ${stampGaps(fileDownload.bytes, { reference: publishedLetter.reference }).join(', ')}`);
   const fileOtherDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedUpdate.id}/download`, { clientSession: fileSession });
   check('a file link cannot deliver a different file', fileOtherDownload.status === 404);
 
@@ -2415,7 +2644,10 @@ const main = async () => {
   const downloadRoomSession = (await sessionFromLink(downloadRoomLink.json.data.token)).session;
   check('a section link with download permission delivers a downloadable document',
     (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedDocument.id}/download`, { clientSession: downloadRoomSession })).status === 200
-    && (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedDocument.id}/download`, { clientSession: downloadRoomSession })).text === 'STAMPED ROOM DOCUMENT');
+    && isStampedFor(
+      (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedDocument.id}/download`, { clientSession: downloadRoomSession })).bytes,
+      { reference: publishedDocument.reference },
+    ));
   check('a section link with download permission cannot escape its section',
     (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedUpdate.id}/download`, { clientSession: downloadRoomSession })).status === 404);
 
@@ -2826,6 +3058,329 @@ const main = async () => {
       .every((destination) => portalModule.linkSectionForDestination(destination) === destination)
     && ['project', 'overview', 'document', 'file']
       .every((destination) => portalModule.linkSectionForDestination(destination) === null));
+
+
+  // =========================================================================
+  group('21. Secure watermarked client delivery (Phase 8 requirements)');
+  // =========================================================================
+
+  const deliveryModule = await import(deliveryBundleUrl);
+  const { decodePng, BRAND } = deliveryModule;
+
+  const deliveryClient = await createClient(phantomToken, 'Delivery Client Ltd');
+  const deliveryProject = await createProject(phantomToken, deliveryClient.id, 'Delivery Project');
+  const deliveryKey = await createKey(phantomToken, deliveryClient.id, deliveryProject.id, { label: 'Delivery key' });
+  const deliverySession = await clientSession(deliveryKey.passkey, 'delivery client');
+
+  db.execute("INSERT INTO vault_sections (slug, title, description, is_sensitive, sort_order, is_archived) VALUES ('phase8-delivery', 'Phase 8 Delivery', 'Harness section', 0, 910, 0)");
+  const deliverySectionId = db.query("SELECT id FROM vault_sections WHERE slug = 'phase8-delivery'")[0].id;
+
+  // The internal sources this group delivers. Each pinned snapshot is a single
+  // attachment block, which is what makes the attachment *the* document.
+  const pngSource = buildPng(64, 40);
+  const docxSource = buildDocx('PHASE 8 OFFICE BODY TEXT');
+  const pdfSource = buildSourcePdf('VAULT ORIGINAL BODY TEXT');
+  const jpegSource = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]), Buffer.from('JFIF-UNSUPPORTED-ORIGINAL', 'latin1')]);
+
+  const insertVaultSource = (code, title, attachment) => {
+    const snapshot = attachment
+      ? JSON.stringify({ version: 1, blocks: [{ id: 'attachment', type: attachment.type || 'file', content: '', fileKey: attachment.key }] })
+      : JSON.stringify({
+        version: 1,
+        blocks: [
+          { id: 'heading', type: 'heading', content: 'PHASE 8 RICH HEADING' },
+          { id: 'body', type: 'paragraph', content: 'PHASE 8 RICH BODY TEXT' },
+        ],
+      });
+    db.execute(
+      `INSERT INTO vault_documents (document_code, section_id, title, content, content_json, status, visibility, is_archived)
+       VALUES (?, ?, ?, '', ?, 'approved', 'members', 0)`,
+      code, deliverySectionId, title, snapshot,
+    );
+    const id = db.query('SELECT id FROM vault_documents WHERE document_code = ?', code)[0].id;
+    if (attachment) {
+      db.execute(
+        'INSERT INTO vault_attachments (document_id, section_id, name, file_key, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?)',
+        id, deliverySectionId, attachment.name, attachment.key, attachment.mime, attachment.bytes.length,
+      );
+      ENV.BUCKET.put(attachment.key, attachment.bytes, { httpMetadata: { contentType: attachment.mime } });
+    }
+    return id;
+  };
+
+  const pdfVault = insertVaultSource('P8-PDF', 'Phase 8 PDF source', {
+    key: 'vault/phase8-delivery/1/contract.pdf', name: 'contract.pdf', mime: 'application/pdf', bytes: pdfSource,
+  });
+  const pngVault = insertVaultSource('P8-PNG', 'Phase 8 image source', {
+    key: 'vault/phase8-delivery/1/diagram.png', name: 'diagram.png', mime: 'image/png', bytes: pngSource, type: 'image',
+  });
+  const docxVault = insertVaultSource('P8-DOCX', 'Phase 8 Word source', {
+    key: 'vault/phase8-delivery/1/offer.docx', name: 'offer.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: docxSource,
+  });
+  const jpegVault = insertVaultSource('P8-JPEG', 'Phase 8 unsupported source', {
+    key: 'vault/phase8-delivery/1/scan.jpeg', name: 'scan.jpeg', mime: 'image/jpeg', bytes: jpegSource,
+  });
+  const richVault = insertVaultSource('P8-RICH', 'Phase 8 rich text source', null);
+
+  const deliverable = async (title, vaultDocumentId, options = {}) => {
+    const record = await createDocument(phantomToken, deliveryClient.id, deliveryProject.id, {
+      title, category: options.category || 'report', vaultDocumentId,
+    });
+    await publish(phantomToken, record.id, 'published');
+    if (options.download !== false) {
+      await request('PATCH', `/api/phantom/client-documents/${record.id}`, { token: phantomToken, body: { allowDownload: true } });
+    }
+    const path = (suffix) => `/api/client/project/${deliveryProject.id}/documents/${record.id}${suffix}`;
+    return {
+      record,
+      storeKey: () => db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', record.id)[0].storage_reference,
+      read: () => request('GET', path(''), { clientSession: deliverySession }),
+      preview: () => request('GET', path('/preview'), { clientSession: deliverySession }),
+      print: () => request('GET', path('/print'), { clientSession: deliverySession }),
+      download: () => request('GET', path('/download'), { clientSession: deliverySession }),
+      prepare: (refresh = false) => prepareDelivery(phantomToken, record.id, refresh),
+    };
+  };
+
+  // --- 1. an existing PDF becomes a stamped PDF ----------------------------
+  const pdfDoc = await deliverable('Phase 8 stamped PDF', pdfVault);
+  const pdfPrepared = await pdfDoc.prepare();
+  check('PHANTOM can prepare the stamped client copy of a PDF document',
+    pdfPrepared.status === 200 && pdfPrepared.json?.data?.kind === 'stamped_pdf'
+    && pdfPrepared.json?.data?.contentType === 'application/pdf'
+    && pdfPrepared.json?.data?.reason === undefined,
+    JSON.stringify(pdfPrepared.json).slice(0, 200));
+  check('the prepared copy is described by size and digest, not by a storage key',
+    /^[0-9a-f]{64}$/.test(pdfPrepared.json.data.sha256 || '') && pdfPrepared.json.data.sizeBytes > 0
+    && !/vault\/|storage_reference/.test(JSON.stringify(pdfPrepared.json)));
+  check('preparing twice reuses the cached artifact instead of re-rendering',
+    (await pdfDoc.prepare()).json.data.cached === true && (await pdfDoc.prepare(true)).json.data.cached === false);
+  check('a refresh produces the same deterministic artifact',
+    (await pdfDoc.prepare(true)).json.data.sha256 === pdfPrepared.json.data.sha256);
+
+  const pdfRead = await pdfDoc.read();
+  check('the client read returns the stamped descriptor and no raw content',
+    pdfRead.status === 200 && pdfRead.json.data.delivery.available === true
+    && pdfRead.json.data.delivery.kind === 'stamped_pdf'
+    && pdfRead.json.data.delivery.stamped === true
+    && !('content' in pdfRead.json.data.document));
+  check('the descriptor never leaks the storage key or the source location',
+    !/vault\/|client-exports|storage_reference|storageReference/.test(JSON.stringify(pdfRead.json)));
+
+  const pdfViewer = await pdfDoc.preview();
+  const pdfPrint = await pdfDoc.print();
+  const pdfDownload = await pdfDoc.download();
+  const pdfText = artifactText(pdfViewer.bytes);
+  check('the viewer serves the stamped PDF, watermarked and branded',
+    pdfViewer.status === 200 && isStampedFor(pdfViewer.bytes, {
+      projectName: 'Delivery Project', reference: pdfDoc.record.reference, version: '1.0', clientName: 'Delivery Client Ltd',
+    }), pdfViewer.status + stampGaps(pdfViewer.bytes).join(','));
+  check('the watermark names the designation, the page and the do-not-redistribute rule',
+    ['CLIENT PROJECT DOCUMENT', 'CODE Rx SOCIETY', 'Watermarked client copy', 'Page 1 of 1']
+      .every((needle) => pdfText.includes(needle)));
+  check('the deliverable carries the project, document, reference and version metadata',
+    ['Delivery Project', pdfDoc.record.reference, 'v1.0', 'Delivery Client Ltd']
+      .every((needle) => pdfText.includes(needle)));
+  check('the stamped copy keeps the document text it was made from',
+    pdfText.includes('VAULT ORIGINAL BODY TEXT'));
+  check('the raw internal original is not forwarded: its file marker never reaches the client',
+    !pdfText.includes('RAW-ORIGINAL-SENTINEL-42')
+    && !Buffer.from(pdfViewer.bytes).equals(Buffer.from(pdfSource)));
+  check('viewer, print and download all hand back the very same stamped artifact',
+    Buffer.from(pdfViewer.bytes).equals(Buffer.from(pdfPrint.bytes))
+    && Buffer.from(pdfViewer.bytes).equals(Buffer.from(pdfDownload.bytes))
+    && pdfPrint.headers.get('content-disposition')?.startsWith('inline')
+    && pdfDownload.headers.get('content-disposition')?.startsWith('attachment')
+    && pdfViewer.headers.get('cache-control') === 'private, no-store'
+    && pdfViewer.headers.get('x-code-rx-delivery') === 'stamped_pdf');
+  check('print output retains the Code Rx branding, not just the viewer',
+    isStampedFor(pdfPrint.bytes, { reference: pdfDoc.record.reference }) && pdfPrint.status === 200);
+  check('the delivery is registered as a pipeline artifact under client-exports/',
+    /^client-exports\/cli_[0-9a-f]{24}\/doc_[0-9a-f]{24}\/crx-stamped-[0-9a-f]{16}\.pdf$/.test(pdfDoc.storeKey() || ''),
+    pdfDoc.storeKey());
+
+  // --- 2. an existing image becomes a stamped image ------------------------
+  const pngDoc = await deliverable('Phase 8 stamped image', pngVault);
+  const pngPrepared = await pngDoc.prepare();
+  check('an image is delivered as a stamped image, not as the raw file',
+    pngPrepared.status === 200 && pngPrepared.json.data.kind === 'stamped_png'
+    && pngPrepared.json.data.contentType === 'image/png');
+  const pngViewer = await pngDoc.preview();
+  const pngArtifact = await decodePng(new Uint8Array(pngViewer.bytes));
+  const pngOriginal = await decodePng(new Uint8Array(pngSource));
+  const pixelAt = (image, x, y) => Array.from(image.rgba.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 4));
+  let changed = 0;
+  for (let index = 0; index < pngArtifact.width * pngArtifact.height; index += 1) {
+    const a = pngArtifact.rgba.slice(index * 4, index * 4 + 3).join(',');
+    const b = index < pngOriginal.width * pngOriginal.height
+      ? pngOriginal.rgba.slice(index * 4, index * 4 + 3).join(',') : '';
+    if (a !== b) changed += 1;
+  }
+  check('the stamped image is a branded page around the client artwork',
+    pngViewer.status === 200 && pngArtifact.height > pngOriginal.height
+    && pixelAt(pngArtifact, 0, 0).slice(0, 3).join(',') === BRAND.greenDark.join(','),
+    `${pngArtifact.width}x${pngArtifact.height} top-left ${pixelAt(pngArtifact, 0, 0).join(',')}`);
+  check('the watermark is burned into the image pixels, not applied by CSS',
+    changed > (pngArtifact.width * pngArtifact.height) / 10, `${changed} pixels differ`);
+  check('the client still sees their artwork inside the stamped image',
+    pngArtifact.rgba.includes(200) && pixelAt(pngOriginal, 2, 2).join(',') === '200,30,40,255');
+  check('the raw image file is never what the client receives',
+    !Buffer.from(pngViewer.bytes).equals(Buffer.from(pngSource)) && pngViewer.headers.get('x-code-rx-delivery') === 'stamped_png');
+
+  // --- 3. Word documents are converted, never handed over ------------------
+  const docxDoc = await deliverable('Phase 8 Word document', docxVault);
+  const docxPrepared = await docxDoc.prepare();
+  check('a Word document is converted into a stamped PDF client copy',
+    docxPrepared.status === 200 && docxPrepared.json.data.kind === 'converted_pdf'
+    && docxPrepared.json.data.contentType === 'application/pdf'
+    && docxPrepared.json.data.sourceKind === 'attachment_office',
+    JSON.stringify(docxPrepared.json).slice(0, 200));
+  const docxViewer = await docxDoc.preview();
+  check('the converted copy carries the Word text under the Code Rx watermark',
+    docxViewer.status === 200 && artifactText(docxViewer.bytes).includes('PHASE 8 OFFICE BODY TEXT')
+    && isStampedFor(docxViewer.bytes, { reference: docxDoc.record.reference }));
+  check('the original .docx container is never served to the client',
+    !Buffer.from(docxViewer.bytes).includes(Buffer.from('word/document.xml'))
+    && !Buffer.from(docxViewer.bytes).includes(Buffer.from([0x50, 0x4b, 0x03, 0x04])));
+
+  // --- 4. a format that cannot be stamped is refused, not exposed ----------
+  const jpegDoc = await deliverable('Phase 8 unsupported format', jpegVault);
+  const jpegPrepared = await jpegDoc.prepare();
+  check('an unsupported format is refused instead of exposing the original',
+    jpegPrepared.status === 409 && jpegPrepared.json?.code === 'delivery_unavailable'
+    && jpegPrepared.json?.data?.reason === 'unsupported_attachment_mime',
+    JSON.stringify(jpegPrepared.json).slice(0, 200));
+  check('a failed preparation records no storage reference and no file',
+    !jpegDoc.storeKey() && (await jpegDoc.prepare()).status === 409);
+  const jpegViewer = await jpegDoc.preview();
+  const jpegDownload = await jpegDoc.download();
+  check('the viewer and the download both return a controlled refusal',
+    jpegViewer.status === 409 && jpegDownload.status === 409
+    && jpegViewer.json?.code === 'delivery_unavailable' && jpegDownload.json?.code === 'delivery_unavailable');
+  check('the refusal leaks neither the file nor its location',
+    !Buffer.from(jpegViewer.bytes).includes(Buffer.from('JFIF-UNSUPPORTED-ORIGINAL'))
+    && !/vault\/|client-exports/.test(jpegViewer.text + jpegDownload.text));
+  check('a refused delivery is recorded in the activity log with its reason',
+    db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.access_denied' AND details_json LIKE '%unsupported_attachment_mime%'")[0].c > 0
+    && db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.document.delivery.failed'")[0].c > 0);
+
+  // --- 5. rich text / block documents get a generated stamped PDF ----------
+  const richDoc = await deliverable('Phase 8 rich text', richVault);
+  check('a rich-text document is delivered as a generated stamped PDF',
+    (await richDoc.prepare()).json.data.kind === 'generated_pdf');
+  const richViewer = await richDoc.preview();
+  check('the generated copy holds the block text under the watermark',
+    richViewer.status === 200 && ['PHASE 8 RICH HEADING', 'PHASE 8 RICH BODY TEXT']
+      .every((needle) => artifactText(richViewer.bytes).includes(needle))
+    && isStampedFor(richViewer.bytes, { reference: richDoc.record.reference }));
+
+  // --- 6. there is no switch, anywhere, that removes the watermark ---------
+  const sneakyPatch = await request('PATCH', `/api/phantom/client-documents/${richDoc.record.id}`, {
+    token: phantomToken,
+    body: { watermark: false, stamp: false, disableWatermark: true, watermarkEnabled: false, allowDownload: true },
+  });
+  check('no document field can disable the watermark or the stamp',
+    sneakyPatch.status === 200 && isStampedFor((await richDoc.download()).bytes, { reference: richDoc.record.reference }));
+  const sneakyCreate = await createDocument(phantomToken, deliveryClient.id, deliveryProject.id, {
+    title: 'Phase 8 watermark opt-out attempt', category: 'report', vaultDocumentId: richVault, watermark: false,
+  });
+  await publish(phantomToken, sneakyCreate.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${sneakyCreate.id}`, { token: phantomToken, body: { allowDownload: true } });
+  const sneakyDownload = await request('GET', `/api/client/project/${deliveryProject.id}/documents/${sneakyCreate.id}/download`, { clientSession: deliverySession });
+  check('asking for an unwatermarked copy at creation time still yields a stamped file',
+    sneakyDownload.status === 200 && isStampedFor(sneakyDownload.bytes, { reference: sneakyCreate.reference }));
+  check('the client descriptor never reports an unstamped or disabled state',
+    (await richDoc.read()).json.data.delivery.stamped === true
+    && !/watermarkEnabled|watermark_enabled|stampEnabled/.test(JSON.stringify((await richDoc.read()).json)));
+  const rawAttempts = await Promise.all([
+    request('GET', `/api/client/project/${deliveryProject.id}/documents/${richDoc.record.id}/download?raw=1`, { clientSession: deliverySession }),
+    request('GET', `/api/client/project/${deliveryProject.id}/documents/${richDoc.record.id}/download?watermark=0`, { clientSession: deliverySession }),
+    request('GET', `/api/client/project/${deliveryProject.id}/documents/${richDoc.record.id}/original`, { clientSession: deliverySession }),
+    request('GET', `/api/client/project/${deliveryProject.id}/documents/${richDoc.record.id}/raw`, { clientSession: deliverySession }),
+  ]);
+  check('a query parameter or a guessed route cannot ask for an unstamped copy',
+    rawAttempts[2].status === 404 && rawAttempts[3].status === 404
+    && rawAttempts.slice(0, 2).every((attempt) => attempt.status === 200
+      && isStampedFor(attempt.bytes, { reference: richDoc.record.reference })));
+
+  // --- 7. authorization: no session, no capability, no delivery ------------
+  const anonymousPreview = await request('GET', `/api/client/project/${deliveryProject.id}/documents/${pdfDoc.record.id}/preview`, {});
+  check('an anonymous caller cannot fetch a client copy (401)', anonymousPreview.status === 401);
+  const memberPrepare = await request('POST', `/api/phantom/client-documents/${pdfDoc.record.id}/delivery`, { token: memberToken, body: {} });
+  check('a member without the delivery capability cannot prepare a client copy (403)', memberPrepare.status === 403, `got ${memberPrepare.status}`);
+  const anonymousPrepare = await request('POST', `/api/phantom/client-documents/${pdfDoc.record.id}/delivery`, { body: {} });
+  check('preparing a client copy without a member session is refused (401)', anonymousPrepare.status === 401);
+
+  const foreign = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: deliverySession });
+  check('one client cannot download another client document', foreign.status === 404);
+  const privateDoc = await deliverable('Phase 8 view only', richVault, { download: false });
+  check('a view-only client can view the stamped copy',
+    (await privateDoc.preview()).status === 200);
+  const viewOnlyDownload = await privateDoc.download();
+  check('a view-only client cannot download it, even though the artifact exists',
+    viewOnlyDownload.status === 404 && !Buffer.from(viewOnlyDownload.bytes).includes(Buffer.from('%PDF-')));
+  await request('PUT', '/api/phantom/settings/client_downloads_enabled', { token: phantomToken, body: { value: '0' } });
+  const switchOffDownload = await deliverable('Phase 8 switch off', richVault);
+  check('the master switch stops downloads while viewing still works',
+    (await switchOffDownload.download()).status === 404 && (await switchOffDownload.preview()).status === 200);
+  await request('PUT', '/api/phantom/settings/client_downloads_enabled', { token: phantomToken, body: { value: '1' } });
+
+  // --- 8. a restricted internal source is refused at delivery time ---------
+  db.execute("INSERT INTO vault_sections (slug, title, description, is_sensitive, sort_order, is_archived) VALUES ('phase8-restricted', 'Phase 8 Restricted', 'Harness section', 1, 911, 0)");
+  const restrictedSectionId = db.query("SELECT id FROM vault_sections WHERE slug = 'phase8-restricted'")[0].id;
+  db.execute(
+    `INSERT INTO vault_documents (document_code, section_id, title, content, content_json, status, visibility, is_archived)
+     VALUES ('P8-RESTRICTED', ?, 'Phase 8 restricted source', '', ?, 'approved', 'members', 0)`,
+    restrictedSectionId,
+    JSON.stringify({ version: 1, blocks: [{ id: 'body', type: 'paragraph', content: 'SENSITIVE PHASE 8 TEXT' }] }),
+  );
+  const restrictedVaultId = db.query("SELECT id FROM vault_documents WHERE document_code = 'P8-RESTRICTED'")[0].id;
+  const restrictedDocument = await createDocument(phantomToken, deliveryClient.id, deliveryProject.id, {
+    title: 'Phase 8 later restricted', category: 'report', vaultDocumentId: richVault,
+  });
+  await publish(phantomToken, restrictedDocument.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${restrictedDocument.id}`, { token: phantomToken, body: { allowDownload: true } });
+  db.execute('UPDATE client_documents SET vault_document_id = ? WHERE public_id = ?', restrictedVaultId, restrictedDocument.id);
+  const restrictedViewer = await request('GET', `/api/client/project/${deliveryProject.id}/documents/${restrictedDocument.id}/preview`, { clientSession: deliverySession });
+  check('a document whose internal source became sensitive is refused at delivery time',
+    restrictedViewer.status === 409 && restrictedViewer.json?.data?.reason === 'source_restricted'
+    && !Buffer.from(restrictedViewer.bytes).includes(Buffer.from('%PDF-')));
+  check('the refusal tells the client to contact Code Rx Society',
+    /Contact Code Rx Society/.test(restrictedViewer.json?.error || ''));
+
+  // --- 9. the delivery capability is delegatable, and only when granted ----
+  await grantHolder(['clients.documents.edit']);
+  const delegatedPrepare = await request('POST', `/api/phantom/client-documents/${richDoc.record.id}/delivery`, { token: holderToken, body: {} });
+  check('a delegated member with clients.documents.edit can prepare a client copy', delegatedPrepare.status === 200);
+  await grantHolder([]);
+  check('withdrawing the grant stops delivery preparation immediately',
+    (await request('POST', `/api/phantom/client-documents/${richDoc.record.id}/delivery`, { token: holderToken, body: {} })).status === 403);
+
+  // --- 10. every failure mode stays inside the safe side ------------------
+  const orphanVault = insertVaultSource('P8-ORPHAN', 'Phase 8 orphan attachment', {
+    key: 'vault/phase8-delivery/1/orphan.pdf', name: 'orphan.pdf', mime: 'application/pdf', bytes: Buffer.alloc(0),
+  });
+  ENV.BUCKET.objects?.delete?.('vault/phase8-delivery/1/orphan.pdf');
+  const orphanDoc = await deliverable('Phase 8 missing source bytes', orphanVault);
+  const orphanPrepared = await orphanDoc.prepare();
+  check('a source whose bytes cannot be read is refused, never served',
+    orphanPrepared.status === 409 && !/vault\/|%PDF-/.test(orphanPrepared.text), JSON.stringify(orphanPrepared.json).slice(0, 160));
+
+  const blanked = await deliverable('Phase 8 blanked source', richVault);
+  db.execute("UPDATE client_documents SET content_snapshot = '' WHERE public_id = ?", blanked.record.id);
+  const blankedPrepared = await blanked.prepare();
+  check('a document whose stored snapshot is empty is refused, not rendered blank',
+    blankedPrepared.status === 409 && blankedPrepared.json?.data?.reason === 'no_source_content',
+    JSON.stringify(blankedPrepared.json).slice(0, 160));
+  const blankedViewer = await blanked.preview();
+  check('the empty-source refusal produces no file at all',
+    blankedViewer.status === 409 && !isPdf(blankedViewer.bytes));
+  check('the empty-source refusal is a controlled message, not a stack trace',
+    /contact Code Rx Society/i.test(blankedPrepared.json?.error || '')
+    && !/Error:|undefined/.test(blankedViewer.text));
+
+  const unknownDocument = await request('GET', `/api/client/project/${deliveryProject.id}/documents/doc_${'a'.repeat(24)}/download`, { clientSession: deliverySession });
+  check('a document id that does not exist inside the client scope is a 404', unknownDocument.status === 404);
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
