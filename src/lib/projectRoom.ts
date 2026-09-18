@@ -47,6 +47,24 @@ export const CATEGORY_LABELS: Record<string, string> = {
   update: 'Update',
 };
 
+/**
+ * Which room section a document of this category lives in. The server sends the
+ * section for every document it lists and refuses anything outside the session's
+ * scope; this mapping only decides which tab a link's destination document
+ * should be opened under.
+ */
+export const CATEGORY_SECTIONS: Record<string, string> = {
+  document: 'documents',
+  letter: 'letters',
+  agreement: 'agreements',
+  report: 'reports',
+  deliverable: 'deliverables',
+  update: 'updates',
+};
+
+export const sectionForCategory = (category?: string | null): string =>
+  CATEGORY_SECTIONS[String(category || '')] || 'overview';
+
 /** Client-facing wording for a project status. Never leaks internal state names. */
 export const PROJECT_STATUS_LABELS: Record<string, string> = {
   active: 'Active',

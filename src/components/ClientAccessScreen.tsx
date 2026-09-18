@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertCircle, ArrowRight, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import {
   ACCESS_KEY_PLACEHOLDER,
@@ -14,6 +14,17 @@ interface ClientAccessScreenProps {
   onSubmit: (accessKey: string) => Promise<void>;
   /** A message carried over from an ended session or a failed link, if any. */
   notice?: string | null;
+  /** Small label above the heading. Defaults to CODE Rx SOCIETY. */
+  eyebrow?: string;
+  /** Heading override, used when the screen is reached through a link. */
+  heading?: string;
+  /** One line of context under the heading. */
+  helper?: string;
+  /** Icon shown beside the notice when it is not an error. */
+  noticeIcon?: ReactNode;
+  /** Offered when the screen was reached from a link the client can drop. */
+  onAbandon?: () => void;
+  abandonLabel?: string;
 }
 
 /**
@@ -23,7 +34,9 @@ interface ClientAccessScreenProps {
  * the moment it takes to exchange it for a session, then cleared, and it is
  * never written to localStorage, sessionStorage, a URL or an analytics sink.
  */
-export const ClientAccessScreen = ({ onSubmit, notice }: ClientAccessScreenProps) => {
+export const ClientAccessScreen = ({
+  onSubmit, notice, eyebrow, heading, helper, noticeIcon, onAbandon, abandonLabel,
+}: ClientAccessScreenProps) => {
   const [value, setValue] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
@@ -100,9 +113,9 @@ export const ClientAccessScreen = ({ onSubmit, notice }: ClientAccessScreenProps
             <span className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">
               <KeyRound className="h-6 w-6" />
             </span>
-            <p className="mt-5 text-[11px] font-black uppercase tracking-[0.32em] text-emerald-700">CODE Rx SOCIETY</p>
-            <h1 className="mt-2 text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">CLIENT ACCESS</h1>
-            <p className="mt-3 text-sm font-medium text-slate-600">Enter your project access key</p>
+            <p className="mt-5 text-[11px] font-black uppercase tracking-[0.32em] text-emerald-700">{eyebrow || 'CODE Rx SOCIETY'}</p>
+            <h1 className="mt-2 text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">{heading || 'CLIENT ACCESS'}</h1>
+            <p className="mt-3 text-sm font-medium text-slate-600">{helper || 'Enter your project access key'}</p>
           </div>
 
           <form onSubmit={handleSubmit} className="mt-8" noValidate>
@@ -134,6 +147,8 @@ export const ClientAccessScreen = ({ onSubmit, notice }: ClientAccessScreenProps
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>{shownError}</span>
                 </p>
+              ) : notice && !noticeDismissed && noticeIcon ? (
+                <p className="flex items-start gap-2 text-sm font-semibold text-slate-600">{noticeIcon}<span>{notice}</span></p>
               ) : hint ? (
                 <p id="client-access-hint" className="text-sm font-medium text-slate-500">{hint}</p>
               ) : null}
@@ -155,6 +170,18 @@ export const ClientAccessScreen = ({ onSubmit, notice }: ClientAccessScreenProps
               )}
             </button>
           </form>
+
+          {onAbandon ? (
+            <div className="mt-5 text-center">
+              <button
+                type="button"
+                onClick={onAbandon}
+                className="text-xs font-black uppercase tracking-[0.14em] text-slate-500 underline-offset-4 hover:text-slate-800 hover:underline"
+              >
+                {abandonLabel || 'Continue without this link'}
+              </button>
+            </div>
+          ) : null}
 
           <div className="mt-8 border-t border-slate-100 pt-6 text-center">
             <p className="text-sm font-semibold text-slate-700">Need assistance?</p>

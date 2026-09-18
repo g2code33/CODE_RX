@@ -52,13 +52,20 @@ import {
   CLIENT_SESSION_TTL_SECONDS,
   CLIENT_LINK_SESSION_TTL_SECONDS,
   CLIENT_LINK_DEFAULT_TTL_MINUTES,
-  CLIENT_LINK_DEFAULT_MAX_USES,
+  listExpiringClientLinks,
+  expireClientLinks,
 } from './lib/client-auth';
 import {
   allocateClientReference,
+  clampLinkTtlMinutes,
   clientAllLinksEnabled,
   clientDocumentExposure,
   clientDownloadsEnabled,
+  clientLinkAllowsDocument,
+  clientLinkAllowsDownload,
+  clientLinkAllowsProjectRoot,
+  clientLinkAllowsSection,
+  clientLinkScope,
   clientPortalEnabled,
   clientFailure,
   clientFailureStateFor,
@@ -66,6 +73,12 @@ import {
   clientNotFound,
   clientProjectUsable,
   clientUsable,
+  describeLinkDestination,
+  isClientLinkDestination,
+  isClientLinkSectionDestination,
+  linkAccessMode,
+  linkAccessModeValue,
+  linkSectionForDestination,
   publicDocument,
   publicProject,
   recordClientActivity,
@@ -74,10 +87,18 @@ import {
   requireClientPortalEnabled,
   requireClientProjectAccess,
   requireClientSession,
+  resolveLinkMaxUses,
+  SECTION_CATEGORY_FOR_SECTION,
   CLIENT_DOCUMENT_CATEGORIES,
   CLIENT_DOCUMENT_LIFECYCLE,
+  CLIENT_LINK_DESTINATIONS,
+  CLIENT_LINK_MAX_TTL_MINUTES,
+  CLIENT_LINK_MAX_USES_LIMIT,
+  CLIENT_LINK_MIN_TTL_MINUTES,
+  CLIENT_LINK_TTL_PRESETS,
   type ClientDocumentCategory,
   type ClientDocumentLifecycle,
+  type ClientLinkDestination,
   type ClientPrincipal,
 } from './lib/client-portal';
 import {
@@ -179,6 +200,21 @@ const cascadeClientAccessRevocation = async (db: D1Database, clientId: number) =
 // Public client API
 // ---------------------------------------------------------------------------
 
+/**
+ * The client-visible description of where this session may go.
+ *
+ * It is derived from the resolved session/link row on every request, never from
+ * the browser, and it carries no identifier the client did not already hold:
+ * a key session is simply `restricted: false` (the whole project room).
+ */
+const linkScopePayload = (scope: ReturnType<typeof clientLinkScope>) => ({
+  restricted: scope.restricted,
+  destination: scope.destination,
+  intent: scope.intent,
+  section: scope.section,
+  documentId: scope.documentId,
+});
+
 const loginPayload = (principal: {
   clientPublicId: string;
   clientName: string;
@@ -187,7 +223,7 @@ const loginPayload = (principal: {
   projectReference: string;
   projectName: string;
   projectDescription: string;
-}, permissions: { download: boolean }) => ({
+}, permissions: { download: boolean }, destination: ReturnType<typeof linkScopePayload>) => ({
   client: {
     id: principal.clientPublicId,
     name: principal.clientName,
@@ -200,7 +236,51 @@ const loginPayload = (principal: {
     description: principal.projectDescription,
   },
   permissions: { view: true, download: permissions.download },
+  destination,
 });
+
+/**
+ * The single document a document/file link points at, in the client-safe shape
+ * the landing screen needs (title, reference, category — never content, never a
+ * storage key). Only ever read for the link's own document, and only after the
+ * scope has been resolved from the stored link row.
+ */
+const linkTargetSummary = async (db: D1Database, scope: ReturnType<typeof clientLinkScope>) => {
+  if (!scope.restricted || scope.documentRowId === null) return null;
+  if (scope.destination !== 'document' && scope.destination !== 'file') return null;
+  const row = await one<any>(db.prepare(
+    `SELECT public_id, title, reference_code, category, version
+     FROM client_documents WHERE id = ?`
+  ).bind(scope.documentRowId));
+  if (!row) return null;
+  return {
+    id: row.public_id,
+    title: row.title,
+    reference: row.reference_code,
+    category: row.category,
+    version: row.version || null,
+  };
+};
+
+/**
+ * Marks every temporary link whose window has closed and records LINK_EXPIRED
+ * against the client it belonged to. Called opportunistically from the two
+ * places that already read the link table (redeeming a link and listing links),
+ * so an expired link stops working the moment it is looked at, and the operator's
+ * list is never stale. Existing client activity infrastructure only.
+ */
+const sweepExpiredLinks = async (db: D1Database) => {
+  const expiring = await listExpiringClientLinks(db, 25);
+  if (!expiring.length) return 0;
+  const expired = await expireClientLinks(db);
+  for (const link of expiring) {
+    await recordClientActivity(db, 'LINK_EXPIRED', {
+      clientPublicId: link.client_public_id,
+      details: { linkId: link.public_id, destination: link.destination_type },
+    });
+  }
+  return expired;
+};
 
 export const registerClientRoutes = (app: ClientApp) => {
   // =========================================================================
@@ -217,6 +297,11 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     const body = await c.req.json().catch(() => ({}));
     const normalized = normalizeClientPasskey(body?.passkey);
+    // Phase 7: a REQUIRE_PASSKEY link exchanges the passkey for a session that
+    // is narrowed to the link's own destination. The token is validated from
+    // its verifier hash before anything else happens, and a link for another
+    // client can never be attached to this one.
+    const requestedLinkToken = cleanStr(body?.linkToken, 8, 256) || '';
 
     // Layer 2: durable per-IP and per-attempted-key throttling in D1. The
     // in-memory limiter alone cannot survive a scaled-out attacker.
@@ -266,13 +351,45 @@ export const registerClientRoutes = (app: ClientApp) => {
     if (key.key_expires_at && new Date(key.key_expires_at).getTime() <= Date.now()) return deny('key_expired');
     if (!clientUsable({ status: key.client_status })) return deny(`client_${key.client_status}`);
 
+    let link: any = null;
+    if (requestedLinkToken) {
+      const candidate = await resolveClientLink(db, requestedLinkToken);
+      const refuseLink = async (state: string) => {
+        await recordClientActivity(db, 'ACCESS_DENIED', {
+          clientPublicId: key.client_public_id,
+          details: { reason: state },
+        });
+        return clientJson({ success: false, ...clientFailure(state) }, 404);
+      };
+      // An unknown token, or a direct-access token offered here, is refused
+      // exactly like an unknown passkey: no state is revealed.
+      if (!candidate || candidate.link_mode !== 'passkey') return refuseLink('link_invalid');
+      if (Number(candidate.client_id) !== Number(key.client_id)) return refuseLink('link_invalid');
+      if (candidate.link_status === 'revoked') return refuseLink('link_revoked');
+      if (candidate.link_status !== 'active') return refuseLink('link_expired');
+      if (candidate.link_expires_at && new Date(candidate.link_expires_at).getTime() <= Date.now()) return refuseLink('link_expired');
+      if (!clientUsable({ status: candidate.client_status })) return refuseLink('client_suspended');
+      if (!clientProjectUsable({ status: candidate.project_status, is_archived: candidate.project_is_archived })) {
+        return refuseLink('project_unavailable');
+      }
+      // A project-scoped key may not be carried into a different project by a link.
+      if (key.key_project_id && Number(key.key_project_id) !== Number(candidate.client_project_id)) {
+        return refuseLink('link_invalid');
+      }
+      // One use per redemption, in SQL, after the passkey has been accepted.
+      if (!await consumeClientLinkUse(db, Number(candidate.link_id))) return refuseLink('link_exhausted');
+      link = candidate;
+    }
+
     // The session must carry a project. If the key is project-scoped, that is
     // the project. Otherwise the client must have exactly one usable project —
     // ambiguous access is refused rather than guessed.
-    let project = key.key_project_id
-      ? await one<any>(db.prepare('SELECT * FROM client_projects WHERE id = ? AND client_id = ?').bind(key.key_project_id, key.client_id))
-      : null;
-    if (!project && !key.key_project_id) {
+    let project = link
+      ? await one<any>(db.prepare('SELECT * FROM client_projects WHERE id = ? AND client_id = ?').bind(link.client_project_id, link.client_id))
+      : (key.key_project_id
+        ? await one<any>(db.prepare('SELECT * FROM client_projects WHERE id = ? AND client_id = ?').bind(key.key_project_id, key.client_id))
+        : null);
+    if (!project && !key.key_project_id && !link) {
       const candidates = await asRows<any>(db.prepare(
         "SELECT * FROM client_projects WHERE client_id = ? AND status = 'active' AND is_archived = 0 ORDER BY id LIMIT 2"
       ).bind(key.client_id));
@@ -288,7 +405,7 @@ export const registerClientRoutes = (app: ClientApp) => {
       clientId: Number(key.client_id),
       clientProjectId: Number(project.id),
       accessKeyId: Number(key.key_id),
-      clientLinkId: null,
+      clientLinkId: link ? Number(link.link_id) : null,
       sessionHash: await clientSessionHash(sessionToken),
       expiresAtIso: expiresAt,
       ipHash: fingerprints.ipHash,
@@ -311,22 +428,36 @@ export const registerClientRoutes = (app: ClientApp) => {
       projectName: project.name,
       projectStatus: project.status,
       accessKeyId: Number(key.key_id),
-      linkId: null,
-      linkAllowsView: true,
-      linkAllowsDownload: true,
-      linkDocumentId: null,
+      linkId: link ? Number(link.link_id) : null,
+      linkAllowsView: link ? Number(link.link_allow_view) === 1 : true,
+      linkAllowsDownload: link ? Number(link.link_allow_download) === 1 : true,
+      linkDocumentId: link && link.client_document_id !== null ? Number(link.client_document_id) : null,
+      linkDocumentPublicId: link && link.link_destination_id ? String(link.link_destination_id) : null,
+      linkDestination: link ? (link.link_destination_type as ClientLinkDestination) : null,
+      linkIntent: link && link.link_intent === 'file' ? 'file' : 'view',
       expiresAt,
     };
 
-    await recordClientActivity(db, 'LOGIN', { principal, details: { method: 'passkey' } });
+    await recordClientActivity(db, 'LOGIN', {
+      principal,
+      details: { method: link ? 'passkey_with_link' : 'passkey' },
+    });
+    if (link) {
+      await recordClientActivity(db, 'LINK_USED', {
+        principal,
+        details: { linkId: link.link_public_id, destination: link.link_destination_type, mode: 'REQUIRE_PASSKEY' },
+      });
+    }
 
+    const scope = clientLinkScope(principal);
     return clientJson({
       success: true,
       data: {
         session: { token: sessionToken, expiresAt },
+        target: await linkTargetSummary(db, scope),
         ...loginPayload({ ...principal, projectDescription: project.description || '' }, {
           download: await clientDownloadsEnabled(db),
-        }),
+        }, linkScopePayload(scope)),
       },
     });
   });
@@ -348,9 +479,10 @@ export const registerClientRoutes = (app: ClientApp) => {
       success: true,
       data: {
         session: { expiresAt: principal.expiresAt },
+        target: await linkTargetSummary(c.env.DB, clientLinkScope(principal)),
         ...loginPayload({ ...principal, projectDescription: project.description || '' }, {
           download: await clientDownloadsEnabled(c.env.DB),
-        }),
+        }, linkScopePayload(clientLinkScope(principal))),
       },
     });
   });
@@ -359,33 +491,63 @@ export const registerClientRoutes = (app: ClientApp) => {
     const principal = c.get('client') as ClientPrincipal;
     const project = c.get('clientProject') as any;
     const db = c.env.DB;
+    const scope = clientLinkScope(principal);
+
+    // A link that exists to deliver one file never opens the room at all.
+    if (!clientLinkAllowsProjectRoot(scope)) return clientNotFound();
+
+    // The category window this session is allowed to see. `null` means the whole
+    // room (a key session, or a link whose destination is the project itself).
+    const allowedCategory = scope.restricted && scope.section
+      ? SECTION_CATEGORY_FOR_SECTION[String(scope.section)]
+      : null;
 
     const counts = await asRows<{ category: string; total: number }>(db.prepare(
       `SELECT category, COUNT(*) AS total FROM client_documents
        WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
          AND lifecycle_status = 'published' AND client_visible = 1
          AND allow_view = 1
+         ${allowedCategory ? 'AND category = ?' : ''}
        GROUP BY category`
-    ).bind(principal.clientId, Number(project.id)));
+    ).bind(...(allowedCategory
+      ? [principal.clientId, Number(project.id), allowedCategory]
+      : [principal.clientId, Number(project.id)])));
 
     const byCategory: Record<string, number> = {};
     for (const section of Object.values(SECTION_CATEGORY)) byCategory[section] = 0;
     for (const row of counts) byCategory[String(row.category)] = Number(row.total || 0);
 
-    const recent = await asRows<any>(db.prepare(
-      `SELECT * FROM client_documents
-       WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
-         AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
-       ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 5`
-    ).bind(principal.clientId, Number(project.id)));
+    // The overview is what it always was — the most recent published documents —
+    // but a destination-scoped session only ever sees its own slice of them.
+    const documentScoped = scope.restricted && (scope.destination === 'document' || scope.destination === 'file');
+    const recent = documentScoped && scope.documentRowId === null
+      ? []
+      : await asRows<any>(db.prepare(
+        `SELECT * FROM client_documents
+         WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
+           AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
+           ${allowedCategory ? 'AND category = ?' : ''}
+           ${documentScoped ? 'AND id = ?' : ''}
+         ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 5`
+      ).bind(...[
+        principal.clientId,
+        Number(project.id),
+        ...(allowedCategory ? [allowedCategory] : []),
+        ...(documentScoped ? [scope.documentRowId] : []),
+      ]));
 
-    await recordClientActivity(db, 'PROJECT_OPENED', { principal });
+    await recordClientActivity(db, 'PROJECT_OPENED', { principal, details: { destination: scope.destination } });
+
+    const visibleSections = scope.restricted
+      ? CLIENT_SECTIONS.filter((section) => clientLinkAllowsSection(scope, section))
+      : CLIENT_SECTIONS;
 
     return clientJson({
       success: true,
       data: {
         project: publicProject(project),
-        sections: CLIENT_SECTIONS.map((section) => ({
+        scope: linkScopePayload(scope),
+        sections: visibleSections.map((section) => ({
           id: section,
           label: section.charAt(0).toUpperCase() + section.slice(1),
           count: section === 'overview' ? recent.length : byCategory[SECTION_CATEGORY[section]] || 0,
@@ -400,6 +562,10 @@ export const registerClientRoutes = (app: ClientApp) => {
     const project = c.get('clientProject') as any;
     const section = String(c.req.param('section') || '').toLowerCase() as ClientSection;
     if (!CLIENT_SECTIONS.includes(section)) return clientNotFound();
+    // A destination-scoped link may only open the section it names. Anything
+    // else is refused identically to a section that does not exist, so a link
+    // cannot be used to discover the rest of the room.
+    if (!clientLinkAllowsSection(clientLinkScope(principal), section)) return clientNotFound();
 
     const db = c.env.DB;
     const rows = section === 'overview'
@@ -424,6 +590,7 @@ export const registerClientRoutes = (app: ClientApp) => {
       data: {
         project: publicProject(project),
         section,
+        scope: linkScopePayload(clientLinkScope(principal)),
         documents,
       },
     });
@@ -435,6 +602,10 @@ export const registerClientRoutes = (app: ClientApp) => {
     const document = c.get('clientDocument') as any;
     const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
     const db = c.env.DB;
+
+    // A link may authorize reaching a document only to deliver its file (a file
+    // link, or a download-only link). Reading the text is a separate permission.
+    if (!exposure.canView) return clientNotFound();
 
     // The authorization middleware deliberately loads a narrow row (no content,
     // no storage keys), so the published snapshot is read here, scoped by the
@@ -542,6 +713,10 @@ export const registerClientRoutes = (app: ClientApp) => {
     const token = String(c.req.param('token') || '').trim();
     if (!token) return clientJson({ success: false, ...clientFailure('link_invalid') }, 404);
 
+    // Close any window that has already elapsed, and record it, before the
+    // token is judged: an expired link is never a live credential.
+    await sweepExpiredLinks(db);
+
     const link = await resolveClientLink(db, token);
     if (!link) return clientJson({ success: false, ...clientFailure('link_invalid') }, 404);
     // A token that matched a stored link is reported with its own state; an
@@ -554,6 +729,26 @@ export const registerClientRoutes = (app: ClientApp) => {
     if (!clientUsable({ status: link.client_status })) return clientJson({ success: false, ...clientFailure('client_suspended') }, 404);
     if (!clientProjectUsable({ status: link.project_status, is_archived: link.project_is_archived })) {
       return clientJson({ success: false, ...clientFailure('project_unavailable') }, 404);
+    }
+    // A one-use link cannot be walked past its window either. This check does
+    // not consume a use: the consumption below is the only place that does.
+    if (link.max_uses !== null && Number(link.use_count) >= Number(link.max_uses) && link.link_mode !== 'passkey') {
+      return clientJson({ success: false, ...clientFailure('link_exhausted') }, 404);
+    }
+
+    // REQUIRE_PASSKEY: the link names where the client may go, but the passkey
+    // is still the credential. Nothing is consumed and no session is created
+    // until that passkey has been presented. The response reveals nothing about
+    // the client or the destination.
+    if (link.link_mode === 'passkey') {
+      return clientJson({
+        success: true,
+        data: {
+          mode: 'REQUIRE_PASSKEY',
+          requiresPasskey: true,
+          expiresAt: link.link_expires_at,
+        },
+      });
     }
 
     // One-use-per-redemption, enforced in SQL so concurrent attempts cannot
@@ -594,6 +789,9 @@ export const registerClientRoutes = (app: ClientApp) => {
       linkAllowsView: Number(link.link_allow_view) === 1,
       linkAllowsDownload: Number(link.link_allow_download) === 1,
       linkDocumentId: link.client_document_id === null ? null : Number(link.client_document_id),
+      linkDocumentPublicId: link.link_destination_id ? String(link.link_destination_id) : null,
+      linkDestination: link.link_destination_type as ClientLinkDestination,
+      linkIntent: link.link_intent === 'file' ? 'file' : 'view',
       expiresAt,
     };
 
@@ -602,13 +800,16 @@ export const registerClientRoutes = (app: ClientApp) => {
       details: { linkId: link.link_public_id, destination: link.link_destination_type },
     });
 
+    const scope = clientLinkScope(principal);
     return clientJson({
       success: true,
       data: {
         session: { token: sessionToken, expiresAt },
+        // The one document the link names, when it names one. Never content.
+        target: await linkTargetSummary(db, scope),
         ...loginPayload({ ...principal, projectDescription: link.project_description || '' }, {
           download: principal.linkAllowsDownload && await clientDownloadsEnabled(db),
-        }),
+        }, linkScopePayload(scope)),
       },
     });
   });
@@ -1088,13 +1289,19 @@ export const registerClientRoutes = (app: ClientApp) => {
     const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
 
+    // Close any elapsed window first, so the operator never sees a link that is
+    // past its expiry still marked active.
+    await sweepExpiredLinks(db);
+
     // Link tokens are never returned: only their metadata, so an operator can
     // see what is outstanding without being able to recover a credential.
     const rows = await asRows<any>(db.prepare(
-      `SELECT l.public_id, l.destination_type, l.destination_id, l.mode, l.allow_view, l.allow_download,
+      `SELECT l.public_id, l.destination_type, l.destination_id, l.destination_intent, l.mode,
+              l.allow_view, l.allow_download,
               l.max_uses, l.use_count, l.status, l.expires_at, l.last_used_at, l.created_at,
               p.public_id AS project_public_id, p.name AS project_name, p.reference_code AS project_reference,
-              d.public_id AS document_public_id, d.title AS document_title, d.reference_code AS document_reference
+              d.public_id AS document_public_id, d.title AS document_title, d.reference_code AS document_reference,
+              d.storage_reference
        FROM client_links l
        JOIN client_projects p ON p.id = l.client_project_id
        LEFT JOIN client_documents d ON d.id = l.client_document_id
@@ -1102,10 +1309,15 @@ export const registerClientRoutes = (app: ClientApp) => {
        ORDER BY l.created_at DESC, l.id DESC LIMIT 100`
     ).bind(Number(client.id)));
 
-    return c.json({ success: true, data: rows.map((row) => ({
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
       id: row.public_id,
-      mode: row.mode,
-      destination: row.destination_type,
+      // The brief's vocabulary: REQUIRE_PASSKEY / DIRECT_ACCESS.
+      mode: linkAccessMode(row.mode),
+      destination: describeLinkDestination(row).destination,
+      intent: describeLinkDestination(row).intent,
+      destinationLabel: describeLinkDestination(row).label,
       project: { id: row.project_public_id, name: row.project_name, reference: row.project_reference },
       document: row.document_public_id
         ? { id: row.document_public_id, title: row.document_title, reference: row.document_reference }
@@ -1114,11 +1326,20 @@ export const registerClientRoutes = (app: ClientApp) => {
       allowDownload: Number(row.allow_download) === 1,
       maxUses: row.max_uses === null ? null : Number(row.max_uses),
       useCount: Number(row.use_count || 0),
+      remainingUses: row.max_uses === null ? null : Math.max(0, Number(row.max_uses) - Number(row.use_count || 0)),
+      hasClientArtifact: Boolean(row.storage_reference),
       status: row.status,
       expiresAt: row.expires_at,
       lastUsedAt: row.last_used_at,
       createdAt: row.created_at,
-    })) });
+      })),
+      // The choices the create endpoint accepts, so the operator UI never
+      // invents a lifetime the server would refuse.
+      expiryPresets: CLIENT_LINK_TTL_PRESETS,
+      lifetimeBounds: { minMinutes: CLIENT_LINK_MIN_TTL_MINUTES, maxMinutes: CLIENT_LINK_MAX_TTL_MINUTES },
+      maxUsesLimit: CLIENT_LINK_MAX_USES_LIMIT,
+      destinations: CLIENT_LINK_DESTINATIONS,
+    });
   });
 
   app.post('/api/phantom/clients/:clientId/links', requireAuth, linkCreate, async (c: any) => {
@@ -1136,46 +1357,127 @@ export const registerClientRoutes = (app: ClientApp) => {
     ).bind(String(body.projectId || '').trim(), client.id));
     if (!project) return c.json({ success: false, error: 'Choose a project that belongs to this client.' }, 400);
 
+    // ---- destination ------------------------------------------------------
+    // Explicit `destination` wins; otherwise the request is interpreted the way
+    // Phase 5 already did (document → document, otherwise project room).
+    let documentId = cleanStr(body.documentId, 1, 80) || '';
+    let intent: 'view' | 'file' = 'view';
+    let destination: ClientLinkDestination;
+    if (body.destination !== undefined) {
+      if (!isClientLinkDestination(body.destination)) {
+        return c.json({
+          success: false,
+          error: `Choose one of: ${CLIENT_LINK_DESTINATIONS.join(', ')}.`,
+        }, 400);
+      }
+      destination = body.destination;
+      if (destination === 'file') intent = 'file';
+      if (destination === 'document' || destination === 'file') {
+        if (!documentId) return c.json({ success: false, error: 'Choose the document this link opens.' }, 400);
+      } else {
+        // A room, overview or section link never silently ignores a stale
+        // document id — the caller asked for the whole destination.
+        documentId = '';
+      }
+    } else if (documentId) {
+      destination = 'document';
+    } else {
+      const section = cleanStr(body.section, 1, 40) || '';
+      destination = isClientLinkSectionDestination(section) ? section as ClientLinkDestination : 'project';
+    }
+
     let document: any = null;
-    if (body.documentId) {
+    if (documentId) {
       document = await one<any>(db.prepare(
         'SELECT * FROM client_documents WHERE public_id = ? AND client_id = ? AND client_project_id = ?'
-      ).bind(String(body.documentId).trim(), client.id, project.id));
+      ).bind(documentId, client.id, project.id));
       if (!document) return c.json({ success: false, error: 'Choose a document that belongs to this project.' }, 400);
       if (!clientDocumentExposure(document, project, { status: client.status }).exposed) {
         return c.json({ success: false, error: 'Publish the document before linking to it.' }, 409);
       }
     }
 
-    const allowDownload = body.allowDownload === true;
-    if (allowDownload && !document) {
-      return c.json({ success: false, error: 'Set download permission on the document itself.' }, 400);
+    // ---- permissions ------------------------------------------------------
+    // VIEW and DOWNLOAD are independent. A file destination exists to deliver
+    // the stamped client copy, so it is download-only by definition and the
+    // server decides that — the request cannot ask for anything else.
+    const allowDownload = intent === 'file' ? true : body.allowDownload === true;
+    const allowView = intent === 'file' ? false : body.allowView !== false;
+    if (!allowView && !allowDownload) {
+      return c.json({ success: false, error: 'A link must allow viewing, downloading, or both.' }, 400);
     }
-    if (allowDownload && Number(document.allow_download) !== 1) {
+    if (allowDownload && document && Number(document.allow_download) !== 1) {
       return c.json({ success: false, error: 'This document does not allow downloads.' }, 409);
     }
+    if (intent === 'file' && !document) {
+      return c.json({ success: false, error: 'Choose the document whose file this link delivers.' }, 400);
+    }
+    if (intent === 'file' && !String(document.storage_reference || '').trim()) {
+      // The watermarking pipeline has not produced a client copy for this
+      // document, so there is no client-safe file to deliver. An untouched
+      // original is never exposed, and a dead link is never issued.
+      return c.json({
+        success: false,
+        error: 'This document has no client-ready file yet. Produce the stamped client copy before creating a file link.',
+      }, 409);
+    }
 
-    const expiryMinutes = Math.min(1440, Math.max(5, Number(body.expiresInMinutes) || CLIENT_LINK_DEFAULT_TTL_MINUTES));
-    const maxUses = body.maxUses === undefined ? CLIENT_LINK_DEFAULT_MAX_USES : Math.max(1, Math.min(50, Number(body.maxUses) || 1));
-    const destination = document ? 'document' : (cleanStr(body.section, 1, 40) || 'overview');
+    // ---- lifetime, mode and uses -----------------------------------------
+    // The presets (15 minutes … 7 days) are advertised by the API; a custom
+    // value is welcome inside the same window, and anything outside it is
+    // refused rather than quietly shortened.
+    const requestedMinutes = body.expiresInMinutes;
+    if (requestedMinutes !== undefined && requestedMinutes !== null && requestedMinutes !== '') {
+      const numeric = Number(requestedMinutes);
+      if (!Number.isFinite(numeric) || numeric < CLIENT_LINK_MIN_TTL_MINUTES || numeric > CLIENT_LINK_MAX_TTL_MINUTES) {
+        return c.json({
+          success: false,
+          error: `Choose a lifetime between ${CLIENT_LINK_MIN_TTL_MINUTES} minutes and ${CLIENT_LINK_MAX_TTL_MINUTES} minutes (7 days).`,
+        }, 400);
+      }
+    }
+    if (body.maxUses !== undefined && body.maxUses !== null && body.maxUses !== '' && Number(body.maxUses) !== 0) {
+      const numeric = Number(body.maxUses);
+      if (!Number.isInteger(numeric) || numeric < 1 || numeric > CLIENT_LINK_MAX_USES_LIMIT) {
+        return c.json({
+          success: false,
+          error: `Maximum uses must be a whole number between 1 and ${CLIENT_LINK_MAX_USES_LIMIT}, or omitted for unlimited.`,
+        }, 400);
+      }
+    }
+    const expiryMinutes = clampLinkTtlMinutes(requestedMinutes ?? CLIENT_LINK_DEFAULT_TTL_MINUTES);
+    const maxUses = resolveLinkMaxUses(body.maxUses);
 
     const token = generateClientLinkToken();
     const publicId = newClientPublicId('lnk');
     const expiresAt = new Date(Date.now() + expiryMinutes * 60000).toISOString();
+    const storedMode = linkAccessModeValue(body.mode ?? body.accessMode ?? 'DIRECT_ACCESS');
+    const storedDestination = intent === 'file' ? 'document' : destination;
+
     await db.prepare(
       `INSERT INTO client_links
        (public_id, client_id, client_project_id, client_document_id, destination_type, destination_id,
-        mode, token_hash, allow_view, allow_download, max_uses, expires_at, created_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, 'direct', ?, 1, ?, ?, ?, ?)`
+        destination_intent, mode, token_hash, allow_view, allow_download, max_uses, expires_at, created_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       publicId, client.id, project.id, document ? Number(document.id) : null,
-      document ? 'document' : destination, document ? document.public_id : null,
-      await clientLinkHash(token), allowDownload ? 1 : 0, maxUses, expiresAt, actor?.userId ?? null,
+      storedDestination, document ? document.public_id : null,
+      intent, storedMode,
+      await clientLinkHash(token), allowView ? 1 : 0, allowDownload ? 1 : 0, maxUses, expiresAt, actor?.userId ?? null,
     ).run();
 
     await audit(db, actor, 'client.link.created', 'client_link', null, {
       clientId: client.public_id, publicId, projectId: project.public_id,
-      documentId: document ? document.public_id : null, maxUses, expiresAt,
+      documentId: document ? document.public_id : null, destination, intent: intent,
+      mode: linkAccessMode(storedMode), allowView, allowDownload, maxUses, expiresAt,
+    });
+    await recordClientActivity(db, 'LINK_CREATED', {
+      clientPublicId: client.public_id,
+      details: {
+        linkId: publicId, projectId: project.public_id, destination, intent,
+        documentId: document ? document.public_id : null,
+        mode: linkAccessMode(storedMode), expiresAt, maxUses,
+      },
     });
 
     return c.json({
@@ -1186,11 +1488,22 @@ export const registerClientRoutes = (app: ClientApp) => {
         // The client app is hash-routed, so the copyable path matches the
         // existing #vault-share / #reset / #activate convention.
         path: `/#client-portal/link/${token}`,
+        mode: linkAccessMode(storedMode),
+        destination,
+        destinationLabel: describeLinkDestination({
+          destination_type: storedDestination, destination_id: document ? document.public_id : null, destination_intent: intent,
+        }).label,
+        intent,
         expiresAt,
+        expiresInMinutes: expiryMinutes,
         maxUses,
+        allowView,
         allowDownload,
+        document: document ? { id: document.public_id, title: document.title, reference: document.reference_code } : null,
       },
-      message: 'Copy this link now and deliver it securely. It cannot be shown again.',
+      message: linkAccessMode(storedMode) === 'REQUIRE_PASSKEY'
+        ? 'Copy this link now and deliver it securely. The client signs in with their access key before it opens.'
+        : 'Copy this link now and deliver it securely. It cannot be shown again.',
     }, 201);
   });
 
@@ -1210,6 +1523,14 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     await audit(db, actor, 'client.link.revoked', 'client_link', link.public_id, {
       clientId: link.client_id, sessionsRevoked: Number(sessions.meta.changes || 0),
+    });
+    const clientRow = await one<any>(db.prepare('SELECT public_id FROM clients WHERE id = ?').bind(Number(link.client_id)));
+    await recordClientActivity(db, 'LINK_REVOKED', {
+      clientPublicId: clientRow?.public_id ?? null,
+      details: {
+        linkId: link.public_id, destination: link.destination_type,
+        sessionsRevoked: Number(sessions.meta.changes || 0),
+      },
     });
     return c.json({ success: true, message: 'Link revoked immediately.' });
   });
@@ -1567,6 +1888,12 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
     const clientState = { status: client.status };
     return {
       project: publicProject(project),
+      // A full-room session, which is what a client with an access key has.
+      // Preview shows the same shape, so what the operator sees is what the
+      // client receives — including the scope block.
+      scope: linkScopePayload(clientLinkScope({
+        linkId: null, linkDestination: null, linkIntent: 'view', linkDocumentId: null, linkDocumentPublicId: null,
+      })),
       sections: CLIENT_SECTIONS.map((section) => ({
         id: section,
         label: section.charAt(0).toUpperCase() + section.slice(1),

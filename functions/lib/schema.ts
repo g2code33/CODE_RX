@@ -980,6 +980,10 @@ CREATE TABLE IF NOT EXISTS client_links (
   client_document_id INTEGER,
   destination_type TEXT NOT NULL CHECK (destination_type IN ('project','overview','documents','letters','agreements','reports','deliverables','updates','document')),
   destination_id TEXT,
+  -- Phase 7: 'view' opens the document reader, 'file' delivers the stamped
+  -- client file only. A file destination is always a document destination with
+  -- view denied and download required, enforced in the server, never in the UI.
+  destination_intent TEXT NOT NULL DEFAULT 'view' CHECK (destination_intent IN ('view','file')),
   mode TEXT NOT NULL DEFAULT 'passkey' CHECK (mode IN ('passkey','direct')),
   token_hash TEXT NOT NULL UNIQUE,
   allow_view INTEGER NOT NULL DEFAULT 1,
@@ -1027,6 +1031,8 @@ CREATE INDEX IF NOT EXISTS idx_client_sessions_client ON client_sessions(client_
 CREATE INDEX IF NOT EXISTS idx_client_sessions_key ON client_sessions(access_key_id, revoked_at);
 CREATE INDEX IF NOT EXISTS idx_client_links_scope ON client_links(client_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_client_links_project ON client_links(client_project_id, status, expires_at);
+-- Phase 7: the expiry sweep only ever looks at active links inside a closed window.
+CREATE INDEX IF NOT EXISTS idx_client_links_expiry ON client_links(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_client_sessions_link ON client_sessions(client_link_id, revoked_at, expires_at);
 -- Client activity is written to the existing audit_logs table, so this index
 -- supports both the PHANTOM audit view and the client activity view.
@@ -1081,12 +1087,16 @@ const SAFE_MIGRATIONS = [
   { table: 'codename_selection_sessions', column: 'ballot_slots_json', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN ballot_slots_json TEXT NOT NULL DEFAULT '[]'" },
   { table: 'codename_selection_sessions', column: 'revealed_codenames_json', sql: "ALTER TABLE codename_selection_sessions ADD COLUMN revealed_codenames_json TEXT NOT NULL DEFAULT '[]'" },
   { table: 'codename_selection_sessions', column: 'review_target_count', sql: 'ALTER TABLE codename_selection_sessions ADD COLUMN review_target_count INTEGER NOT NULL DEFAULT 3' },
+  // Phase 7 — temporary project links. The destination intent separates "open
+  // the document" from "deliver the client file"; existing links keep the
+  // 'view' default, so no stored link changes meaning.
+  { table: 'client_links', column: 'destination_intent', sql: "ALTER TABLE client_links ADD COLUMN destination_intent TEXT NOT NULL DEFAULT 'view' CHECK (destination_intent IN ('view','file'))" },
 ] as const;
 
 // Bumped so the additive client-portal tables, indexes and feature flags above
 // are applied once on an existing live database. The migration path only ever
 // adds objects; it never alters or drops an existing table, column, or row.
-const VAULT_SCHEMA_VERSION = '2026-09-17-code-rx12-client-portal-2';
+const VAULT_SCHEMA_VERSION = '2026-09-18-code-rx13-client-portal-3';
 
 
 // Role codes stay stable for member history and permissions. Their visible

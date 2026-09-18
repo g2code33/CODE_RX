@@ -148,6 +148,10 @@ export interface ClientSessionRecord {
   link_allow_view: number | null;
   link_allow_download: number | null;
   link_document_id: number | null;
+  /** Phase 7: the destination the link was issued for (stored values). */
+  link_destination_type: string | null;
+  link_destination_id: string | null;
+  link_intent: string | null;
   client_id: number;
   client_public_id: string;
   client_name: string;
@@ -180,6 +184,8 @@ export const resolveClientSessionRecord = async (
             l.id AS link_id, l.status AS link_status, l.expires_at AS link_expires_at,
             l.allow_view AS link_allow_view, l.allow_download AS link_allow_download,
             l.client_document_id AS link_document_id,
+            l.destination_type AS link_destination_type, l.destination_id AS link_destination_id,
+            l.destination_intent AS link_intent,
             cl.id AS client_id, cl.public_id AS client_public_id, cl.name AS client_name,
             cl.contact_name AS client_contact_name, cl.contact_email AS client_contact_email,
             cl.status AS client_status,
@@ -308,6 +314,8 @@ export interface ClientLinkRecord {
   link_allow_view: number;
   link_allow_download: number;
   link_destination_type: string;
+  link_destination_id: string | null;
+  link_intent: string;
   link_mode: 'passkey' | 'direct';
   destination_type: string;
   destination_id: string | null;
@@ -347,6 +355,7 @@ export const resolveClientLink = async (db: D1Database, token: string): Promise<
   const rows = await asRows<ClientLinkRecord>(db.prepare(
     `SELECT l.id AS link_id, l.public_id AS link_public_id, l.status AS link_status, l.mode AS link_mode,
             l.destination_type AS link_destination_type, l.destination_type, l.destination_id,
+            l.destination_id AS link_destination_id, l.destination_intent AS link_intent,
             l.allow_view AS link_allow_view, l.allow_download AS link_allow_download,
             l.allow_view, l.allow_download,
             l.max_uses, l.use_count, l.expires_at AS link_expires_at, l.expires_at,
@@ -387,6 +396,22 @@ export const consumeClientLinkUse = async (db: D1Database, linkId: number): Prom
   ).bind(linkId).run();
   return Number(result.meta.changes || 0) === 1;
 };
+
+/**
+ * Lists the links that are about to be marked expired, so the caller can record
+ * LINK_EXPIRED against each one before the sweep. Bounded on purpose: a sweep
+ * must never become a full-table operation.
+ */
+export const listExpiringClientLinks = async (
+  db: D1Database,
+  limit = 25,
+): Promise<Array<{ id: number; public_id: string; client_public_id: string; destination_type: string }>> =>
+  asRows<{ id: number; public_id: string; client_public_id: string; destination_type: string }>(db.prepare(
+    `SELECT l.id, l.public_id, l.destination_type, cl.public_id AS client_public_id
+     FROM client_links l JOIN clients cl ON cl.id = l.client_id
+     WHERE l.status = 'active' AND l.expires_at IS NOT NULL AND datetime(l.expires_at) <= CURRENT_TIMESTAMP
+     ORDER BY l.id LIMIT ?`
+  ).bind(Math.max(1, Math.min(100, limit))));
 
 /** Marks any link whose window has closed. Cheap, indexed, and safe to run periodically. */
 export const expireClientLinks = async (db: D1Database): Promise<number> => {

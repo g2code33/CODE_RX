@@ -15,6 +15,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -324,7 +325,8 @@ const main = async () => {
   const clientIndexes = db.query(
     "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_client%' ORDER BY name",
   ).map((row) => row.name);
-  check('all 11 client-portal authorization indexes exist', clientIndexes.length === 11, clientIndexes.join(','));
+  check('all 12 client-portal authorization indexes exist', clientIndexes.length === 12, clientIndexes.join(','));
+  check('temporary-link expiry is indexed for the sweep', clientIndexes.includes('idx_client_links_expiry'));
   check('the audit feed is indexed by action',
     db.query("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name='idx_audit_logs_action'")[0].c === 1);
 
@@ -2137,13 +2139,701 @@ const main = async () => {
   // Report
   // -------------------------------------------------------------------------
 
+
+  // =========================================================================
+  group('18. Temporary project links — destinations and access modes (Phase 7)');
+  // =========================================================================
+
+  // A dedicated passkey for the Phase 7 passkey flows, so the durable per-key
+  // throttle (10 attempts / 15 min) is never shared with earlier groups.
+  const p7Key = await createKey(phantomToken, roomA.id, roomProjectA.id, { label: 'Phase 7 key' });
+  const p7Passkey = p7Key.passkey;
+  await request('PATCH', `/api/phantom/client-documents/${publishedUpdate.id}`, {
+    token: phantomToken, body: { allowDownload: true, storageReference: 'client-exports/room/update.pdf' },
+  });
+  await ENV.BUCKET.put('client-exports/room/update.pdf', 'STAMPED ROOM UPDATE', { httpMetadata: { contentType: 'application/pdf' } });
+  await request('PUT', '/api/phantom/settings/client_downloads_enabled', { token: phantomToken, body: { value: '1' } });
+
+  // A published, downloadable document whose stamped client copy does not exist
+  // yet — the one case where a file link must be refused rather than issued.
+  const noArtifactDoc = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'Downloadable but unstamped', category: 'report', contentText: 'No client copy exists yet.',
+  });
+  await publish(phantomToken, noArtifactDoc.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${noArtifactDoc.id}`, { token: phantomToken, body: { allowDownload: true } });
+
+  // A document in the Documents section with a stamped client copy, so a
+  // section link's download permission can be exercised honestly.
+  const publishedDocument = await createDocument(phantomToken, roomA.id, roomProjectA.id, {
+    title: 'Published document', category: 'document', contentText: 'Document body for the room.',
+  });
+  await publish(phantomToken, publishedDocument.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${publishedDocument.id}`, { token: phantomToken, body: { allowDownload: true } });
+  await request('PATCH', `/api/phantom/client-documents/${publishedDocument.id}`, {
+    token: phantomToken, body: { storageReference: 'client-exports/room/document.pdf' },
+  });
+  await ENV.BUCKET.put('client-exports/room/document.pdf', 'STAMPED ROOM DOCUMENT', { httpMetadata: { contentType: 'application/pdf' } });
+
+  const createLinkFor = (clientId, body) => request('POST', `/api/phantom/clients/${clientId}/links`, { token: phantomToken, body });
+  const redeemLink = (token) => request('POST', `/api/client/link/${token}`);
+  const sessionFromLink = async (token) => {
+    const response = await redeemLink(token);
+    return { response, session: response.json?.data?.session?.token || null };
+  };
+  const passkeyWithLink = (token, passkey) => request('POST', '/api/client/auth/login', {
+    body: { passkey, linkToken: token },
+  });
+
+  // --- the API advertises exactly what it accepts ---------------------------
+  const linkCatalogue = await request('GET', `/api/phantom/clients/${roomA.id}/links`, { token: phantomToken });
+  check('the links API advertises the ten destinations',
+    linkCatalogue.status === 200
+    && ['project', 'overview', 'documents', 'letters', 'agreements', 'reports', 'deliverables', 'updates', 'document', 'file']
+      .every((destination) => linkCatalogue.json.destinations.includes(destination)),
+    JSON.stringify(linkCatalogue.json.destinations));
+  check('the links API advertises the six expiry presets from the brief',
+    JSON.stringify(linkCatalogue.json.expiryPresets) === JSON.stringify([15, 60, 360, 1440, 4320, 10080]),
+    JSON.stringify(linkCatalogue.json.expiryPresets));
+  check('the links API advertises the lifetime window and the uses limit',
+    linkCatalogue.json.lifetimeBounds.minMinutes === 5 && linkCatalogue.json.lifetimeBounds.maxMinutes === 10080
+    && linkCatalogue.json.maxUsesLimit === 50);
+
+  // --- creation validation -------------------------------------------------
+  const badDestination = await createLinkFor(roomA.id, { projectId: roomProjectA.id, destination: 'everything' });
+  check('an unknown destination is refused (400)', badDestination.status === 400, JSON.stringify(badDestination.json));
+  const missingDocument = await createLinkFor(roomA.id, { projectId: roomProjectA.id, destination: 'document' });
+  check('a document destination without a document is refused (400)', missingDocument.status === 400);
+  const noPermissions = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'project', allowView: false, allowDownload: false,
+  });
+  check('a link that allows neither viewing nor downloading is refused (400)', noPermissions.status === 400);
+  const tooLong = await createLinkFor(roomA.id, { projectId: roomProjectA.id, expiresInMinutes: 10081 });
+  check('a lifetime beyond seven days is refused (400)', tooLong.status === 400, JSON.stringify(tooLong.json));
+  const tooShort = await createLinkFor(roomA.id, { projectId: roomProjectA.id, expiresInMinutes: 4 });
+  check('a lifetime under five minutes is refused (400)', tooShort.status === 400);
+  const badUses = await createLinkFor(roomA.id, { projectId: roomProjectA.id, maxUses: 51 });
+  check('a maximum uses beyond the limit is refused (400)', badUses.status === 400);
+  const fileWithoutArtifact = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'file', documentId: noArtifactDoc.id,
+  });
+  check('a file link is refused for a document with no client-ready file (409)',
+    fileWithoutArtifact.status === 409 && /client-ready file/.test(fileWithoutArtifact.json.error),
+    JSON.stringify(fileWithoutArtifact.json));
+  const fileWithoutDownloadPermission = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'file', documentId: publishedUpdate.id, allowDownload: false,
+  });
+  check('a file link cannot be asked for without download permission (still 201, forced on)',
+    fileWithoutDownloadPermission.status === 201 && fileWithoutDownloadPermission.json.data.allowDownload === true
+    && fileWithoutDownloadPermission.json.data.allowView === false,
+    JSON.stringify(fileWithoutDownloadPermission.json.data));
+
+  // --- each of the ten destinations ----------------------------------------
+  const roomDestinations = [
+    ['project', null], ['overview', null], ['documents', null], ['letters', null],
+    ['agreements', null], ['reports', null], ['deliverables', null], ['updates', null],
+  ];
+  const createdLinks = {};
+  for (const [destination] of roomDestinations) {
+    const response = await createLinkFor(roomA.id, {
+      projectId: roomProjectA.id, destination, mode: 'DIRECT_ACCESS', expiresInMinutes: 60,
+    });
+    createdLinks[destination] = response.json?.data;
+    check(`a ${destination} link can be created`, response.status === 201, JSON.stringify(response.json).slice(0, 160));
+    check(`the ${destination} link reports its destination back`,
+      response.json?.data?.destination === destination && response.json?.data?.mode === 'DIRECT_ACCESS',
+      JSON.stringify(response.json?.data));
+  }
+  const documentLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: publishedUpdate.id,
+    mode: 'DIRECT_ACCESS', allowDownload: true,
+  });
+  check('a specific-document link can be created', documentLink.status === 201, JSON.stringify(documentLink.json).slice(0, 160));
+  const readerLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: publishedLetter.id, mode: 'DIRECT_ACCESS',
+  });
+  check('a document link defaults to view only',
+    readerLink.json?.data?.allowView === true && readerLink.json?.data?.allowDownload === false);
+  const fileLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'file', documentId: publishedLetter.id, mode: 'DIRECT_ACCESS',
+  });
+  check('a specific-file link can be created for a stamped document',
+    fileLink.status === 201 && fileLink.json?.data?.intent === 'file'
+    && fileLink.json?.data?.allowView === false && fileLink.json?.data?.allowDownload === true,
+    JSON.stringify(fileLink.json?.data).slice(0, 200));
+
+  const storedIntents = db.query(
+    "SELECT destination_type, destination_intent FROM client_links WHERE public_id = ?", fileLink.json.data.id)[0];
+  check('a file link is stored as a document destination with the file intent',
+    storedIntents.destination_type === 'document' && storedIntents.destination_intent === 'file',
+    JSON.stringify(storedIntents));
+
+  // --- the destination decides what a direct link can reach ----------------
+  const lettersSession = (await sessionFromLink(createdLinks.letters.token)).session;
+  const lettersProject = await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: lettersSession });
+  check('a letters link reports a restricted scope', lettersProject.status === 200
+    && lettersProject.json.data.scope.restricted === true && lettersProject.json.data.scope.destination === 'letters',
+    JSON.stringify(lettersProject.json.data.scope));
+  check('a letters link offers only the letters section',
+    lettersProject.json.data.sections.length === 1 && lettersProject.json.data.sections[0].id === 'letters',
+    JSON.stringify(lettersProject.json.data.sections));
+  check('a letters link counts only letters',
+    lettersProject.json.data.sections[0].count === 1 && lettersProject.json.data.recent.length === 1
+    && lettersProject.json.data.recent[0].category === 'letter',
+    JSON.stringify(lettersProject.json.data.recent.map((document) => document.category)));
+  check('a letters link never leaks a report title through the overview list',
+    !/View only report|Published update/.test(JSON.stringify(lettersProject.json)));
+
+  const lettersAllowed = await request('GET', `/api/client/project/${roomProjectA.id}/sections/letters`, { clientSession: lettersSession });
+  check('the letters link opens the letters section', lettersAllowed.status === 200);
+  const lettersDenied = await request('GET', `/api/client/project/${roomProjectA.id}/sections/reports`, { clientSession: lettersSession });
+  check('the letters link cannot open the reports section', lettersDenied.status === 404);
+  const lettersDeniedUpdate = await request('GET', `/api/client/project/${roomProjectA.id}/sections/updates`, { clientSession: lettersSession });
+  check('the letters link cannot open the updates section', lettersDeniedUpdate.status === 404);
+  const lettersDocumentDenied = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedUpdate.id}`, { clientSession: lettersSession });
+  check('the letters link cannot open a document of another category', lettersDocumentDenied.status === 404);
+  const lettersOwnDocument = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: lettersSession });
+  check('the letters link can open a letter of its own section', lettersOwnDocument.status === 200);
+
+  const overviewSession = (await sessionFromLink(createdLinks.overview.token)).session;
+  const overviewProject = await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: overviewSession });
+  check('an overview link offers only the overview',
+    overviewProject.status === 200 && overviewProject.json.data.sections.length === 1
+    && overviewProject.json.data.sections[0].id === 'overview',
+    JSON.stringify(overviewProject.json.data.sections));
+  check('an overview link cannot open a section',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/documents`, { clientSession: overviewSession })).status === 404);
+
+  const projectSession = (await sessionFromLink(createdLinks.project.token)).session;
+  const projectRoom = await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: projectSession });
+  const keyRoomSections = (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomSessionA })).json.data.sections;
+  check('a project-room link offers exactly the sections an access key offers',
+    projectRoom.status === 200
+    && JSON.stringify(projectRoom.json.data.sections) === JSON.stringify(keyRoomSections),
+    JSON.stringify(projectRoom.json.data.sections.map((section) => section.id)));
+  check('a project-room link opens a section normally',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/updates`, { clientSession: projectSession })).status === 200);
+
+  const documentSession = (await sessionFromLink(documentLink.json.data.token)).session;
+  const documentAllowed = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedUpdate.id}`, { clientSession: documentSession });
+  check('a document link opens its own document', documentAllowed.status === 200
+    && documentAllowed.json.data.document.id === publishedUpdate.id, JSON.stringify(documentAllowed.json).slice(0, 160));
+  const documentOther = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: documentSession });
+  check('a document link cannot open a different document of the same project', documentOther.status === 404);
+  check('a document link cannot open its document\'s section either',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/updates`, { clientSession: documentSession })).status === 404);
+  check('a document link never offers a section list',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: documentSession })).json.data.sections
+      .every((section) => section.count === 0));
+
+  const fileSession = (await sessionFromLink(fileLink.json.data.token)).session;
+  check('a file link cannot open the room at all',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: fileSession })).status === 404);
+  check('a file link cannot open a section',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/letters`, { clientSession: fileSession })).status === 404);
+  check('a file link cannot read the document text',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: fileSession })).status === 404);
+  const fileDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: fileSession });
+  check('a file link delivers exactly its file', fileDownload.status === 200 && fileDownload.text === 'STAMPED ROOM LETTER',
+    `${fileDownload.status} ${fileDownload.text.slice(0, 40)}`);
+  const fileOtherDownload = await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedUpdate.id}/download`, { clientSession: fileSession });
+  check('a file link cannot deliver a different file', fileOtherDownload.status === 404);
+
+  // --- access modes --------------------------------------------------------
+  const passkeyLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'letters', mode: 'REQUIRE_PASSKEY', expiresInMinutes: 60,
+  });
+  check('a REQUIRE_PASSKEY link can be created', passkeyLink.status === 201);
+  const sessionsBeforePasskeyRedeem = Number(db.query('SELECT COUNT(*) AS c FROM client_sessions')[0].c);
+  const passkeyRedeem = await redeemLink(passkeyLink.json.data.token);
+  check('opening a REQUIRE_PASSKEY link reports that the passkey is required',
+    passkeyRedeem.status === 200 && passkeyRedeem.json.data.requiresPasskey === true
+    && passkeyRedeem.json.data.mode === 'REQUIRE_PASSKEY', JSON.stringify(passkeyRedeem.json));
+  check('a REQUIRE_PASSKEY link never mints a session on its own',
+    !passkeyRedeem.json.data.session && Number(db.query('SELECT COUNT(*) AS c FROM client_sessions')[0].c) === sessionsBeforePasskeyRedeem);
+  check('a REQUIRE_PASSKEY link consumes no use before the passkey is given',
+    Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', passkeyLink.json.data.id)[0].use_count) === 0);
+  check('the pre-authentication response reveals nothing about the client or the destination',
+    !/Room Client A|Room Project A|Published letter|letters|CRX-/i.test(JSON.stringify(passkeyRedeem.json.data)),
+    JSON.stringify(passkeyRedeem.json.data));
+
+  const wrongPasskeyWithLink = await request('POST', '/api/client/auth/login', {
+    body: { passkey: roomKeyB.passkey, linkToken: passkeyLink.json.data.token },
+  });
+  check('another client\'s passkey cannot unlock the link (404)',
+    wrongPasskeyWithLink.status === 404 && wrongPasskeyWithLink.json.code === 'link_invalid',
+    JSON.stringify(wrongPasskeyWithLink.json));
+  check('a refused passkey does not consume a use of the link',
+    Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', passkeyLink.json.data.id)[0].use_count) === 0);
+
+  const passkeyLogin = await passkeyWithLink(passkeyLink.json.data.token, p7Passkey);
+  const passkeySession = passkeyLogin.json?.data?.session?.token;
+  check('the passkey opens the link and lands on its destination',
+    passkeyLogin.status === 200 && Boolean(passkeySession)
+    && passkeyLogin.json.data.destination.destination === 'letters'
+    && passkeyLogin.json.data.destination.restricted === true,
+    JSON.stringify(passkeyLogin.json).slice(0, 200));
+  check('a link redeemed with a passkey consumes exactly one use',
+    Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', passkeyLink.json.data.id)[0].use_count) === 1);
+  check('the passkey session is still bound to the link, not to the key',
+    Number(db.query('SELECT client_link_id, access_key_id FROM client_sessions WHERE id = (SELECT MAX(id) FROM client_sessions)')[0].client_link_id) > 0);
+  check('the passkey session is narrowed to the link\'s destination',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/sections/letters`, { clientSession: passkeySession })).status === 200
+    && (await request('GET', `/api/client/project/${roomProjectA.id}/sections/reports`, { clientSession: passkeySession })).status === 404);
+
+  const directTokenOnPasskeyLogin = await passkeyWithLink(documentLink.json.data.token, p7Passkey);
+  check('a direct-access token is not exchangeable through the passkey endpoint (404)',
+    directTokenOnPasskeyLogin.status === 404 && directTokenOnPasskeyLogin.json.code === 'link_invalid',
+    JSON.stringify(directTokenOnPasskeyLogin.json));
+
+  // --- permission rules ----------------------------------------------------
+  const viewOnlyLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: publishedLetter.id,
+    mode: 'DIRECT_ACCESS', allowDownload: false,
+  });
+  const viewOnlySession = (await sessionFromLink(viewOnlyLink.json.data.token)).session;
+  check('a view-only link can read its document',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: viewOnlySession })).status === 200);
+  check('a view-only link cannot download, even though the document allows it',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: viewOnlySession })).status === 404);
+  check('the view-only link reports download permission as denied',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: viewOnlySession }))
+      .json.data.document.permissions.download === false);
+
+  const downloadOnlyLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: publishedLetter.id,
+    mode: 'DIRECT_ACCESS', allowView: false, allowDownload: true,
+  });
+  const downloadOnlySession = (await sessionFromLink(downloadOnlyLink.json.data.token)).session;
+  check('a download-only link cannot read the document text',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: downloadOnlySession })).status === 404);
+  check('a download-only link still delivers the file',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: downloadOnlySession })).status === 200);
+
+  const downloadRoomLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'documents', mode: 'DIRECT_ACCESS', allowDownload: true,
+  });
+  const downloadRoomSession = (await sessionFromLink(downloadRoomLink.json.data.token)).session;
+  check('a section link with download permission delivers a downloadable document',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedDocument.id}/download`, { clientSession: downloadRoomSession })).status === 200
+    && (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedDocument.id}/download`, { clientSession: downloadRoomSession })).text === 'STAMPED ROOM DOCUMENT');
+  check('a section link with download permission cannot escape its section',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedUpdate.id}/download`, { clientSession: downloadRoomSession })).status === 404);
+
+  // --- token security ------------------------------------------------------
+  check('a link token is 256 bits of CSPRNG output and is not stored raw',
+    /^[0-9a-f]{64}$/.test(createdLinks.letters.token)
+    && Number(db.query('SELECT COUNT(*) AS c FROM client_links WHERE token_hash = ?', createdLinks.letters.token)[0].c) === 0);
+  check('every destination produced a distinct verifier hash',
+    Number(db.query('SELECT COUNT(DISTINCT token_hash) AS c FROM client_links')[0].c)
+      === Number(db.query('SELECT COUNT(*) AS c FROM client_links')[0].c));
+  const tampered = `${createdLinks.letters.token.slice(0, -1)}${createdLinks.letters.token.endsWith('a') ? 'b' : 'a'}`;
+  const tamperedRedeem = await redeemLink(tampered);
+  check('a tampered token is refused identically to an unknown one (404 link_invalid)',
+    tamperedRedeem.status === 404 && tamperedRedeem.json.code === 'link_invalid', JSON.stringify(tamperedRedeem.json));
+  const unknownRedeem = await redeemLink('f'.repeat(64));
+  check('an unknown token is indistinguishable from a malformed one',
+    unknownRedeem.status === tamperedRedeem.status && unknownRedeem.json.code === tamperedRedeem.json.code
+    && JSON.stringify(unknownRedeem.json) === JSON.stringify(tamperedRedeem.json));
+
+  // =========================================================================
+  group('19. Temporary links — expiry, revocation, uses, tampering, activity (Phase 7)');
+  // =========================================================================
+
+  // --- optional maximum uses ----------------------------------------------
+  const unlimitedLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+  });
+  check('a link can be issued without a use limit',
+    unlimitedLink.status === 201 && unlimitedLink.json.data.maxUses === null, JSON.stringify(unlimitedLink.json.data));
+  check('an unlimited link is stored without a maximum',
+    db.query('SELECT max_uses FROM client_links WHERE public_id = ?', unlimitedLink.json.data.id)[0].max_uses === null);
+  const unlimitedFirst = await sessionFromLink(unlimitedLink.json.data.token);
+  const unlimitedSecond = await sessionFromLink(unlimitedLink.json.data.token);
+  check('an unlimited link can be redeemed more than once',
+    unlimitedFirst.response.status === 200 && unlimitedSecond.response.status === 200);
+  check('each redemption is counted',
+    Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', unlimitedLink.json.data.id)[0].use_count) === 2);
+
+  const twoUseLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'overview', mode: 'DIRECT_ACCESS', maxUses: 2,
+  });
+  const twoUseFirst = await sessionFromLink(twoUseLink.json.data.token);
+  const twoUseSecond = await sessionFromLink(twoUseLink.json.data.token);
+  const twoUseThird = await redeemLink(twoUseLink.json.data.token);
+  check('a link stops working exactly at its maximum uses',
+    twoUseFirst.response.status === 200 && twoUseSecond.response.status === 200
+    && twoUseThird.status === 404 && twoUseThird.json.code === 'link_exhausted',
+    `${twoUseFirst.response.status}/${twoUseSecond.response.status}/${twoUseThird.status}`);
+  check('the exhausted link stores its whole use budget',
+    Number(db.query('SELECT use_count, max_uses FROM client_links WHERE public_id = ?', twoUseLink.json.data.id)[0].use_count) === 2);
+
+  // --- expiry --------------------------------------------------------------
+  const p7ExpiringLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'documents', mode: 'DIRECT_ACCESS', expiresInMinutes: 15,
+  });
+  const expiringStored = db.query('SELECT expires_at FROM client_links WHERE public_id = ?', p7ExpiringLink.json.data.id)[0];
+  const minutesStored = (new Date(expiringStored.expires_at).getTime() - Date.now()) / 60000;
+  check('the 15-minute preset produces a fifteen-minute link',
+    minutesStored > 13 && minutesStored <= 15.1, String(minutesStored));
+  const sevenDayLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'documents', mode: 'DIRECT_ACCESS', expiresInMinutes: 10080,
+  });
+  const sevenDayStored = db.query('SELECT expires_at FROM client_links WHERE public_id = ?', sevenDayLink.json.data.id)[0];
+  check('a custom seven-day lifetime is accepted',
+    (new Date(sevenDayStored.expires_at).getTime() - Date.now()) / 3600000 > 167);
+
+  db.execute('UPDATE client_links SET expires_at = ? WHERE public_id = ?',
+    new Date(Date.now() - 60000).toISOString(), p7ExpiringLink.json.data.id);
+  const expiredRedeem = await redeemLink(p7ExpiringLink.json.data.token);
+  check('an expired link cannot be redeemed (404 link_expired)',
+    expiredRedeem.status === 404 && expiredRedeem.json.code === 'link_expired', JSON.stringify(expiredRedeem.json));
+  check('the sweep marked the expired link and recorded LINK_EXPIRED',
+    db.query('SELECT status FROM client_links WHERE public_id = ?', p7ExpiringLink.json.data.id)[0].status === 'expired'
+    && Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.link_expired'")[0].c) >= 1);
+  check('an expired link records the event once, not on every look',
+    Number(db.query(
+      "SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.link_expired' AND details_json LIKE ?",
+      `%${p7ExpiringLink.json.data.id}%`)[0].c) === 1);
+  const expiredPasskeyRedeem = await redeemLink(p7ExpiringLink.json.data.token);
+  check('an expired link stays expired however it is re-presented',
+    expiredPasskeyRedeem.status === 404 && expiredPasskeyRedeem.json.code === 'link_expired');
+
+  const passkeyExpiring = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'letters', mode: 'REQUIRE_PASSKEY', expiresInMinutes: 60,
+  });
+  db.execute('UPDATE client_links SET expires_at = ? WHERE public_id = ?',
+    new Date(Date.now() - 1000).toISOString(), passkeyExpiring.json.data.id);
+  const expiredPasskeyLogin = await passkeyWithLink(passkeyExpiring.json.data.token, p7Passkey);
+  check('an expired REQUIRE_PASSKEY link cannot be unlocked even with a valid passkey',
+    expiredPasskeyLogin.status === 404 && expiredPasskeyLogin.json.code === 'link_expired',
+    JSON.stringify(expiredPasskeyLogin.json));
+  check('the refused passkey signing created no session bound to that link',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_sessions WHERE client_link_id = (SELECT id FROM client_links WHERE public_id = ?)',
+      passkeyExpiring.json.data.id)[0].c) === 0);
+
+  // --- revocation ----------------------------------------------------------
+  const revocable = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: 5,
+  });
+  const revocableSession = (await sessionFromLink(revocable.json.data.token)).session;
+  check('the revocable link works before it is revoked',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: revocableSession })).status === 200);
+  const p7RevokeResponse = await request('POST', `/api/phantom/client-links/${revocable.json.data.id}/revoke`, { token: phantomToken });
+  check('PHANTOM can revoke a link immediately', p7RevokeResponse.status === 200);
+  check('the revoked link is marked with a revocation time',
+    db.query('SELECT status, revoked_at FROM client_links WHERE public_id = ?', revocable.json.data.id)[0].revoked_at !== null);
+  const revokedRedeem = await redeemLink(revocable.json.data.token);
+  check('a revoked link cannot be redeemed (404 link_revoked)',
+    revokedRedeem.status === 404 && revokedRedeem.json.code === 'link_revoked', JSON.stringify(revokedRedeem.json));
+  const revokedSessionUse = await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: revocableSession });
+  check('revoking a link kills the sessions it minted', revokedSessionUse.status === 401 || revokedSessionUse.status === 404,
+    String(revokedSessionUse.status));
+  check('the revocation is recorded as LINK_REVOKED against the client',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.link_revoked'")[0].c) >= 1);
+  const revokeAgain = await request('POST', `/api/phantom/client-links/${revocable.json.data.id}/revoke`, { token: phantomToken });
+  check('revoking twice is idempotent', revokeAgain.status === 200);
+
+  // --- suspended client access -------------------------------------------
+  const suspendClient = await createClient(phantomToken, 'Phase 7 p7SuspendState client');
+  const suspendProject = await createProject(phantomToken, suspendClient.id, 'Phase 7 p7SuspendState project');
+  const suspendLink = await createLinkFor(suspendClient.id, {
+    projectId: suspendProject.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: 5,
+  });
+  const suspendDirectSession = (await sessionFromLink(suspendLink.json.data.token)).session;
+  const p7SuspendState = await request('POST', `/api/phantom/clients/${suspendClient.id}/status`, {
+    token: phantomToken, body: { status: 'suspended' },
+  });
+  check('suspending a client revokes its outstanding temporary links',
+    p7SuspendState.status === 200 && Number(p7SuspendState.json.data.links) >= 1
+    && db.query('SELECT status FROM client_links WHERE public_id = ?', suspendLink.json.data.id)[0].status === 'revoked',
+    JSON.stringify(p7SuspendState.json.data));
+  const suspendRedeem = await redeemLink(suspendLink.json.data.token);
+  check('a suspended client\'s link stops opening anything', suspendRedeem.status === 404, String(suspendRedeem.status));
+  check('a suspended client\'s link session dies with it',
+    [401, 404].includes((await request('GET', `/api/client/project/${suspendProject.id}`, { clientSession: suspendDirectSession })).status));
+
+  // --- wrong project, wrong document, cross-client tampering ---------------
+  const roomBKey = await createKey(phantomToken, roomB.id, roomProjectB.id, { label: 'Room B phase 7 key' });
+  const roomBSession = await clientSession(roomBKey.passkey, 'phase 7 client B');
+  const roomBLink = await createLinkFor(roomB.id, {
+    projectId: roomProjectB.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: 3,
+  });
+  const roomBLinkSession = (await sessionFromLink(roomBLink.json.data.token)).session;
+
+  check('a link session cannot open another client\'s project',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomBLinkSession })).status === 404);
+  check('a link session cannot open another client\'s document',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}`, { clientSession: roomBLinkSession })).status === 404);
+  check('a link session cannot download another client\'s file',
+    (await request('GET', `/api/client/project/${roomProjectA.id}/documents/${publishedLetter.id}/download`, { clientSession: roomBLinkSession })).status === 404);
+  check('a link session cannot open another project of its own client',
+    (await request('GET', `/api/client/project/${projectA.id}`, { clientSession: roomBLinkSession })).status === 404);
+  check('a key session of another client cannot open this client\'s room',
+    (await request('GET', `/api/client/project/${roomProjectA.id}`, { clientSession: roomBSession })).status === 404);
+  const foreignDocument = await request('GET', `/api/client/project/${roomProjectA.id}/sections/reports`, { clientSession: roomBSession });
+  check('a foreign session cannot list this client\'s sections', foreignDocument.status === 404);
+  check('client B\'s link never reveals client A\'s document titles',
+    !/Published letter|CLIENT B PRIVATE/.test(JSON.stringify(roomBLink.json)));
+
+  const crossProjectLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: publishedLetter.id, mode: 'DIRECT_ACCESS',
+  });
+  const crossProjectSession = (await sessionFromLink(crossProjectLink.json.data.token)).session;
+  check('a document link cannot reach a document of another project of the same client',
+    (await request('GET', `/api/client/project/${projectA.id}/documents/${publishedLetter.id}`, { clientSession: crossProjectSession })).status === 404);
+  check('a document link cannot reach another project at all',
+    (await request('GET', `/api/client/project/${projectA.id}`, { clientSession: crossProjectSession })).status === 404);
+  check('a link created for one client is never redeemable for another',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_links WHERE public_id = ? AND client_id = (SELECT id FROM clients WHERE public_id = ?)',
+      crossProjectLink.json.data.id, roomA.id)[0].c) === 1);
+  const mismatchedLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'letters', mode: 'REQUIRE_PASSKEY',
+  });
+  const crossedPasskey = await passkeyWithLink(mismatchedLink.json.data.token, roomKeyB.passkey);
+  check('a passkey from another client cannot redeem the link, whatever else is correct',
+    crossedPasskey.status === 404 && crossedPasskey.json.code === 'link_invalid');
+
+  // --- only published documents can be linked to ---------------------------
+  const draftLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: unpublishedDraft.id, mode: 'DIRECT_ACCESS',
+  });
+  check('a link cannot be created for an unpublished document (409)', draftLink.status === 409);
+  const archivedLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'document', documentId: archivedReport.id, mode: 'DIRECT_ACCESS',
+  });
+  check('a link cannot be created for an archived document (409)', archivedLink.status === 409);
+
+  // --- activity and the operator view --------------------------------------
+  check('LINK_CREATED is recorded through the existing activity infrastructure',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.link_created'")[0].c) >= 1);
+  check('LINK_USED is recorded for both access modes',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.link_used'")[0].c) >= 2);
+  const linkActivity = await request('GET', `/api/phantom/clients/${roomA.id}/activity?limit=100`, { token: phantomToken });
+  const activityEvents = (linkActivity.json.data || []).map((entry) => entry.event);
+  check('the client activity feed shows the link lifecycle events',
+    ['LINK_CREATED', 'LINK_USED', 'LINK_REVOKED'].every((event) => activityEvents.includes(event)),
+    activityEvents.slice(0, 12).join(','));
+  const activityBlob = JSON.stringify(linkActivity.json.data);
+  // Method and mode names ("passkey", "REQUIRE_PASSKEY") are not credentials:
+  // the check looks for credential material — a stored verifier, a link token,
+  // or a raw access key.
+  const credentialPattern = /[0-9a-f]{64}|key_hash|token_hash|CRX(-[0-9A-Z]{4}){3,4}/;
+  const activityMatch = (activityBlob.match(credentialPattern) || [])[0];
+  check('no credential is ever written to the activity log',
+    !activityMatch, `${activityMatch} in ${activityBlob.slice(Math.max(0, activityBlob.search(credentialPattern) - 120), activityBlob.search(credentialPattern) + 60)}`);
+  check('the access mode is recorded as a name, never as a credential',
+    /"mode":"REQUIRE_PASSKEY"/.test(activityBlob) || /"mode":"DIRECT_ACCESS"/.test(activityBlob));
+  check('link activity is attached to the client it belongs to',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action LIKE 'client.link_%' AND subject_id = ?", roomA.id)[0].c) >= 1);
+
+  const operatorList = await request('GET', `/api/phantom/clients/${roomA.id}/links`, { token: phantomToken });
+  const listedLink = (operatorList.json.data || []).find((entry) => entry.id === fileLink.json.data.id);
+  check('the operator link list reports the destination, the mode and the permissions',
+    Boolean(listedLink) && listedLink.destination === 'file' && listedLink.mode === 'DIRECT_ACCESS'
+    && listedLink.allowView === false && listedLink.allowDownload === true,
+    JSON.stringify(listedLink));
+  check('the operator link list never returns a token or a hash',
+    !/[0-9a-f]{64}/.test(JSON.stringify(operatorList.json)) && !/token/.test(JSON.stringify(operatorList.json)));
+  check('the operator link list reports remaining uses',
+    listedLink && listedLink.remainingUses === (listedLink.maxUses === null ? null : listedLink.maxUses - listedLink.useCount));
+  const expiredInList = (operatorList.json.data || []).find((entry) => entry.id === p7ExpiringLink.json.data.id);
+  check('an expired link is listed as expired, never as active',
+    expiredInList && expiredInList.status === 'expired', JSON.stringify(expiredInList));
+
+
+  // =========================================================================
+  group('20. Temporary links — the primitives underneath (Phase 7 units)');
+  // =========================================================================
+  //
+  // The route-level groups prove what the API does. These checks drive the
+  // primitives directly, because a rule that is enforced by two layers (the
+  // sweep and an inline re-check, the SQL guard and a pre-check, a route and a
+  // cascade helper) can be removed from one layer without any route-level test
+  // noticing.
+
+  // --- the token itself ----------------------------------------------------
+  const firstToken = helpers.generateClientLinkToken();
+  const secondToken = helpers.generateClientLinkToken();
+  check('a link token is a long, URL-safe random value',
+    /^[A-Za-z0-9_-]{40,}$/.test(firstToken) && firstToken.length >= 43, `${firstToken.length} chars`);
+  check('two link tokens are never the same', firstToken !== secondToken);
+  const firstHash = await helpers.clientLinkHash(firstToken);
+  check('only a hash of the token is ever stored',
+    /^[0-9a-f]{64}$/.test(firstHash) && firstHash !== firstToken
+    && firstHash === await helpers.clientLinkHash(firstToken));
+  check('the hash is domain separated from a bare SHA-256 of the token',
+    firstHash !== createHash('sha256').update(firstToken).digest('hex'));
+  check('the direct-access session lifetime is bounded and short',
+    helpers.CLIENT_LINK_SESSION_TTL_SECONDS === 45 * 60);
+
+  const tokenisedLink = await createLinkFor(roomB.id, {
+    projectId: roomProjectB.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+  });
+  const storedLinkRow = db.query('SELECT * FROM client_links WHERE public_id = ?', tokenisedLink.json.data.id)[0];
+  check('the raw token appears in no column of the stored link row',
+    !JSON.stringify(storedLinkRow).includes(tokenisedLink.json.data.token)
+    && storedLinkRow.token_hash === await helpers.clientLinkHash(tokenisedLink.json.data.token));
+  check('a link can only be resolved by its token, never by its identifier',
+    (await helpers.resolveClientLink(db, tokenisedLink.json.data.token)) !== null
+    && (await helpers.resolveClientLink(db, tokenisedLink.json.data.id)) === null
+    && (await helpers.resolveClientLink(db, 'not-a-token')) === null);
+
+  // --- the atomic use guard ------------------------------------------------
+  const linkRowId = (publicId) => Number(db.query('SELECT id FROM client_links WHERE public_id = ?', publicId)[0].id);
+  const oneUseLink = await createLinkFor(roomB.id, {
+    projectId: roomProjectB.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: 1,
+  });
+  await helpers.consumeClientLinkUse(db, linkRowId(oneUseLink.json.data.id));
+  const secondConsume = await helpers.consumeClientLinkUse(db, linkRowId(oneUseLink.json.data.id));
+  check('the use guard refuses the use after the maximum, at the SQL level', secondConsume === false);
+  check('a refused use is not counted',
+    Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', oneUseLink.json.data.id)[0].use_count) === 1);
+
+  const windowLink = await createLinkFor(roomB.id, {
+    projectId: roomProjectB.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+  });
+  db.execute('UPDATE client_links SET status = \'active\', expires_at = ? WHERE public_id = ?',
+    new Date(Date.now() - 60000).toISOString(), windowLink.json.data.id);
+  check('the use guard refuses a use once the window has closed',
+    await helpers.consumeClientLinkUse(db, linkRowId(windowLink.json.data.id)) === false);
+  db.execute('UPDATE client_links SET status = \'revoked\', expires_at = NULL WHERE public_id = ?', windowLink.json.data.id);
+  check('the use guard refuses a revoked link',
+    await helpers.consumeClientLinkUse(db, linkRowId(windowLink.json.data.id)) === false);
+
+  // --- the expiry mechanism ------------------------------------------------
+  const sweepExpired = await createLinkFor(roomB.id, {
+    projectId: roomProjectB.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+  });
+  const sweepLive = await createLinkFor(roomB.id, {
+    projectId: roomProjectB.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 60,
+  });
+  db.execute('UPDATE client_links SET expires_at = ? WHERE public_id = ?',
+    new Date(Date.now() - 1000).toISOString(), sweepExpired.json.data.id);
+  const swept = await helpers.expireClientLinks(db);
+  check('the expiry sweep reports what it closed', Number(swept) >= 1, String(swept));
+  check('the expiry sweep closes the elapsed link and leaves the live one alone',
+    db.query('SELECT status FROM client_links WHERE public_id = ?', sweepExpired.json.data.id)[0].status === 'expired'
+    && db.query('SELECT status FROM client_links WHERE public_id = ?', sweepLive.json.data.id)[0].status === 'active');
+  check('the sweep only offers links that have actually elapsed',
+    (await helpers.listExpiringClientLinks(db, 100))
+      .every((row) => row.public_id !== sweepLive.json.data.id));
+
+  // --- the cascade: a link session dies with the client's links ------------
+  const cascadeClient = await createClient(phantomToken, 'Phase 7 cascade client');
+  const cascadeProject = await createProject(phantomToken, cascadeClient.id, 'Phase 7 cascade project');
+  const cascadeLink = await createLinkFor(cascadeClient.id, {
+    projectId: cascadeProject.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+  });
+  const cascadeSession = (await sessionFromLink(cascadeLink.json.data.token)).session;
+  const cascadeClientRowId = Number(db.query('SELECT id FROM clients WHERE public_id = ?', cascadeClient.id)[0].id);
+  check('a session minted from a link works while the link is live',
+    cascadeSession !== null
+    && (await request('GET', `/api/client/project/${cascadeProject.id}`, { clientSession: cascadeSession })).status === 200);
+  const cascadeRevoked = await helpers.revokeClientLinks(db, cascadeClientRowId);
+  check('revoking a client\'s links reports how many it closed', Number(cascadeRevoked) >= 1, String(cascadeRevoked));
+  check('revoking a client\'s links also kills the sessions those links minted',
+    [401, 404].includes((await request('GET', `/api/client/project/${cascadeProject.id}`, { clientSession: cascadeSession })).status));
+  check('a direct-access session is recorded as a link session, never as a key session',
+    db.query('SELECT access_key_id, client_link_id FROM client_sessions WHERE client_id = ?', cascadeClientRowId)
+      .every((row) => row.access_key_id === null && row.client_link_id !== null));
+
+  // --- a passkey link spends its uses at sign-in, never at the link screen --
+  const spentPasskeyLink = await createLinkFor(roomA.id, {
+    projectId: roomProjectA.id, destination: 'letters', mode: 'REQUIRE_PASSKEY', maxUses: 1,
+  });
+  const spentFirstLook = await redeemLink(spentPasskeyLink.json.data.token);
+  check('opening a passkey link without signing in consumes nothing',
+    spentFirstLook.status === 200 && spentFirstLook.json.data.requiresPasskey === true
+    && Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', spentPasskeyLink.json.data.id)[0].use_count) === 0,
+    JSON.stringify(spentFirstLook.json));
+  const spentLogin = await passkeyWithLink(spentPasskeyLink.json.data.token, p7Passkey);
+  check('signing in through a passkey link spends exactly one use',
+    spentLogin.status === 200
+    && Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', spentPasskeyLink.json.data.id)[0].use_count) === 1
+    && Number(db.query('SELECT use_count FROM client_links WHERE public_id = ?', spentPasskeyLink.json.data.id)[0].use_count)
+      <= Number(db.query('SELECT max_uses FROM client_links WHERE public_id = ?', spentPasskeyLink.json.data.id)[0].max_uses),
+    JSON.stringify(spentLogin.json?.code || spentLogin.status));
+  const spentSecondLook = await redeemLink(spentPasskeyLink.json.data.token);
+  check('a spent passkey link still offers the sign-in screen rather than a dead end',
+    spentSecondLook.status === 200 && spentSecondLook.json.data.requiresPasskey === true,
+    JSON.stringify(spentSecondLook.json));
+  const spentSecondLogin = await passkeyWithLink(spentPasskeyLink.json.data.token, p7Passkey);
+  check('a passkey link that is out of uses is refused at sign-in',
+    spentSecondLogin.status === 404 && spentSecondLogin.json.code === 'link_exhausted',
+    JSON.stringify(spentSecondLogin.json));
+  check('no session was minted for the refused sign-in',
+    Number(db.query('SELECT COUNT(*) AS c FROM client_sessions WHERE client_link_id = (SELECT id FROM client_links WHERE public_id = ?)',
+      spentPasskeyLink.json.data.id)[0].c) === 1);
+
+  // --- the destination rules, tested one destination at a time -------------
+  const scopeFor = (destination, intent = 'view', documentId = null, documentRowId = null) => portalModule.clientLinkScope({
+    linkId: 1, linkDestination: destination, linkIntent: intent,
+    linkDocumentId: documentRowId, linkDocumentPublicId: documentId,
+  });
+  const letterDocument = { id: 11, public_id: 'doc_letter', category: 'letter' };
+  const reportDocument = { id: 12, public_id: 'doc_report', category: 'report' };
+  const targetDocument = { id: 13, public_id: 'doc_target', category: 'letter' };
+
+  check('a session without a link is not restricted',
+    portalModule.clientLinkScope({ linkId: null, linkDestination: null, linkIntent: 'view', linkDocumentId: null, linkDocumentPublicId: null }).restricted === false);
+  check('a link with an unusable destination is still restricted',
+    scopeFor('everything').restricted === true && scopeFor('everything').destination === 'project');
+  check('a section link carries its own section and no document',
+    scopeFor('letters').section === 'letters' && scopeFor('letters').documentId === null);
+  check('a document link carries the document and no section',
+    scopeFor('document', 'view', 'doc_target').documentId === 'doc_target' && scopeFor('document', 'view', 'doc_target').section === null);
+  check('a file link is an intent, not a destination, in the stored scope',
+    scopeFor('document', 'file', 'doc_target').destination === 'file'
+    && scopeFor('document', 'file', 'doc_target').intent === 'file');
+
+  const sectionMatrix = [
+    ['project', ['overview', 'documents', 'letters', 'agreements', 'reports', 'deliverables', 'updates'], true],
+    ['overview', ['overview'], true],
+    ['overview', ['letters'], false],
+    ['letters', ['letters'], true],
+    ['letters', ['documents'], false],
+    ['document', ['letters'], false],
+    ['file', ['overview'], false],
+  ];
+  for (const [destination, sections, expected] of sectionMatrix) {
+    const scope = scopeFor(destination);
+    check(`a ${destination} link ${expected ? 'may' : 'may not'} open ${sections.join('/')}`,
+      sections.every((section) => portalModule.clientLinkAllowsSection(scope, section) === expected));
+  }
+  check('a project link may read any published document in the room',
+    [letterDocument, reportDocument].every((document) => portalModule.clientLinkAllowsDocument(scopeFor('project'), document)));
+  check('a letters link may read only letter-category documents',
+    portalModule.clientLinkAllowsDocument(scopeFor('letters'), letterDocument)
+    && !portalModule.clientLinkAllowsDocument(scopeFor('letters'), reportDocument));
+  check('a document link may read only its own document',
+    portalModule.clientLinkAllowsDocument(scopeFor('document', 'view', 'doc_target'), targetDocument)
+    && !portalModule.clientLinkAllowsDocument(scopeFor('document', 'view', 'doc_target'), letterDocument));
+  check('a document link matches its document by row id as well as by public id',
+    portalModule.clientLinkTargetsDocument(scopeFor('document', 'view', null, 13), targetDocument)
+    && !portalModule.clientLinkTargetsDocument(scopeFor('document', 'view', null, 13), letterDocument));
+  check('a file link may never read the document text',
+    !portalModule.clientLinkAllowsDocument(scopeFor('document', 'file', 'doc_target'), targetDocument));
+  check('a file link may download only its own file',
+    portalModule.clientLinkAllowsDownload(scopeFor('document', 'file', 'doc_target'), targetDocument)
+    && !portalModule.clientLinkAllowsDownload(scopeFor('document', 'file', 'doc_target'), letterDocument));
+  check('a download permission never widens which documents a link reaches',
+    !portalModule.clientLinkAllowsDownload(scopeFor('letters'), reportDocument));
+  check('the room root is closed to a file link and open to the others',
+    !portalModule.clientLinkAllowsProjectRoot(scopeFor('document', 'file', 'doc_target'))
+    && ['project', 'overview', 'letters', 'document'].every((destination) => portalModule.clientLinkAllowsProjectRoot(scopeFor(destination))));
+  check('each section destination maps to the section it opens',
+    ['documents', 'letters', 'agreements', 'reports', 'deliverables', 'updates']
+      .every((destination) => portalModule.linkSectionForDestination(destination) === destination)
+    && ['project', 'overview', 'document', 'file']
+      .every((destination) => portalModule.linkSectionForDestination(destination) === null));
+
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
   console.log('\n' + '='.repeat(64));
   console.log(`TOTAL: ${results.length}   PASSED: ${passed}   FAILED: ${failed}`);
   if (failed) {
     console.log('\nFailures:');
-    for (const result of results.filter((entry) => !entry.p5Passed)) {
+    for (const result of results.filter((entry) => !entry.passed)) {
       console.log(`  - [${result.suite}] ${result.name}${result.detail ? ` — ${result.detail}` : ''}`);
     }
   }

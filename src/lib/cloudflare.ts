@@ -596,17 +596,53 @@ async function clientCall<T = any>(endpoint: string, options: ClientCallOptions 
   return payload as T;
 }
 
+/**
+ * The client-visible scope of a session (Phase 7). A key session reports
+ * `restricted: false`; a session minted from a temporary link reports the one
+ * destination it may reach, derived by the server from the stored link row.
+ */
+export interface ClientPortalDestination {
+  restricted: boolean;
+  destination: string;
+  intent: string;
+  section: string | null;
+  documentId: string | null;
+}
+
+export interface ClientPortalSessionPayload {
+  session?: ClientPortalSession;
+  client?: any;
+  project?: any;
+  permissions?: any;
+  destination?: ClientPortalDestination | null;
+  target?: { id: string; title: string; reference?: string | null; category?: string; version?: string | null } | null;
+  /** Present on a REQUIRE_PASSKEY link: the passkey is still the credential. */
+  requiresPasskey?: boolean;
+  mode?: string;
+  expiresAt?: string | null;
+}
+
 export const clientPortal = {
-  /** Exchanges a raw access key for a short-lived client session. */
-  exchangeAccessKey: (accessKey: string) =>
-    clientCall<{ data: { session: ClientPortalSession; client: any; project: any; permissions: any } }>(
+  /**
+   * Exchanges a raw access key for a short-lived client session.
+   *
+   * `linkToken` is supplied when the client arrived through a REQUIRE_PASSKEY
+   * link: the passkey stays the credential, and the link narrows the session to
+   * its own destination. The token is never stored.
+   */
+  exchangeAccessKey: (accessKey: string, linkToken?: string | null) =>
+    clientCall<{ data: ClientPortalSessionPayload }>(
       '/api/client/auth/login',
-      { method: 'POST', body: { passkey: accessKey } },
+      { method: 'POST', body: linkToken ? { passkey: accessKey, linkToken } : { passkey: accessKey } },
     ),
 
-  /** Exchanges a temporary link token for a client session. */
+  /**
+   * Exchanges a temporary link token for a scoped client session — or, for a
+   * REQUIRE_PASSKEY link, reports that the passkey is required and keeps the
+   * destination closed until it is given.
+   */
   redeemLink: (linkToken: string) =>
-    clientCall<{ data: { session: ClientPortalSession; client: any; project: any; permissions: any } }>(
+    clientCall<{ data: ClientPortalSessionPayload }>(
       `/api/client/link/${encodeURIComponent(linkToken)}`,
       { method: 'POST' },
     ),
@@ -616,7 +652,7 @@ export const clientPortal = {
   logout: () => clientCall<{ success: boolean }>('/api/client/auth/logout', { method: 'POST' }),
 
   project: (projectId: string) =>
-    clientCall<{ data: { project: any; sections: any[]; recent: any[] } }>(
+    clientCall<{ data: { project: any; sections: any[]; recent: any[]; scope?: ClientPortalDestination } }>(
       `/api/client/project/${encodeURIComponent(projectId)}`,
     ),
 
@@ -724,7 +760,15 @@ export const clientAccessCenter = {
 
   links: async (clientId: string) => (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/links`)).data || [],
   createLink: (clientId: string, data: any) =>
-    apiCall<{ data: { id: string; token: string; path: string; expiresAt: string; maxUses: number; allowDownload: boolean }; message: string }>(
+    apiCall<{
+      data: {
+        id: string; token: string; path: string; expiresAt: string; expiresInMinutes: number;
+        mode: string; destination: string; destinationLabel: string; intent: string;
+        maxUses: number | null; allowView: boolean; allowDownload: boolean;
+        document: { id: string; title: string; reference: string } | null;
+      };
+      message: string;
+    }>(
       `/api/phantom/clients/${clientId}/links`, { method: 'POST', body: JSON.stringify(data) },
     ),
   revokeLink: (linkId: string) => apiCall<{ message: string }>(`/api/phantom/client-links/${linkId}/revoke`, { method: 'POST' }),

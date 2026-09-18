@@ -6,6 +6,23 @@ import {
 import { clientAccessCenter } from '../lib/cloudflare';
 import { ClientProjectRoom, type ClientPortalContext, type RoomTransport } from './ClientProjectRoom';
 import { CATEGORY_LABELS } from '../lib/projectRoom';
+import {
+  LINK_ACCESS_MODES,
+  LINK_DESTINATIONS,
+  LINK_MAX_USES_LIMIT,
+  LINK_TTL_MINUTES_FALLBACK,
+  LINK_TTL_MAX_MINUTES,
+  LINK_TTL_MIN_MINUTES,
+  LINK_TTL_PRESETS,
+  linkDestination,
+  linkDestinationLabel,
+  linkPermissionSummary,
+  linkUsesLabel,
+  validateLinkLifetime,
+  validateLinkMaxUses,
+  type LinkAccessMode,
+  type LinkDestinationId,
+} from '../lib/linkAccess';
 
 type Section = 'clients' | 'projects' | 'documents' | 'links' | 'activity' | 'permissions';
 
@@ -125,7 +142,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [showClientForm, setShowClientForm] = useState<null | { mode: 'create' } | { mode: 'edit'; client: any }>(null);
   const [showProjectForm, setShowProjectForm] = useState<null | { mode: 'create' } | { mode: 'edit'; project: any }>(null);
   const [keyDialog, setKeyDialog] = useState<null | { clientId: string; projectId?: string }>(null);
-  const [revealedKey, setRevealedKey] = useState<null | { passkey: string; hint: string; expiresAt: string | null; message: string }>(null);
+  const [revealedKey, setRevealedKey] = useState<null | { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string }>(null);
   const [publishFlow, setPublishFlow] = useState<null | { clientId: string; projectId?: string; document?: any }>(null);
   const [linkDialog, setLinkDialog] = useState<null | { clientId: string }>(null);
   const [previewClient, setPreviewClient] = useState<null | { client: any; projectId: string; room: any; projects: any[] }>(null);
@@ -492,7 +509,10 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
           client={detail} projects={projects} documents={documents}
           onClose={() => setLinkDialog(null)}
           onIssued={async (payload, message) => {
-            setRevealedKey({ passkey: payload.token, hint: '', expiresAt: payload.expiresAt, message });
+            setRevealedKey({
+              passkey: payload.token, hint: '', expiresAt: payload.expiresAt, message,
+              label: 'Temporary link token',
+            });
             await refresh('A temporary link was created and is shown once.');
           }}
         />
@@ -716,9 +736,9 @@ const LinksPanel = ({
   <div>
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h4 className="text-lg font-black text-slate-900">Temporary access links</h4>
+        <h4 className="text-lg font-black text-slate-900">Temporary project links</h4>
         <p className="text-xs font-medium text-slate-500">
-          Links are exchanged for a short-lived client session. A link token is never stored — it is shown once.
+          Each link opens one destination, for a limited time. Tokens are hashed on the server and shown once.
         </p>
       </div>
       {can('clients.links.create') ? (
@@ -733,13 +753,24 @@ const LinksPanel = ({
               <div className="flex flex-wrap items-center gap-2">
                 <p className="font-bold text-slate-900">{link.project?.name || 'Project'}</p>
                 <Pill tone={link.status}>{link.status}</Pill>
-                <Pill>{link.document ? 'single document' : 'whole room'}</Pill>
+                <Pill>{linkDestinationLabel(link.destination)}</Pill>
+                <Pill tone={link.mode === 'DIRECT_ACCESS' ? 'suspended' : 'active'}>
+                  {link.mode === 'DIRECT_ACCESS' ? 'Direct access' : 'Passkey required'}
+                </Pill>
               </div>
-              {link.document ? <p className="mt-1 text-xs font-semibold text-slate-600">{link.document.title} · <span className="font-mono">{link.document.reference}</span></p> : null}
+              {link.document ? (
+                <p className="mt-1 text-xs font-semibold text-slate-600">
+                  {link.document.title} · <span className="font-mono">{link.document.reference}</span>
+                  {link.intent === 'file' ? <span className="ml-2 font-bold text-emerald-700">file only</span> : null}
+                </p>
+              ) : null}
               <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
                 <span className="inline-flex items-center gap-1"><Clock className="h-3 w-3" /> expires {formatWhen(link.expiresAt)}</span>
-                <span>used {link.useCount}{link.maxUses ? ` / ${link.maxUses}` : ''}</span>
-                <span>View {link.allowView ? 'allowed' : 'denied'} · Download {link.allowDownload ? 'allowed' : 'denied'}</span>
+                <span>{linkUsesLabel(link)}</span>
+                <span>{linkPermissionSummary(link).label}</span>
+                {link.intent === 'file' && link.hasClientArtifact === false ? (
+                  <span className="font-bold text-amber-700">no client file yet</span>
+                ) : null}
               </p>
             </div>
             {link.status === 'active' && can('clients.links.revoke') ? (
@@ -1228,7 +1259,7 @@ const KeyDialog = ({
 
 const KeyRevealDialog = ({
   payload, onClose,
-}: { payload: { passkey: string; hint: string; expiresAt: string | null; message: string }; onClose: () => void }) => {
+}: { payload: { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string }; onClose: () => void }) => {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -1243,12 +1274,14 @@ const KeyRevealDialog = ({
   return (
     <Dialog
       title="Copy this now"
-      subtitle="This value is shown once. Close this window and it cannot be retrieved — only regenerated."
+      subtitle={payload.label === 'Temporary link token'
+        ? 'This link is shown once. Deliver it securely; it cannot be retrieved — only replaced.'
+        : 'This value is shown once. Close this window and it cannot be retrieved — only regenerated.'}
       onClose={onClose}
     >
       <div className="space-y-4">
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center">
-          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-700">Client credential</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-700">{payload.label || 'Client credential'}</p>
           <p className="mt-2 break-all font-mono text-lg font-black tracking-[0.12em] text-emerald-900 sm:text-2xl">{payload.passkey}</p>
           {payload.expiresAt ? <p className="mt-2 text-[11px] font-bold text-emerald-800">Expires {formatWhen(payload.expiresAt)}</p> : null}
         </div>
@@ -1462,29 +1495,59 @@ const LinkDialogHost = ({
   onIssued: (payload: { token: string; expiresAt: string; path: string }, message: string) => void | Promise<void>;
 }) => {
   const [projectId, setProjectId] = useState(projects.find((project) => !project.isArchived)?.id || '');
+  const [destination, setDestination] = useState<LinkDestinationId>('project');
   const [documentId, setDocumentId] = useState('');
-  const [scope, setScope] = useState<'room' | 'document'>('room');
-  const [expiryMinutes, setExpiryMinutes] = useState('60');
+  const [mode, setMode] = useState<LinkAccessMode>('REQUIRE_PASSKEY');
+  const [expiryMinutes, setExpiryMinutes] = useState(String(LINK_TTL_MINUTES_FALLBACK));
+  const [customExpiry, setCustomExpiry] = useState('');
+  const [unlimitedUses, setUnlimitedUses] = useState(false);
   const [maxUses, setMaxUses] = useState('1');
+  const [allowView, setAllowView] = useState(true);
   const [allowDownload, setAllowDownload] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const chosen = linkDestination(destination)!;
+  const isFile = destination === 'file';
+  const needsDocument = chosen.needsDocument;
+
+  // Only published, client-visible documents of the chosen project can be
+  // linked to — the server refuses anything else, so the picker does not offer it.
   const projectDocuments = documents.filter((document) =>
     document.project?.id === projectId && document.lifecycle === 'published' && document.clientVisible);
+  const chosenDocument = projectDocuments.find((document) => document.id === documentId) || null;
+
+  // A file destination exists to deliver the stamped client copy, so the
+  // permissions are decided by the destination, not by the operator.
+  const effectiveAllowDownload = isFile ? true : allowDownload;
+  const effectiveAllowView = isFile ? false : allowView;
+
+  const minutes = customExpiry ? Number(customExpiry) : Number(expiryMinutes);
 
   const submit = async () => {
     setError(null);
     if (!projectId) { setError('Choose the project this link opens.'); return; }
-    if (scope === 'document' && !documentId) { setError('Choose the published document this link opens.'); return; }
+    if (needsDocument && !documentId) {
+      setError(isFile ? 'Choose the published document whose file this link delivers.' : 'Choose the published document this link opens.');
+      return;
+    }
+    const lifetimeProblem = validateLinkLifetime(minutes);
+    if (lifetimeProblem) { setError(lifetimeProblem); return; }
+    const usesProblem = unlimitedUses ? null : validateLinkMaxUses(Number(maxUses));
+    if (usesProblem) { setError(usesProblem); return; }
+    if (!effectiveAllowView && !effectiveAllowDownload) { setError('Allow viewing, downloading, or both.'); return; }
+
     setSaving(true);
     try {
       const result = await clientAccessCenter.createLink(client.id, {
         projectId,
-        documentId: scope === 'document' ? documentId : undefined,
-        expiresInMinutes: Number(expiryMinutes) || 60,
-        maxUses: Number(maxUses) || 1,
-        allowDownload: scope === 'document' ? allowDownload : false,
+        destination,
+        documentId: needsDocument ? documentId : undefined,
+        mode,
+        expiresInMinutes: minutes,
+        maxUses: unlimitedUses ? null : Number(maxUses),
+        allowView: effectiveAllowView,
+        allowDownload: effectiveAllowDownload,
       });
       await onIssued({ token: result.data.token, expiresAt: result.data.expiresAt, path: result.data.path }, result.message);
     } catch (failure: any) {
@@ -1497,19 +1560,10 @@ const LinkDialogHost = ({
   return (
     <Dialog
       title="Create temporary link"
-      subtitle={`For ${client.name}. The link is exchanged for a short-lived client session — the URL alone never authorizes anything.`}
+      subtitle={`For ${client.name}. The destination, the access mode and the lifetime are all enforced by the server.`}
       onClose={onClose}
     >
-      <div className="space-y-4">
-        <Field label="Scope">
-          <div className="flex gap-2">
-            {([['room', 'Whole project room'], ['document', 'One published document']] as const).map(([value, label]) => (
-              <button key={value} onClick={() => setScope(value)} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${scope === value ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
-                {label}
-              </button>
-            ))}
-          </div>
-        </Field>
+      <div className="space-y-5">
         <Field label="Project">
           <select className={inputClass} value={projectId} onChange={(event) => { setProjectId(event.target.value); setDocumentId(''); }}>
             <option value="">Choose a project…</option>
@@ -1518,9 +1572,30 @@ const LinkDialogHost = ({
             ))}
           </select>
         </Field>
-        {scope === 'document' ? (
+
+        <Field label="Destination">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {LINK_DESTINATIONS.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => { setDestination(entry.id); if (!entry.needsDocument) setDocumentId(''); }}
+                className={`rounded-xl px-3.5 py-2.5 text-left text-xs font-bold transition ${
+                  destination === entry.id
+                    ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                    : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <span className="block font-black uppercase tracking-wider">{entry.label}</span>
+                <span className="mt-0.5 block text-[11px] font-medium text-slate-500">{entry.hint}</span>
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        {needsDocument ? (
           <>
-            <Field label="Published document">
+            <Field label={isFile ? 'Document whose file is delivered' : 'Published document'}>
               <select className={inputClass} value={documentId} onChange={(event) => setDocumentId(event.target.value)}>
                 <option value="">Choose a published document…</option>
                 {projectDocuments.map((document) => (
@@ -1533,20 +1608,125 @@ const LinkDialogHost = ({
                 Nothing is published in this project yet, so there is no document to link to.
               </p>
             ) : null}
-            <label className="flex items-start gap-3">
-              <input type="checkbox" checked={allowDownload} onChange={(event) => setAllowDownload(event.target.checked)} className="mt-0.5 rounded border-slate-300" />
-              <span className="text-xs font-semibold text-slate-700">Allow download on this link (the document must also allow it)</span>
-            </label>
+            {isFile && chosenDocument && !chosenDocument.hasClientArtifact ? (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11px] font-semibold text-amber-900">
+                This document has no stamped client copy yet. Code Rx Society never hands over an unstamped original,
+                so the server will refuse a file link until the client-ready file exists.
+              </p>
+            ) : null}
+            {isFile && chosenDocument && Number(chosenDocument.allowDownload) !== 1 ? (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11px] font-semibold text-amber-900">
+                This document does not allow downloads, so a file link cannot be created for it.
+              </p>
+            ) : null}
           </>
         ) : null}
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Expires in (minutes)" hint="5–1440.">
-            <input type="number" min={5} max={1440} className={inputClass} value={expiryMinutes} onChange={(event) => setExpiryMinutes(event.target.value)} />
-          </Field>
-          <Field label="Maximum uses" hint="1–50.">
-            <input type="number" min={1} max={50} className={inputClass} value={maxUses} onChange={(event) => setMaxUses(event.target.value)} />
-          </Field>
-        </div>
+
+        <Field label="Access mode" hint={LINK_ACCESS_MODES.find((entry) => entry.id === mode)?.hint}>
+          <div className="flex flex-wrap gap-2">
+            {LINK_ACCESS_MODES.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => setMode(entry.id)}
+                className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider transition ${
+                  mode === entry.id ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="Valid for">
+          <div className="flex flex-wrap gap-2">
+            {LINK_TTL_PRESETS.map((preset) => (
+              <button
+                key={preset.minutes}
+                type="button"
+                onClick={() => { setExpiryMinutes(String(preset.minutes)); setCustomExpiry(''); }}
+                className={`rounded-xl px-3 py-2 text-[11px] font-black uppercase tracking-wider transition ${
+                  !customExpiry && Number(expiryMinutes) === preset.minutes
+                    ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                    : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 flex items-center gap-3">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500" htmlFor="link-custom-expiry">Custom</label>
+            <input
+              id="link-custom-expiry"
+              type="number"
+              min={LINK_TTL_MIN_MINUTES}
+              max={LINK_TTL_MAX_MINUTES}
+              className={`${inputClass} max-w-[160px]`}
+              placeholder={`${LINK_TTL_MIN_MINUTES}–${LINK_TTL_MAX_MINUTES} minutes`}
+              value={customExpiry}
+              onChange={(event) => setCustomExpiry(event.target.value)}
+            />
+            <span className="text-[11px] font-semibold text-slate-500">minutes</span>
+          </div>
+        </Field>
+
+        <Field label="Permissions">
+          <div className="space-y-2">
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={effectiveAllowView}
+                disabled={isFile}
+                onChange={(event) => setAllowView(event.target.checked)}
+                className="mt-0.5 rounded border-slate-300"
+              />
+              <span className="text-xs font-semibold text-slate-700">
+                VIEW — the client may read the destination
+                {isFile ? <span className="ml-1 font-bold text-slate-500">(a file link never opens the reader)</span> : null}
+              </span>
+            </label>
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={effectiveAllowDownload}
+                disabled={isFile}
+                onChange={(event) => setAllowDownload(event.target.checked)}
+                className="mt-0.5 rounded border-slate-300"
+              />
+              <span className="text-xs font-semibold text-slate-700">
+                DOWNLOAD — documents that allow downloads may be downloaded through this link
+                {isFile ? <span className="ml-1 font-bold text-slate-500">(always on for a file link)</span> : null}
+              </span>
+            </label>
+          </div>
+        </Field>
+
+        <Field label="Maximum uses">
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <input
+                type="checkbox"
+                checked={unlimitedUses}
+                onChange={(event) => setUnlimitedUses(event.target.checked)}
+                className="rounded border-slate-300"
+              />
+              Unlimited
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={LINK_MAX_USES_LIMIT}
+              className={`${inputClass} max-w-[140px]`}
+              value={maxUses}
+              disabled={unlimitedUses}
+              onChange={(event) => setMaxUses(event.target.value)}
+            />
+            <span className="text-[11px] font-semibold text-slate-500">uses (1–{LINK_MAX_USES_LIMIT})</span>
+          </div>
+        </Field>
+
         {error ? <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-sm font-semibold text-rose-800">{error}</p> : null}
         <div className="flex justify-end gap-2 pt-1">
           <button onClick={onClose} className="mini-button">Cancel</button>

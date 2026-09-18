@@ -6,6 +6,7 @@ import {
   Download,
   Eye,
   FileText,
+  KeyRound,
   Loader2,
   LockKeyhole,
   LogOut,
@@ -14,8 +15,14 @@ import {
 import { clientPortal, ClientPortalError } from '../lib/cloudflare';
 import { messageForFailure } from '../lib/accessKey';
 import {
+  landingFor,
+  linkDestinationLabel,
+  type LinkLanding,
+} from '../lib/linkAccess';
+import {
   CATEGORY_LABELS,
   canDownload,
+  sectionForCategory,
   downloadFileName,
   emptyMessageFor,
   hasAnyPublishedContent,
@@ -32,6 +39,20 @@ export interface ClientPortalContext {
   client: { id: string; name: string; contactName?: string | null };
   project: { id: string; reference: string; name: string; description?: string; status?: string };
   permissions: { view: boolean; download: boolean };
+  /**
+   * Phase 7: where this session may go. `restricted` is true only for a session
+   * minted from a temporary link; a key session sees the whole room. The room
+   * renders only what the server offered — the server refuses the rest anyway.
+   */
+  destination?: {
+    restricted: boolean;
+    destination: string;
+    intent: string;
+    section: string | null;
+    documentId: string | null;
+  } | null;
+  /** The single document a document/file link names, when it names one. */
+  target?: { id: string; title: string; reference?: string | null; category?: string; version?: string | null } | null;
 }
 
 /**
@@ -41,7 +62,7 @@ export interface ClientPortalContext {
  * lets PREVIEW render the genuine component without inventing a second room.
  */
 export interface RoomTransport {
-  project: (projectId: string) => Promise<{ data: { project?: any; sections?: any[]; recent?: any[] } }>;
+  project: (projectId: string) => Promise<{ data: { project?: any; sections?: any[]; recent?: any[]; scope?: any } }>;
   section: (projectId: string, section: string) => Promise<{ data: { documents?: any[] } }>;
   document: (projectId: string, documentId: string) => Promise<{ data: { document: any } }>;
   /** Absent in preview: preview never serves a file. */
@@ -189,6 +210,62 @@ const DocumentRow = ({
 };
 
 /**
+ * The landing screen for a link that exists to deliver one file.
+ *
+ * It shows only the file the link names: no section list, no other document, no
+ * counts. When the download is not permitted through this link the button is
+ * replaced by the reason, and the server refuses the request in any case.
+ */
+const FileLandingPanel = ({
+  target, clientName, canDownload, busy, onDownload,
+}: {
+  target: { title?: string; reference?: string | null; category?: string; version?: string | null } | null;
+  clientName: string;
+  canDownload: boolean;
+  busy: boolean;
+  onDownload: () => void | Promise<void>;
+}) => (
+  <div className="mx-auto max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.4)] sm:p-9">
+    <span className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">
+      <Download className="h-5 w-5" />
+    </span>
+    <h1 className="mt-5 text-xl font-black tracking-tight text-slate-900 sm:text-2xl">Your file is ready</h1>
+    <p className="mt-2 text-sm font-medium leading-6 text-slate-600">
+      This temporary link delivers one file from {clientName}, prepared for you by Code Rx Society.
+    </p>
+
+    <div className="mt-6 rounded-xl border border-slate-100 bg-slate-50/70 px-4 py-4">
+      <p className="text-sm font-bold text-slate-900">{target?.title || 'Client file'}</p>
+      <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
+        {target?.reference ? <span className="font-mono uppercase tracking-wider">{target.reference}</span> : null}
+        {target?.version ? <span>Version {target.version}</span> : null}
+        {target?.category ? <span className="uppercase tracking-[0.1em] text-emerald-700">{CATEGORY_LABELS[target.category] || 'Document'}</span> : null}
+      </p>
+    </div>
+
+    {canDownload ? (
+      <button
+        type="button"
+        onClick={() => void onDownload()}
+        disabled={busy}
+        className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-4 text-sm font-black uppercase tracking-[0.18em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-70 sm:w-auto"
+      >
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Download file
+      </button>
+    ) : (
+      <p className="mt-6 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+        <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0" />
+        This link does not permit downloads. Ask Code Rx Society for a link that does.
+      </p>
+    )}
+
+    <p className="mt-6 text-xs font-medium leading-5 text-slate-500">
+      Only this file is available through this link. Nothing else in the project room can be opened from here.
+    </p>
+  </div>
+);
+
+/**
  * The authenticated Client Project Room.
  *
  * Nothing here decides access: the project id comes from the signed-in session,
@@ -212,6 +289,10 @@ export const ClientProjectRoom = ({
   const [signingOut, setSigningOut] = useState(false);
 
   const projectId = context.project.id;
+  // Where the link (or key) was allowed to land. Everything below is derived
+  // from the server's own scope block, never from the URL.
+  const landing: LinkLanding = useMemo(() => landingFor(context.destination), [context.destination]);
+  const restricted = context.destination?.restricted === true;
 
   const handleFailure = useCallback((failure: unknown) => {
     const status = failure instanceof ClientPortalError ? failure.status : -1;
@@ -242,7 +323,25 @@ export const ClientProjectRoom = ({
     }
   }, [projectId, handleFailure, transport]);
 
-  useEffect(() => { void loadProject(); }, [loadProject]);
+  useEffect(() => {
+    // A file link exists to deliver one file: the room is never fetched, so the
+    // session stays the minimum authorization the destination needs.
+    if (landing.fileOnly) { setLoading(false); return; }
+    void loadProject();
+  }, [loadProject, landing.fileOnly]);
+
+  // Land on the destination the link named, once the room's own data has loaded.
+  useEffect(() => {
+    if (loading || landing.fileOnly) return;
+    if (landing.kind === 'section') void openSection(landing.section);
+    else if (landing.kind === 'document' && landing.documentId) {
+      void openSection(sectionForCategory(context.target?.category));
+      void openDocumentById(landing.documentId);
+    }
+    // Only when the destination itself changes: a client browsing afterwards is
+    // never bounced back to the link's landing point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, landing.kind, landing.section, landing.documentId, landing.fileOnly]);
 
   const openSection = async (section: string) => {
     setActiveSection(section);
@@ -368,6 +467,15 @@ export const ClientProjectRoom = ({
             </span>
           </div>
         ) : null}
+        {restricted && !landing.fileOnly ? (
+          <div className="mb-6 flex items-start gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700">
+            <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+            <span>
+              You opened this room with a temporary link for <strong>{linkDestinationLabel(context.destination?.destination)}</strong>.
+              Anything outside that destination stays closed; your access key opens the whole room.
+            </span>
+          </div>
+        ) : null}
         {notice ? (
           <div className="mb-6 flex items-start justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
             <span className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{notice}</span>
@@ -375,6 +483,30 @@ export const ClientProjectRoom = ({
           </div>
         ) : null}
 
+        {landing.fileOnly ? (
+          <FileLandingPanel
+            target={context.target || null}
+            clientName={context.client.name}
+            canDownload={context.permissions.download === true}
+            busy={busy}
+            onDownload={async () => {
+              if (!landing.documentId) return;
+              setBusy(true);
+              setError(null);
+              try {
+                if (!transport.download) {
+                  onNotice('In preview, downloads are shown but not served.');
+                  return;
+                }
+                await transport.download(projectId, landing.documentId, `${(context.target?.reference || 'code-rx-file')}.pdf`);
+              } catch {
+                onNotice('This file is not available to download yet. Please contact Code Rx Society.');
+              } finally {
+                setBusy(false);
+              }
+            }}
+          />
+        ) : (
         <div className="grid gap-6 lg:grid-cols-[230px_1fr] lg:gap-8">
           {/* Sections: a horizontal strip on small screens, a sidebar from lg up. */}
           <nav aria-label="Project sections" className="lg:sticky lg:top-6 lg:self-start">
@@ -503,6 +635,16 @@ export const ClientProjectRoom = ({
                         />
                       ))}
                     </ul>
+                  ) : activeSection === 'overview' && !anythingPublished && landing.fileOnly ? (
+                    <div className="px-5 py-10 text-center">
+                      <span className="mx-auto inline-flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                      </span>
+                      <p className="mt-4 text-sm font-bold text-slate-700">Preparing your file…</p>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">
+                        This link delivers a single file. Your download starts automatically.
+                      </p>
+                    </div>
                   ) : (
                     <div className="px-5 py-12 text-center">
                       <span className="mx-auto inline-flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
@@ -535,6 +677,7 @@ export const ClientProjectRoom = ({
             </p>
           </section>
         </div>
+        )}
       </main>
     </div>
   );

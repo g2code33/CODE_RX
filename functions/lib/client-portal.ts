@@ -23,7 +23,13 @@
 import type { Context, Next } from 'hono';
 import type { Env } from '../env';
 import { actorFromContext, audit, hasWebsitePermission } from './vault';
-import { clientSessionHash, CLIENT_SESSION_HEADER, resolveClientSessionRecord } from './client-auth';
+import {
+  clientSessionHash,
+  CLIENT_SESSION_HEADER,
+  CLIENT_LINK_DEFAULT_MAX_USES,
+  CLIENT_LINK_DEFAULT_TTL_MINUTES,
+  resolveClientSessionRecord,
+} from './client-auth';
 
 // ---------------------------------------------------------------------------
 // Enumerations (stored as CHECK-constrained text, matching existing table style)
@@ -53,7 +59,10 @@ export const CLIENT_ACTIVITY_EVENTS = [
   'SECTION_OPENED',
   'DOCUMENT_VIEWED',
   'DOCUMENT_DOWNLOADED',
+  'LINK_CREATED',
   'LINK_USED',
+  'LINK_EXPIRED',
+  'LINK_REVOKED',
   'ACCESS_KEY_REVOKED',
   'ACCESS_KEY_REGENERATED',
   'ACCESS_DENIED',
@@ -61,6 +70,230 @@ export const CLIENT_ACTIVITY_EVENTS = [
   'ACCESS_REVOKED_ALL',
 ] as const;
 export type ClientActivityEvent = typeof CLIENT_ACTIVITY_EVENTS[number];
+
+// ---------------------------------------------------------------------------
+// Temporary project links — destinations, access modes and scope (Phase 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ten things a temporary link may open. The stored values are the Phase 5
+ * `client_links.destination_type` values; `file` is stored as a `document`
+ * destination whose intent is 'file', so no existing row changes meaning.
+ */
+export const CLIENT_LINK_DESTINATIONS = [
+  'project', 'overview', 'documents', 'letters', 'agreements',
+  'reports', 'deliverables', 'updates', 'document', 'file',
+] as const;
+export type ClientLinkDestination = typeof CLIENT_LINK_DESTINATIONS[number];
+
+/** Destinations that name one of the room's sections. */
+export const CLIENT_LINK_SECTION_DESTINATIONS = [
+  'documents', 'letters', 'agreements', 'reports', 'deliverables', 'updates',
+] as const;
+
+export const CLIENT_LINK_DESTINATION_LABELS: Record<ClientLinkDestination, string> = {
+  project: 'Project Room',
+  overview: 'Project Overview',
+  documents: 'Documents',
+  letters: 'Letters',
+  agreements: 'Agreements',
+  reports: 'Reports',
+  deliverables: 'Deliverables',
+  updates: 'Updates',
+  document: 'Specific document',
+  file: 'Specific file',
+};
+
+/** The brief's access modes. Storage keeps the Phase 5 `passkey`/`direct` values. */
+export const CLIENT_LINK_ACCESS_MODES = ['REQUIRE_PASSKEY', 'DIRECT_ACCESS'] as const;
+export type ClientLinkAccessMode = typeof CLIENT_LINK_ACCESS_MODES[number];
+
+export type ClientLinkIntent = 'view' | 'file';
+
+/** Storage value → brief name. Unknown storage values are treated as passkey. */
+export const linkAccessMode = (stored: unknown): ClientLinkAccessMode =>
+  String(stored) === 'direct' ? 'DIRECT_ACCESS' : 'REQUIRE_PASSKEY';
+
+/** Brief name → storage value. */
+export const linkAccessModeValue = (brief: unknown): 'passkey' | 'direct' =>
+  String(brief || '').trim().toUpperCase() === 'DIRECT_ACCESS' ? 'direct' : 'passkey';
+
+export const isClientLinkDestination = (value: unknown): value is ClientLinkDestination =>
+  typeof value === 'string' && (CLIENT_LINK_DESTINATIONS as readonly string[]).includes(value);
+
+export const isClientLinkSectionDestination = (value: unknown): boolean =>
+  typeof value === 'string' && (CLIENT_LINK_SECTION_DESTINATIONS as readonly string[]).includes(value);
+
+/**
+ * Expiry choices offered by the operator UI and accepted by the server, in
+ * minutes. Custom expirations are any other value inside the same window.
+ */
+export const CLIENT_LINK_TTL_PRESETS = [15, 60, 360, 1440, 4320, 10080] as const;
+export const CLIENT_LINK_MIN_TTL_MINUTES = 5;
+export const CLIENT_LINK_MAX_TTL_MINUTES = 7 * 24 * 60;
+export const CLIENT_LINK_MAX_USES_LIMIT = 50;
+
+/** Clamps a requested lifetime into the supported window. Never trusts the browser. */
+export const clampLinkTtlMinutes = (value: unknown): number => {
+  const minutes = Math.floor(Number(value));
+  if (!Number.isFinite(minutes) || minutes <= 0) return CLIENT_LINK_DEFAULT_TTL_MINUTES;
+  return Math.min(CLIENT_LINK_MAX_TTL_MINUTES, Math.max(CLIENT_LINK_MIN_TTL_MINUTES, minutes));
+};
+
+/**
+ * `maxUses` absent means the operator asked for the single-use default; an
+ * explicit null/empty/0 means the link is not use-limited.
+ */
+export const resolveLinkMaxUses = (value: unknown): number | null => {
+  if (value === undefined) return CLIENT_LINK_DEFAULT_MAX_USES;
+  if (value === null || value === '' || Number(value) === 0) return null;
+  const uses = Math.floor(Number(value));
+  if (!Number.isFinite(uses) || uses < 1) return CLIENT_LINK_DEFAULT_MAX_USES;
+  return Math.min(CLIENT_LINK_MAX_USES_LIMIT, uses);
+};
+
+/**
+ * The destination a stored link points at, in the shape the client app and the
+ * operator UI both use. `label` is client-safe wording only.
+ */
+export interface ClientLinkDestinationDescriptor {
+  destination: ClientLinkDestination;
+  intent: ClientLinkIntent;
+  /** Section id when the destination is a room section, otherwise null. */
+  section: string | null;
+  /** Public document id for document/file destinations, otherwise null. */
+  documentId: string | null;
+  label: string;
+}
+
+export const describeLinkDestination = (row: {
+  destination_type?: unknown;
+  destination_id?: unknown;
+  destination_intent?: unknown;
+  document_public_id?: unknown;
+}): ClientLinkDestinationDescriptor => {
+  const stored = String(row?.destination_type || '');
+  const intent: ClientLinkIntent = String(row?.destination_intent || 'view') === 'file' ? 'file' : 'view';
+  const documentId = row?.document_public_id === null || row?.document_public_id === undefined
+    ? (typeof row?.destination_id === 'string' ? row.destination_id : null)
+    : String(row.document_public_id);
+  const destination: ClientLinkDestination = intent === 'file'
+    ? 'file'
+    : (isClientLinkDestination(stored) ? stored : (documentId ? 'document' : 'project'));
+  return {
+    destination,
+    intent,
+    section: isClientLinkSectionDestination(destination) ? destination : null,
+    documentId: destination === 'document' || destination === 'file' ? documentId : null,
+    label: CLIENT_LINK_DESTINATION_LABELS[destination],
+  };
+};
+
+/** The client-visible scope of one request's session. */
+export interface ClientLinkScope {
+  /** False for a key session: the whole project room is the destination. */
+  restricted: boolean;
+  destination: ClientLinkDestination;
+  intent: ClientLinkIntent;
+  section: string | null;
+  /** Opaque public id of the destination document, when there is one. */
+  documentId: string | null;
+  /** The same document's row id, used for authorization comparisons. */
+  documentRowId: number | null;
+}
+
+/**
+ * Derives the scope from the principal itself. Everything is read from the
+ * resolved session/link row, so a tampered URL cannot widen it.
+ */
+export const clientLinkScope = (
+  principal: Pick<ClientPrincipal, 'linkId' | 'linkDestination' | 'linkIntent' | 'linkDocumentId' | 'linkDocumentPublicId'>,
+): ClientLinkScope => {
+  const empty: ClientLinkScope = {
+    restricted: false, destination: 'project', intent: 'view', section: null, documentId: null, documentRowId: null,
+  };
+  if (principal.linkId === null) return empty;
+  const destination: ClientLinkDestination = principal.linkIntent === 'file'
+    ? 'file'
+    : (isClientLinkDestination(principal.linkDestination) ? principal.linkDestination : 'project');
+  const documentScoped = destination === 'document' || destination === 'file';
+  return {
+    restricted: true,
+    destination,
+    intent: destination === 'file' ? 'file' : 'view',
+    section: isClientLinkSectionDestination(destination) ? destination : null,
+    documentId: documentScoped
+      ? (principal.linkDocumentPublicId
+        ?? (principal.linkDocumentId === null ? null : String(principal.linkDocumentId)))
+      : null,
+    documentRowId: documentScoped ? principal.linkDocumentId : null,
+  };
+};
+
+/**
+ * May this session open the project's room root? A file link exists to deliver
+ * one file, so it never opens the room at all.
+ */
+export const clientLinkAllowsProjectRoot = (scope: ClientLinkScope): boolean =>
+  !scope.restricted || scope.destination !== 'file';
+
+/** May this session open one of the room's sections? */
+export const clientLinkAllowsSection = (scope: ClientLinkScope, section: string): boolean => {
+  if (!scope.restricted) return true;
+  if (scope.destination === 'project') return true;
+  if (scope.destination === 'overview') return section === 'overview';
+  if (scope.destination === 'document' || scope.destination === 'file') return false;
+  return scope.section === section;
+};
+
+/** The document category behind a room section. */
+export const SECTION_CATEGORY_FOR_SECTION: Record<string, string> = {
+  documents: 'document',
+  letters: 'letter',
+  agreements: 'agreement',
+  reports: 'report',
+  deliverables: 'deliverable',
+  updates: 'update',
+};
+
+/**
+ * May this session open one document? A link that names a single document only
+ * ever opens that one; a section link only opens documents of its own category.
+ */
+export const clientLinkTargetsDocument = (
+  scope: ClientLinkScope,
+  document: { id: number | string; public_id?: string | null },
+): boolean => {
+  if (scope.documentRowId !== null) return Number(document.id) === scope.documentRowId;
+  if (scope.documentId === null) return false;
+  return String(scope.documentId) === String(document.id)
+    || String(scope.documentId) === String(document.public_id ?? '');
+};
+
+export const clientLinkAllowsDocument = (
+  scope: ClientLinkScope,
+  document: { id: number | string; public_id?: string | null; category?: string | null },
+): boolean => {
+  if (!scope.restricted) return true;
+  if (scope.destination === 'file') return false;
+  if (scope.destination === 'document') return clientLinkTargetsDocument(scope, document);
+  if (scope.destination === 'project' || scope.destination === 'overview') return true;
+  return SECTION_CATEGORY_FOR_SECTION[String(scope.section)] === String(document.category || '');
+};
+
+/** May this session download one document's client file? */
+export const clientLinkAllowsDownload = (
+  scope: ClientLinkScope,
+  document: { id: number | string; public_id?: string | null; category?: string | null },
+): boolean => {
+  if (!scope.restricted) return true;
+  if (scope.destination === 'file') return clientLinkTargetsDocument(scope, document);
+  return clientLinkAllowsDocument(scope, document);
+};
+
+/** Maps a destination to the room section it opens, when it opens one. */
+export const linkSectionForDestination = (destination: ClientLinkDestination): string | null =>
+  isClientLinkSectionDestination(destination) ? destination : null;
 
 // ---------------------------------------------------------------------------
 // Row helpers
@@ -249,8 +482,19 @@ export interface ClientPrincipal {
   linkId: number | null;
   linkAllowsView: boolean;
   linkAllowsDownload: boolean;
-  /** Set when the link is scoped to a single document. */
+  /** Set when the link is scoped to a single document (row id, for authorization). */
   linkDocumentId: number | null;
+  /** The same document's opaque public id, for the client-facing payload. */
+  linkDocumentPublicId: string | null;
+  /**
+   * Phase 7: the destination the link was issued for. A session minted from a
+   * key has `linkDestination: null` and is unrestricted inside its project; a
+   * link session may only reach what its destination names. The value always
+   * comes from the stored link row, never from the browser.
+   */
+  linkDestination: ClientLinkDestination | null;
+  /** 'view' opens the reader, 'file' delivers the stamped client file only. */
+  linkIntent: ClientLinkIntent;
   expiresAt: string;
 }
 
@@ -350,6 +594,9 @@ export const resolveClientPrincipal = async (
       linkAllowsView: record.link_allow_view === null ? true : Number(record.link_allow_view) === 1,
       linkAllowsDownload: record.link_allow_download === null ? true : Number(record.link_allow_download) === 1,
       linkDocumentId: record.link_document_id === null ? null : Number(record.link_document_id),
+      linkDocumentPublicId: record.link_destination_id ? String(record.link_destination_id) : null,
+      linkDestination: record.link_destination_type ? (record.link_destination_type as ClientLinkDestination) : null,
+      linkIntent: record.link_intent === 'file' ? 'file' : 'view',
       expiresAt: record.session_expires_at,
     },
     reason: 'ok',
@@ -427,18 +674,25 @@ export const requireClientDocumentAccess = async (c: any, next: Next) => {
   if (!base.canView) return clientNotFound();
 
   // A temporary link can be narrower than the client's own permissions: it may
-  // forbid downloading, or point at one single document. Both restrictions are
-  // applied here, server-side, on top of the document's own flags.
+  // forbid downloading, point at a single document, or exist only to deliver a
+  // file. Every one of those restrictions is applied here, server-side, on top
+  // of the document's own flags — the link's destination comes from the stored
+  // link row, never from the URL.
+  let exposure = base;
   if (principal.linkId !== null) {
-    if (!principal.linkAllowsView) return clientNotFound();
-    if (principal.linkDocumentId !== null && Number(document.id) !== principal.linkDocumentId) return clientNotFound();
+    const scope = clientLinkScope(principal);
+    const mayRead = principal.linkAllowsView && clientLinkAllowsDocument(scope, document);
+    // A link that only delivers a file — a file destination, or a download-only
+    // link — may not read the document but must be able to reach its file.
+    const mayTouch = mayRead
+      || (principal.linkAllowsDownload && clientLinkAllowsDownload(scope, document));
+    if (!mayTouch) return clientNotFound();
+    exposure = {
+      exposed: base.exposed,
+      canView: base.canView && mayRead,
+      canDownload: base.canDownload && principal.linkAllowsDownload && clientLinkAllowsDownload(scope, document),
+    };
   }
-
-  const exposure = {
-    exposed: base.exposed,
-    canView: base.canView && principal.linkAllowsView,
-    canDownload: base.canDownload && principal.linkAllowsDownload,
-  };
 
   c.set('clientDocument', document);
   c.set('clientDocumentExposure', exposure);

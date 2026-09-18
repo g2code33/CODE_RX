@@ -56,6 +56,8 @@ const bundle = async () => {
       contents: `
         export * from './src/lib/accessKey';
         export * from './src/lib/projectRoom';
+        export * from './src/lib/linkAccess';
+        export { ClientLinkState } from './src/components/ClientLinkState';
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom } from './src/components/ClientProjectRoom';
@@ -93,6 +95,12 @@ const main = async () => {
     visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
     permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
     documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
+    LINK_DESTINATIONS, LINK_DESTINATION_IDS, LINK_ACCESS_MODES, LINK_TTL_PRESETS,
+    LINK_TTL_MINUTES_FALLBACK, LINK_TTL_MIN_MINUTES, LINK_TTL_MAX_MINUTES, LINK_MAX_USES_LIMIT,
+    linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
+    validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
+    landingFor, linkStateScreen, LINK_STATE_SCREENS, LINK_CONTACT_EMAIL, linkContactHref,
+    looksLikeLinkToken, linkPath, ClientLinkState,
   } = module;
 
   const { renderToStaticMarkup } = await import('react-dom/server');
@@ -620,6 +628,197 @@ const main = async () => {
     /export const clientPortal = \{/.test(apiSource) && /export const clientAccessCenter = \{/.test(apiSource));
   check('the workspace never renders the audit detail JSON as raw internal ids only',
     !/subject_id|actor_user_id/.test(centerSource));
+
+
+  // =========================================================================
+  group('12. Temporary project links — destinations, modes and end states (Phase 7)');
+  // =========================================================================
+
+  // --- the ten destinations, in the order the brief lists them -------------
+  check('the dialog offers exactly the ten destinations the brief names',
+    LINK_DESTINATIONS.map((entry) => entry.id).join(',')
+      === 'project,overview,documents,letters,agreements,reports,deliverables,updates,document,file',
+    LINK_DESTINATIONS.map((entry) => entry.id).join(','));
+  check('the destinations carry client-facing labels, never internal codes',
+    LINK_DESTINATIONS.every((entry) => /^[A-Z][A-Za-z ]+$/.test(entry.label))
+    && LINK_DESTINATIONS.every((entry) => entry.hint.length > 20),
+    LINK_DESTINATIONS.map((entry) => entry.label).join(' · '));
+  check('only a specific document and a specific file need a document chosen',
+    LINK_DESTINATIONS.filter((entry) => entry.needsDocument).map((entry) => entry.id).join(',') === 'document,file');
+  check('a file destination is a download destination, never a room destination',
+    linkDestination('file')?.kind === 'file' && linkDestination('project')?.kind === 'room');
+  check('an unknown destination never resolves to something wider',
+    linkDestination('everything') === null && linkDestinationLabel('everything') === 'Project Room');
+
+  // --- the two access modes ------------------------------------------------
+  check('exactly the two access modes are offered',
+    LINK_ACCESS_MODES.map((entry) => entry.id).join(',') === 'REQUIRE_PASSKEY,DIRECT_ACCESS',
+    LINK_ACCESS_MODES.map((entry) => entry.id).join(','));
+  check('direct access says the token itself is the credential',
+    /token is the credential/i.test(LINK_ACCESS_MODES.find((entry) => entry.id === 'DIRECT_ACCESS')?.hint || ''));
+  check('the passkey mode says the passkey is still the credential',
+    /signs in with their project access key/i.test(LINK_ACCESS_MODES.find((entry) => entry.id === 'REQUIRE_PASSKEY')?.hint || ''));
+  check('the mode is translated to operator wording',
+    linkAccessModeLabel('REQUIRE_PASSKEY') === 'Require passkey' && linkAccessModeLabel('DIRECT_ACCESS') === 'Direct access');
+
+  // --- the expiry choices --------------------------------------------------
+  check('the six required expirations are offered in order',
+    LINK_TTL_PRESETS.map((preset) => preset.minutes).join(',') === '15,60,360,1440,4320,10080',
+    LINK_TTL_PRESETS.map((preset) => preset.minutes).join(','));
+  check('the expiry labels read as the brief words them',
+    LINK_TTL_PRESETS.map((preset) => preset.label).join(',')
+      === '15 minutes,1 hour,6 hours,24 hours,3 days,7 days',
+    LINK_TTL_PRESETS.map((preset) => preset.label).join(','));
+  check('a custom expiration stays inside the window the server accepts',
+    LINK_TTL_MIN_MINUTES === 5 && LINK_TTL_MAX_MINUTES === 10080);
+  check('the custom lifetime is validated before it is sent',
+    validateLinkLifetime(5) === null && Boolean(validateLinkLifetime(4)) && Boolean(validateLinkLifetime(10081))
+    && Boolean(validateLinkLifetime(null)) && Boolean(validateLinkLifetime(90.5)));
+  check('a custom lifetime is described with the preset wording when one matches',
+    ttlLabel(1440) === '24 hours' && ttlLabel(10080) === '7 days' && ttlLabel(5) === '5 minutes');
+  check('the default lifetime is one of the offered presets',
+    LINK_TTL_PRESETS.some((preset) => preset.minutes === LINK_TTL_MINUTES_FALLBACK));
+
+  // --- permissions and uses ------------------------------------------------
+  check('view and download are described as independent permissions',
+    linkPermissionSummary({ allowView: true, allowDownload: true }).label === 'View and download'
+    && linkPermissionSummary({ allowView: true, allowDownload: false }).label === 'View only'
+    && linkPermissionSummary({ allowView: false, allowDownload: true }).label === 'Download only');
+  check('a file link is download-only whatever else was chosen',
+    linkPermissionSummary({ intent: 'file', allowView: true, allowDownload: true }).label === 'Download only'
+    && /never asks for a token|text stays closed|reading only/i.test(
+      `${linkPermissionSummary({ intent: 'file' }).detail} ${linkPermissionSummary({ allowView: true }).detail}`));
+  check('the operator wording never claims download permission implies read permission',
+    !/download permission (also )?(allows|means) (reading|viewing)/i.test(
+      `${linkPermissionSummary({ allowView: false, allowDownload: true }).detail}`));
+  check('a maximum-uses limit is bounded',
+    validateLinkMaxUses(null) === null && validateLinkMaxUses(1) === null && validateLinkMaxUses(LINK_MAX_USES_LIMIT) === null
+    && Boolean(validateLinkMaxUses(0)) && Boolean(validateLinkMaxUses(LINK_MAX_USES_LIMIT + 1)));
+  check('the uses column shows the count and the limit',
+    linkUsesLabel({ useCount: 2, maxUses: 5 }) === '2 of 5 used'
+    && /unlimited/.test(linkUsesLabel({ useCount: 2, maxUses: null })),
+    linkUsesLabel({ useCount: 2, maxUses: 5 }));
+
+  // --- where an authorized client lands (never from the URL) ---------------
+  const roomLanding = landingFor({ restricted: true, destination: 'project' });
+  const overviewLanding = landingFor({ restricted: true, destination: 'overview' });
+  const sectionLanding = landingFor({ restricted: true, destination: 'letters' });
+  const documentLanding = landingFor({ restricted: true, destination: 'document', documentId: 'doc_abc' });
+  const fileLanding = landingFor({ restricted: true, destination: 'file', documentId: 'doc_abc' });
+  check('a room link opens the room overview', roomLanding.kind === 'room' && roomLanding.section === 'overview');
+  check('an overview link states its destination', overviewLanding.kind === 'overview' && overviewLanding.label === 'Project Overview');
+  check('a section link opens exactly that section',
+    sectionLanding.kind === 'section' && sectionLanding.section === 'letters');
+  check('a document link opens exactly that document',
+    documentLanding.kind === 'document' && documentLanding.documentId === 'doc_abc');
+  check('a file link is flagged as file-only so the room is never fetched',
+    fileLanding.kind === 'file' && fileLanding.fileOnly === true && fileLanding.documentId === 'doc_abc');
+  check('an unrestricted session lands on the whole room',
+    landingFor({ restricted: false }).kind === 'room' && landingFor(null).fileOnly === false
+    && landingFor(undefined).label === 'Project Room');
+  check('a restricted payload with an unusable destination never widens access',
+    landingFor({ restricted: true, destination: 'everything' }).label === 'Project Room');
+
+  // --- the end states ------------------------------------------------------
+  check('the four link end states exist', Object.keys(LINK_STATE_SCREENS).sort().join(',')
+    === 'link_exhausted,link_expired,link_invalid,link_revoked', Object.keys(LINK_STATE_SCREENS).join(','));
+  check('the expired state is headed exactly THIS LINK HAS EXPIRED',
+    linkStateScreen('link_expired')?.headline === 'THIS LINK HAS EXPIRED');
+  check('the revoked state is headed exactly ACCESS REVOKED',
+    linkStateScreen('link_revoked')?.headline === 'ACCESS REVOKED');
+  check('every end state tells the client what to do next',
+    Object.values(LINK_STATE_SCREENS).every((state) => state.message.length > 30 && state.guidance.length > 20));
+  check('a non-link failure is left to the ordinary access screen',
+    linkStateScreen('invalid_passkey') === null && linkStateScreen('') === null && linkStateScreen(undefined) === null);
+  check('the contact address is the existing Code Rx Society address',
+    LINK_CONTACT_EMAIL === 'coderxsociety@gmail.com' && linkContactHref('THIS LINK HAS EXPIRED').startsWith('mailto:coderxsociety@gmail.com?subject='));
+  check('the contact mail link names the state rather than the token',
+    !/lnk_|token/i.test(decodeURIComponent(linkContactHref('ACCESS REVOKED'))));
+
+  // --- the token itself ----------------------------------------------------
+  check('a link token is recognised by its shape, never inspected further',
+    looksLikeLinkToken('a'.repeat(43)) && looksLikeLinkToken('A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2')
+    && !looksLikeLinkToken('CRX-8K4P-X92M-7LQF-B3TD') && !looksLikeLinkToken('short') && !looksLikeLinkToken('a/'.repeat(20)));
+  check('the client-facing link path carries the token in the fragment, not the query',
+    linkPath('abc123') === '/#client-portal/link/abc123' && !/\?/.test(linkPath('abc123')));
+
+  // --- the rendered end states --------------------------------------------
+  const expiredHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_expired'), onContinue: () => {} }));
+  check('the expired screen renders the required headline', expiredHtml.includes('THIS LINK HAS EXPIRED'));
+  check('the expired screen offers Contact Code Rx Society',
+    expiredHtml.includes('Contact Code Rx Society') && /href="mailto:coderxsociety@gmail\.com/.test(expiredHtml));
+  check('the expired screen states that nothing was shown',
+    /no project content was shown/i.test(expiredHtml));
+  check('the expired screen offers the access key as the way forward',
+    /Use my access key/.test(expiredHtml));
+  const revokedHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_revoked') }));
+  check('the revoked screen renders the required headline', revokedHtml.includes('ACCESS REVOKED'));
+  check('the revoked screen offers Contact Code Rx Society', revokedHtml.includes('Contact Code Rx Society'));
+  check('the revoked screen does not pretend a retry will work',
+    !/try again/i.test(revokedHtml) && /can no longer be opened/i.test(revokedHtml));
+  const exhaustedHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_exhausted') }));
+  check('an exhausted link is explained as a limit, not as an error', /reached the number of uses/i.test(exhaustedHtml));
+  const invalidHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_invalid') }));
+  check('an unrecognised link never confirms what it was', /could not be recognised/i.test(invalidHtml));
+  for (const [name, html] of [['expired', expiredHtml], ['revoked', revokedHtml], ['exhausted', exhaustedHtml], ['invalid', invalidHtml]]) {
+    check(`the ${name} screen renders no destination, no project and no identifiers`,
+      !/Recently published|prj_|doc_|lnk_|storage_reference|vault_/i.test(html));
+    check(`the ${name} screen never renders a stored credential field`,
+      !/key_hash|token_hash|session_hash|passkey_hash/i.test(html));
+  }
+
+  // --- the portal shell ----------------------------------------------------
+  const portalSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientPortal.tsx'), 'utf8');
+  check('the portal reads the link token from the fragment', /#client-portal\/link\//.test(portalSource));
+  check('the token is removed from the address bar once it has been exchanged',
+    /stripLinkTokenFromUrl/.test(portalSource) && /history\.replaceState/.test(portalSource));
+  check('the link token is held in memory only',
+    /useState<\{ token: string \} \| null>\(null\)/.test(portalSource)
+    && !/localStorage[\s\S]{0,80}pendingLink/.test(portalSource)
+    && !/sessionStorage[\s\S]{0,80}pendingLink/.test(portalSource));
+  check('only the session token is ever written to session storage',
+    /clientPortalSession\.write\(\{ token: session\.token, expiresAt: session\.expiresAt \}\)/.test(portalSource));
+  check('a passkey-required link opens nothing until the passkey is given',
+    /requiresPasskey[\s\S]{0,200}setPendingLink/.test(portalSource));
+  check('an unusable link renders the link end state instead of a room',
+    /ClientLinkState/.test(portalSource) && /linkStateScreen\(/.test(portalSource));
+  check('the portal never fetches the room while a link end state is showing',
+    !/linkState\s*&&[\s\S]{0,200}clientPortal\.(project|room)\(/.test(portalSource));
+  check('the portal forgets the link token when the client signs in with a key',
+    /setPendingLink\(null\)/.test(portalSource));
+
+  // --- the operator surfaces ----------------------------------------------
+  const linksPanelSource = centerSource.slice(centerSource.indexOf('const LinksPanel'));
+  check('the links panel renders the destination, the mode and the permissions',
+    /linkDestinationLabel\(link\.destination\)/.test(linksPanelSource)
+    && /link\.mode === 'DIRECT_ACCESS'/.test(linksPanelSource)
+    && /linkPermissionSummary\(link\)\.label/.test(linksPanelSource));
+  check('the links panel shows the remaining uses and the expiry',
+    /linkUsesLabel\(link\)/.test(linksPanelSource) && /expires \{formatWhen\(link\.expiresAt\)\}/.test(linksPanelSource));
+  check('a revoked or expired link cannot be revoked again',
+    /link\.status === 'active' && can\('clients\.links\.revoke'\)/.test(linksPanelSource));
+  check('the links panel warns when a file link has no stamped client copy',
+    /hasClientArtifact === false/.test(linksPanelSource) && /no client file yet/.test(linksPanelSource));
+  check('the create dialog builds its choices from the shared rules',
+    /LINK_DESTINATIONS\.map/.test(centerSource) && /LINK_ACCESS_MODES\.map/.test(centerSource)
+    && /LINK_TTL_PRESETS\.map/.test(centerSource));
+  check('the create dialog sends destination, mode, lifetime, uses and permissions',
+    /destination,/.test(centerSource) && /mode,/.test(centerSource) && /expiresInMinutes: minutes/.test(centerSource)
+    && /maxUses: unlimitedUses \? null : Number\(maxUses\)/.test(centerSource)
+    && /allowView: effectiveAllowView/.test(centerSource) && /allowDownload: effectiveAllowDownload/.test(centerSource));
+  check('a file link is forced to download-only in the dialog',
+    /const effectiveAllowDownload = isFile \? true : allowDownload/.test(centerSource)
+    && /const effectiveAllowView = isFile \? false : allowView/.test(centerSource));
+  check('only published, client-visible documents can be linked to',
+    /document\.lifecycle === 'published' && document\.clientVisible/.test(centerSource));
+  check('the dialog explains that an unstamped document cannot be linked',
+    /never hands over an unstamped original/i.test(centerSource));
+  check('the token is shown once and never again',
+    /shown once/.test(centerSource) && /cannot be retrieved/.test(centerSource));
+  check('the links panel states that tokens are hashed on the server',
+    /hashed on the server and shown once/i.test(linksPanelSource));
+  check('the operator surfaces never render a link token from the list',
+    !/link\.token/.test(centerSource));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

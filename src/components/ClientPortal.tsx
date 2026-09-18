@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { KeyRound, Loader2 } from 'lucide-react';
 import { ClientAccessScreen } from './ClientAccessScreen';
+import { ClientLinkState } from './ClientLinkState';
 import { ClientProjectRoom, type ClientPortalContext } from './ClientProjectRoom';
 import { clientPortal, clientPortalSession, ClientPortalError } from '../lib/cloudflare';
 import { messageForFailure } from '../lib/accessKey';
+import { linkStateScreen, type LinkStateScreen } from '../lib/linkAccess';
 
 /**
  * Reads a temporary link token out of `#client-portal/link/<token>`.
@@ -27,13 +29,19 @@ const stripLinkTokenFromUrl = () => {
 
 /**
  * The client portal shell: it owns the client session, decides whether to show
- * the access screen or the project room, and never trusts a stored copy of the
- * client's identity — the context always comes back from the server.
+ * the access screen, a link end state, or the project room, and never trusts a
+ * stored copy of the client's identity — the context always comes back from the
+ * server.
  */
 export const ClientPortal = () => {
   const [context, setContext] = useState<ClientPortalContext | null>(null);
   const [checking, setChecking] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  // A link that requires the passkey: the token is held in memory only, never
+  // in storage, and it is offered back to the server when the client signs in.
+  const [pendingLink, setPendingLink] = useState<{ token: string } | null>(null);
+  // A link that cannot be used at all — expired, revoked, exhausted, unknown.
+  const [linkState, setLinkState] = useState<LinkStateScreen | null>(null);
   const redeemedLink = useRef(false);
 
   const applySession = useCallback((session: { token: string; expiresAt: string }, data: any) => {
@@ -42,7 +50,11 @@ export const ClientPortal = () => {
       client: data.client,
       project: data.project,
       permissions: data.permissions || { view: true, download: false },
+      destination: data.destination || null,
+      target: data.target || null,
     });
+    setPendingLink(null);
+    setLinkState(null);
     setNotice(null);
   }, []);
 
@@ -59,12 +71,23 @@ export const ClientPortal = () => {
         stripLinkTokenFromUrl();
         try {
           const response = await clientPortal.redeemLink(linkToken);
-          if (!cancelled) applySession(response.data.session, response.data);
+          if (cancelled) return;
+          const data = response.data || {};
+          // REQUIRE_PASSKEY: the link names the destination, the passkey is
+          // still the credential. Nothing is opened until it has been given.
+          if (data.requiresPasskey) {
+            setPendingLink({ token: linkToken });
+            return;
+          }
+          if (!data.session) throw new ClientPortalError('This link could not be opened.', 0, 'link_invalid');
+          applySession(data.session, data);
         } catch (failure) {
           if (cancelled) return;
           const status = failure instanceof ClientPortalError ? failure.status : -1;
           const code = failure instanceof ClientPortalError ? failure.code : null;
-          setNotice(messageForFailure(status, code));
+          const screen = linkStateScreen(code);
+          if (screen) setLinkState(screen);
+          else setNotice(messageForFailure(status, code));
         } finally {
           if (!cancelled) setChecking(false);
         }
@@ -97,9 +120,12 @@ export const ClientPortal = () => {
   const signIn = useCallback(async (accessKey: string) => {
     // Failures propagate so the access screen can show the exact state. The raw
     // key is only ever held in that component's state until this resolves.
-    const response = await clientPortal.exchangeAccessKey(accessKey);
+    const response = await clientPortal.exchangeAccessKey(accessKey, pendingLink?.token);
+    if (!response.data.session) {
+      throw new ClientPortalError('Your session could not be started.', 0, 'unavailable');
+    }
     applySession(response.data.session, response.data);
-  }, [applySession]);
+  }, [applySession, pendingLink]);
 
   const signOut = useCallback(() => {
     clientPortalSession.clear();
@@ -123,8 +149,34 @@ export const ClientPortal = () => {
     );
   }
 
+  if (linkState) {
+    return (
+      <ClientLinkState
+        state={linkState}
+        onContinue={() => {
+          setLinkState(null);
+          setPendingLink(null);
+          setNotice(null);
+        }}
+      />
+    );
+  }
+
   if (!context) {
-    return <ClientAccessScreen onSubmit={signIn} notice={notice} />;
+    return (
+      <ClientAccessScreen
+        onSubmit={signIn}
+        notice={notice}
+        // A passkey-required link explains itself before the key is typed.
+        eyebrow={pendingLink ? 'Temporary project link' : undefined}
+        heading={pendingLink ? 'SIGN IN TO CONTINUE' : undefined}
+        helper={pendingLink
+          ? 'This temporary link opens for you once your project access key is accepted.'
+          : undefined}
+        noticeIcon={pendingLink ? <KeyRound className="mt-0.5 h-4 w-4 shrink-0" /> : undefined}
+        onAbandon={pendingLink ? () => { setPendingLink(null); setNotice(null); } : undefined}
+      />
+    );
   }
 
   return (
