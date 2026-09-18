@@ -282,7 +282,7 @@ export const EditableImage = ({
   // Empty assets are intentional: project/card placeholders remain visible,
   // while the transparent selectable slot opens the upload inspector.
   if (!src) return <span {...props} aria-label={`${label} — upload an image`} />;
-  return <img {...props} src={src} alt={alt} />;
+  return <img {...props} src={src} alt={alt} loading="lazy" decoding="async" />;
 };
 
 export const selectedDesign = (design: SiteDesign, elementKey: string, breakpoint: 'desktop' | 'tablet' | 'mobile') =>

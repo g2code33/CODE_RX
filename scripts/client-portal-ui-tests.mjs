@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
+import childProcess from 'node:child_process';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 // The bundle is emitted inside the repo so that the externalized React imports
@@ -118,6 +119,7 @@ const main = async () => {
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
     landingFor, linkStateScreen, LINK_STATE_SCREENS, LINK_CONTACT_EMAIL, linkContactHref,
     CLIENT_PORTAL_HASH, clientPortalPath, clientEntryCopy, ClientPortalEntry,
+    telHref,
     clientContact, clientSupportMailto, phantomContactHref, PHANTOM_CONTACT_HASH, CLIENT_SITE_HOME,
     ClientSupportContact, ClientAccessKeyField, ClientSiteSign,
     SiteEmoji, SiteEmojiText, SiteEmojiProvider, SiteEmojiAdmin, ContactForm,
@@ -1798,6 +1800,92 @@ const main = async () => {
   check('no control on the join form is left without a name',
     unlabelled.length === 0 && unnamed.length === 0,
     `${unlabelled.length} unlabelled, ${unnamed.length} unnamed`);
+
+  // =========================================================================
+  group('22. Phase 17 Round C — weight, reach and focus');
+  // =========================================================================
+
+  // --- every image the app renders asks the browser to defer it ------------
+  const imagesWithoutLazy = [];
+  for (const name of fs.readdirSync(path.join(ROOT, 'src/components'))) {
+    if (!name.endsWith('.tsx')) continue;
+    const source = readSrc(`src/components/${name}`);
+    for (const match of source.matchAll(/<img\b[\s\S]{0,400}?\/>/g)) {
+      if (!/loading="lazy"/.test(match[0]) || !/decoding="async"/.test(match[0])) imagesWithoutLazy.push(`${name}: ${match[0].slice(0, 60)}`);
+    }
+  }
+  check('every image in the application defers its load', imagesWithoutLazy.length === 0, imagesWithoutLazy.join(' | '));
+
+  const assetBytes = (file) => fs.statSync(path.join(ROOT, 'public', file)).size;
+  const budget = {
+    'CODE RX11.png': 140 * 1024,
+    'icon-512.png': 140 * 1024,
+    'icon-512-maskable.png': 100 * 1024,
+    'logo.png': 60 * 1024,
+    'logo-small.png': 40 * 1024,
+    'icon-192.png': 30 * 1024,
+    'apple-touch-icon.png': 30 * 1024,
+  };
+  const heavy = Object.entries(budget).filter(([file, limit]) => assetBytes(file) > limit);
+  check('the shipped images are inside a sane weight budget', heavy.length === 0,
+    heavy.map(([file, limit]) => `${file} ${(assetBytes(file) / 1024).toFixed(0)}KB > ${limit / 1024}KB`).join(', '));
+  check('the emblem is not shipped at a resolution it is never drawn at',
+    (() => {
+      const size = childProcess.execSync(`identify -format "%w" "${path.join(ROOT, 'public/CODE RX11.png')}"`, { encoding: 'utf8' }).trim();
+      return Number(size) <= 512;
+    })());
+  check('no image was degraded into a thumbnail in the process',
+    (() => {
+      const out = childProcess.execSync(`identify -format "%w %h|" "${path.join(ROOT, 'public/logo.png')}" "${path.join(ROOT, 'public/icon-512.png')}"`, { encoding: 'utf8' }).trim().split('|');
+      return /^240 240$/.test(out[0].trim()) && /^512 512$/.test(out[1].trim());
+    })());
+
+  // --- a release invalidates the cached shell ------------------------------
+  check('the service worker cache name is versioned and current',
+    /const CACHE = 'code-rx-v5'/.test(readSrc('public/sw.js')));
+  check('the service worker still refuses to cache API responses',
+    /if \(url\.pathname\.startsWith\('\/api\/'\)\) return;/.test(readSrc('public/sw.js')));
+
+  // --- sharing and crawling ------------------------------------------------
+  const indexPage = readSrc('index.html');
+  check('the page carries a social card for every share',
+    /property="og:title"/.test(indexPage) && /property="og:description"/.test(indexPage)
+    && /property="og:image"/.test(indexPage) && /name="twitter:card"/.test(indexPage)
+    && /<link rel="canonical"/.test(indexPage));
+  check('the shared image is the society emblem, at an absolute address',
+    /og:image" content="https:\/\/[^"]+CODE%20RX11\.png"/.test(indexPage));
+  check('crawlers are given a map and told to leave the API alone',
+    /Sitemap: https:\/\//.test(readSrc('public/robots.txt'))
+    && /Disallow: \/api\//.test(readSrc('public/robots.txt'))
+    && /<urlset/.test(readSrc('public/sitemap.xml')));
+  check('the site description stays under the length search engines display',
+    (indexPage.match(/name="description" content="([^"]+)"/)?.[1].length || 0) <= 180);
+
+  // --- a phone number is a phone number ------------------------------------
+  check('the footer numbers are tappable, and the helper keeps the dialling shape',
+    /href=\{\`tel:\$\{telHref\(/.test(readSrc('src/components/Footer.tsx'))
+    && telHref('053 734 5524') === '0537345524'
+    && telHref('+233 53 734 5524') === '0537345524'
+    && telHref('') === '');
+
+  // --- nothing is left without a focus ring --------------------------------
+  const unfocused = [];
+  for (const name of fs.readdirSync(path.join(ROOT, 'src/components'))) {
+    if (!name.endsWith('.tsx')) continue;
+    const source = readSrc(`src/components/${name}`);
+    for (const match of source.matchAll(/className=(?:"([^"]*)"|\{`([^`]*)`\})/g)) {
+      const classes = match[1] || match[2] || '';
+      if (!classes.includes('outline-none')) continue;
+      if (classes.includes('focus-visible:ring') || classes.includes('focus:ring')) continue;
+      unfocused.push(name);
+    }
+  }
+  check('no control removes the focus outline without replacing it', unfocused.length === 0,
+    [...new Set(unfocused)].join(', '));
+  check('no pale slate-300 text or placeholder survives anywhere',
+    !/text-slate-300|placeholder:text-slate-300/.test(
+      fs.readdirSync(path.join(ROOT, 'src/components')).filter((n) => n.endsWith('.tsx'))
+        .map((n) => readSrc(`src/components/${n}`)).join('\n')));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

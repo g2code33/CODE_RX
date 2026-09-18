@@ -848,7 +848,7 @@ export const AdminPanel = ({
                         {siteContent.home.communityMembers.map((member, idx) => (
                           <div key={member.id} className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-100">
                             <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-200 flex-shrink-0">
-                              <img src={member.image} alt={member.name} className="w-full h-full object-cover" />
+                              <img src={member.image} alt={member.name} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                             </div>
                             <input 
                               type="text"
@@ -995,7 +995,7 @@ export const AdminPanel = ({
                     {siteContent.about.team.map((member, idx) => (
                       <div key={idx} className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-wrap items-center gap-4">
                         <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-200 flex-shrink-0">
-                          <img src={member.image} alt={member.name} className="w-full h-full object-cover" />
+                          <img src={member.image} alt={member.name} className="w-full h-full object-cover" loading="lazy" decoding="async" />
                         </div>
                         <div className="flex-grow grid md:grid-cols-3 gap-3 flex-1 min-w-[300px]">
                           <input 

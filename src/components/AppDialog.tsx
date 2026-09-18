@@ -145,7 +145,7 @@ export const Modal = ({
         aria-modal="true"
         aria-labelledby={labelledBy || 'app-dialog-title'}
         tabIndex={-1}
-        className={`relative my-auto w-full ${widths[size]} overflow-hidden rounded-2xl bg-white shadow-[0_28px_90px_rgba(2,20,12,0.45)] outline-none`}
+        className={`relative my-auto w-full ${widths[size]} overflow-hidden rounded-2xl bg-white shadow-[0_28px_90px_rgba(2,20,12,0.45)] outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40`}
       >
         <div className="flex items-start justify-between gap-4 border-b border-[#e2e8f0] px-6 py-5">
           <div className="min-w-0">

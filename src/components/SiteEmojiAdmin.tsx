@@ -109,7 +109,7 @@ export const SiteEmojiAdmin = ({
               <div className="flex items-start gap-3">
                 <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-slate-100 bg-slate-50 text-2xl">
                   {replacement?.src ? (
-                    <img src={replacement.src} alt={entry.label} className="h-8 w-8 object-contain" />
+                    <img src={replacement.src} alt={entry.label} className="h-8 w-8 object-contain" loading="lazy" decoding="async" />
                   ) : (
                     entry.emoji
                   )}
@@ -127,7 +127,7 @@ export const SiteEmojiAdmin = ({
                   {entry.emoji}
                   <span className="text-slate-400">→</span>
                   {replacement?.src ? (
-                    <img src={replacement.src} alt={`${entry.label} replacement`} className="inline-block h-5 w-5 object-contain" />
+                    <img src={replacement.src} alt={`${entry.label} replacement`} className="inline-block h-5 w-5 object-contain" loading="lazy" decoding="async" />
                   ) : (
                     <span className="text-slate-400">{entry.emoji}</span>
                   )}

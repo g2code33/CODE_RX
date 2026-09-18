@@ -2,7 +2,9 @@
 // Caches the app shell (the single-file index.html + logos) for offline
 // launch; API requests are never cached.
 
-const CACHE = 'code-rx-v4';
+// BUMP THIS on every release. The shell is served from the cache first, so a
+// stale value here is what makes a deploy invisible for one page load.
+const CACHE = 'code-rx-v5';
 const CORE = [
   '/',
   '/index.html',

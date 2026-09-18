@@ -152,7 +152,7 @@ export const ClientAccessKeyField = ({
               : `Access key, group ${index + 1} of ${ACCESS_KEY_GROUPS}`}
             aria-invalid={invalid}
             aria-describedby={describedBy}
-            className={`w-full min-w-0 rounded-xl border-2 bg-slate-50 py-4 text-center font-mono text-lg font-bold uppercase tracking-[0.14em] text-slate-900 shadow-inner outline-none transition placeholder:text-slate-300 disabled:opacity-60 sm:text-xl ${
+            className={`w-full min-w-0 rounded-xl border-2 bg-slate-50 py-4 text-center font-mono text-lg font-bold uppercase tracking-[0.14em] text-slate-900 shadow-inner outline-none transition placeholder:text-slate-500 disabled:opacity-60 sm:text-xl ${
               invalid
                 ? 'border-rose-300 bg-rose-50/40 focus:border-rose-400 focus:bg-white'
                 : complete && filled

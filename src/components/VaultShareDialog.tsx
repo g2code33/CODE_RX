@@ -251,7 +251,7 @@ export const VaultShareDialog = ({ document, onClose }: VaultShareDialogProps) =
           </label>
           <label className="rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm text-emerald-950">
             <span className="flex items-center gap-2 font-bold"><CalendarDays className="h-4 w-4 text-emerald-600" />Link access period</span>
-            <select value={expiryChoice} onChange={(event) => setExpiryChoice(event.target.value as ExpiryChoice)} className="mt-2 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 outline-none focus:border-emerald-500">
+            <select value={expiryChoice} onChange={(event) => setExpiryChoice(event.target.value as ExpiryChoice)} className="mt-2 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-500/40 text-slate-700 outline-none focus:border-emerald-500">
               {EXPIRY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
             <small className="mt-1.5 block text-xs leading-5 text-slate-500">{selectedExpiry.detail}</small>
@@ -270,7 +270,7 @@ export const VaultShareDialog = ({ document, onClose }: VaultShareDialogProps) =
           <div><p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">New secure link</p><p className="mt-1 text-xs text-emerald-900">Ready to share whenever you are.</p></div>
           {copyButton(shareUrl, 'new-link')}
         </div>
-        <textarea readOnly value={shareUrl} aria-label="New secure share link" className="h-20 w-full resize-none bg-white p-4 text-xs leading-5 text-slate-700 outline-none" />
+        <textarea readOnly value={shareUrl} aria-label="New secure share link" className="h-20 w-full resize-none bg-white p-4 text-xs leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40" />
         {'share' in navigator && <div className="border-t border-slate-100 px-4 py-3"><button onClick={() => void nativeShare()} className="inline-flex items-center gap-2 text-xs font-black text-emerald-700 transition hover:text-emerald-900"><Send className="h-4 w-4" />Share from this device</button></div>}
       </article>}
 

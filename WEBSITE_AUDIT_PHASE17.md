@@ -3,7 +3,10 @@
 
 **How this was done:** static inspection of all 58 source files, a headless render of the real components (home, contact modal, dashboard, client access screen, client support block), a live server probe of the running build, contrast computed numerically against the real palette, and HTTP checks on the external links the site ships. Nothing here is a guess: each finding names the file and line, or the measured value.
 
-**Nothing in this report has been changed yet** — it is a findings list for you to pick from.
+**Status: all three rounds are done.** Round A (`a5e6279`) removed the invented content and gave every emptied
+screen a real empty state. Round B (`ece41fd`) replaced the 27 browser dialogs, made the dashboard search real and
+gave every modal Escape, focus and a locked page behind. Round C (this commit) is the list below: weight, reach and
+focus. Each finding in the body carries its own note where the fix differs from the suggestion.
 
 ---
 

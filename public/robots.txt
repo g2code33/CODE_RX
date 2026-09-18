@@ -1,0 +1,9 @@
+# CODE Rx SOCIETY — crawler rules
+# The public site is open to search engines. The API surface is not: API
+# responses carry member, Vault and client data, and must never be indexed.
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /vault-share
+
+Sitemap: https://coderxsociety.pages.dev/sitemap.xml

@@ -24,7 +24,7 @@ export const ClientSiteSign = ({
       aria-label="Code Rx Society website home"
       className="flex min-w-0 items-center gap-3 rounded-lg no-underline focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100"
     >
-      <img src="/logo.png" alt="Code Rx Society" className="h-9 w-9 rounded-lg object-contain" />
+      <img src="/logo.png" alt="Code Rx Society" className="h-9 w-9 rounded-lg object-contain" loading="lazy" decoding="async" />
       <span className="min-w-0 leading-tight">
         <span className="block text-[12px] font-black tracking-[0.22em] text-slate-900 sm:text-[13px]">CODE Rx SOCIETY</span>
         <span className="block truncate text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{subtitle}</span>

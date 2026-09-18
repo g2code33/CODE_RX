@@ -975,7 +975,7 @@ export const ActivityPanel = ({
           </ul>
         ) : (
           <div className="px-5 py-10 text-center">
-            <Clock className="mx-auto h-6 w-6 text-slate-300" />
+            <Clock className="mx-auto h-6 w-6 text-slate-500" />
             <p className="mt-3 text-sm font-bold text-slate-700">
               {filters.kind ? `No ${String(kindLabel(filters.kind)).toLowerCase()} activity recorded for this client.` : 'No client activity recorded yet.'}
             </p>

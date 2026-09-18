@@ -310,6 +310,14 @@ export const PHANTOM_CONTACT_HASH = '#contact-phantom';
 export const phantomContactHref = (): string => `/${PHANTOM_CONTACT_HASH}`;
 
 /** A support email with enough context for Code Rx to answer on the first reply. */
+/** A phone number written the way a person reads it, or the form `tel:` needs. */
+export const telHref = (value: string | null | undefined): string => {
+  const digits = String(value || '').replace(/[^\d+]/g, '');
+  // A leading 0 is a national prefix: keep it, and strip a stray country code
+  // that would otherwise be dialled twice.
+  return digits.replace(/^\+?233/, '0').replace(/^0{2,}/, '0');
+};
+
 export const clientSupportMailto = (email: string, context = 'Client portal access', detail?: string | null): string => {
   const body = [
     'Hello Code Rx Society,',
