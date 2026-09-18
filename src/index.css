@@ -473,7 +473,10 @@ footer.brand-section {
 }
 
 .brand-app .text-slate-400 {
-  color: #94a992 !important;
+  /* Was a pale grey-green (#94a992, about 2.6:1 on white) carried over from the
+     dark identity — the faintest text in the portal, admin and dashboard
+     screens. It now matches the other muted greys at 4.8:1. */
+  color: var(--brand-muted) !important;
 }
 
 .brand-app .text-yellow-600 {
@@ -491,22 +494,24 @@ footer.brand-section {
 
 .brand-app .bg-emerald-50,
 .brand-app .bg-emerald-100 {
-  background-color: rgba(184, 255, 61, 0.08) !important;
+  background-color: rgba(21, 128, 61, 0.08) !important;
 }
 
 .brand-app .bg-emerald-200 {
-  background-color: rgba(184, 255, 61, 0.14) !important;
+  background-color: rgba(21, 128, 61, 0.14) !important;
 }
 
 .brand-app .text-emerald-600,
 .brand-app .text-emerald-700,
 .brand-app .text-emerald-500 {
-  color: var(--brand-lime) !important;
+  /* Deep green rather than the lighter accent: these are small labels, and on
+     white the lighter green only reached 3.6:1. */
+  color: var(--brand-green) !important;
 }
 
 .brand-app .shadow-emerald-100,
 .brand-app .shadow-emerald-200 {
-  --tw-shadow-color: rgba(113, 255, 31, 0.12) !important;
+  --tw-shadow-color: rgba(21, 128, 61, 0.12) !important;
 }
 
 .brand-app .bg-emerald-500 {

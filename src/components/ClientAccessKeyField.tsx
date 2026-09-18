@@ -152,12 +152,12 @@ export const ClientAccessKeyField = ({
               : `Access key, group ${index + 1} of ${ACCESS_KEY_GROUPS}`}
             aria-invalid={invalid}
             aria-describedby={describedBy}
-            className={`w-full min-w-0 rounded-xl border-2 bg-slate-50/70 py-4 text-center font-mono text-lg font-bold uppercase tracking-[0.14em] text-slate-900 shadow-inner outline-none transition placeholder:text-slate-300 disabled:opacity-60 sm:text-xl ${
+            className={`w-full min-w-0 rounded-xl border-2 bg-slate-50 py-4 text-center font-mono text-lg font-bold uppercase tracking-[0.14em] text-slate-900 shadow-inner outline-none transition placeholder:text-slate-300 disabled:opacity-60 sm:text-xl ${
               invalid
                 ? 'border-rose-300 bg-rose-50/40 focus:border-rose-400 focus:bg-white'
                 : complete && filled
                   ? 'border-emerald-300 bg-white focus:border-emerald-500 focus:ring-4 focus:ring-emerald-50'
-                  : 'border-slate-200 focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50'
+                  : 'border-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-50'
             }`}
           />
         );

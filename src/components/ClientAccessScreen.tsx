@@ -205,7 +205,7 @@ export const ClientAccessScreen = ({
                 ) : null}
               </div>
               {filled && !complete ? (
-                <span className="shrink-0 pt-0.5 font-mono text-[11px] font-bold text-slate-400" aria-hidden="true">
+                <span className="shrink-0 pt-0.5 font-mono text-[11px] font-bold text-slate-500" aria-hidden="true">
                   {filled}/{ACCESS_KEY_BODY_LENGTH}
                 </span>
               ) : null}

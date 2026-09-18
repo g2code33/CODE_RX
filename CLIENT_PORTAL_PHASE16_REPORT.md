@@ -137,3 +137,46 @@ the five dark surfaces — and in the last two the value must appear as text on 
 **Database migrations:** none.
 
 **Success rate for this build: 100.0 % — 1770/1770** (428 interface + 1332 backend + 10 live).
+
+---
+
+## 8. Follow-up, continued — contrast on the screens a client reads
+
+The sweep above was about the *public* site. The same class of problem was still on the **client-facing screens**, and
+there the numbers were worse, because those screens are rendered outside the `.brand-app` shell and so take the raw
+utility values:
+
+| Where | Was | Contrast on white | Now |
+| --- | --- | --- | --- |
+| `ClientProjectRoom` labels (9 spots: freshness chip, section captions, empty-state icons, footer line) | `text-slate-400` `#94a3b8` | **2.6:1** | `text-slate-500` `#64748b` — 4.8:1 |
+| `ClientAccessScreen` box counter | `text-slate-400` | **2.6:1** | `text-slate-500` — 4.8:1 |
+| `ClientProjectRoom` status line | `text-emerald-600` `#059669` | 3.8:1 | `text-emerald-700` — 5.5:1 |
+| Contact modal placeholder | `#94a3b8` | **2.6:1** | `#64748b` — 4.8:1 |
+| The three access-key boxes | `border-slate-200` on a white card | 1.3:1 | `border-slate-400` — 2.6:1, and a solid `bg-slate-50` fill |
+| Project status divider dot | `#94a992` | **2.6:1** | `#15803d` at 40 % |
+
+The **admin, dashboard, community and member** screens were already remapped through `.brand-app`, and two of those
+remaps were carried over from the old dark identity and were now painting text *paler* than the classes they replaced:
+
+* `.brand-app .text-slate-400` → `#94a992` (2.6:1) — now `var(--brand-muted)` `#64748b` (4.8:1).
+* `.brand-app .text-emerald-500/600/700` → `var(--brand-lime)` `#16a34a` (3.6:1) — now `var(--brand-green)` `#15803d` (5.0:1).
+* The emerald washes and shadows that went with them moved from lime to the same deep green, so nothing in that block
+  is a pale green on white any more.
+
+### Verification (current build)
+
+| Check | Result |
+| --- | --- |
+| Type check | clean |
+| Production build | exit 0 — 1,136.85 kB / 290.35 kB gzip |
+| Interface suite (group 19, 6 checks — one computes every mapped colour in the five client screens against white) | **435/435** |
+| Backend suite | **1332/1332** |
+| Live: page, published content, PHANTOM sign-in, portal setting, client key sign-in, removed long key refused | **10/10** |
+| Delivered bundle | `placeholder:\:text-[#64748b]` present · `.text-slate-400{color:var(--brand-muted)!important}` present · `border-slate-400 focus:border-emerald-500` present · no `color:` declaration using `#94a992` |
+
+**Files edited in this pass:** `src/components/{ClientAccessScreen,ClientProjectRoom,ContactForm,ClientAccessKeyField,Projects}.tsx`,
+`src/index.css` (the `.brand-app` remaps), `scripts/client-portal-ui-tests.mjs` (group 19).
+
+**Database migrations:** none.
+
+**Success rate for this build: 100.0 % — 1777/1777** (435 interface + 1332 backend + 10 live).

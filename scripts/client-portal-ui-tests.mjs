@@ -1528,6 +1528,75 @@ const main = async () => {
       return lum(hex('#e2e8f0')) <= lum(hex('#e7edf3')) && lum(hex('#e2e8f0')) < 240;
     })());
 
+  // =========================================================================
+  group('19. Phase 16 follow-up — every word on the client screens is readable');
+  // =========================================================================
+
+  // The screens a client actually sees were still using the palest grey in the
+  // palette (#94a3b8 = 2.6:1 on white) for their small uppercase labels. This
+  // checks the rule rather than the spots: every mapped text colour in these
+  // components must reach 4.5:1 on white.
+  const CONTRAST_PALETTE = {
+    'slate-300': '#cbd5e1', 'slate-400': '#94a3b8', 'slate-500': '#64748b', 'slate-600': '#475569',
+    'slate-700': '#334155', 'slate-800': '#1e293b', 'slate-900': '#0f172a',
+    'emerald-500': '#10b981', 'emerald-600': '#059669', 'emerald-700': '#047857', 'emerald-800': '#065f46',
+    'amber-600': '#d97706', 'amber-700': '#b45309', 'rose-700': '#be123c', 'rose-800': '#9f1239',
+    'sky-600': '#0284c7', 'indigo-600': '#4f46e5',
+  };
+  const relativeLuminance = (hex) => {
+    const value = hex.replace('#', '');
+    const channels = [0, 2, 4].map((i) => parseInt(value.slice(i, i + 2), 16) / 255);
+    const linear = channels.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  };
+  const contrastOnWhite = (hex) => {
+    const a = relativeLuminance(hex);
+    const b = relativeLuminance('#ffffff');
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  };
+
+  const clientScreens = ['ClientAccessScreen', 'ClientProjectRoom', 'ClientLinkState', 'ClientSupportContact', 'ClientSiteSign'];
+  const faint = [];
+  clientScreens.forEach((name) => {
+    const source = src(`src/components/${name}.tsx`);
+    for (const match of source.matchAll(/\b(?:placeholder:)?text-([a-z]+-\d{2,3})\b/g)) {
+      const hex = CONTRAST_PALETTE[match[1]];
+      if (hex && contrastOnWhite(hex) < 4.5) faint.push(`${name}: text-${match[1]}`);
+    }
+  });
+  check('no text on a client screen is painted below 4.5:1 on white', faint.length === 0, faint.join(', '));
+  check('the faintest label greys were lifted on both client screens',
+    !/text-slate-400/.test(src('src/components/ClientAccessScreen.tsx'))
+    && !/text-slate-400/.test(src('src/components/ClientProjectRoom.tsx'))
+    && !/text-emerald-600/.test(src('src/components/ClientProjectRoom.tsx')));
+
+  const remapRule = (selector) => {
+    const match = indexCss.match(new RegExp(`${selector}\\s*\\{[^}]*\\}`));
+    return (match?.[0] || '').match(/color:\s*([^;!]+)/)?.[1]?.trim() || '';
+  };
+  const muted = indexCss.match(/--brand-muted:\s*(#[0-9a-f]{6})/)?.[1] || '#64748b';
+  const deepGreen = indexCss.match(/--brand-green:\s*(#[0-9a-f]{6})/)?.[1] || '#15803d';
+  check('the app-shell remap no longer paints slate-400 paler than the class it replaces',
+    /\.brand-app \.text-slate-400\s*\{[^}]*color:\s*var\(--brand-muted\)/.test(indexCss)
+    && !/color:\s*#94a992/i.test(indexCss)
+    && contrastOnWhite(muted) >= 4.5);
+  check('the app-shell remap sends emerald labels to the deep green, not the lighter accent',
+    /\.brand-app \.text-emerald-600[\s\S]{0,200}color:\s*var\(--brand-green\)/.test(indexCss)
+    && contrastOnWhite(deepGreen) >= 4.5);
+  check('the app-shell emerald washes follow the same colour direction',
+    (() => {
+      const rule = (selector) => (indexCss.match(new RegExp(`${selector}\\s*\\{[^}]*\\}`))?.[0] || '');
+      const soft = rule('\\.brand-app \\.bg-emerald-50,\\s*\\.brand-app \\.bg-emerald-100');
+      const strong = rule('\\.brand-app \\.bg-emerald-200');
+      return /rgba\(21,\s*128,\s*61,\s*0\.08\)/.test(soft) && /rgba\(21,\s*128,\s*61,\s*0\.14\)/.test(strong);
+    })());
+  check('the three key boxes have a border a client can actually see',
+    /border-slate-400 focus:border-emerald-500/.test(src('src/components/ClientAccessKeyField.tsx'))
+    && contrastOnWhite(CONTRAST_PALETTE['slate-400']) >= 2.5
+    && !/border-slate-200 focus:border-emerald-400/.test(src('src/components/ClientAccessKeyField.tsx')));
+  check('the contact modal placeholder is readable too',
+    /placeholder:text-\[#64748b\]/.test(src('src/components/ContactForm.tsx')));
+
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
   console.log('\n' + '='.repeat(64));

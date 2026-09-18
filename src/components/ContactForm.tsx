@@ -67,7 +67,7 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
   };
 
   const fieldLabel = 'mb-1.5 block text-[12px] font-black uppercase tracking-[0.12em] text-[#334155]';
-  const fieldBox = 'w-full rounded-xl border border-[#cbd5e1] bg-white px-4 py-3 text-[15px] font-medium text-[#0f172a] outline-none transition placeholder:text-[#94a3b8] focus:border-[#15803d] focus:ring-4 focus:ring-[#16a34a]/15';
+  const fieldBox = 'w-full rounded-xl border border-[#cbd5e1] bg-white px-4 py-3 text-[15px] font-medium text-[#0f172a] outline-none transition placeholder:text-[#64748b] focus:border-[#15803d] focus:ring-4 focus:ring-[#16a34a]/15';
 
   const panel = (
     <AnimatePresence>
