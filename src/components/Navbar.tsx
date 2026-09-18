@@ -50,9 +50,8 @@ export const Navbar = ({
           className="group flex min-w-0 items-center gap-2.5 text-left"
           aria-label="Go to CODE Rx Society home"
         >
-          <span className="relative h-11 w-11 shrink-0 sm:h-12 sm:w-12">
-            <span className="absolute inset-1 rounded-full bg-lime-300/10 blur-lg transition-opacity group-hover:opacity-100" />
-            <EditableImage elementKey="nav.logo" mediaKey="brand.logoSmall" label="Navigation logo" src={logo.src} alt={logo.alt} className="brand-logo-glow relative h-full w-full object-contain" />
+          <span className="brand-logo-plate relative grid h-12 w-12 shrink-0 place-items-center p-1 sm:h-14 sm:w-14">
+            <EditableImage elementKey="nav.logo" mediaKey="brand.logoSmall" label="Navigation logo" src={logo.src} alt={logo.alt} className="h-full w-full object-contain" />
           </span>
           <span className="header-wordmark flex flex-col">
             <span className="header-wordmark-title"><EditableText elementKey="nav.brand.before" copyKey="nav.brand.before" label="Navigation brand">{getCopy(copy, 'nav.brand.before', 'CODE')}</EditableText> <span><EditableText elementKey="nav.brand.accent" copyKey="nav.brand.accent" label="Navigation brand accent">{getCopy(copy, 'nav.brand.accent', 'Rx')}</EditableText></span></span>

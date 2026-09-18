@@ -279,10 +279,6 @@ h1, h2, h3, h4, h5, h6 {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
-.brand-logo-glow {
-  filter: drop-shadow(0 0 18px rgba(139, 255, 42, 0.33)) drop-shadow(0 0 52px rgba(77, 255, 36, 0.16));
-}
-
 .brand-scanlines {
   background-image: linear-gradient(to bottom, rgba(184, 255, 61, 0.05) 1px, transparent 1px);
   background-size: 100% 5px;
@@ -387,11 +383,6 @@ footer {
   box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.1);
 }
 
-@keyframes brand-pulse {
-  0%, 100% { opacity: 0.55; transform: scale(0.98); }
-  50% { opacity: 1; transform: scale(1.02); }
-}
-
 @keyframes brand-float {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-8px); }
@@ -402,12 +393,19 @@ footer {
   to { transform: translateX(-50%); }
 }
 
-.animate-brand-pulse {
-  animation: brand-pulse 4s ease-in-out infinite;
-}
-
 .animate-brand-float {
   animation: brand-float 5s ease-in-out infinite;
+}
+
+/* The Code Rx emblem is a dark mark with its own artwork. It is shown crisp and
+   unblurred on every light surface: no glow filter, no halo, no fade — a clean
+   white plate with a hairline ring so the mark reads clearly wherever it sits. */
+.brand-logo-plate {
+  border-radius: 0.9rem;
+  background: #ffffff;
+  box-shadow: 0 6px 18px rgba(2, 44, 34, 0.1);
+  outline: 1px solid rgba(22, 163, 74, 0.16);
+  outline-offset: -1px;
 }
 
 /* Keep the portal/admin/member flows readable on the dark Code Rx identity:

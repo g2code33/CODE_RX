@@ -66,6 +66,10 @@ const bundle = async () => {
         export { ClientSupportContact } from './src/components/ClientSupportContact';
         export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
         export { ClientSiteSign } from './src/components/ClientSiteSign';
+        export { SiteEmoji, SiteEmojiText, SiteEmojiProvider } from './src/components/SiteEmoji';
+        export { SiteEmojiAdmin } from './src/components/SiteEmojiAdmin';
+        export { ContactForm } from './src/components/ContactForm';
+        export * from './src/data/siteEmojis';
         export * from './functions/lib/client-activity';
       `,
       resolveDir: ROOT,
@@ -111,6 +115,8 @@ const main = async () => {
     CLIENT_PORTAL_HASH, clientPortalPath, clientEntryCopy, ClientPortalEntry,
     clientContact, clientSupportMailto, phantomContactHref, PHANTOM_CONTACT_HASH, CLIENT_SITE_HOME,
     ClientSupportContact, ClientAccessKeyField, ClientSiteSign,
+    SiteEmoji, SiteEmojiText, SiteEmojiProvider, SiteEmojiAdmin, ContactForm,
+    SITE_EMOJIS, SITE_EMOJI_MEDIA_PREFIX, siteEmojiMediaKey, siteEmojiReplacement, splitEmojiRuns, isSiteEmoji,
     splitAccessKey, joinAccessKey, validateAccessKeyGroups,
     ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH,
     looksLikeLinkToken, linkPath, ClientLinkState,
@@ -1269,12 +1275,22 @@ const main = async () => {
     && /clientContact\(links\)/.test(src('src/components/ClientPortal.tsx'))
     && /ClientPortal links=\{siteContent\.links\}/.test(src('src/App.tsx')));
   check('the block offers exactly the three wanted actions',
-    /Contact Code Rx/.test(contactSource) && /Contact PHANTOM/.test(contactSource) && /Telegram/.test(contactSource));
+    /Contact Code Rx/.test(contactSource) && /Talk to PHANTOM/.test(contactSource) && /Telegram/.test(contactSource));
   check('the copy-address control is gone',
     !/navigator\.clipboard/.test(contactSource) && !/Copy address/i.test(contactSource)
     && !/copyState/.test(contactSource) && !/select-all/.test(contactSource));
   check('no telephone list and no dialling link are rendered any more',
     !/tel:/.test(contactSource) && !/telHref/.test(contactSource));
+  check('the website says “Talk to PHANTOM” everywhere, including the client chip',
+    !/Contact PHANTOM/.test(contactSource) && !/Contact PHANTOM/.test(src('src/components/Footer.tsx'))
+    && !/Contact PHANTOM/.test(src('src/components/ContactForm.tsx'))
+    && /Talk to PHANTOM/.test(src('src/components/ContactForm.tsx'))
+    && /aria-label="Talk to PHANTOM" title="Talk to PHANTOM"/.test(src('src/components/Footer.tsx')));
+  check('the portal form is readable: solid colours, one column, no wash over the text',
+    /createPortal\(panel, document\.body\)/.test(src('src/components/ContactForm.tsx'))
+    && /text-\[#0f172a\]/.test(src('src/components/ContactForm.tsx'))
+    && /bg-\[#063b2a\]/.test(src('src/components/ContactForm.tsx'))
+    && /max-w-2xl/.test(src('src/components/ContactForm.tsx')));
   check('the PHANTOM chip opens the website form, which works without any mail app',
     phantomContactHref() === `/${PHANTOM_CONTACT_HASH}` && PHANTOM_CONTACT_HASH === '#contact-phantom'
     && /href=\{phantomHref\}/.test(contactSource)
@@ -1286,7 +1302,7 @@ const main = async () => {
   check('the rendered block carries the three actions, and nothing to copy',
     /href="mailto:coderxsociety@gmail\.com\?subject=Client%20portal%20access/.test(supportHtml)
     && /Contact Code Rx/.test(supportHtml) && /href="\/#contact-phantom"/.test(supportHtml)
-    && /Contact PHANTOM/.test(supportHtml) && /t\.me/.test(supportHtml)
+    && /Talk to PHANTOM/.test(supportHtml) && /t\.me/.test(supportHtml)
     && !supportHtml.includes('coderxsociety@gmail.com<') && !/tel:/.test(supportHtml));
   check('a configured address and channel flow through every contact action',
     (() => {
@@ -1329,6 +1345,95 @@ const main = async () => {
     clientContact(undefined).email === clientContact(null).email && clientContact({}).telegram.startsWith('https://t.me/'));
   check('the support mail carries the screen context in its subject',
     decodeURIComponent(clientSupportMailto('a@b.test', 'Client portal access')).includes('subject=Client portal access'));
+
+  // =========================================================================
+  group('16. Phase 15 — logo, rename and the emoji replacement section');
+  // =========================================================================
+
+  const indexCss = src('src/index.css');
+  check('the logo glow and its fading pulse are gone',
+    !/brand-logo-glow/.test(indexCss) && !/brand-pulse/.test(indexCss) && !/animate-brand-pulse/.test(indexCss));
+  check('the logo sits on a solid plate everywhere it is shown',
+    /\.brand-logo-plate\s*\{/.test(indexCss) && /brand-logo-plate/.test(src('src/components/Navbar.tsx'))
+    && /brand-logo-plate/.test(src('src/components/Footer.tsx')));
+  check('the site never renders the logo through a glow or pulse class again',
+    !/brand-logo-glow|animate-brand-pulse/.test(src('src/components/Navbar.tsx'))
+    && !/brand-logo-glow|animate-brand-pulse/.test(src('src/components/Footer.tsx'))
+    && !/brand-logo-glow|animate-brand-pulse/.test(src('src/components/Hero.tsx'))
+    && !/brand-logo-glow|animate-brand-pulse/.test(src('src/components/About.tsx')));
+  check('the flat logo wrapper keeps the logo large and unmuted',
+    /brand-logo-plate[^"]*h-12 w-12/.test(src('src/components/Navbar.tsx')) && /brand-logo-plate[^"]*h-14 w-14/.test(src('src/components/Footer.tsx')));
+
+  check('every emoji shown on the website is registered with a home and a label',
+    SITE_EMOJIS.length >= 15
+    && SITE_EMOJIS.every((entry) => entry.key && entry.emoji && entry.label && entry.where)
+    && new Set(SITE_EMOJIS.map((entry) => entry.key)).size === SITE_EMOJIS.length
+    && SITE_EMOJIS.every((entry) => siteEmojiMediaKey(entry.key) === `${SITE_EMOJI_MEDIA_PREFIX}${entry.key}`));
+  check('the registry covers the emojis the public site actually prints',
+    ['👋', '🏆', '🥈', '🥉', '👍', '❤️', '🔥', '✅', '📎', '🟢', '🚧', '🧪', '💊', '💻', '🚀']
+      .every((character) => isSiteEmoji(character)));
+  check('an emoji that only lives in editor sample data is not offered as a website emoji',
+    !isSiteEmoji('🧠') && !isSiteEmoji('✨') && !isSiteEmoji('💉') && !isSiteEmoji('→'));
+  check('a string keeps its words and hands back each emoji run',
+    JSON.stringify(splitEmojiRuns('Status: 🚧 in progress')).includes('"type":"text","value":"Status: "')
+    && splitEmojiRuns('Status: 🚧 in progress').some((run) => run.type === 'emoji' && run.value === '🚧')
+    && splitEmojiRuns('').length === 0 && splitEmojiRuns(null).length === 0);
+
+  const replacementMedia = { [`${SITE_EMOJI_MEDIA_PREFIX}status.development`]: { src: '/api/files/emoji/boom.png', alt: 'Under construction' } };
+  check('a replaced emoji resolves to the uploaded image and its alt text',
+    siteEmojiReplacement(replacementMedia, '🚧')?.src === '/api/files/emoji/boom.png'
+    && siteEmojiReplacement(replacementMedia, '🚧')?.alt === 'Under construction');
+  check('an emoji that was not replaced stays the emoji',
+    siteEmojiReplacement(replacementMedia, '🚀') === null && siteEmojiReplacement(undefined, '🚧') === null);
+
+  const plain = render(React.createElement(SiteEmojiProvider, null,
+    React.createElement(SiteEmoji, { character: '🚧' })));
+  const swapped = render(React.createElement(SiteEmojiProvider, { media: replacementMedia },
+    React.createElement(SiteEmoji, { character: '🚧' })));
+  const swappedText = render(React.createElement(SiteEmojiProvider, { media: replacementMedia },
+    React.createElement(SiteEmojiText, { text: 'Status: 🚧 in progress' })));
+  check('the site draws the uploaded image in place of the emoji',
+    swapped.includes('<img') && swapped.includes('/api/files/emoji/boom.png') && swapped.includes('alt="Under construction"')
+    && /class="[^"]*h-\[1\.05em\]/.test(swapped));
+  check('with nothing uploaded the site shows the emoji exactly as before',
+    plain.includes('🚧') && !plain.includes('<img') && swappedText.includes('Status: ')
+    && !swappedText.includes('🚧') && /<img/.test(swappedText));
+  check('a replaced emoji inside a sentence keeps the surrounding words',
+    swappedText.includes('Status: ') && swappedText.includes(' in progress') && swappedText.includes('/api/files/emoji/boom.png'));
+
+  const emojiSection = src('src/components/SiteEmojiAdmin.tsx');
+  check('the admin section uploads through the existing media upload and site content',
+    /uploadFile\(file, 'emoji'\)/.test(emojiSection) && /db\.siteContent\.update\(next\)/.test(emojiSection)
+    && /accept="image\/png,image\/jpeg,image\/webp"/.test(emojiSection));
+  check('the admin section can also put the original emoji back',
+    /Use the emoji again/.test(emojiSection) && /delete nextMedia\[siteEmojiMediaKey\(entry\.key\)\]/.test(emojiSection));
+  check('the section is reachable inside the existing PHANTOM workspace, not a new admin system',
+    /\['emojis', 'Site Emojis', Smile\]/.test(src('src/components/PhantomControlCenter.tsx'))
+    && /tab === 'emojis'/.test(src('src/components/PhantomControlCenter.tsx'))
+    && /siteContent=\{siteContent\}/.test(src('src/components/AdminPanel.tsx')));
+  const adminHtml = render(React.createElement(SiteEmojiAdmin, {
+    siteContent: { media: replacementMedia },
+    setSiteContent: () => undefined,
+  }));
+  check('the section lists the emojis with their places, and marks the replaced ones',
+    adminHtml.includes('Site emojis') && adminHtml.includes('Welcome wave') && adminHtml.includes('1 of 15 replaced')
+    && adminHtml.includes('/api/files/emoji/boom.png'));
+
+  const modalHtml = render(React.createElement(ContactForm, { isOpen: true, onClose: () => undefined }));
+  check('the contact modal reads as a solid card: dark header, white panel, one column',
+    /Talk to [^<]*PHANTOM/.test(modalHtml) && !/#04120b\/75[^"]*text-white/.test(modalHtml)
+    && /max-w-2xl/.test(modalHtml) && /bg-white/.test(modalHtml));
+  check('every field in the modal is labelled with readable, solid colours',
+    /Your name/.test(modalHtml) && /Reply email/.test(modalHtml) && /Your message/.test(modalHtml)
+    && (modalHtml.match(/text-\[#334155\]/g) || []).length >= 3
+    && (modalHtml.match(/border-\[#cbd5e1\]/g) || []).length >= 4
+    && !/placeholder:text-slate-3/.test(modalHtml));
+  check('the close control sits in the dark header, not floating over white',
+    /aria-label="Close Talk to PHANTOM"/.test(modalHtml)
+    && /h-10 w-10[^"]*border-white\/25/.test(modalHtml));
+  check('the modal offers the three topics and a working mail fallback',
+    /Send to PHANTOM/.test(modalHtml) && /mailto:coderxsociety@gmail\.com/.test(modalHtml)
+    && /aria-pressed/.test(modalHtml));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

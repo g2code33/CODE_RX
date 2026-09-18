@@ -1,13 +1,12 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowUpRight,
   CheckCircle2,
   Handshake,
   Mail,
   MessageCircle,
   Send,
-  ShieldCheck,
   Sparkles,
   User,
   X,
@@ -34,7 +33,7 @@ const TOPICS: ContactTopic[] = [
 
 const emptyForm = () => ({ name: '', email: '', subject: '', message: '' });
 
-/** Public contact channel routed to PHANTOM through the existing D1 + EmailJS API. */
+/** "Talk to PHANTOM" — the public channel routed to PHANTOM through the existing D1 + EmailJS API. */
 export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gmail.com' }: ContactFormProps) => {
   const [formData, setFormData] = useState(emptyForm);
   const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
@@ -67,89 +66,86 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
     setStatus('idle');
   };
 
-  return (
+  const fieldLabel = 'mb-1.5 block text-[12px] font-black uppercase tracking-[0.12em] text-[#334155]';
+  const fieldBox = 'w-full rounded-xl border border-[#cbd5e1] bg-white px-4 py-3 text-[15px] font-medium text-[#0f172a] outline-none transition placeholder:text-[#94a3b8] focus:border-[#15803d] focus:ring-4 focus:ring-[#16a34a]/15';
+
+  const panel = (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="phantom-contact-title">
+        <div
+          className="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto bg-[#04120b]/75 p-3 sm:items-center sm:p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="phantom-contact-title"
+        >
           <motion.button
             type="button"
-            aria-label="Close Contact PHANTOM form"
+            aria-label="Close Talk to PHANTOM"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={close}
-            className="absolute inset-0 cursor-default bg-slate-950/55 backdrop-blur-md"
+            className="fixed inset-0 cursor-default"
           />
 
           <motion.section
-            initial={{ opacity: 0, scale: 0.97, y: 22 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.97, y: 16 }}
-            transition={{ type: 'spring', duration: 0.42, bounce: 0.16 }}
-            className="relative grid max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-[2rem] bg-white shadow-[0_28px_100px_rgba(2,44,34,0.45)] lg:grid-cols-[0.86fr_1.14fr] xl:h-[calc(100vh-2rem)] xl:max-h-[720px] xl:overflow-hidden"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            transition={{ type: 'spring', duration: 0.4, bounce: 0.12 }}
+            className="relative my-auto w-full max-w-2xl overflow-hidden rounded-3xl bg-white shadow-[0_28px_90px_rgba(2,20,12,0.45)]"
           >
-            <button
-              type="button"
-              onClick={close}
-              aria-label="Close Contact PHANTOM form"
-              className="absolute right-4 top-4 z-20 grid h-10 w-10 place-items-center rounded-full border border-white/20 bg-white/10 text-white backdrop-blur transition hover:bg-white/20 lg:right-5 lg:top-5"
-            >
-              <X className="h-5 w-5" />
-            </button>
-
-            <aside className="relative overflow-hidden bg-[#063b2a] px-7 py-8 text-white sm:px-9 sm:py-9 xl:px-9 xl:py-8">
-              <div className="absolute -left-24 -top-16 h-56 w-56 rounded-full bg-[#b8ff3d]/15 blur-3xl" />
-              <div className="absolute -bottom-20 right-[-4rem] h-72 w-72 rounded-full border border-[#b8ff3d]/20" />
-              <div className="relative z-10 flex h-full flex-col">
-                <div className="inline-flex w-fit items-center gap-2 rounded-full border border-[#b8ff3d]/25 bg-[#b8ff3d]/10 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.18em] text-[#d9ff9c]">
-                  <ShieldCheck className="h-3.5 w-3.5" />
-                  Direct PHANTOM channel
-                </div>
-
-                <div className="mt-6 xl:mt-5">
-                  <p className="text-xs font-black uppercase tracking-[0.18em] text-[#b8ff3d]">Code Rx Society</p>
-                  <h2 id="phantom-contact-title" className="mt-3 max-w-sm text-4xl font-black leading-[0.94] tracking-[-0.06em] text-white sm:text-5xl xl:text-4xl">
+            {/* Header: deep green, high-contrast text, no decoration over the words. */}
+            <header className="relative bg-[#063b2a] px-6 py-5 sm:px-8 sm:py-6">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-[#b8ff3d]">Code Rx Society</p>
+                  <h2 id="phantom-contact-title" className="mt-2 text-3xl font-black tracking-[-0.03em] text-white sm:text-4xl">
                     Talk to <span className="text-[#b8ff3d]">PHANTOM.</span>
                   </h2>
-                  <p className="mt-5 max-w-sm text-sm leading-7 text-emerald-50/80">
-                    Questions about joining, partnerships, research or a project? Send a clear message and the Code Rx leadership team will route it to the right next step.
+                  <p className="mt-2 max-w-xl text-[13px] font-medium leading-6 text-[#dcefe2] sm:text-sm">
+                    Joining, research, partnerships or a project — send one clear message and the Code Rx leadership team
+                    routes it to the right next step. Replies normally arrive within 24–48 hours.
                   </p>
                 </div>
-
-                <div className="mt-7 space-y-3 border-t border-white/10 pt-5 text-sm text-emerald-50/80 xl:mt-6">
-                  <div className="flex gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white/10 text-[#b8ff3d]">01</span><p><strong className="text-white">Choose a topic</strong><br />Give PHANTOM the right context from the start.</p></div>
-                  <div className="flex gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white/10 text-[#b8ff3d]">02</span><p><strong className="text-white">Receive a response</strong><br />Replies normally arrive within 24–48 hours.</p></div>
-                </div>
-
-                <a href={`mailto:${supportEmail}`} className="mt-auto inline-flex items-center gap-2 pt-7 text-sm font-bold text-[#d9ff9c] transition hover:text-white xl:pt-5">
-                  <Mail className="h-4 w-4" />
-                  Prefer email? {supportEmail}
-                  <ArrowUpRight className="h-4 w-4" />
-                </a>
+                <button
+                  type="button"
+                  onClick={close}
+                  aria-label="Close Talk to PHANTOM"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-white/25 bg-white/10 text-white transition hover:bg-white/20 focus:outline-none focus-visible:ring-4 focus-visible:ring-[#b8ff3d]/40"
+                >
+                  <X className="h-5 w-5" />
+                </button>
               </div>
-            </aside>
+            </header>
 
-            <div className="p-6 sm:p-7 xl:p-7">
+            <div className="px-6 py-6 sm:px-8 sm:py-7">
               {status === 'sent' ? (
-                <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
-                  <div className="grid h-20 w-20 place-items-center rounded-[1.6rem] bg-emerald-50 text-emerald-600 shadow-[0_12px_30px_rgba(5,150,105,0.14)]">
-                    <CheckCircle2 className="h-10 w-10" />
+                <div className="flex flex-col items-center py-4 text-center">
+                  <div className="grid h-16 w-16 place-items-center rounded-2xl bg-[#ecfdf5] text-[#15803d]">
+                    <CheckCircle2 className="h-8 w-8" />
                   </div>
-                  <p className="mt-8 text-[11px] font-black uppercase tracking-[0.18em] text-emerald-600">Message received</p>
-                  <h3 className="mt-3 text-3xl font-black tracking-[-0.05em] text-slate-900 sm:text-4xl">Your message is in.</h3>
-                  <p className="mt-4 max-w-md text-sm leading-7 text-slate-500">
-                    We will reply to <strong className="text-slate-700">{formData.email}</strong>. Thank you for reaching out to Code Rx Society.
+                  <p className="mt-6 text-[11px] font-black uppercase tracking-[0.18em] text-[#15803d]">Message received</p>
+                  <h3 className="mt-2 text-2xl font-black tracking-[-0.03em] text-[#0f172a] sm:text-3xl">Your message is in.</h3>
+                  <p className="mt-3 max-w-md text-sm leading-7 text-[#475569]">
+                    We will reply to <strong className="text-[#0f172a]">{formData.email}</strong>. Thank you for reaching out to Code Rx Society.
                   </p>
-                  <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                    <button type="button" onClick={startAnotherMessage} className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-xs font-black uppercase tracking-[0.12em] text-emerald-700 transition hover:bg-emerald-100">Send another message</button>
-                    <button type="button" onClick={close} className="rounded-xl bg-slate-900 px-5 py-3 text-xs font-black uppercase tracking-[0.12em] text-white transition hover:bg-slate-700">Close</button>
+                  <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+                    <button type="button" onClick={startAnotherMessage} className="rounded-xl border border-[#a7f3d0] bg-[#ecfdf5] px-5 py-3 text-xs font-black uppercase tracking-[0.12em] text-[#15803d] transition hover:bg-[#d1fae5]">
+                      Send another message
+                    </button>
+                    <button type="button" onClick={close} className="rounded-xl bg-[#0f172a] px-5 py-3 text-xs font-black uppercase tracking-[0.12em] text-white transition hover:bg-[#1e293b]">
+                      Close
+                    </button>
                   </div>
                 </div>
               ) : (
                 <>
-                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-emerald-600">Contact PHANTOM</p>
-                  <h3 className="mt-2 text-3xl font-black tracking-[-0.05em] text-slate-900">How can we help?</h3>
-                  <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500">Choose a starting point, then tell us what you need. Your email is used only to reply to this message.</p>
+                  <p className="text-[12px] font-black uppercase tracking-[0.14em] text-[#15803d]">Talk to PHANTOM</p>
+                  <h3 className="mt-1.5 text-2xl font-black tracking-[-0.03em] text-[#0f172a]">How can we help?</h3>
+                  <p className="mt-2 text-sm leading-6 text-[#475569]">
+                    Choose a starting point, then tell us what you need. Your email is used only to reply to this message.
+                  </p>
 
                   <div className="mt-5 grid gap-2 sm:grid-cols-3">
                     {TOPICS.map((topic) => {
@@ -161,43 +157,47 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
                           type="button"
                           onClick={() => chooseTopic(topic)}
                           aria-pressed={selected}
-                          className={`flex items-center gap-2 rounded-xl border px-3 py-2.5 text-left text-xs font-bold transition ${selected ? 'border-emerald-500 bg-emerald-50 text-emerald-800 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-200 hover:bg-emerald-50/50'}`}
+                          className={`flex items-center gap-2 rounded-xl border px-3 py-3 text-left text-[12px] font-black uppercase tracking-[0.06em] transition ${
+                            selected
+                              ? 'border-[#15803d] bg-[#ecfdf5] text-[#14532d]'
+                              : 'border-[#cbd5e1] bg-white text-[#334155] hover:border-[#15803d] hover:bg-[#f0fdf4]'
+                          }`}
                         >
-                          <Icon className={`h-4 w-4 shrink-0 ${selected ? 'text-emerald-600' : 'text-slate-400'}`} />
+                          <Icon className={`h-4 w-4 shrink-0 ${selected ? 'text-[#15803d]' : 'text-[#64748b]'}`} />
                           {topic.label}
                         </button>
                       );
                     })}
                   </div>
 
-                  <form onSubmit={handleSubmit} className="mt-5 space-y-3">
+                  <form onSubmit={handleSubmit} className="mt-5 space-y-4">
                     <div className="grid gap-4 sm:grid-cols-2">
                       <label className="block">
-                        <span className="mb-1.5 block text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">Your name</span>
+                        <span className={fieldLabel}>Your name</span>
                         <div className="relative">
-                          <User className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                          <User className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
                           <input
                             type="text"
                             autoComplete="name"
                             placeholder="Your full name"
                             value={formData.name}
                             onChange={(event) => setFormData((current) => ({ ...current, name: event.target.value }))}
-                            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-100"
+                            className={`${fieldBox} pl-11`}
                             required
                           />
                         </div>
                       </label>
                       <label className="block">
-                        <span className="mb-1.5 block text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">Reply email</span>
+                        <span className={fieldLabel}>Reply email</span>
                         <div className="relative">
-                          <Mail className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                          <Mail className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748b]" />
                           <input
                             type="email"
                             autoComplete="email"
                             placeholder="you@example.com"
                             value={formData.email}
                             onChange={(event) => setFormData((current) => ({ ...current, email: event.target.value }))}
-                            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-100"
+                            className={`${fieldBox} pl-11`}
                             required
                           />
                         </div>
@@ -205,46 +205,55 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
                     </div>
 
                     <label className="block">
-                      <span className="mb-1.5 block text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">Subject</span>
+                      <span className={fieldLabel}>Subject</span>
                       <input
                         type="text"
                         placeholder="What would you like to discuss?"
                         value={formData.subject}
                         onChange={(event) => setFormData((current) => ({ ...current, subject: event.target.value }))}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-100"
+                        className={fieldBox}
                         required
                       />
                     </label>
 
                     <label className="block">
-                      <span className="mb-1.5 block text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">Your message</span>
+                      <span className={fieldLabel}>Your message</span>
                       <textarea
                         placeholder="Share the details PHANTOM should know…"
-                        rows={3}
+                        rows={5}
                         value={formData.message}
                         onChange={(event) => setFormData((current) => ({ ...current, message: event.target.value }))}
-                        className="w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-100"
+                        className={`${fieldBox} resize-y leading-6`}
                         required
                       />
                     </label>
 
                     {status === 'error' && (
-                      <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
+                      <p role="alert" className="rounded-xl border border-[#fecdd3] bg-[#fff1f2] px-4 py-3 text-sm font-semibold text-[#be123c]">
                         We could not send your message just now. Please check your connection and try again.
                       </p>
                     )}
 
-                    <div className="flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
-                      <p className="text-xs leading-5 text-slate-400">By sending, you agree that Code Rx may use your email only to respond to this enquiry.</p>
+                    <div className="flex flex-col gap-3 border-t border-[#e2e8f0] pt-4 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-xs leading-5 text-[#475569]">
+                        By sending, you agree that Code Rx may use your email only to respond to this enquiry.
+                      </p>
                       <button
                         type="submit"
                         disabled={status === 'sending'}
-                        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-xs font-black uppercase tracking-[0.12em] text-white shadow-[0_12px_24px_rgba(5,150,105,0.22)] transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-[#15803d] px-5 py-3 text-xs font-black uppercase tracking-[0.12em] text-white transition hover:bg-[#14652f] focus:outline-none focus-visible:ring-4 focus-visible:ring-[#16a34a]/25 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         {status === 'sending' ? 'Sending…' : 'Send to PHANTOM'}
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
+
+                    <p className="text-center text-xs font-semibold text-[#475569] sm:text-left">
+                      Prefer email?{' '}
+                      <a href={`mailto:${supportEmail}`} className="font-black text-[#15803d] underline-offset-2 hover:underline">
+                        {supportEmail}
+                      </a>
+                    </p>
                   </form>
                 </>
               )}
@@ -254,4 +263,10 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
       )}
     </AnimatePresence>
   );
+
+  // Rendered at the end of the document so no page animation, blur or overflow
+  // rule on an ancestor can clip it, fade it or trap its stacking order.
+  if (typeof document === 'undefined') return panel;
+  return createPortal(panel, document.body);
+
 };

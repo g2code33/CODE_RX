@@ -6,7 +6,7 @@ import { phantomContactHref, type ClientContact } from '../lib/linkAccess';
  *
  * 1. **Contact Code Rx** — a mail message to the society's published address,
  *    already carrying the context of the screen it was sent from.
- * 2. **Contact PHANTOM** — the website's own PHANTOM form, opened by hash. It is
+ * 2. **Talk to PHANTOM** — the website's own PHANTOM form, opened by hash. It is
  *    the channel that works on any machine or browser, because it is a form on
  *    a page rather than a handler the device may not have.
  * 3. **Telegram** — the society's channel, opened in a new tab.
@@ -54,7 +54,7 @@ export const ClientSupportContact = ({
         className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-[11px] font-black uppercase tracking-[0.12em] text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus-visible:ring-4 focus-visible:ring-slate-100"
       >
         <UserRound className="h-3.5 w-3.5" aria-hidden="true" />
-        Contact PHANTOM
+        Talk to PHANTOM
       </a>
       {contact.telegram ? (
         <a

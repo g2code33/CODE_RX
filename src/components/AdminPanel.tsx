@@ -549,7 +549,7 @@ export const AdminPanel = ({
   }
 
   if (workspace === 'phantom') {
-    return <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onBack={() => onWorkspaceChange('controller')} onHome={onHome} onOpenCommunity={onOpenCommunity} />;
+    return <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onBack={() => onWorkspaceChange('controller')} onHome={onHome} onOpenCommunity={onOpenCommunity} siteContent={siteContent} setSiteContent={setSiteContent} />;
   }
 
   if (workspace === 'builder') {
@@ -682,7 +682,7 @@ export const AdminPanel = ({
 
           {/* Main Admin Content */}
           <main className="flex-grow space-y-6 bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onHome={onHome} onOpenCommunity={onOpenCommunity} />}
+            {activeView === 'phantom' && user?.isPhantom && <PhantomControlCenter onOpenVault={() => onWorkspaceChange('vault')} onHome={onHome} onOpenCommunity={onOpenCommunity} siteContent={siteContent} setSiteContent={setSiteContent} />}
             {activeView === 'overview' && (
               <div className="space-y-6">
                 <div className="flex justify-between items-center">

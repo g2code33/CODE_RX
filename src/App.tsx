@@ -12,6 +12,7 @@ import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
 import { CommunityHub } from './components/CommunityHub';
 import { VisualEditorProvider } from './components/VisualEditorContext';
+import { SiteEmojiProvider } from './components/SiteEmoji';
 import { SECTION_MAP } from './data/mockData';
 import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
 import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
@@ -476,11 +477,15 @@ function App() {
     </div>
   );
 
+  // One provider for the whole app: every screen reads the published emoji
+  // replacements from the same media map the site content already carries.
+  const withEmojis = <SiteEmojiProvider media={siteContent.media}>{shell}</SiteEmojiProvider>;
+
   // Public pages use the same design renderer as the live builder, without
   // any selectable outlines or editor controls.
   return !isAdmin && !isDashboard
-    ? <VisualEditorProvider enabled={false} interactionMode="preview" selected={null} select={() => undefined} design={siteContent.design}>{shell}</VisualEditorProvider>
-    : shell;
+    ? <VisualEditorProvider enabled={false} interactionMode="preview" selected={null} select={() => undefined} design={siteContent.design}>{withEmojis}</VisualEditorProvider>
+    : withEmojis;
 }
 
 export default App;
