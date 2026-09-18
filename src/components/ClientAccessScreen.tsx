@@ -1,10 +1,9 @@
-import { FormEvent, useEffect, useRef, useState, type ReactNode } from 'react';
+import { FormEvent, useState, type ReactNode } from 'react';
 import { AlertCircle, ArrowRight, CheckCircle2, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import {
   ACCESS_KEY_BODY_LENGTH,
   ACCESS_KEY_GROUPS,
   ACCESS_KEY_PLACEHOLDER,
-  compactAccessKey,
   joinAccessKey,
   messageForFailure,
   splitAccessKey,
@@ -15,6 +14,7 @@ import { clientContact, clientSupportMailto, type ClientContact } from '../lib/l
 import { ClientPortalError } from '../lib/cloudflare';
 import { ClientSupportContact } from './ClientSupportContact';
 import { ClientAccessKeyField } from './ClientAccessKeyField';
+import { ClientSiteSign } from './ClientSiteSign';
 
 interface ClientAccessScreenProps {
   /** Exchanges the raw access key for a client session. */
@@ -52,16 +52,12 @@ interface ClientAccessScreenProps {
 export const ClientAccessScreen = ({
   onSubmit, notice, eyebrow, heading, helper, noticeIcon, onAbandon, abandonLabel, contact,
 }: ClientAccessScreenProps) => {
-  // The key lives in three fixed boxes; the free-form field below is only for
-  // keys issued before the short format, so nothing about the common case can
-  // be disturbed by it.
+  // The key lives in three fixed boxes. There is no second field and no second
+  // key format: every key Code Rx issues today fits these boxes.
   const [boxes, setBoxes] = useState<string[]>(['', '', '']);
-  const [legacy, setLegacy] = useState('');
-  const [legacyMode, setLegacyMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [noticeDismissed, setNoticeDismissed] = useState(false);
-  const legacyRef = useRef<HTMLInputElement>(null);
   const shownError = error ?? (noticeDismissed ? null : notice ?? null);
   const details = contact ?? clientContact(null);
 
@@ -69,10 +65,6 @@ export const ClientAccessScreen = ({
   const validation = validateAccessKeyGroups(boxes);
   const filled = Math.min(body.length, ACCESS_KEY_BODY_LENGTH);
   const complete = filled === ACCESS_KEY_BODY_LENGTH;
-
-  useEffect(() => {
-    if (legacyMode) legacyRef.current?.focus();
-  }, [legacyMode]);
 
   const clearFeedback = () => {
     if (error) setError(null);
@@ -88,7 +80,6 @@ export const ClientAccessScreen = ({
       await onSubmit(candidate);
       // Success hands control to the project room; the key is dropped here.
       setBoxes(['', '', '']);
-      setLegacy('');
     } catch (failure) {
       const status = failure instanceof ClientPortalError ? failure.status : -1;
       const code = failure instanceof ClientPortalError ? failure.code : null;
@@ -121,17 +112,6 @@ export const ClientAccessScreen = ({
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (legacyMode) {
-      const candidate = compactAccessKey(legacy);
-      const validationForLegacy = validateAccessKey(candidate);
-      if (!validationForLegacy.ok) {
-        setError(validationForLegacy.problem);
-        legacyRef.current?.focus();
-        return;
-      }
-      void submitBody(validationForLegacy.body);
-      return;
-    }
     if (!validation.ok) {
       setError(validation.problem);
       return;
@@ -153,13 +133,7 @@ export const ClientAccessScreen = ({
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-5">
-          <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Code Rx Society" className="h-9 w-9 rounded-lg object-contain" />
-            <div className="leading-tight">
-              <p className="text-[13px] font-black tracking-[0.22em] text-slate-900">CODE Rx SOCIETY</p>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Client Project Portal</p>
-            </div>
-          </div>
+          <ClientSiteSign />
           <span className="hidden items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-emerald-700 sm:inline-flex">
             <ShieldCheck className="h-4 w-4" /> Secure client access
           </span>
@@ -188,7 +162,7 @@ export const ClientAccessScreen = ({
               invalid={Boolean(shownError)}
               complete={complete}
               describedBy={describedBy}
-              autoFocus={!legacyMode}
+              autoFocus
             />
 
             {/* One marker per character of the key body: nine marks, two groups of
@@ -239,30 +213,6 @@ export const ClientAccessScreen = ({
               ) : null}
             </div>
 
-            {legacyMode ? (
-              <div className="mt-4">
-                <label htmlFor="client-access-legacy" className="mb-1.5 block text-xs font-black uppercase tracking-[0.12em] text-slate-500">
-                  Long access key (issued earlier)
-                </label>
-                <input
-                  id="client-access-legacy"
-                  ref={legacyRef}
-                  value={legacy}
-                  onChange={(event) => {
-                    setLegacy(event.target.value.toUpperCase().replace(/[^A-Za-z0-9- ]/g, '').slice(0, 40));
-                    clearFeedback();
-                  }}
-                  placeholder="CRX-XXXX-XXXX-XXXX-XXXX"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="characters"
-                  spellCheck={false}
-                  disabled={submitting}
-                  className="w-full rounded-xl border-2 border-slate-200 bg-slate-50/70 px-3.5 py-3.5 text-center font-mono text-base font-bold tracking-[0.08em] text-slate-900 outline-none transition focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50 disabled:opacity-60"
-                />
-              </div>
-            ) : null}
-
             <button
               type="submit"
               disabled={submitting}
@@ -279,20 +229,6 @@ export const ClientAccessScreen = ({
               )}
             </button>
 
-            <div className="mt-3 text-center">
-              <button
-                type="button"
-                onClick={() => {
-                  setLegacyMode((value) => !value);
-                  setLegacy('');
-                  setBoxes(['', '', '']);
-                  setError(null);
-                }}
-                className="text-xs font-bold text-slate-500 underline-offset-4 transition hover:text-emerald-700 hover:underline"
-              >
-                {legacyMode ? 'Use the three boxes instead' : 'Using a long key issued earlier?'}
-              </button>
-            </div>
           </form>
 
           {onAbandon ? (

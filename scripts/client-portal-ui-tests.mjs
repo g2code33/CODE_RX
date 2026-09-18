@@ -65,6 +65,7 @@ const bundle = async () => {
         export { ClientPortalEntry } from './src/components/ClientPortalEntry';
         export { ClientSupportContact } from './src/components/ClientSupportContact';
         export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
+        export { ClientSiteSign } from './src/components/ClientSiteSign';
         export * from './functions/lib/client-activity';
       `,
       resolveDir: ROOT,
@@ -108,9 +109,10 @@ const main = async () => {
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
     landingFor, linkStateScreen, LINK_STATE_SCREENS, LINK_CONTACT_EMAIL, linkContactHref,
     CLIENT_PORTAL_HASH, clientPortalPath, clientEntryCopy, ClientPortalEntry,
-    clientContact, clientSupportMailto, telHref, ClientSupportContact, ClientAccessKeyField,
-    splitAccessKey, joinAccessKey, compactAccessKey, validateAccessKeyGroups,
-    ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH, ACCESS_KEY_LEGACY_BODY_LENGTH,
+    clientContact, clientSupportMailto, phantomContactHref, PHANTOM_CONTACT_HASH, CLIENT_SITE_HOME,
+    ClientSupportContact, ClientAccessKeyField, ClientSiteSign,
+    splitAccessKey, joinAccessKey, validateAccessKeyGroups,
+    ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH,
     looksLikeLinkToken, linkPath, ClientLinkState,
   } = module;
 
@@ -154,11 +156,12 @@ const main = async () => {
   check('the pasted CRX prefix is dropped, but a body that starts with CRX is not mangled',
     formatAccessKey('CRX8K4P92MSD').body === canonicalBody
     && formatAccessKey('CRX8K4P92').body === 'CRX8K4P92');
-  check('a long paste cannot exceed the server limit',
+  check('a long paste is held at a bounded length, not an unbounded buffer',
     formatAccessKey('A'.repeat(120)).body.length === 32);
-  check('a legacy long key is still accepted in the free-form field',
-    validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').ok === true
-    && validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').body.length === ACCESS_KEY_LEGACY_BODY_LENGTH);
+  check('a key from the old long format is refused, never silently halved',
+    validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').ok === false
+    && validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').body === '8K4PX92M7LQFB3TD'
+    && /9 characters/i.test(String(validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').problem)));
 
   check('validation accepts a complete key',
     validateAccessKeyGroups(['8K4', 'P92', 'MSD']).ok === true
@@ -166,7 +169,7 @@ const main = async () => {
   check('validation rejects an empty key with a plain-language prompt',
     validateAccessKeyGroups(['', '', '']).ok === false && /enter the project access key/i.test(validateAccessKeyGroups(['', '', '']).problem));
   check('validation rejects a half-filled key without calling it invalid',
-    validateAccessKeyGroups(['8K4', 'P9', '']).ok === false && /too short/i.test(validateAccessKeyGroups(['8K4', 'P9', '']).problem));
+    validateAccessKeyGroups(['8K4', 'P9', '']).ok === false && /9 characters/i.test(validateAccessKeyGroups(['8K4', 'P9', '']).problem));
   check('validation explains the ambiguous characters',
     validateAccessKeyGroups(['0O1', '8K4', 'MSD']).ok === false
     && /never contain/i.test(validateAccessKeyGroups(['0O1', '8K4', 'MSD']).problem));
@@ -226,7 +229,7 @@ const main = async () => {
     screenHtml.includes('>CRX<') || /client-access-key-label/.test(screenHtml));
   check('the primary action is rendered', /Enter Project/i.test(screenHtml));
   check('the assistance line is rendered', screenHtml.includes('Need assistance?'));
-  check('the contact line is rendered', screenHtml.includes('Contact Code Rx Society'));
+  check('the contact line is rendered', screenHtml.includes('Contact Code Rx'));
   check('the contact line is a mail link',
     /href="mailto:coderxsociety@gmail\.com[^"]*"/.test(screenHtml));
   check('the access key input is never pre-filled', /value=""/.test(screenHtml) || !/value="CRX/.test(screenHtml));
@@ -773,15 +776,15 @@ const main = async () => {
   // --- the rendered end states --------------------------------------------
   const expiredHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_expired'), onContinue: () => {} }));
   check('the expired screen renders the required headline', expiredHtml.includes('THIS LINK HAS EXPIRED'));
-  check('the expired screen offers Contact Code Rx Society',
-    expiredHtml.includes('Contact Code Rx Society') && /href="mailto:coderxsociety@gmail\.com/.test(expiredHtml));
+  check('the expired screen still offers Contact Code Rx',
+    expiredHtml.includes('Contact Code Rx') && /href="mailto:coderxsociety@gmail\.com/.test(expiredHtml));
   check('the expired screen states that nothing was shown',
     /no project content was shown/i.test(expiredHtml));
   check('the expired screen offers the access key as the way forward',
     /Use my access key/.test(expiredHtml));
   const revokedHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_revoked') }));
   check('the revoked screen renders the required headline', revokedHtml.includes('ACCESS REVOKED'));
-  check('the revoked screen offers Contact Code Rx Society', revokedHtml.includes('Contact Code Rx Society'));
+  check('the revoked screen still offers Contact Code Rx', revokedHtml.includes('Contact Code Rx'));
   check('the revoked screen does not pretend a retry will work',
     !/try again/i.test(revokedHtml) && /can no longer be opened/i.test(revokedHtml));
   const exhaustedHtml = render(React.createElement(ClientLinkState, { state: linkStateScreen('link_exhausted') }));
@@ -1250,9 +1253,9 @@ const main = async () => {
   check('a glyph a key can never contain is kept visible and explained, never deleted',
     /Access keys never contain/.test(src('src/lib/accessKey.ts'))
     && !/replace\(\/\[\^A-Z\]/.test(fieldSource));
-  check('keys issued before the short format can still be entered in full',
-    /Using a long key issued earlier\?/.test(screenSource) && /id="client-access-legacy"/.test(screenSource)
-    && /compactAccessKey\(legacy\)/.test(screenSource));
+  check('there is no second field and no second key format on the screen',
+    !/client-access-legacy/.test(screenSource) && !/long key/i.test(screenSource)
+    && (screenSource.match(/<input/g) || []).length === 0);
   check('the field keeps its live guidance, its busy state and its go key',
     /aria-busy=\{submitting\}/.test(screenSource) && /Looks complete/.test(screenSource)
     && /of \$\{ACCESS_KEY_BODY_LENGTH\} characters/.test(screenSource));
@@ -1265,22 +1268,27 @@ const main = async () => {
     /footer\.email/.test(src('src/lib/linkAccess.ts')) && /getLink\(links, key, fallback\)|getLink\(source/.test(src('src/lib/linkAccess.ts'))
     && /clientContact\(links\)/.test(src('src/components/ClientPortal.tsx'))
     && /ClientPortal links=\{siteContent\.links\}/.test(src('src/App.tsx')));
-  check('the contact block never depends on a mail client alone',
-    /Copy address/.test(contactSource) && /navigator\.clipboard/.test(contactSource)
-    && /href=\{contact\.telegram\}/.test(contactSource) && /noopener noreferrer/.test(contactSource)
-    && /telHref\(/.test(contactSource));
-  check('the address stays visible and copyable even when the clipboard is blocked',
-    /select-all font-mono/.test(contactSource) && /Copy is blocked in this browser/.test(contactSource));
-  check('a telephone number is dialled as digits only',
-    telHref('053 734 5524') === 'tel:0537345524');
+  check('the block offers exactly the three wanted actions',
+    /Contact Code Rx/.test(contactSource) && /Contact PHANTOM/.test(contactSource) && /Telegram/.test(contactSource));
+  check('the copy-address control is gone',
+    !/navigator\.clipboard/.test(contactSource) && !/Copy address/i.test(contactSource)
+    && !/copyState/.test(contactSource) && !/select-all/.test(contactSource));
+  check('no telephone list and no dialling link are rendered any more',
+    !/tel:/.test(contactSource) && !/telHref/.test(contactSource));
+  check('the PHANTOM chip opens the website form, which works without any mail app',
+    phantomContactHref() === `/${PHANTOM_CONTACT_HASH}` && PHANTOM_CONTACT_HASH === '#contact-phantom'
+    && /href=\{phantomHref\}/.test(contactSource)
+    && /location\.hash === PHANTOM_CONTACT_HASH/.test(src('src/components/Footer.tsx')));
   const supportHtml = render(React.createElement(ClientSupportContact, {
     contact: clientContact(null),
     mailtoHref: clientSupportMailto('coderxsociety@gmail.com', 'Client portal access'),
   }));
-  check('the rendered block carries a working mail link, the address, a channel and a number',
+  check('the rendered block carries the three actions, and nothing to copy',
     /href="mailto:coderxsociety@gmail\.com\?subject=Client%20portal%20access/.test(supportHtml)
-    && supportHtml.includes('coderxsociety@gmail.com') && /t\.me/.test(supportHtml) && /tel:/.test(supportHtml));
-  check('a configured address flows through every contact action',
+    && /Contact Code Rx/.test(supportHtml) && /href="\/#contact-phantom"/.test(supportHtml)
+    && /Contact PHANTOM/.test(supportHtml) && /t\.me/.test(supportHtml)
+    && !supportHtml.includes('coderxsociety@gmail.com<') && !/tel:/.test(supportHtml));
+  check('a configured address and channel flow through every contact action',
     (() => {
       const configured = clientContact({ 'footer.email': 'projects@code-rx.test', 'footer.telegram': 'https://t.me/code_rx', 'footer.phoneOne': '020 000 0000' });
       const html = render(React.createElement(ClientSupportContact, {
@@ -1288,10 +1296,35 @@ const main = async () => {
         mailtoHref: clientSupportMailto(configured.email, 'Client portal access'),
       }));
       return configured.email === 'projects@code-rx.test' && configured.phones.includes('020 000 0000')
-        && /mailto:projects@code-rx\.test/.test(html) && /t\.me\/code_rx/.test(html) && /tel:0200000000/.test(html)
+        && /mailto:projects@code-rx\.test/.test(html) && /t\.me\/code_rx/.test(html)
         // Clearing a detail in the website editor removes it from the client page.
         && clientContact({ 'footer.phoneOne': '', 'footer.phoneTwo': '' }).phones.length === 0;
     })());
+  check('a missing Telegram link simply drops that one chip',
+    !/t\.me/.test(render(React.createElement(ClientSupportContact, {
+      contact: clientContact({ 'footer.telegram': '' }),
+      mailtoHref: clientSupportMailto('coderxsociety@gmail.com', 'Client portal access'),
+    })))
+    && /Contact Code Rx/.test(render(React.createElement(ClientSupportContact, {
+      contact: clientContact({ 'footer.telegram': '' }),
+      mailtoHref: clientSupportMailto('coderxsociety@gmail.com', 'Client portal access'),
+    }))));
+
+  // --- the way back to the website ----------------------------------------
+  check('every client screen carries a way back to the website',
+    /ClientSiteSign/.test(screenSource) && /ClientSiteSign/.test(src('src/components/ClientLinkState.tsx'))
+    && /ClientSiteSign/.test(src('src/components/ClientProjectRoom.tsx'))
+    && CLIENT_SITE_HOME === '/');
+  check('the header sign is a real link home and says so',
+    /href=\{CLIENT_SITE_HOME\}/.test(src('src/components/ClientSiteSign.tsx'))
+    && /aria-label="Code Rx Society website home"/.test(src('src/components/ClientSiteSign.tsx'))
+    && /Back to website/.test(src('src/components/ClientSiteSign.tsx')));
+  const signHtml = render(React.createElement(ClientSiteSign, {}));
+  check('the rendered sign links to the site root twice, without a hash credential',
+    (signHtml.match(/href="\/"/g) || []).length === 2 && !/#client-portal/.test(signHtml)
+    && /Back to website/.test(signHtml));
+  check('the room keeps its own subtitle in the shared sign',
+    render(React.createElement(ClientSiteSign, { subtitle: 'Client Project Room' })).includes('Client Project Room'));
   check('an empty site content still falls back to the society defaults',
     clientContact(undefined).email === clientContact(null).email && clientContact({}).telegram.startsWith('https://t.me/'));
   check('the support mail carries the screen context in its subject',

@@ -292,7 +292,22 @@ export const clientContact = (links?: Record<string, string> | null): ClientCont
 };
 
 /** A phone number a `tel:` link can dial (spaces and dashes removed, nothing else assumed). */
-export const telHref = (phone: string): string => `tel:${phone.replace(/[^\d+]/g, '')}`;
+/**
+ * Where the client screens send someone who wants the society itself: the site
+ * root. The portal never invents a second website — every "back to the website"
+ * sign, in every client screen, points here.
+ */
+export const CLIENT_SITE_HOME = '/';
+
+/**
+ * The PHANTOM contact channel is the public site's existing contact form, and
+ * this is the hash that opens it. The client screens link here instead of
+ * building a second contact route: the form already posts through the existing
+ * API to PHANTOM, and the client leaves with the full website around them.
+ */
+export const PHANTOM_CONTACT_HASH = '#contact-phantom';
+
+export const phantomContactHref = (): string => `/${PHANTOM_CONTACT_HASH}`;
 
 /** A support email with enough context for Code Rx to answer on the first reply. */
 export const clientSupportMailto = (email: string, context = 'Client portal access', detail?: string | null): string => {

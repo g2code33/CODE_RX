@@ -5,8 +5,8 @@
  * and message rules can be unit tested directly.
  *
  * Shape: `CRX-XXX-XXX-ABC` — two random groups and a three-letter project code
- * the client can recognise. Every key is entered in three fixed boxes, so these
- * helpers work in groups rather than on one long string.
+ * the client can recognise. It is the only key format: every key is entered in
+ * three fixed boxes, so these helpers work in groups, never on one long string.
  *
  * The alphabet matches the server (`functions/lib/client-auth.ts`): the
  * ambiguous glyphs 0, O, 1 and I are never part of a random group, which is what
@@ -19,12 +19,15 @@ export const ACCESS_KEY_GROUP_LENGTH = 3;
 export const ACCESS_KEY_GROUPS = 3;
 /** The trailing group is the project code: letters only, never digits. */
 export const ACCESS_KEY_CODE_LENGTH = 3;
-/** Two random groups plus the project code. */
+/** Two random groups plus the project code — the one and only key length. */
 export const ACCESS_KEY_BODY_LENGTH = ACCESS_KEY_GROUP_LENGTH * (ACCESS_KEY_GROUPS - 1) + ACCESS_KEY_CODE_LENGTH;
-/** Keys issued before the short format are still accepted (12–32 characters). */
-export const ACCESS_KEY_LEGACY_BODY_LENGTH = 16;
-export const ACCESS_KEY_MIN_BODY_LENGTH = 9;
-export const ACCESS_KEY_MAX_BODY_LENGTH = 32;
+/**
+ * How much of a paste the helpers will hold. It is deliberately longer than a
+ * key: a key from the old long format is kept whole so it can be *reported* as
+ * the wrong length, never silently cut down to something the server would then
+ * reject for the wrong reason.
+ */
+const ACCESS_KEY_MAX_TYPED_LENGTH = 32;
 export const ACCESS_KEY_PLACEHOLDER = 'CRX-___-___-ABC';
 
 /** Characters that are NOT in the alphabet but are commonly mistyped. */
@@ -52,9 +55,7 @@ export interface AccessKeyFormat {
  * is a key with the prefix attached.
  */
 const stripPrefix = (compact: string): string =>
-  compact.length !== ACCESS_KEY_BODY_LENGTH
-    && compact.startsWith(ACCESS_KEY_PREFIX)
-    && compact.length - ACCESS_KEY_PREFIX.length >= ACCESS_KEY_MIN_BODY_LENGTH
+  compact.length > ACCESS_KEY_BODY_LENGTH && compact.startsWith(ACCESS_KEY_PREFIX)
     ? compact.slice(ACCESS_KEY_PREFIX.length)
     : compact;
 
@@ -71,7 +72,7 @@ export const splitAccessKey = (raw: string): string[] => {
 
 /** The compact body a set of boxes represents, ready for the server. */
 export const joinAccessKey = (groups: string[]): string =>
-  groups.join('').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ACCESS_KEY_MAX_BODY_LENGTH);
+  groups.join('').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ACCESS_KEY_BODY_LENGTH);
 
 /**
  * Formats anything a client has typed into the canonical CRX shape.
@@ -82,11 +83,13 @@ export const joinAccessKey = (groups: string[]): string =>
 export const formatAccessKey = (raw: string): AccessKeyFormat => {
   const upper = String(raw ?? '').toUpperCase();
   const ignored: string[] = [];
-  let body = '';
+  let compact = '';
 
   for (const character of upper) {
     if (ACCESS_KEY_ALPHABET.includes(character)) {
-      if (body.length < ACCESS_KEY_MAX_BODY_LENGTH) body += character;
+      // Collected in full first: the prefix rule needs the value as typed, and
+      // only then is the body cut down to the one length a key can have.
+      compact += character;
       continue;
     }
     // Lowercase letters, dashes, spaces and the CRX prefix are expected input,
@@ -94,7 +97,7 @@ export const formatAccessKey = (raw: string): AccessKeyFormat => {
     if (/[A-Z0-9]/.test(character) && !ignored.includes(character)) ignored.push(character);
   }
 
-  body = stripPrefix(body);
+  const body = stripPrefix(compact).slice(0, ACCESS_KEY_MAX_TYPED_LENGTH);
 
   const groups: string[] = [];
   for (let index = 0; index < body.length; index += ACCESS_KEY_GROUP_LENGTH) {
@@ -110,10 +113,6 @@ export const formatAccessKey = (raw: string): AccessKeyFormat => {
   };
 };
 
-/** Compact a legacy key typed in the free-form field. Never reorders characters. */
-export const compactAccessKey = (raw: string): string =>
-  String(raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ACCESS_KEY_MAX_BODY_LENGTH);
-
 export interface AccessKeyValidation {
   ok: boolean;
   body: string;
@@ -122,7 +121,8 @@ export interface AccessKeyValidation {
 }
 
 const EMPTY_PROBLEM = 'Enter the project access key Code Rx Society gave you.';
-const SHORT_PROBLEM = 'This access key looks too short. Check it and try again.';
+const SHORT_PROBLEM = `An access key is ${ACCESS_KEY_BODY_LENGTH} characters — ${ACCESS_KEY_GROUPS} boxes of ${ACCESS_KEY_GROUP_LENGTH}. Check it and try again.`;
+const LONG_PROBLEM = `An access key is ${ACCESS_KEY_BODY_LENGTH} characters. Check the key and try again.`;
 const CODE_PROBLEM = 'The last group is the project code — three letters, like MSD.';
 
 /** Validation for the three fixed boxes: two random groups, then the project code. */
@@ -143,14 +143,15 @@ export const validateAccessKeyGroups = (boxes: string[]): AccessKeyValidation =>
 };
 
 /**
- * Validation for a whole key typed as one string — the fixed boxes and the
- * free-form field for keys issued before the short format both use it.
- * The server always validates again.
+ * Validation for a whole key given as one string — what a paste produces, and
+ * what the paste handler runs before it fills the boxes. The server always
+ * validates again.
  */
 export const validateAccessKey = (raw: string): AccessKeyValidation => {
   const formatted = formatAccessKey(raw);
   if (!formatted.body) return { ok: false, body: '', problem: EMPTY_PROBLEM };
-  if (formatted.body.length < ACCESS_KEY_MIN_BODY_LENGTH) return { ok: false, body: formatted.body, problem: SHORT_PROBLEM };
+  if (formatted.body.length < ACCESS_KEY_BODY_LENGTH) return { ok: false, body: formatted.body, problem: SHORT_PROBLEM };
+  if (formatted.body.length > ACCESS_KEY_BODY_LENGTH) return { ok: false, body: formatted.body, problem: LONG_PROBLEM };
   if (formatted.ignored.length) {
     return {
       ok: false,
@@ -158,6 +159,7 @@ export const validateAccessKey = (raw: string): AccessKeyValidation => {
       problem: `Access keys never contain ${formatted.ignored.join(', ')} — check the key and try again.`,
     };
   }
+  if (!formatted.complete) return { ok: false, body: formatted.body, problem: LONG_PROBLEM };
   return { ok: true, body: formatted.body, problem: null };
 };
 

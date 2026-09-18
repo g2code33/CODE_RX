@@ -543,7 +543,7 @@ const main = async () => {
   const portalDark = await request('GET', '/api/client/me', {});
   check('portal is dark until PHANTOM enables it (404)', portalDark.status === 404, `got ${portalDark.status}`);
 
-  const darkLogin = await request('POST', '/api/client/auth/login', { body: { passkey: 'CRX-AAAA-BBBB-CCCC-DDDD' } });
+  const darkLogin = await request('POST', '/api/client/auth/login', { body: { passkey: 'CRX-AAA-BBB-CCC' } });
   check('passkey login refused while portal is disabled', darkLogin.status === 404, `got ${darkLogin.status}`);
 
   // PHANTOM signs in through the existing member authentication path.
@@ -596,12 +596,17 @@ const main = async () => {
   check('the random part is two groups from the 32-symbol alphabet (about 30 bits)',
     normalise(keyA.passkey).length === 9
     && normalise(keyA.passkey).slice(0, 6).split('').every((character) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'.includes(character)));
-  check('a key issued before the short format still normalises to its body',
-    normalise('CRX-8K4P-X92M-7LQF-B3TD') === '8K4PX92M7LQFB3TD'
-    && normalise('CRX-8K4-P92-MSD') === '8K4P92MSD'
-    && normalise('8k4-p92-msd') === '8K4P92MSD');
+  check('the canonical key normalises whether or not the prefix and dashes are there',
+    normalise('CRX-8K4-P92-MSD') === '8K4P92MSD'
+    && normalise('8k4-p92-msd') === '8K4P92MSD'
+    && normalise('CRX8K4P92MSD') === '8K4P92MSD');
+  check('the long key is gone: a 16-character body is refused like any other bad shape',
+    normalise('CRX-8K4P-X92M-7LQF-B3TD') === null && normalise('8K4PX92M7LQFB3TD') === null);
   check('a value that cannot be a key is refused before any hash lookup',
-    normalise('nope') === null && normalise('A'.repeat(120)) === null && normalise('CRX-0O1-8K4') === null);
+    normalise('nope') === null && normalise('A'.repeat(120)) === null && normalise('CRX-0O1-8K4') === null
+    // A digit in the project code is a well-formed body, so it is simply a key
+    // that does not exist — the client-side check explains the code rule first.
+    && normalise('CRX-8K4-P92-MS2') === '8K4P92MS2');
   check('the short key is protected by a per-project-code failure throttle',
     helpers.CLIENT_AUTH_CODE_LIMIT >= 100 && helpers.CLIENT_AUTH_CODE_WINDOW_SECONDS <= 3600
     && helpers.CLIENT_AUTH_CODE_LOCK_SECONDS >= 60);

@@ -1,11 +1,12 @@
 import { ArrowUpRight, Check, Globe, Mail, Phone, Send, X } from 'lucide-react';
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { getCopy, getLink, getMedia, MediaAsset } from '../data/editorSchema';
 import { db } from '../lib/cloudflare';
 import { PharmacyBackground } from './PharmacyBackground';
 import { EditableImage, EditableRegion, EditableText } from './VisualEditorContext';
 import { ContactForm } from './ContactForm';
 import { ClientPortalEntry } from './ClientPortalEntry';
+import { PHANTOM_CONTACT_HASH } from '../lib/linkAccess';
 
 export const Footer = ({ copy, links, media }: { copy?: Record<string, string>; links?: Record<string, string>; media?: Record<string, MediaAsset> }) => {
   const [isContactOpen, setIsContactOpen] = useState(false);
@@ -16,6 +17,18 @@ export const Footer = ({ copy, links, media }: { copy?: Record<string, string>; 
   const logo = getMedia(media, 'footer.logo', { src: '/CODE%20RX11.png', alt: 'Code Rx Society' });
   const telegram = getLink(links, 'footer.telegram', 'https://t.me/+EdRpfR1GTGNjM2Q0');
   const email = getLink(links, 'footer.email', 'coderxsociety@gmail.com');
+
+  // The client portal's "Contact PHANTOM" chip hands the client back to the
+  // website and to this exact form — the same channel the footer buttons open,
+  // never a second contact route.
+  useEffect(() => {
+    const openFromHash = () => {
+      if (window.location.hash === PHANTOM_CONTACT_HASH) setIsContactOpen(true);
+    };
+    openFromHash();
+    window.addEventListener('hashchange', openFromHash);
+    return () => window.removeEventListener('hashchange', openFromHash);
+  }, []);
 
   const handleSubscribe = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

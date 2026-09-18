@@ -1,5 +1,6 @@
 import { AlertTriangle, Ban, Clock, ShieldCheck, Timer } from 'lucide-react';
 import { clientContact, linkContactHref, type ClientContact, type LinkStateScreen } from '../lib/linkAccess';
+import { ClientSiteSign } from './ClientSiteSign';
 import { ClientSupportContact } from './ClientSupportContact';
 
 interface ClientLinkStateProps {
@@ -30,13 +31,7 @@ export const ClientLinkState = ({ state, onContinue, continueLabel, contact }: C
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-5">
-          <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Code Rx Society" className="h-9 w-9 rounded-lg object-contain" />
-            <div className="leading-tight">
-              <p className="text-[13px] font-black tracking-[0.22em] text-slate-900">CODE Rx SOCIETY</p>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Client Project Portal</p>
-            </div>
-          </div>
+          <ClientSiteSign />
           <span className="hidden items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500 sm:inline-flex">
             <ShieldCheck className="h-4 w-4" /> Secure client access
           </span>
@@ -71,7 +66,6 @@ export const ClientLinkState = ({ state, onContinue, continueLabel, contact }: C
               contact={details}
               mailtoHref={linkContactHref(state.headline, details.email)}
               message={state.guidance}
-              actionLabel="Contact Code Rx Society"
             />
           </div>
 

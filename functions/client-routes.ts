@@ -1357,8 +1357,8 @@ export const registerClientRoutes = (app: ClientApp) => {
       if (new Date(expiresAt).getTime() <= Date.now()) return c.json({ success: false, error: 'The expiry date must be in the future.' }, 400);
     }
 
-    // Generation happens exactly once, here. Only the SHA-256 verifier and a
-    // four-character hint are stored; the raw value is returned once and is not
+    // Generation happens exactly once, here. Only the SHA-256 verifier and the
+    // project-code hint are stored; the raw value is returned once and is not
     // recoverable afterwards. The trailing group is the project's own
     // three-letter code, so the key itself says which project it opens.
     const passkey = generateClientPasskey(projectName ?? client.name);

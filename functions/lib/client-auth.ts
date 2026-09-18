@@ -46,22 +46,21 @@ export const CLIENT_PASSKEY_CODE_LENGTH = 3;
  * (about 1.07 billion combinations) in front of a project identifier that is
  * not secret.
  *
- * This is deliberately shorter and friendlier than the earlier 16-character
- * key, at the request of the product owner: a client reads it from a letter,
+ * This is deliberately short and friendly: a client reads it from a letter,
  * dictates it, or types it in three fixed boxes. Because the random space is
- * smaller, the durable throttling below is not optional: the per-IP limit, the
- * per-attempted-key limit, and the per-project-code limit that is applied after
- * a failed lookup (so a correct key is never blocked by someone else's attack).
- * Raising the strength later is a one-line change to
- * CLIENT_PASSKEY_RANDOM_LENGTH; every parser here accepts longer bodies, and
- * keys issued before this change (16-character bodies) keep working.
+ * smaller than a long random key would give, the durable throttling below is not
+ * optional: the per-IP limit, the per-attempted-key limit, and the
+ * per-project-code limit that is applied after a failed lookup (so a correct key
+ * is never blocked by someone else's attack).
+ * There is exactly one key format. The earlier 16-character key is gone from
+ * the product entirely: the server no longer accepts a body of any other
+ * length, so a key issued before this change cannot be presented at all until
+ * PHANTOM issues a new one (one tap per key, and the workspace list shows each
+ * key's project code). Raising the strength later is a one-line change to
+ * CLIENT_PASSKEY_RANDOM_LENGTH; every generated key and every parser follow it.
  */
 export const CLIENT_PASSKEY_RANDOM_LENGTH = 6;
-const PASSKEY_BODY_LENGTH = CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH;
-
-/** Accepted body length range. Only a cheap pre-hash format filter — the hash is the verifier. */
-const PASSKEY_MIN_BODY_LENGTH = 9;
-const PASSKEY_MAX_BODY_LENGTH = 32;
+export const CLIENT_PASSKEY_BODY_LENGTH = CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH;
 
 /** Domain separator keeps client verifiers distinct from Vault share verifiers. */
 const PASSKEY_HASH_DOMAIN = 'code-rx:client-access-key:v1:';
@@ -130,11 +129,15 @@ export const generateClientPasskey = (source?: string | null): string => {
  * Normalises anything a client types into the stored form: uppercase, no
  * separators, and an optional leading `CRX` removed. Returns null when the
  * value cannot be a passkey, so malformed input never reaches a hash lookup.
+ *
+ * Only the canonical body length is accepted — there is no legacy format left,
+ * so a key from the old system is refused here (null) exactly like a typo, and
+ * never reaches the database.
  */
 export const normalizeClientPasskey = (value: unknown): string | null => {
   const compact = String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const body = compact.startsWith(CLIENT_PASSKEY_PREFIX) ? compact.slice(CLIENT_PASSKEY_PREFIX.length) : compact;
-  if (body.length < PASSKEY_MIN_BODY_LENGTH || body.length > PASSKEY_MAX_BODY_LENGTH) return null;
+  if (body.length !== CLIENT_PASSKEY_BODY_LENGTH) return null;
   for (const character of body) {
     if (!CLIENT_PASSKEY_ALPHABET.includes(character)) return null;
   }
@@ -613,19 +616,16 @@ export const CLIENT_AUTH_CODE_WINDOW_SECONDS = 15 * 60;
 export const CLIENT_AUTH_CODE_LOCK_SECONDS = 15 * 60;
 
 /**
- * The four-character-ish hint shown beside a key in the workspace: the project
- * code for a short key (so the list reads "…MSD"), the last four characters for
- * a key issued before this format. Display only — never an authentication factor.
+ * The hint shown beside a key in the workspace: the project code, so the list
+ * reads "…MSD" without ever holding a stored key. Display only — never an
+ * authentication factor.
  */
 export const clientPasskeyHint = (normalizedBody: string): string =>
-  normalizedBody.length === CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH
-    ? normalizedBody.slice(-CLIENT_PASSKEY_CODE_LENGTH)
-    : normalizedBody.slice(-4);
+  normalizedBody.slice(-CLIENT_PASSKEY_CODE_LENGTH);
 
 /** The project code a well-formed attempt was aimed at, or null for legacy keys. */
 export const clientPasskeyCodeScope = (normalizedPasskey: string | null): string | null => {
-  const expected = CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH;
-  if (!normalizedPasskey || normalizedPasskey.length !== expected) return null;
+  if (!normalizedPasskey || normalizedPasskey.length !== CLIENT_PASSKEY_BODY_LENGTH) return null;
   const code = normalizedPasskey.slice(-CLIENT_PASSKEY_CODE_LENGTH);
   return /^[A-Z]{3}$/.test(code) ? `code:${code}` : null;
 };

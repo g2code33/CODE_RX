@@ -19,6 +19,7 @@ import {
   linkDestinationLabel,
   type LinkLanding,
 } from '../lib/linkAccess';
+import { ClientSiteSign } from './ClientSiteSign';
 import {
   CATEGORY_LABELS,
   canDownload,
@@ -561,13 +562,7 @@ export const ClientProjectRoom = ({
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-5 sm:py-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <img src="/logo.png" alt="Code Rx Society" className="h-9 w-9 rounded-lg object-contain" />
-            <div className="min-w-0 leading-tight">
-              <p className="text-[12px] font-black tracking-[0.22em] text-slate-900 sm:text-[13px]">CODE Rx SOCIETY</p>
-              <p className="truncate text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Client Project Room</p>
-            </div>
-          </div>
+          <ClientSiteSign subtitle="Client Project Room" />
           <div className="flex items-center gap-3">
             <div className="hidden text-right sm:block">
               <p className="max-w-[220px] truncate text-sm font-bold text-slate-900">{context.client.name}</p>
