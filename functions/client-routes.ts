@@ -22,6 +22,16 @@ import type { Hono } from 'hono';
 import { requireAuth } from './lib/auth';
 import { actorFromContext, audit } from './lib/vault';
 import { checkRateLimit } from './lib/rate-limit';
+import {
+  buildClientActivityEntry,
+  clientActivityPage,
+  CLIENT_ACTIVITY_KINDS,
+  CLIENT_ACTIVITY_KIND_LABELS,
+  type ActivityDocumentRef,
+  type ActivityLinkRef,
+  type ActivityProjectRef,
+} from './lib/client-activity';
+import { CLIENT_NOTIFICATION_SETTINGS, notifyClientDocumentEvent } from './lib/client-notifications';
 import { cleanEmail, cleanOptionalStr, cleanStr } from './lib/validate';
 import {
   clientThrottleKeys,
@@ -111,6 +121,7 @@ import {
   type ClientLinkDestination,
   type ClientPrincipal,
 } from './lib/client-portal';
+import { documentFreshness } from './lib/client-portal';
 import {
   assertClientCapability,
   auditPermissionChange,
@@ -1700,6 +1711,9 @@ export const registerClientRoutes = (app: ClientApp) => {
       version: document.version || null,
       lifecycle: document.lifecycle_status,
       clientVisible: Number(document.client_visible) === 1,
+      // The same NEW / UPDATED signal the client room shows, from the existing
+      // timestamps (Phase 9).
+      freshness: documentFreshness(document),
       allowView: Number(document.allow_view) === 1,
       allowDownload: Number(document.allow_download) === 1,
       isArchived: Number(document.is_archived) === 1,
@@ -2011,9 +2025,52 @@ export const registerClientRoutes = (app: ClientApp) => {
       clientVisible: clientVisible === 1,
     });
     if (state === 'published') {
+      // The publication is recorded against the client it belongs to, so it
+      // appears in that client's timeline next to the client's own reads, and it
+      // carries the project it was published into (Phase 9).
+      const context = await one<any>(db.prepare(
+        `SELECT cl.public_id AS client_public_id, cl.name AS client_name, cl.contact_email AS contact_email,
+                p.public_id AS project_public_id, p.name AS project_name, p.reference_code AS project_reference
+         FROM client_documents d
+         JOIN client_projects p ON p.id = d.client_project_id
+         JOIN clients cl ON cl.id = d.client_id
+         WHERE d.id = ?`
+      ).bind(document.id));
       await recordClientActivity(db, 'DOCUMENT_VIEWED', {
-        clientPublicId: null,
-        details: { note: 'publication', documentId: document.public_id, reference: document.reference_code },
+        clientPublicId: context?.client_public_id ? String(context.client_public_id) : null,
+        details: {
+          note: 'publication',
+          documentId: document.public_id,
+          reference: document.reference_code,
+          projectPublicId: context?.project_public_id ? String(context.project_public_id) : null,
+          version: document.version || null,
+        },
+      });
+
+      // Optional notifications (Phase 9). Off by default, best-effort, and never
+      // able to fail a publish: the existing member inbox and the existing
+      // EmailJS transaction are reused, and the outcome is audited.
+      const wasUpdated = Boolean(document.published_at) || Number(String(document.version || '1').split('.')[0]) > 1;
+      const event = String(document.category) === 'update'
+        ? 'project_update' as const
+        : wasUpdated ? 'document_updated' as const : 'new_document' as const;
+      const notification = await notifyClientDocumentEvent(db, c.env, {
+        event,
+        client: { name: String(context?.client_name || ''), contactEmail: context?.contact_email ? String(context.contact_email) : null },
+        project: { name: String(context?.project_name || ''), reference: String(context?.project_reference || '') },
+        document: {
+          title: String(document.title || ''),
+          reference: document.reference_code ? String(document.reference_code) : null,
+          version: document.version ? String(document.version) : null,
+          category: String(document.category || 'document'),
+        },
+        actor,
+        portalLink: null,
+      });
+      return c.json({
+        success: true,
+        message: 'Document published to the client.',
+        data: { state, clientVisible: clientVisible === 1, notification },
       });
     }
 
@@ -2028,28 +2085,87 @@ export const registerClientRoutes = (app: ClientApp) => {
 
   // ---------------- Client activity (existing audit infrastructure) ----------------
 
+  /**
+   * The client activity timeline.
+   *
+   * Rows come from the existing `audit_logs` table (no second logging system).
+   * The route only adds presentation: which project/document/link an entry
+   * belongs to, how access was granted, and a display-safe filter of the stored
+   * details. Everything is scoped to the client named in the URL, and the
+   * project/document/link lookups are loaded for that client alone, so one
+   * client's timeline can never name another client's project.
+   */
   app.get('/api/phantom/clients/:clientId/activity', requireAuth, activityView, async (c: any) => {
-    const client = await findClientByPublicId(c.env.DB, String(c.req.param('clientId') || ''));
+    const db = c.env.DB;
+    const client = await findClientByPublicId(db, String(c.req.param('clientId') || ''));
     if (!client) return c.json({ success: false, error: 'Client not found.' }, 404);
     const limit = Math.min(200, Math.max(1, Number(c.req.query('limit') || 60)));
-    // Client activity lives in the existing audit_logs table — no second
-    // logging system — and is indexed by (subject_type, subject_id).
-    const rows = await asRows<any>(c.env.DB.prepare(
+    const rows = await asRows<any>(db.prepare(
       `SELECT id, action, subject_id, details_json, created_at
        FROM audit_logs
        WHERE subject_type = 'client' AND subject_id = ?
-       ORDER BY created_at DESC, id DESC LIMIT ?`
-    ).bind(client.public_id, limit));
-    return c.json({ success: true, data: rows.map((row) => {
-      let details: Record<string, unknown> = {};
-      try { details = JSON.parse(row.details_json || '{}'); } catch { details = {}; }
-      return {
-        id: row.id,
-        event: String(row.action || '').replace(/^client\./, '').toUpperCase(),
-        at: row.created_at,
-        details,
-      };
-    }) });
+       ORDER BY created_at DESC, id DESC LIMIT 400`
+    ).bind(client.public_id));
+
+    const [projectRows, documentRows, linkRows] = await Promise.all([
+      asRows<any>(db.prepare(
+        'SELECT public_id, name, reference_code FROM client_projects WHERE client_id = ? LIMIT 500'
+      ).bind(client.id)),
+      asRows<any>(db.prepare(
+        `SELECT d.public_id, d.reference_code, d.title, p.public_id AS project_public_id
+         FROM client_documents d JOIN client_projects p ON p.id = d.client_project_id
+         WHERE d.client_id = ? LIMIT 500`
+      ).bind(client.id)),
+      asRows<any>(db.prepare(
+        `SELECT l.public_id, l.destination_type, l.destination_id, l.mode, p.public_id AS project_public_id
+         FROM client_links l JOIN client_projects p ON p.id = l.client_project_id
+         WHERE l.client_id = ? LIMIT 500`
+      ).bind(client.id)),
+    ]);
+
+    const projects = new Map<string, ActivityProjectRef>(projectRows.map((row) => [String(row.public_id), {
+      id: String(row.public_id), name: String(row.name), reference: String(row.reference_code || ''),
+    }]));
+    const documents = new Map<string, ActivityDocumentRef>(documentRows.map((row) => [String(row.public_id), {
+      id: String(row.public_id),
+      reference: row.reference_code ? String(row.reference_code) : null,
+      title: String(row.title || ''),
+      projectPublicId: row.project_public_id ? String(row.project_public_id) : null,
+    }]));
+    const links = new Map<string, ActivityLinkRef>(linkRows.map((row) => [String(row.public_id), {
+      id: String(row.public_id),
+      destination: row.destination_type ? String(row.destination_type) : null,
+      projectPublicId: row.project_public_id ? String(row.project_public_id) : null,
+      mode: row.mode ? String(row.mode) : null,
+    }]));
+
+    const entries = rows.map((row) => buildClientActivityEntry(row, {
+      projects, documents, links, clientPublicId: String(client.public_id),
+    }));
+    const page = clientActivityPage(entries, {
+      kind: c.req.query('kind') || null,
+      projectId: c.req.query('project') || null,
+      documentId: c.req.query('document') || null,
+      limit,
+    });
+    return c.json({
+      success: true,
+      data: page.entries,
+      meta: {
+        total: entries.length,
+        counts: page.counts,
+        kinds: page.kinds.length ? page.kinds : CLIENT_ACTIVITY_KINDS,
+        // The workspace renders these labels rather than keeping its own copy of
+        // the taxonomy.
+        labels: { kinds: CLIENT_ACTIVITY_KIND_LABELS },
+        filters: {
+          kind: c.req.query('kind') || null,
+          project: c.req.query('project') || null,
+          document: c.req.query('document') || null,
+          limit,
+        },
+      },
+    });
   });
 
   // PHANTOM-only preview and publishing support, registered by the same
@@ -2323,18 +2439,39 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
   // the capability can be delegated without handing over platform settings.
   // =========================================================================
   const PORTAL_SETTING_KEYS = ['client_portal_enabled', 'client_downloads_enabled', 'client_all_links_enabled'];
+  // Phase 9 reuses this same route, guard and audit trail for the optional
+  // notification switches. The default group is still exactly the three portal
+  // switches, so existing clients of this endpoint see no change.
+  const NOTIFICATION_SETTING_KEYS = CLIENT_NOTIFICATION_SETTINGS.map((entry) => entry.key);
+  const SETTING_GROUPS: Record<string, { keys: string[]; labels: Record<string, string>; audit: string }> = {
+    portal: { keys: PORTAL_SETTING_KEYS, labels: {}, audit: 'client.portal_settings.updated' },
+    notifications: {
+      keys: [...NOTIFICATION_SETTING_KEYS],
+      labels: Object.fromEntries(CLIENT_NOTIFICATION_SETTINGS.map((entry) => [entry.key, entry.label])),
+      audit: 'client.notification_settings.updated',
+    },
+  };
+
+  const settingGroup = (c: any) => {
+    const name = String(c.req.query('group') || 'portal').toLowerCase();
+    return { name, group: SETTING_GROUPS[name] || null };
+  };
 
   app.get('/api/phantom/client-portal-settings', requireAuth, settingsManage, async (c: any) => {
+    const { name, group } = settingGroup(c);
+    if (!group) return c.json({ success: false, error: 'Unknown client settings group.' }, 400);
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT setting_key, setting_value, updated_at FROM system_settings WHERE setting_key IN (${PORTAL_SETTING_KEYS.map(() => '?').join(',')})`
-    ).bind(...PORTAL_SETTING_KEYS));
+      `SELECT setting_key, setting_value, updated_at FROM system_settings WHERE setting_key IN (${group.keys.map(() => '?').join(',')})`
+    ).bind(...group.keys));
     const byKey = new Map(rows.map((row) => [String(row.setting_key), row]));
     return c.json({
       success: true,
-      data: PORTAL_SETTING_KEYS.map((key) => ({
+      data: group.keys.map((key) => ({
         key,
         value: String(byKey.get(key)?.setting_value ?? '0') === '1',
         updatedAt: byKey.get(key)?.updated_at ?? null,
+        group: name,
+        label: group.labels[key] || null,
       })),
     });
   });
@@ -2347,7 +2484,8 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
     const applied: Array<{ key: string; previous: boolean; next: boolean }> = [];
     for (const entry of changes) {
       const key = String(entry?.key || '');
-      if (!PORTAL_SETTING_KEYS.includes(key)) {
+      const accepted = Object.values(SETTING_GROUPS).some((candidate) => candidate.keys.includes(key));
+      if (!accepted) {
         return c.json({ success: false, error: 'Unknown client portal setting.' }, 400);
       }
       if (typeof entry.value !== 'boolean') {
@@ -2362,10 +2500,15 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
       ).bind(key, entry.value ? '1' : '0', actor?.userId ?? null).run();
       applied.push({ key, previous: String(existing?.setting_value ?? '0') === '1', next: entry.value });
     }
-    if (applied.length) {
-      await audit(db, actor, 'client.portal_settings.updated', 'system_settings', 'client_portal', {
-        previousValue: Object.fromEntries(applied.map((entry) => [entry.key, entry.previous])),
-        newValue: Object.fromEntries(applied.map((entry) => [entry.key, entry.next])),
+    // Each switch is recorded under the audit action of its own group, so the
+    // existing client portal audit trail is unchanged and the notification
+    // switches are traceable on their own.
+    for (const [name, group] of Object.entries(SETTING_GROUPS)) {
+      const entries = applied.filter((entry) => group.keys.includes(entry.key));
+      if (!entries.length) continue;
+      await audit(db, actor, group.audit, 'system_settings', name === 'portal' ? 'client_portal' : 'client_notifications', {
+        previousValue: Object.fromEntries(entries.map((entry) => [entry.key, entry.previous])),
+        newValue: Object.fromEntries(entries.map((entry) => [entry.key, entry.next])),
       });
     }
     return c.json({ success: true, message: 'Client portal settings saved.', data: { applied } });

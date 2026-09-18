@@ -24,8 +24,27 @@ export interface RoomDocument {
   version?: string | null;
   publishedAt?: string | null;
   updatedAt?: string | null;
+  /**
+   * 'new' / 'updated' / null, decided by the server from the publication date,
+   * the last change and the version — the timestamps the portal already keeps.
+   * Anything else the server might send is ignored rather than rendered.
+   */
+  freshness?: 'new' | 'updated' | null;
   permissions?: { view?: boolean; download?: boolean };
 }
+
+/** The NEW / UPDATED badge for a document, or null when it has neither. */
+export const freshnessBadge = (
+  document: RoomDocument | null | undefined,
+): { label: 'NEW' | 'UPDATED'; title: string } | null => {
+  if (document?.freshness === 'new') {
+    return { label: 'NEW', title: 'Published recently' };
+  }
+  if (document?.freshness === 'updated') {
+    return { label: 'UPDATED', title: 'Changed since it was first published' };
+  }
+  return null;
+};
 
 /**
  * The stamped client copy of a document.

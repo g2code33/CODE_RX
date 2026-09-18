@@ -877,8 +877,12 @@ const main = async () => {
   check('key listing is scoped to one client', otherKeys.json.data.every((key) => key.id !== keyA.id));
 
   const activityB = await request('GET', `/api/phantom/clients/${clientB.id}/activity`, { token: phantomToken });
+  const foreignActivity = activityB.json.data.filter(
+    (entry) => entry.details.clientPublicId !== clientB.id && entry.details.clientPublicId !== null,
+  );
   check('client activity is per-client and does not contain another client',
-    activityB.json.data.every((entry) => entry.details.clientPublicId === clientB.id || entry.details.clientPublicId === null));
+    foreignActivity.length === 0,
+    JSON.stringify(foreignActivity.map((entry) => ({ event: entry.event, details: entry.details }))).slice(0, 300));
 
   const failReason = await request('GET', `/api/client/project/${projectB.id}`, { clientSession: sessionA });
   const missingReason = await request('GET', '/api/client/project/prj_doesnotexist0000000000', { clientSession: sessionA });
@@ -3381,6 +3385,371 @@ const main = async () => {
 
   const unknownDocument = await request('GET', `/api/client/project/${deliveryProject.id}/documents/doc_${'a'.repeat(24)}/download`, { clientSession: deliverySession });
   check('a document id that does not exist inside the client scope is a 404', unknownDocument.status === 404);
+
+  // =========================================================================
+  // Phase 9 — activity timeline, notifications, NEW/UPDATED
+  // =========================================================================
+
+  group('22. Client activity timeline (Phase 9)');
+  const timelineClient = await createClient(phantomToken, 'Timeline Client Ltd');
+  const timelineProject = await createProject(phantomToken, timelineClient.id, 'Timeline Project');
+  const timelineKey = await createKey(phantomToken, timelineClient.id, timelineProject.id, { label: 'Timeline key' });
+  const timelineSession = await clientSession(timelineKey.passkey, 'timeline session');
+  const timelineDocument = await createDocument(phantomToken, timelineClient.id, timelineProject.id, {
+    title: 'Timeline report', category: 'report', contentText: 'Timeline body text.',
+  });
+  await publish(phantomToken, timelineDocument.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${timelineDocument.id}`, {
+    token: phantomToken, body: { allowDownload: true },
+  });
+
+  // Real client activity, through the real client routes.
+  await request('GET', `/api/client/project/${timelineProject.id}`, { clientSession: timelineSession });
+  await request('GET', `/api/client/project/${timelineProject.id}/sections/overview`, { clientSession: timelineSession });
+  await request('GET', `/api/client/project/${timelineProject.id}/documents/${timelineDocument.id}`, { clientSession: timelineSession });
+  await request('GET', `/api/client/project/${timelineProject.id}/documents/${timelineDocument.id}/download`, { clientSession: timelineSession });
+  await request('POST', '/api/client/auth/logout', { clientSession: timelineSession });
+
+  const timelineLinkResponse = await request('POST', `/api/phantom/clients/${timelineClient.id}/links`, {
+    token: phantomToken, body: { projectId: timelineProject.id, expiresInMinutes: 30, mode: 'DIRECT_ACCESS' },
+  });
+  const timelineLinkToken = timelineLinkResponse.json?.data?.token;
+  const timelineLinkId = timelineLinkResponse.json?.data?.id;
+  await request('POST', `/api/client/link/${timelineLinkToken}`);
+  await request('POST', `/api/phantom/client-links/${timelineLinkId}/revoke`, { token: phantomToken });
+  // A refused attempt: a document id that is not in this project's scope.
+  await request('GET', `/api/client/project/${timelineProject.id}/documents/doc_${'b'.repeat(24)}`, { clientSession: timelineSession });
+
+  const timelineFeed = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity?limit=200`, { token: phantomToken });
+  const timelineEntries = timelineFeed.json?.data || [];
+  const timelineEvents = timelineEntries.map((entry) => entry.event);
+  check('the activity timeline answers with entries and presentation metadata',
+    timelineFeed.status === 200 && Array.isArray(timelineEntries) && timelineEntries.length > 0
+    && timelineFeed.json.meta && timelineFeed.json.meta.labels?.kinds?.document === 'Documents',
+    JSON.stringify(timelineFeed.json?.meta?.counts || {}));
+  check('every recorded event type the client can produce is present',
+    ['LOGIN', 'PROJECT_OPENED', 'SECTION_OPENED', 'DOCUMENT_VIEWED', 'DOCUMENT_DOWNLOADED', 'LOGOUT',
+      'LINK_CREATED', 'LINK_USED', 'LINK_REVOKED', 'DOCUMENT_PUBLISHED'].every((event) => timelineEvents.includes(event)),
+    timelineEvents.slice(0, 16).join(','));
+  check('publication reads as a publication, not as a client read',
+    timelineEntries.some((entry) => entry.event === 'DOCUMENT_PUBLISHED' && entry.kind === 'project'
+      && entry.actor?.type === 'staff' && entry.accessMethod?.id === 'staff'
+      && entry.document?.id === timelineDocument.id));
+  const downloadEntry = timelineEntries.find((entry) => entry.event === 'DOCUMENT_DOWNLOADED');
+  check('an entry names the project and the document it touched',
+    downloadEntry?.project?.id === timelineProject.id && downloadEntry?.project?.name === 'Timeline Project'
+    && Boolean(downloadEntry?.project?.reference) && downloadEntry?.document?.id === timelineDocument.id
+    && Boolean(downloadEntry?.document?.reference),
+    JSON.stringify(downloadEntry || null).slice(0, 200));
+  check('an entry says how access was granted',
+    downloadEntry?.accessMethod?.id === 'access_key' && downloadEntry?.accessMethod?.label === 'Project access key'
+    && timelineEntries.find((entry) => entry.event === 'LINK_USED')?.accessMethod?.id === 'link_direct',
+    JSON.stringify([downloadEntry?.accessMethod, timelineEntries.find((entry) => entry.event === 'LINK_USED')?.accessMethod]));
+  check('every entry carries the full timeline shape',
+    timelineEntries.every((entry) => Number.isInteger(entry.id) && typeof entry.event === 'string'
+      && typeof entry.kind === 'string' && typeof entry.label === 'string' && typeof entry.at === 'string'
+      && entry.actor && typeof entry.actor.type === 'string' && entry.accessMethod && typeof entry.accessMethod.label === 'string'
+      && typeof entry.summary === 'string' && entry.details && typeof entry.details === 'object'));
+  check('the counts describe the whole history, not the returned page',
+    Number(timelineFeed.json.meta.counts.all) === Number(timelineFeed.json.meta.total)
+    && Object.entries(timelineFeed.json.meta.counts)
+      .filter(([kind]) => kind !== 'all')
+      .reduce((sum, [, value]) => sum + Number(value), 0) === Number(timelineFeed.json.meta.total));
+
+  const documentFilter = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity?limit=200&kind=document`, { token: phantomToken });
+  check('the timeline can be filtered to documents only',
+    documentFilter.status === 200 && documentFilter.json.data.length > 0
+    && documentFilter.json.data.every((entry) => entry.kind === 'document')
+    && Number(documentFilter.json.meta.counts.all) === Number(timelineFeed.json.meta.counts.all));
+  const projectFilter = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity?limit=200&project=${timelineProject.id}`, { token: phantomToken });
+  check('the timeline can be filtered to one project',
+    projectFilter.status === 200 && projectFilter.json.data.length > 0
+    && projectFilter.json.data.every((entry) => entry.project?.id === timelineProject.id));
+  const documentIdFilter = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity?limit=200&document=${timelineDocument.id}`, { token: phantomToken });
+  check('the timeline can be filtered to one document',
+    documentIdFilter.status === 200 && documentIdFilter.json.data.length > 0
+    && documentIdFilter.json.data.every((entry) => entry.document?.id === timelineDocument.id));
+  const unknownKind = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity?limit=200&kind=not-a-kind`, { token: phantomToken });
+  check('an unknown filter shows everything rather than nothing',
+    unknownKind.status === 200 && unknownKind.json.data.length === timelineEntries.length);
+  const oneEntry = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity?limit=1`, { token: phantomToken });
+  check('the timeline honours the requested limit', oneEntry.json?.data?.length === 1);
+
+  const timelineBlob = JSON.stringify(timelineFeed.json);
+  const credentials = [timelineKey.passkey, timelineLinkToken, timelineSession].filter(Boolean);
+  check('no credential a client used appears anywhere in the timeline',
+    credentials.every((secret) => !timelineBlob.includes(secret)),
+    credentials.filter((secret) => timelineBlob.includes(secret)).length ? 'a credential was echoed' : '');
+  check('no internal storage reference, vault path or hash reaches the timeline',
+    !/client-exports\/|vault\/|storage_reference|token_hash|session_id|[0-9a-f]{64}/.test(timelineBlob));
+
+  // Another client's activity can never be attributed to this one.
+  const timelineOther = await createClient(phantomToken, 'Timeline Other Ltd');
+  const timelineOtherProject = await createProject(phantomToken, timelineOther.id, 'Timeline Other Project');
+  const timelineOtherKey = await createKey(phantomToken, timelineOther.id, timelineOtherProject.id, { label: 'Other key' });
+  await clientSession(timelineOtherKey.passkey, 'other session');
+  const otherFeed = await request('GET', `/api/phantom/clients/${timelineOther.id}/activity?limit=200`, { token: phantomToken });
+  check('a second client still gets its own timeline',
+    otherFeed.json.data.some((entry) => entry.event === 'LOGIN') && otherFeed.json.data.length > 0);
+  check('one client timeline never names another client project or document',
+    !JSON.stringify(otherFeed.json).includes(timelineProject.id)
+    && !JSON.stringify(otherFeed.json).includes(timelineDocument.id)
+    && !JSON.stringify(timelineFeed.json).includes(timelineOtherProject.id));
+  check('a client session cannot read the operator activity timeline (401)',
+    (await request('GET', `/api/phantom/clients/${timelineClient.id}/activity`, { clientSession: timelineSession })).status === 401);
+  await grantHolder([]);
+  const noActivityCapability = await request('GET', `/api/phantom/clients/${timelineClient.id}/activity`, { token: holderToken });
+  check('a member without the activity capability is refused (403)', noActivityCapability.status === 403);
+
+  group('23. Optional client notifications (Phase 9)');
+  const notifyClient = await createClient(phantomToken, 'Notify Client Ltd');
+  await request('PATCH', `/api/phantom/clients/${notifyClient.id}`, {
+    token: phantomToken, body: { contactEmail: 'client-contact@example.test' },
+  });
+  const notifyProject = await createProject(phantomToken, notifyClient.id, 'Notify Project');
+  const notifyStats = () => ({
+    notifications: Number(db.query('SELECT COUNT(*) AS c FROM notifications')[0].c),
+    recipients: Number(db.query('SELECT COUNT(*) AS c FROM notification_recipients')[0].c),
+  });
+  const publishNotification = async (title, body = {}) => {
+    const document = await createDocument(phantomToken, notifyClient.id, notifyProject.id, {
+      title, category: 'report', contentText: 'Notify body text.', ...body,
+    });
+    const response = await publish(phantomToken, document.id, 'published');
+    return { document, response, outcome: response.json?.data?.notification };
+  };
+
+  const beforeNotify = notifyStats();
+  const offPublish = await publishNotification('Notify document while off');
+  check('notifications are optional and off by default',
+    offPublish.response.status === 200 && offPublish.outcome?.sent === false
+    && offPublish.outcome?.reason === 'notifications_disabled',
+    JSON.stringify(offPublish.outcome || null));
+  check('an opted-out publish writes nothing to the notification inbox',
+    notifyStats().notifications === beforeNotify.notifications && notifyStats().recipients === beforeNotify.recipients);
+
+  const notificationSettings = await request('GET', '/api/phantom/client-portal-settings?group=notifications', { token: phantomToken });
+  check('the notification switches are read through the existing settings route',
+    notificationSettings.status === 200 && notificationSettings.json.data.length === 4
+    && notificationSettings.json.data.every((entry) => entry.group === 'notifications' && typeof entry.value === 'boolean' && entry.label)
+    && notificationSettings.json.data.every((entry) => entry.value === false),
+    JSON.stringify(notificationSettings.json.data || null).slice(0, 200));
+  const portalSettingsStillThree = await request('GET', '/api/phantom/client-portal-settings', { token: phantomToken });
+  check('the portal settings group is unchanged (three switches)', portalSettingsStillThree.json?.data?.length === 3);
+  const badNotificationSetting = await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken, body: { settings: [{ key: 'client_notify_everything', value: true }] },
+  });
+  check('an unknown notification switch is refused (400)', badNotificationSetting.status === 400);
+  const noSettingsCapability = await request('PUT', '/api/phantom/client-portal-settings', {
+    token: holderToken, body: { settings: [{ key: 'client_notifications_enabled', value: true }] },
+  });
+  check('a member without the settings capability cannot change the switches (403)', noSettingsCapability.status === 403);
+
+  const enableNotifications = await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken,
+    body: {
+      settings: [
+        { key: 'client_notifications_enabled', value: true },
+        { key: 'client_notify_new_document', value: true },
+        { key: 'client_notify_document_updated', value: true },
+        { key: 'client_notify_project_update', value: true },
+      ],
+    },
+  });
+  check('PHANTOM can opt in to the notifications', enableNotifications.status === 200
+    && enableNotifications.json.data.applied.length === 4);
+  check('the switch change is recorded in the existing audit log',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.notification_settings.updated'")[0].c) >= 1);
+
+  // The internal inbox is the platform's own notification system: a member who
+  // holds the publishing capability receives the notification.
+  const grantPublisher = await grantHolder(['clients.documents.publish', 'clients.view']);
+  check('the publishing capability can be delegated to a member', grantPublisher.status === 200);
+
+  const inAppPublish = await publishNotification('Notify document one');
+  check('publishing with notifications on reaches the internal inbox',
+    inAppPublish.response.status === 200 && inAppPublish.outcome?.sent === true
+    && inAppPublish.outcome?.internalRecipients >= 1,
+    JSON.stringify(inAppPublish.outcome || null));
+  const storedNotification = db.query(
+    "SELECT n.id, n.title, n.message FROM notifications n WHERE n.title = 'New client document published' ORDER BY n.id DESC LIMIT 1"
+  )[0];
+  check('the notification uses the existing inbox tables',
+    Boolean(storedNotification) && /Notify Client Ltd/.test(storedNotification.message)
+    && /Notify Project/.test(storedNotification.message) && /Notify document one/.test(storedNotification.message));
+  const recipientRows = storedNotification
+    ? db.query('SELECT member_profile_id FROM notification_recipients WHERE notification_id = ?', storedNotification.id)
+    : [];
+  const recipientIsMember = (row) => Number(db.query(
+    "SELECT COUNT(*) AS c FROM member_profiles WHERE id = ? AND status = 'active'",
+    row.member_profile_id,
+  )[0].c) === 1;
+  check('the delegated member is notified, and only members are ever recipients',
+    recipientRows.some((row) => row.member_profile_id === holderProfile.id)
+    && recipientRows.length === inAppPublish.outcome?.internalRecipients
+    && recipientRows.every(recipientIsMember),
+    JSON.stringify(recipientRows));
+  check('the notification text carries no credential and no internal id',
+    !/client-exports\/|vault\/|[0-9a-f]{64}|CRX-[A-Z0-9]{4}/.test(storedNotification?.message || ''));
+  check('reading the portal never creates a notification',
+    (await publishNotification('Notify document two')).response.status === 200
+    && Number(db.query('SELECT COUNT(*) AS c FROM notifications')[0].c) - Number(db.query('SELECT COUNT(*) AS c FROM notifications')[0].c) === 0);
+
+  // The same event over the existing EmailJS transaction: the network call is
+  // stubbed, so the harness proves what leaves the platform without sending mail.
+  const emailCalls = [];
+  const realFetch = globalThis.fetch;
+  const mailKeys = ['EMAILJS_SERVICE_ID', 'EMAILJS_PUBLIC_KEY', 'EMAILJS_TEMPLATE_ID_GENERAL'];
+  const previousMail = Object.fromEntries(mailKeys.map((key) => [key, ENV[key]]));
+  const restoreMail = () => {
+    for (const key of mailKeys) {
+      if (previousMail[key] === undefined) delete ENV[key];
+      else ENV[key] = previousMail[key];
+    }
+  };
+  ENV.EMAILJS_SERVICE_ID = 'service_test';
+  ENV.EMAILJS_PUBLIC_KEY = 'public_test';
+  ENV.EMAILJS_TEMPLATE_ID_GENERAL = 'template_test';
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('api.emailjs.com')) {
+      emailCalls.push({ url: String(url), body: String(init?.body || '') });
+      return new Response('OK', { status: 200 });
+    }
+    return realFetch(url, init);
+  };
+  let emailedPublish;
+  try {
+    const document = await createDocument(phantomToken, notifyClient.id, notifyProject.id, {
+      title: 'Notify emailed document', category: 'report', contentText: 'Emailed body.',
+    });
+    const response = await request('POST', `/api/phantom/client-documents/${document.id}/lifecycle`, {
+      token: phantomToken, body: { state: 'published' },
+    });
+    emailedPublish = { document, response, outcome: response.json?.data?.notification };
+  } finally {
+    restoreMail();
+    globalThis.fetch = realFetch;
+  }
+  check('the client contact address is told through the existing EmailJS transaction',
+    emailCalls.length === 1 && emailedPublish.outcome?.emailSent === true && emailedPublish.outcome?.reason === 'sent',
+    JSON.stringify(emailedPublish?.outcome || null));
+  check('the email is addressed to the client contact and carries no credential',
+    /client-contact@example\.test/.test(emailCalls[0]?.body || '')
+    && /NEW DOCUMENT|new document/i.test(emailCalls[0]?.body || '')
+    && !/passkey|CRX-[A-Z0-9]{4}|[0-9a-f]{64}|client-exports\//i.test(emailCalls[0]?.body || ''),
+    (emailCalls[0]?.body || '').slice(0, 200));
+
+  // A mail provider that is down must never break a publish.
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('api.emailjs.com')) throw new Error('provider down');
+    return realFetch(url, init);
+  };
+  let brokenEmailPublish;
+  try {
+    const document = await createDocument(phantomToken, notifyClient.id, notifyProject.id, {
+      title: 'Notify with a broken provider', category: 'report', contentText: 'Broken provider body.',
+    });
+    const response = await request('POST', `/api/phantom/client-documents/${document.id}/lifecycle`, {
+      token: phantomToken, body: { state: 'published' },
+    });
+    brokenEmailPublish = { document, response };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  check('a broken mail provider cannot fail a publish',
+    brokenEmailPublish.response.status === 200
+    && db.query('SELECT lifecycle_status FROM client_documents WHERE public_id = ?', brokenEmailPublish.document.id)[0].lifecycle_status === 'published');
+  check('the failed email is recorded as a skipped notification, never as an error',
+    Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.notification.skipped'")[0].c) >= 1);
+
+  const projectUpdatePublish = await publishNotification('Notify project status', { category: 'update' });
+  check('a project update publishes as a project update notification',
+    projectUpdatePublish.response.status === 200
+    && Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.notification.sent' AND details_json LIKE '%\"event\":\"project_update\"%'")[0].c) >= 1,
+    JSON.stringify(projectUpdatePublish.outcome || null));
+  const republished = await request('POST', `/api/phantom/client-documents/${inAppPublish.document.id}/lifecycle`, {
+    token: phantomToken, body: { state: 'published' },
+  });
+  check('republishing an existing document is an update, not a new document',
+    republished.status === 200
+    && Number(db.query("SELECT COUNT(*) AS c FROM audit_logs WHERE action = 'client.notification.sent' AND details_json LIKE '%\"event\":\"document_updated\"%'")[0].c) >= 1,
+    JSON.stringify(republished.json?.data?.notification || null));
+
+  await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken, body: { settings: [{ key: 'client_notify_new_document', value: false }] },
+  });
+  const eventOffPublish = await publishNotification('Notify document with the event off');
+  check('a single event can be switched off on its own',
+    eventOffPublish.outcome?.sent === false && eventOffPublish.outcome?.reason === 'event_disabled',
+    JSON.stringify(eventOffPublish.outcome || null));
+
+  await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken, body: { settings: [{ key: 'client_notify_new_document', value: true }] },
+  });
+  const noEmailClient = await createClient(phantomToken, 'Notify No Email Ltd');
+  const noEmailProject = await createProject(phantomToken, noEmailClient.id, 'Notify No Email Project');
+  const noEmailDocument = await createDocument(phantomToken, noEmailClient.id, noEmailProject.id, {
+    title: 'Notify without a contact address', category: 'report', contentText: 'Body.',
+  });
+  const noEmailPublish = await publish(phantomToken, noEmailDocument.id, 'published');
+  check('a client without a contact address still notifies the internal inbox',
+    noEmailPublish.json?.data?.notification?.reason === 'internal_only'
+    && noEmailPublish.json?.data?.notification?.internalRecipients >= 1,
+    JSON.stringify(noEmailPublish.json?.data?.notification || null));
+
+  await request('PUT', '/api/phantom/client-portal-settings', {
+    token: phantomToken,
+    body: {
+      settings: [
+        { key: 'client_notifications_enabled', value: false },
+        { key: 'client_notify_new_document', value: true },
+        { key: 'client_notify_document_updated', value: true },
+        { key: 'client_notify_project_update', value: true },
+      ],
+    },
+  });
+
+  group('24. NEW and UPDATED from the existing timestamps (Phase 9)');
+  const freshnessClient = await createClient(phantomToken, 'Freshness Client Ltd');
+  const freshnessProject = await createProject(phantomToken, freshnessClient.id, 'Freshness Project');
+  const freshnessKey = await createKey(phantomToken, freshnessClient.id, freshnessProject.id, { label: 'Freshness key' });
+  const freshnessSession = await clientSession(freshnessKey.passkey, 'freshness session');
+  const freshnessDocument = await createDocument(phantomToken, freshnessClient.id, freshnessProject.id, {
+    title: 'Freshness report', category: 'report', contentText: 'Freshness body.',
+  });
+  await publish(phantomToken, freshnessDocument.id, 'published');
+  const readFreshness = async () => (await request('GET', `/api/client/project/${freshnessProject.id}/documents/${freshnessDocument.id}`, { clientSession: freshnessSession }))
+    .json?.data?.document?.freshness;
+
+  check('a document published just now is marked NEW for the client', await readFreshness() === 'new');
+  const freshnessList = await request('GET', `/api/phantom/clients/${freshnessClient.id}/documents`, { token: phantomToken });
+  check('the operator sees the same NEW signal on the existing document list',
+    freshnessList.json.data.find((entry) => entry.id === freshnessDocument.id)?.freshness === 'new');
+
+  db.execute("UPDATE client_documents SET published_at = datetime('now', '-30 days'), updated_at = datetime('now', '-30 days') WHERE public_id = ?", freshnessDocument.id);
+  check('an old document carries no badge', await readFreshness() === null);
+
+  db.execute("UPDATE client_documents SET version = '2.0', updated_at = CURRENT_TIMESTAMP WHERE public_id = ?", freshnessDocument.id);
+  check('a version change makes it UPDATED', await readFreshness() === 'updated');
+
+  db.execute("UPDATE client_documents SET version = '1.0', published_at = datetime('now', '-2 days'), updated_at = datetime('now', '-1 day') WHERE public_id = ?", freshnessDocument.id);
+  check('a recent change to a recently published document is UPDATED', await readFreshness() === 'updated');
+
+  db.execute("UPDATE client_documents SET version = '1.0', published_at = datetime('now', '-20 days'), updated_at = datetime('now', '-19 days') WHERE public_id = ?", freshnessDocument.id);
+  check('a stale change is not still flagged', await readFreshness() === null);
+
+  const freshnessScan = db.query('SELECT published_at, updated_at, version FROM client_documents WHERE public_id = ?', freshnessDocument.id)[0];
+  check('the badge is derived from columns that already existed',
+    Object.keys(freshnessScan).sort().join(',') === 'published_at,updated_at,version'
+    && Number(db.query("SELECT COUNT(*) AS c FROM pragma_table_info('client_documents') WHERE name IN ('freshness','badge','freshness_state','seen_at')")[0].c) === 0
+    && Number(db.query("SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name LIKE '%freshness%'")[0].c) === 0);
+  const freshnessValues = db.query("SELECT published_at, updated_at, version FROM client_documents WHERE published_at IS NOT NULL LIMIT 40");
+  check('every published document resolves to new, updated or neither',
+    freshnessValues.length > 0 && freshnessValues.every((row) => [null, 'new', 'updated'].includes(portalModule.documentFreshness(row))),
+    JSON.stringify(freshnessValues.slice(0, 3)));
+  const freshnessSections = await request('GET', `/api/client/project/${freshnessProject.id}/sections/reports`, { clientSession: freshnessSession });
+  check('the badge reaches the client room through the existing section payload',
+    (freshnessSections.json?.data?.documents || []).every((document) => [null, 'new', 'updated'].includes(document.freshness)));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

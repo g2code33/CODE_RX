@@ -40,12 +40,16 @@ export const ClientLinkState = ({ state, onContinue, continueLabel }: ClientLink
       </header>
 
       <main className="mx-auto flex w-full max-w-xl flex-col items-center px-5 py-14 sm:py-20">
-        <div className="w-full rounded-2xl border border-slate-200 bg-white p-7 shadow-[0_18px_50px_-30px_rgba(15,23,42,0.35)] sm:p-10">
+        <div
+          role="status"
+          aria-live="polite"
+          className="w-full rounded-2xl border border-slate-200 bg-white p-7 shadow-[0_18px_50px_-30px_rgba(15,23,42,0.35)] sm:p-10"
+        >
           <div className="flex flex-col items-center text-center">
             <span className={`inline-flex h-12 w-12 items-center justify-center rounded-xl ring-1 ${
               revoked ? 'bg-rose-50 text-rose-700 ring-rose-100' : 'bg-amber-50 text-amber-700 ring-amber-100'
             }`}>
-              <Icon className="h-6 w-6" />
+              <Icon className="h-6 w-6" aria-hidden="true" />
             </span>
             <h1 className="mt-5 text-2xl font-black tracking-tight text-slate-900 sm:text-3xl">{state.headline}</h1>
             <p className="mt-3 text-sm font-medium leading-6 text-slate-600">{state.message}</p>

@@ -132,7 +132,9 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [keys, setKeys] = useState<any[]>([]);
   const [documents, setDocuments] = useState<any[]>([]);
   const [links, setLinks] = useState<any[]>([]);
-  const [activity, setActivity] = useState<any[]>([]);
+  const [activity, setActivity] = useState<{ entries: any[]; meta: any }>({ entries: [], meta: null });
+  const [activityFilters, setActivityFilters] = useState<{ kind: string | null }>({ kind: null });
+  const [activityLoading, setActivityLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<any>({ capabilities: [], legacy: [], mine: [] });
   const [portalSettings, setPortalSettings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -171,7 +173,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
         clientAccessCenter.keys(clientId),
         clientAccessCenter.documents(clientId),
         clientAccessCenter.links(clientId),
-        clientAccessCenter.activity(clientId, 60),
+        clientAccessCenter.activity(clientId, 120),
       ]);
       setDetail(clientDetail);
       setProjects(projectRows);
@@ -179,12 +181,34 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
       setDocuments(documentRows);
       setLinks(linkRows);
       setActivity(activityRows);
+      setActivityFilters({ kind: null });
     } catch (failure: any) {
       setError(failure?.message || 'This client workspace could not be loaded.');
     } finally {
       setBusy(false);
     }
   }, []);
+
+  /**
+   * The activity timeline, filtered by kind. Filtering happens on the server so
+   * the counts describe the client's whole history rather than the page of rows
+   * the browser happens to hold.
+   */
+  const loadActivity = useCallback(async (clientId: string, filters: { kind: string | null } = { kind: null }) => {
+    setActivityLoading(true);
+    try {
+      setActivity(await clientAccessCenter.activity(clientId, 120, { kind: filters.kind }));
+    } catch (failure: any) {
+      setError(failure?.message || 'The client activity timeline could not be loaded.');
+    } finally {
+      setActivityLoading(false);
+    }
+  }, []);
+
+  const changeActivityFilter = (kind: string | null) => {
+    setActivityFilters({ kind });
+    if (selectedClientId) void loadActivity(selectedClientId, { kind });
+  };
 
   /**
    * The caller's own effective capabilities. Rendering follows this set so an
@@ -205,10 +229,13 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
     setBusy(true);
     setError(null);
     try {
-      const [matrix, settings] = await Promise.all([
+      const [matrix, portalSwitch, notificationSwitches] = await Promise.all([
         clientAccessCenter.permissionMatrix(),
         clientAccessCenter.portalSettings().catch(() => []),
+        // Phase 9: the optional notification switches live on the same route.
+        clientAccessCenter.portalSettings('notifications').catch(() => []),
       ]);
+      const settings = [...(portalSwitch || []), ...(notificationSwitches || [])];
       setCapabilities((current: any) => ({ ...current, ...matrix, mine: matrix.mine ?? current.mine }));
       setPortalSettings(settings || []);
     } catch (failure: any) {
@@ -443,7 +470,15 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                 />
               )}
 
-              {section === 'activity' && <ActivityPanel client={detail} activity={activity} />}
+              {section === 'activity' && (
+                <ActivityPanel
+                  client={detail}
+                  activity={activity}
+                  loading={activityLoading}
+                  filters={activityFilters}
+                  onFilterChange={changeActivityFilter}
+                />
+              )}
 
               {section === 'permissions' && (
                 <PermissionsPanel
@@ -792,33 +827,169 @@ const LinksPanel = ({
   </div>
 );
 
-const ActivityPanel = ({ client, activity }: { client: any; activity: any[] }) => (
-  <div>
-    <h4 className="text-lg font-black text-slate-900">Client activity</h4>
-    <p className="text-xs font-medium text-slate-500">
-      Recorded in the existing audit log against {client.name}. Credentials are never written to it.
-    </p>
-    <div className="mt-4 overflow-hidden rounded-2xl border border-slate-100 bg-white">
-      {activity.length ? (
-        <ul className="divide-y divide-slate-100">
-          {activity.map((entry) => (
-            <li key={entry.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-              <div className="min-w-0">
-                <p className="text-sm font-bold text-slate-800">{String(entry.event || '').replace(/_/g, ' ')}</p>
-                <p className="text-[11px] font-medium text-slate-500">
-                  {entry.details?.reason ? `reason: ${entry.details.reason}` : ''}
-                  {entry.details?.reference ? ` · ${entry.details.reference}` : ''}
-                  {entry.details?.section ? ` · ${entry.details.section}` : ''}
-                </p>
+/** One recorded entry, with only display-safe details. */
+const ACTIVITY_DETAIL_KEYS: Array<[string, string]> = [
+  ['reference', 'Reference'],
+  ['title', 'Document'],
+  ['section', 'Section'],
+  ['destination', 'Destination'],
+  ['reason', 'Reason'],
+  ['state', 'State'],
+  ['sessionsRevoked', 'Sessions revoked'],
+  ['mode', 'Link mode'],
+];
+
+const activityKindTone = (kind: string) => {
+  if (kind === 'security') return 'bg-rose-50 text-rose-700 ring-rose-100';
+  if (kind === 'link') return 'bg-sky-50 text-sky-700 ring-sky-100';
+  if (kind === 'document') return 'bg-emerald-50 text-emerald-700 ring-emerald-100';
+  if (kind === 'auth') return 'bg-indigo-50 text-indigo-700 ring-indigo-100';
+  return 'bg-slate-100 text-slate-600 ring-slate-200';
+};
+
+const activityWhen = (value?: string | null) => {
+  const formatted = formatWhen(value);
+  if (formatted === '—') return formatted;
+  const text = String(value || '');
+  const parsed = new Date(text.includes('T') ? text : `${text.replace(' ', 'T')}Z`);
+  if (Number.isNaN(parsed.getTime())) return formatted;
+  const minutes = Math.round((Date.now() - parsed.getTime()) / 60_000);
+  if (minutes < 1) return `${formatted} · just now`;
+  if (minutes < 60) return `${formatted} · ${minutes}m ago`;
+  if (minutes < 60 * 24 * 2) return `${formatted} · ${Math.round(minutes / 60)}h ago`;
+  return formatted;
+};
+
+/**
+ * The client activity timeline.
+ *
+ * The rows are the platform's existing audit entries, presented: what happened,
+ * when, through which credential, on which project, and — where the entry names
+ * one — which document. The stored details are shown through an allow-list, so a
+ * passkey, a session token, a link token or an internal storage key can never be
+ * rendered here even if a future recorder wrote one into the log.
+ */
+export const ActivityPanel = ({
+  client, activity, loading, filters, onFilterChange,
+}: {
+  client: any;
+  activity: { entries: any[]; meta: any };
+  loading: boolean;
+  filters: { kind: string | null };
+  onFilterChange: (kind: string | null) => void;
+}) => {
+  const entries = activity?.entries || [];
+  const counts = activity?.meta?.counts || { all: entries.length };
+  const kindLabels: Record<string, string> = activity?.meta?.labels?.kinds || {};
+  const kindLabel = (kind?: string | null) => (kind ? kindLabels[kind] || String(kind) : 'Activity');
+  const activityAccessLabel = (method?: { label?: string } | null) => method?.label || 'Unknown method';
+  const kinds: string[] = activity?.meta?.kinds?.length
+    ? activity.meta.kinds
+    : ['project', 'document', 'link', 'auth', 'navigation', 'security'];
+  const chips: Array<{ id: string | null; label: string; count: number }> = [
+    { id: null, label: 'All activity', count: Number(counts.all || 0) },
+    ...kinds.map((kind) => ({ id: kind, label: kindLabel(kind), count: Number(counts[kind] || 0) })),
+  ];
+  return (
+    <div>
+      <h4 className="text-lg font-black text-slate-900">Client activity</h4>
+      <p className="text-xs font-medium text-slate-500">
+        Recorded in the existing audit log against {client.name}. Each entry shows who acted, how access was granted and
+        what it touched — credentials are never written to the log and never shown here.
+      </p>
+
+      <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Filter client activity">
+        {chips.map((chip) => {
+          const active = filters.kind === chip.id;
+          return (
+            <button
+              key={chip.id || 'all'}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onFilterChange(chip.id)}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-black uppercase tracking-[0.12em] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200 ${
+                active
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'
+              }`}
+            >
+              {chip.label}
+              <span className="rounded-full bg-white/70 px-1.5 text-[10px] font-bold text-slate-500">{chip.count}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 overflow-hidden rounded-2xl border border-slate-100 bg-white" aria-live="polite">
+        {loading ? (
+          <div className="divide-y divide-slate-100">
+            {[0, 1, 2, 3].map((row) => (
+              <div key={row} className="flex items-center justify-between gap-3 px-4 py-4">
+                <div className="flex-1 space-y-2">
+                  <div className="h-3 w-40 animate-pulse rounded bg-slate-100" />
+                  <div className="h-3 w-64 animate-pulse rounded bg-slate-100" />
+                </div>
+                <div className="h-3 w-24 animate-pulse rounded bg-slate-100" />
               </div>
-              <span className="text-[11px] font-semibold text-slate-500">{formatWhen(entry.at)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : <p className="px-5 py-8 text-center text-sm font-semibold text-slate-500">No client activity recorded yet.</p>}
+            ))}
+          </div>
+        ) : entries.length ? (
+          <ul className="divide-y divide-slate-100">
+            {entries.map((entry) => {
+              const details = ACTIVITY_DETAIL_KEYS
+                .map(([key, label]) => (entry.details?.[key] === undefined || entry.details?.[key] === ''
+                  ? null
+                  : { label, value: String(entry.details[key]) }))
+                .filter(Boolean) as Array<{ label: string; value: string }>;
+              return (
+                <li key={entry.id} className="flex flex-wrap items-start justify-between gap-3 px-4 py-3.5 sm:px-5">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.12em] ring-1 ${activityKindTone(entry.kind)}`}>
+                        {kindLabel(entry.kind)}
+                      </span>
+                      <p className="text-sm font-bold text-slate-800">{entry.label || entry.event}</p>
+                    </div>
+                    <p className="mt-1 text-[11px] font-semibold text-slate-500">
+                      {entry.actor?.name ? `${entry.actor.name} · ` : ''}
+                      {entry.accessMethod?.label || activityAccessLabel(entry.accessMethod)}
+                      {entry.project?.name ? ` · ${entry.project.name}` : ''}
+                      {entry.project?.reference ? ` (${entry.project.reference})` : ''}
+                      {entry.document ? ` · ${entry.document.reference || entry.document.title}` : ''}
+                    </p>
+                    {details.length ? (
+                      <p className="mt-1 text-[11px] font-medium text-slate-500">
+                        {details.map((detail) => `${detail.label}: ${detail.value}`).join(' · ')}
+                      </p>
+                    ) : null}
+                  </div>
+                  <span className="whitespace-nowrap text-[11px] font-semibold text-slate-500">{activityWhen(entry.at)}</span>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <div className="px-5 py-10 text-center">
+            <Clock className="mx-auto h-6 w-6 text-slate-300" />
+            <p className="mt-3 text-sm font-bold text-slate-700">
+              {filters.kind ? `No ${String(kindLabel(filters.kind)).toLowerCase()} activity recorded for this client.` : 'No client activity recorded yet.'}
+            </p>
+            <p className="mt-1 text-xs font-medium text-slate-500">
+              {filters.kind
+                ? 'Clear the filter to see the full timeline.'
+                : 'Sign-ins, project visits, document reads, temporary links and security changes appear here as they happen.'}
+            </p>
+            {filters.kind ? (
+              <button type="button" onClick={() => onFilterChange(null)} className="mini-button mt-4">
+                Show all activity
+              </button>
+            ) : null}
+          </div>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 /**
  * The client permission matrix.
@@ -884,11 +1055,13 @@ const PermissionsPanel = ({
     }
   };
 
-  const saveSettings = async () => {
+  const saveSettings = async (groupId?: string) => {
     setSavingSettings(true);
     setNotice(null);
     try {
-      const payload = (settings || []).map((entry: any) => ({ key: entry.key, value: Boolean(settingsDraft[entry.key]) }));
+      const payload = (settings || [])
+        .filter((entry: any) => !groupId || (entry.group || 'portal') === groupId)
+        .map((entry: any) => ({ key: entry.key, value: Boolean(settingsDraft[entry.key]) }));
       const result = await clientAccessCenter.savePortalSettings(payload);
       setNotice(result.message || 'Portal settings saved.');
       await onSettingsSaved(result.message || 'Client portal settings saved.');
@@ -1000,29 +1173,47 @@ const PermissionsPanel = ({
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-slate-100 bg-white p-4">
-                <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Client portal settings</p>
-                <p className="mt-1 text-xs font-medium text-slate-500">
-                  The three switches the client routes already check. PHANTOM can also change them in Settings.
-                </p>
-                <div className="mt-3 flex flex-wrap gap-3">
-                  {(settings || []).map((entry: any) => (
-                    <label key={entry.key} className="flex items-center gap-2 rounded-xl border border-slate-100 px-3.5 py-2.5">
-                      <input
-                        type="checkbox"
-                        className="rounded border-slate-300"
-                        checked={Boolean(settingsDraft[entry.key])}
-                        disabled={savingSettings}
-                        onChange={(event) => setSettingsDraft((current) => ({ ...current, [entry.key]: event.target.checked }))}
-                      />
-                      <span className="font-mono text-[11px] font-bold text-slate-700">{entry.key}</span>
-                    </label>
-                  ))}
+              {[
+                {
+                  id: 'portal',
+                  title: 'Client portal settings',
+                  blurb: 'The three switches the client routes already check. PHANTOM can also change them in Settings.',
+                },
+                {
+                  id: 'notifications',
+                  title: 'Client notifications (optional)',
+                  blurb: 'Off by default. When enabled, publishing tells the people who manage client content in the platform\'s own notification inbox, and emails the client\'s contact address through the existing EmailJS transaction. A notification never blocks or delays a publish.',
+                },
+              ].map((group) => (
+                <div key={group.id} className="rounded-2xl border border-slate-100 bg-white p-4">
+                  <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">{group.title}</p>
+                  <p className="mt-1 text-xs font-medium text-slate-500">{group.blurb}</p>
+                  <div className="mt-3 space-y-2">
+                    {(settings || []).filter((entry: any) => (entry.group || 'portal') === group.id).map((entry: any) => (
+                      <label key={entry.key} className="flex items-start gap-2.5 rounded-xl border border-slate-100 px-3.5 py-2.5">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5 rounded border-slate-300"
+                          checked={Boolean(settingsDraft[entry.key])}
+                          disabled={savingSettings}
+                          onChange={(event) => setSettingsDraft((current) => ({ ...current, [entry.key]: event.target.checked }))}
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-[12px] font-bold text-slate-700">{entry.label || entry.key}</span>
+                          <span className="block font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-400">{entry.key}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <button onClick={() => saveSettings(group.id)} disabled={savingSettings} className="mini-button mini-button--primary">
+                      {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      {group.id === 'portal' ? 'Save portal settings' : 'Save notification settings'}
+                    </button>
+                  </div>
                 </div>
-                <button onClick={saveSettings} disabled={savingSettings} className="mini-button mini-button--primary mt-3">
-                  {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save portal settings
-                </button>
-              </div>
+              ))}
+              {notice ? <p className="text-xs font-semibold text-emerald-700">{notice}</p> : null}
             </div>
           )}
         </div>

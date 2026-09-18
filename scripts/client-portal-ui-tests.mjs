@@ -61,7 +61,8 @@ const bundle = async () => {
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
-        export { ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
+        export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
+        export * from './functions/lib/client-activity';
       `,
       resolveDir: ROOT,
       loader: 'tsx',
@@ -95,7 +96,9 @@ const main = async () => {
     visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
     permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
     documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
-    parseDelivery, deliveryAvailable, canPrint, deliveryMessage,
+    parseDelivery, deliveryAvailable, canPrint, deliveryMessage, freshnessBadge,
+    ActivityPanel, buildClientActivityEntry, clientActivityPage, safeActivityDetails,
+    activityAccessMethod, activityKindFor, activityLabelFor, clientActivityEvent, CLIENT_ACTIVITY_KINDS,
     LINK_DESTINATIONS, LINK_DESTINATION_IDS, LINK_ACCESS_MODES, LINK_TTL_PRESETS,
     LINK_TTL_MINUTES_FALLBACK, LINK_TTL_MIN_MINUTES, LINK_TTL_MAX_MINUTES, LINK_MAX_USES_LIMIT,
     linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
@@ -926,6 +929,191 @@ const main = async () => {
     /renders\s+the\s+watermarked\s+copy\s+the\s+first\s+time\s+it\s+is\s+delivered/i.test(workspaceSource));
   check('the download blurb promises the stamped copy, never the original',
     /stamped Code Rx copy of this document/i.test(roomSource));
+
+  group('14. Activity, notifications and client polish (Phase 9)');
+  // =========================================================================
+
+  const phase9Room = src('src/components/ClientProjectRoom.tsx');
+  const roomLib = src('src/lib/projectRoom.ts');
+  const cloudflareLib = src('src/lib/cloudflare.ts');
+
+  // --- the server-side presentation rules ----------------------------------
+  check('a recorded action becomes its event name',
+    clientActivityEvent('client.document_downloaded') === 'DOCUMENT_DOWNLOADED'
+    && clientActivityEvent('client.link_used') === 'LINK_USED'
+    && clientActivityEvent('') === '');
+  check('every event the brief names maps to a kind and a readable label',
+    ['LOGIN', 'PROJECT_OPENED', 'SECTION_OPENED', 'DOCUMENT_VIEWED', 'DOCUMENT_DOWNLOADED',
+      'LINK_USED', 'LINK_EXPIRED', 'LINK_REVOKED', 'ACCESS_KEY_REVOKED', 'ACCESS_KEY_REGENERATED']
+      .every((event) => CLIENT_ACTIVITY_KINDS.includes(activityKindFor(event))
+        && activityLabelFor(event).length > 3 && !/_/.test(activityLabelFor(event))));
+  check('an unknown event is still rendered readably', activityLabelFor('SOMETHING_NEW') === 'Something new');
+  check('access method is read from what was recorded, not guessed',
+    activityAccessMethod('LOGIN', { method: 'passkey' }).id === 'access_key'
+    && activityAccessMethod('LOGIN', { method: 'passkey_with_link' }).id === 'link_passkey'
+    && activityAccessMethod('LINK_USED', { linkId: 'lnk_1' }, { mode: 'direct' }).id === 'link_direct'
+    && activityAccessMethod('LINK_USED', { linkId: 'lnk_1' }, { mode: 'passkey' }).id === 'link_passkey'
+    && activityAccessMethod('LINK_REVOKED', {}).id === 'staff'
+    && activityAccessMethod('LINK_EXPIRED', {}).id === 'system'
+    && activityAccessMethod('ACCESS_KEY_REVOKED', {}).id === 'staff');
+  check('a publication is attributed to staff, not to the client',
+    buildClientActivityEntry({ id: 1, action: 'client.document_viewed', created_at: '2026-01-01 10:00:00', details_json: JSON.stringify({ note: 'publication', documentId: 'doc_1' }) }).accessMethod.id === 'staff');
+
+  // --- nothing sensitive can leave through the feed ------------------------
+  const hostileDetails = {
+    passkey: 'CRX-AAAA-BBBB-CCCC-DDDD',
+    sessionToken: 'f'.repeat(64),
+    token_hash: 'e'.repeat(64),
+    storage_reference: 'client-exports/cli_1/doc_1/crx-stamped-0123456789abcdef.pdf',
+    file_key: 'vault/secret/1/contract.pdf',
+    artifact: 'vault/secret/1/contract.pdf',
+    ipHash: 'abc',
+    reason: 'download_not_permitted',
+    reference: 'CRX-RPT-2026-001',
+  };
+  const safeDetails = safeActivityDetails(hostileDetails);
+  check('the feed allow-list keeps the useful fields and drops the rest',
+    safeDetails.reason === 'download_not_permitted' && safeDetails.reference === 'CRX-RPT-2026-001'
+    && Object.keys(safeDetails).length === 2, JSON.stringify(safeDetails));
+  const hostileEntry = buildClientActivityEntry(
+    { id: 9, action: 'client.access_denied', created_at: '2026-01-01 10:00:00', details_json: JSON.stringify(hostileDetails) },
+    { clientPublicId: 'cli_1' },
+  );
+  const hostileBlob = JSON.stringify(hostileEntry);
+  check('a credential written into the log by a future change cannot reach the timeline',
+    !hostileDetails.passkey.split('-').join('-').length ? false : !/CRX-[A-Z0-9]{4}|[0-9a-f]{64}|client-exports\/|vault\//.test(hostileBlob),
+    hostileBlob.slice(0, 200));
+  check('the timeline still attributes the entry to its client', hostileEntry.details.clientPublicId === 'cli_1');
+
+  // --- filtering and counts ------------------------------------------------
+  const sampleEntries = [
+    buildClientActivityEntry({ id: 1, action: 'client.login', created_at: '2026-01-01 10:00:00', details_json: '{}' }, {}),
+    buildClientActivityEntry({ id: 2, action: 'client.document_viewed', created_at: '2026-01-01 10:01:00', details_json: JSON.stringify({ documentId: 'doc_1', clientPublicId: 'cli_1', clientName: 'Ashanti Health Trust', method: 'passkey' }) },
+      { documents: new Map([['doc_1', { id: 'doc_1', reference: 'CRX-RPT-1', title: 'Report', projectPublicId: 'prj_1' }]]),
+        projects: new Map([['prj_1', { id: 'prj_1', name: 'Project', reference: 'CRX-P-1' }]]) }),
+    buildClientActivityEntry({ id: 3, action: 'client.document_viewed', created_at: '2026-01-01 10:02:00', details_json: JSON.stringify({ note: 'publication', documentId: 'doc_1' }) },
+      { clientPublicId: 'cli_1', documents: new Map([['doc_1', { id: 'doc_1', reference: 'CRX-RPT-1', title: 'Report', projectPublicId: 'prj_1' }]]) }),
+  ];
+  check('an entry resolves its project and document from what was recorded',
+    sampleEntries[1].project?.id === 'prj_1' && sampleEntries[1].document?.reference === 'CRX-RPT-1'
+    && sampleEntries[1].actor.type === 'client', JSON.stringify(sampleEntries[1]));
+  const page = clientActivityPage(sampleEntries, { kind: 'document', limit: 10 });
+  check('filtering by kind keeps the counts describing the whole history',
+    page.entries.length === 1 && page.counts.all === 3 && page.counts.document === 1 && page.counts.auth === 1);
+  check('an unknown kind filters nothing and the limit is applied last',
+    clientActivityPage(sampleEntries, { kind: 'nonsense' }).entries.length === 3
+    && clientActivityPage(sampleEntries, { limit: 1 }).entries.length === 1);
+  check('the project filter uses the public project id only',
+    clientActivityPage(sampleEntries, { projectId: 'prj_1' }).entries.length === 1
+    && clientActivityPage(sampleEntries, { projectId: 'prj_2' }).entries.length === 0);
+
+  // --- the workspace panel the operator sees -------------------------------
+  const activityPanel = (props) => render(React.createElement(ActivityPanel, {
+    client: { id: 'cli_1', name: 'Ashanti Health Trust' },
+    activity: { entries: sampleEntries, meta: { total: 3, counts: { all: 3, document: 1, auth: 1 }, kinds: ['auth', 'document'], labels: { kinds: { auth: 'Sign-ins', document: 'Documents' } } } },
+    loading: false, filters: { kind: null }, onFilterChange: () => {}, ...props,
+  }));
+  const panelMarkup = activityPanel({});
+  check('the operator panel shows the filters, the counts and the timeline',
+    /Sign-ins/.test(panelMarkup) && /Documents/.test(panelMarkup) && /aria-pressed="true"/.test(panelMarkup)
+    && /CRX-RPT-1/.test(panelMarkup) && /Project/.test(panelMarkup));
+  check('the operator panel names the actor, the method and the time',
+    /Ashanti Health Trust/.test(panelMarkup) && /Project access key/.test(panelMarkup)
+    && /Code Rx staff/.test(panelMarkup) && /2026/.test(panelMarkup) && /10:0?1/.test(panelMarkup),
+    panelMarkup.slice(0, 260));
+  check('the filter controls are buttons, for keyboard and screen-reader users',
+    (panelMarkup.match(/<button/g) || []).length >= 2 && /type="button"/.test(panelMarkup)
+    && /aria-label="Filter client activity"/.test(panelMarkup));
+  const loadingMarkup = activityPanel({ loading: true });
+  check('the timeline has a loading state rather than an empty list',
+    /animate-pulse/.test(loadingMarkup) && !/CRX-RPT-1/.test(loadingMarkup));
+  const emptyMarkup = activityPanel({ activity: { entries: [], meta: { counts: { all: 0 }, kinds: [], labels: {} } } });
+  check('an empty timeline explains itself and how to fill it',
+    /No client activity recorded yet/.test(emptyMarkup) && /Sign-ins, project visits/.test(emptyMarkup));
+  const filteredEmptyMarkup = activityPanel({ activity: { entries: [], meta: { counts: { all: 4, document: 0 }, kinds: ['document'], labels: { kinds: { document: 'Documents' } } } }, filters: { kind: 'document' } });
+  check('an empty filter result offers a way back',
+    /No documents activity recorded/.test(filteredEmptyMarkup) && /Show all activity/.test(filteredEmptyMarkup));
+  const hostileMarkup = activityPanel({
+    activity: {
+      entries: [buildClientActivityEntry({ id: 4, action: 'client.access_denied', created_at: '2026-01-01 10:00:00', details_json: JSON.stringify(hostileDetails) }, { clientPublicId: 'cli_1' })],
+      meta: { counts: { all: 1, security: 1 }, kinds: ['security'], labels: { kinds: { security: 'Security' } } },
+    },
+  });
+  check('the operator panel renders only the allow-listed details',
+    /download_not_permitted/.test(hostileMarkup)
+    && !/CRX-AAAA/.test(hostileMarkup) && !/[0-9a-f]{64}/.test(hostileMarkup)
+    && !/client-exports\/|vault\//.test(hostileMarkup));
+
+  // --- the transport the workspace uses -----------------------------------
+  check('the activity request asks the server to filter and to count',
+    /activity: async \([\s\S]{0,700}limit[\s\S]{0,700}kind[\s\S]{0,400}project[\s\S]{0,400}document/.test(cloudflareLib)
+    && /activity\?\\?\$?\{?query/.test(cloudflareLib.replace(/\s+/g, ' ')) === false ? /activity\?\$\{query\.toString\(\)\}/.test(cloudflareLib) : true);
+  check('the notification switches are read from the same settings route',
+    /portalSettings: async \(group: 'portal' \| 'notifications' = 'portal'\)/.test(cloudflareLib)
+    && /client-portal-settings\?group=\$\{group\}/.test(cloudflareLib));
+
+  // --- the optional notification switches in the workspace ----------------
+  check('the workspace offers the portal switches and the notification switches separately',
+    /Client portal settings/.test(workspaceSource) && /Client notifications \(optional\)/.test(workspaceSource)
+    && /portalSettings\('notifications'\)/.test(workspaceSource));
+  check('the notification switches are described as optional and non-blocking',
+    /Off by default/i.test(workspaceSource) && /never blocks or delays a publish/i.test(workspaceSource)
+    && /existing EmailJS transaction/.test(workspaceSource));
+  check('the workspace says the client is never a recipient of an internal notification',
+    /platform\\?'s own notification inbox|notification inbox/i.test(workspaceSource));
+
+  // --- NEW and UPDATED ----------------------------------------------------
+  check('the badge is earned from the server signal only',
+    freshnessBadge({ freshness: 'new' })?.label === 'NEW' && freshnessBadge({ freshness: 'updated' })?.label === 'UPDATED'
+    && freshnessBadge({ freshness: null }) === null && freshnessBadge({ freshness: 'just-added' }) === null
+    && freshnessBadge({}) === null && freshnessBadge(null) === null);
+  check('the room declares freshness on its document type',
+    /freshness\?: 'new' \| 'updated' \| null;/.test(roomLib) && /export const freshnessBadge/.test(roomLib));
+  check('the room shows the badge in the list and in the open document',
+    (phase9Room.match(/freshnessBadge\(/g) || []).length >= 3
+    && /NEW<\/span> recently published/.test(phase9Room) && /UPDATED<\/span> changed since/.test(phase9Room));
+  check('the badge is explained rather than left to guesswork',
+    /recently published/.test(phase9Room) && /changed since/.test(phase9Room)
+    && /Published recently|Changed since it was first published/.test(roomLib));
+  check('the badge never replaces the publication dates the client already had',
+    /publicationInfo\(document\)/.test(phase9Room) && /Published \$\{formatDate\(document\.publishedAt\)\}/.test(roomLib));
+
+  // --- client-facing polish ------------------------------------------------
+  check('the project room announces loading and its document list to screen readers',
+    /aria-live="polite"/.test(phase9Room) && /aria-busy=\{loading\}/.test(phase9Room) && /role="status"/.test(phase9Room));
+  check('list controls keep a visible keyboard focus ring',
+    (phase9Room.match(/focus-visible:ring/g) || []).length >= 2);
+  const accessScreenSource = src('src/components/ClientAccessScreen.tsx');
+  const linkStateSource = src('src/components/ClientLinkState.tsx');
+  check('the access form announces that it is busy and keeps its accessible label',
+    /aria-busy=\{submitting\}/.test(accessScreenSource) && /<label htmlFor="client-access-key"/.test(accessScreenSource)
+    && /aria-describedby=\{shownError \? 'client-access-error'/.test(accessScreenSource)
+    && /enterKeyHint="go"/.test(accessScreenSource));
+  check('the expired and revoked screens announce themselves and keep their route out',
+    /role="status"/.test(linkStateSource) && /aria-live="polite"/.test(linkStateSource)
+    && /no project content was shown from this one/.test(linkStateSource));
+  check('the room notice is announced and can be dismissed without a mouse',
+    /role="status"[\s\S]{0,200}aria-live="polite"/.test(phase9Room)
+    && /aria-label="Dismiss this message"/.test(phase9Room));
+  check('the sections strip scrolls on small screens and becomes a sidebar on large ones',
+    /overflow-x-auto/.test(phase9Room) && /lg:flex-col/.test(phase9Room) && /lg:sticky/.test(phase9Room));
+  check('the room keeps its professional empty, error and permission states',
+    /role="alert"/.test(phase9Room) && /No documents available yet/.test(phase9Room)
+    && /Everything published to this section will appear here/.test(phase9Room)
+    && /View only/.test(phase9Room) && /This room only shows documents published to/.test(phase9Room));
+  check('the client screens keep the Code Rx brand and never promise an unstamped copy',
+    /CODE Rx SOCIETY|Code Rx Society/.test(phase9Room) && /emerald/.test(phase9Room)
+    && !/without.{0,12}watermark|no watermark|turn off/i.test(phase9Room));
+
+  // --- no unrelated redesign ---------------------------------------------
+  const unrelatedSurfaces = [
+    'src/components/Vault.tsx', 'src/components/MemberPortal.tsx', 'src/components/PublicSite.tsx',
+  ].filter((file) => fs.existsSync(path.join(ROOT, file)));
+  check('the member, Vault and public surfaces are untouched by Phase 9',
+    unrelatedSurfaces.every((file) => {
+      const source = src(file);
+      return !/freshnessBadge|clientActivityPage|Client notifications \(optional\)/.test(source);
+    }), unrelatedSurfaces.join(','));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

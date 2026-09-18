@@ -843,8 +843,29 @@ export const clientAccessCenter = {
     ),
   revokeLink: (linkId: string) => apiCall<{ message: string }>(`/api/phantom/client-links/${linkId}/revoke`, { method: 'POST' }),
 
-  activity: async (clientId: string, limit = 60) =>
-    (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/activity?limit=${limit}`)).data || [],
+  /**
+   * The client activity timeline. Entries are built and filtered server-side
+   * (kind / project / document); `meta.counts` counts the client's whole loaded
+   * history so the filter chips stay honest. Nothing sensitive is returned — the
+   * server drops credentials and internal keys before it answers.
+   */
+  activity: async (
+    clientId: string,
+    limit = 60,
+    filters: { kind?: string | null; project?: string | null; document?: string | null } = {},
+  ) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (filters.kind) query.set('kind', filters.kind);
+    if (filters.project) query.set('project', filters.project);
+    if (filters.document) query.set('document', filters.document);
+    const payload = await apiCall<{ data: any[]; meta?: any }>(
+      `/api/phantom/clients/${clientId}/activity?${query.toString()}`,
+    );
+    return {
+      entries: payload.data || [],
+      meta: payload.meta || { total: 0, counts: { all: 0 }, kinds: [], filters: {} },
+    };
+  },
 
   /** Publishable Vault sources for the publishing workflow (internal picker). */
   vaultSources: async (search = '') => {
@@ -866,8 +887,12 @@ export const clientAccessCenter = {
       method: 'POST', body: JSON.stringify({ memberProfileId, permissions }),
     }),
 
-  /** The three client portal switches. */
-  portalSettings: async () => (await apiCall<{ data: any[] }>('/api/phantom/client-portal-settings')).data || [],
+  /**
+   * The client portal switches, and (Phase 9) the optional notification
+   * switches — the same route and the same `system_settings` rows, grouped.
+   */
+  portalSettings: async (group: 'portal' | 'notifications' = 'portal') =>
+    (await apiCall<{ data: any[] }>(`/api/phantom/client-portal-settings?group=${group}`)).data || [],
   savePortalSettings: (settings: Array<{ key: string; value: boolean }>) =>
     apiCall<{ data: any; message: string }>('/api/phantom/client-portal-settings', {
       method: 'PUT', body: JSON.stringify({ settings }),

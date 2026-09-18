@@ -118,7 +118,7 @@ export const ClientAccessScreen = ({
             <p className="mt-3 text-sm font-medium text-slate-600">{helper || 'Enter your project access key'}</p>
           </div>
 
-          <form onSubmit={handleSubmit} className="mt-8" noValidate>
+          <form onSubmit={handleSubmit} className="mt-8" noValidate aria-busy={submitting}>
             <label htmlFor="client-access-key" className="sr-only">Project access key</label>
             <input
               id="client-access-key"
@@ -127,6 +127,7 @@ export const ClientAccessScreen = ({
               onChange={(event) => handleChange(event.target.value)}
               placeholder={ACCESS_KEY_PLACEHOLDER}
               inputMode="text"
+              enterKeyHint="go"
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="characters"

@@ -816,6 +816,43 @@ export const publicProject = (row: any) => ({
 });
 
 /** Client-facing document shape. Never includes vault ids, storage keys, or client ids. */
+/**
+ * How long a document keeps its NEW / UPDATED badge. The badge is derived from
+ * the timestamps the portal already stores — no new columns, no new writes — and
+ * it is computed on the server so every client sees the same thing regardless of
+ * their own clock.
+ */
+export const CLIENT_FRESHNESS_WINDOW_DAYS = 14;
+
+const parsedTimestamp = (value: unknown): number | null => {
+  if (!value) return null;
+  const text = String(value);
+  const time = new Date(text.includes('T') ? text : `${text.replace(' ', 'T')}Z`).getTime();
+  return Number.isFinite(time) ? time : null;
+};
+
+/**
+ * 'new'   — published recently and not changed since,
+ * 'updated' — changed (or re-versioned) after publishing, recently,
+ * null    — nothing worth flagging.
+ */
+export const documentFreshness = (
+  row: { published_at?: unknown; updated_at?: unknown; version?: unknown },
+  now: number = Date.now(),
+): 'new' | 'updated' | null => {
+  const published = parsedTimestamp(row.published_at);
+  if (published === null) return null;
+  const updated = parsedTimestamp(row.updated_at);
+  const windowMs = CLIENT_FRESHNESS_WINDOW_DAYS * 86_400_000;
+  const version = String(row.version || '1.0');
+  const changedSincePublish = (updated !== null && updated > published + 60_000) || version !== '1.0';
+  if (changedSincePublish) {
+    const lastChange = Math.max(updated ?? 0, published);
+    return now - lastChange <= windowMs ? 'updated' : null;
+  }
+  return now - published <= windowMs ? 'new' : null;
+};
+
 export const publicDocument = (row: any, exposure: { canView: boolean; canDownload: boolean }, options: { includeContent?: boolean } = {}) => ({
   id: row.public_id,
   reference: row.reference_code || null,
@@ -826,6 +863,8 @@ export const publicDocument = (row: any, exposure: { canView: boolean; canDownlo
   direction: 'outbound',
   publishedAt: row.published_at || null,
   updatedAt: row.updated_at || null,
+  // 'new' / 'updated' / null, from the timestamps above (Phase 9).
+  freshness: documentFreshness(row),
   permissions: { view: exposure.canView, download: exposure.canDownload },
   ...(options.includeContent ? { content: safeContentSnapshot(row.content_snapshot, row.content_snapshot_format) } : {}),
 });
