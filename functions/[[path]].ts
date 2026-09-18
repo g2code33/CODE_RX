@@ -21,6 +21,7 @@ import { activeNotificationRecipients, canSendNotifications, createNotification,
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 import { registerClientRoutes } from './client-routes';
 import { moveToRecycleBin } from './lib/recycle';
+import { CLIENT_ARTIFACT_PREFIX } from './lib/client-document-delivery';
 import {
   auditPermissionChange, CLIENT_PORTAL_PERMISSION_KEYS, diffPermissionSets,
 } from './lib/client-permissions';
@@ -5701,6 +5702,7 @@ const publicUploadFolder = (value: unknown) => {
   const folder = raw.trim().replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*(?:\/[A-Za-z0-9][A-Za-z0-9_-]*)*$/.test(folder)) return null;
   if (folder.toLowerCase() === 'vault' || folder.toLowerCase().startsWith('vault/')) return null;
+  if (folder.toLowerCase() === 'client-exports' || folder.toLowerCase().startsWith('client-exports/')) return null;
   return folder;
 };
 
@@ -5800,6 +5802,12 @@ app.get('/api/files/*', async (c) => {
     const key = decodeURIComponent(url.pathname.replace(/^\/api\/files\//, ''));
     if (!key) return c.json({ success: false, error: 'File not found' }, 404);
     if (key.startsWith('vault/')) return c.json({ success: false, error: 'Vault files require an authorized Vault session.' }, 403);
+    // Stamped client copies are delivered only through the session-authorized
+    // client routes; the storage key is never a public, permanent URL
+    // (Phase 10 sweep: /api/files/ must not bypass the portal's authorization).
+    if (key.startsWith(CLIENT_ARTIFACT_PREFIX)) {
+      return c.json({ success: false, error: 'Client documents are served through the client portal.' }, 403);
+    }
     const object = await c.env.BUCKET.get(key);
     if (!object) return c.json({ success: false, error: 'File not found' }, 404);
     return new Response(object.body, {

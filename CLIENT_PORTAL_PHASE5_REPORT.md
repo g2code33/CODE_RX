@@ -195,7 +195,7 @@ Deployment is the normal path: this branch → `main` → `.github/workflows/dep
 The dev server is running on port **8788** with real Pages Functions, the local D1 database and the local R2 bucket (`.wrangler/state`). Locally it needs a gitignored `.dev.vars` containing `JWT_SECRET` and `ADMIN_PASSWORD`; without it the login returns *"Authentication is not configured."*
 
 **1. Open PHANTOM**
-Sign in as the local PHANTOM account — `coderxsociety@gmail.com` / `DevPreviewPassword1` (local dev only) — then choose **PHANTOM Control** in the workspace switcher and **CLIENT ACCESS CENTER** in the founder sidebar.
+Sign in as the local seeded PHANTOM account (the local development password lives in `.dev.vars`, which is not tracked) — then choose **PHANTOM Control** in the workspace switcher and **CLIENT ACCESS CENTER** in the founder sidebar.
 
 You should see two demo clients in the rail:
 
