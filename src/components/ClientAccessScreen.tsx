@@ -182,7 +182,7 @@ export const ClientAccessScreen = ({
             </div>
 
             <p className="mt-2 text-center text-[11px] font-semibold tracking-wide text-slate-500">
-              {ACCESS_KEY_PLACEHOLDER} — the last three letters are your project code.
+              {ACCESS_KEY_PLACEHOLDER}
             </p>
 
             <div className="flex min-h-[46px] items-start justify-between gap-3 pt-3">
@@ -202,9 +202,7 @@ export const ClientAccessScreen = ({
                     {complete ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : null}
                     <span>{complete && submitting ? 'Verifying access key…' : hint}</span>
                   </p>
-                ) : (
-                  <p className="text-sm font-medium text-slate-400">Type or paste the key Code Rx Society gave you.</p>
-                )}
+                ) : null}
               </div>
               {filled && !complete ? (
                 <span className="shrink-0 pt-0.5 font-mono text-[11px] font-bold text-slate-400" aria-hidden="true">
@@ -252,7 +250,7 @@ export const ClientAccessScreen = ({
         </div>
 
         <p className="mt-6 max-w-md text-center text-xs font-medium leading-5 text-slate-500">
-          Your access key is verified on Code Rx servers and is never stored in this browser.
+          Your access key is verified on Code Rx servers.
           Only your published project documents are shown here.
         </p>
       </main>

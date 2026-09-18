@@ -254,7 +254,8 @@ const main = async () => {
   const submitTag = [...screenHtml.matchAll(/<button[^>]*>/g)].map((match) => match[0]).find((tag) => /type="submit"/.test(tag)) || '';
   check('the submit button is enabled in the idle state',
     Boolean(submitTag) && !/\sdisabled(\s|>|=)/.test(submitTag), submitTag.slice(0, 120));
-  check('the screen promises the key is not stored', /never stored in this browser/i.test(screenHtml));
+  check('the screen states the key is verified on Code Rx servers',
+    /verified on Code Rx servers/i.test(screenHtml) && !/never stored in this browser/i.test(screenHtml));
   check('the rendered screen contains no internal identifiers',
     !/prj_|cli_|vault_|storage_reference|sessionId|key_hash/i.test(screenHtml));
 
@@ -1434,6 +1435,57 @@ const main = async () => {
   check('the modal offers the three topics and a working mail fallback',
     /Send to PHANTOM/.test(modalHtml) && /mailto:coderxsociety@gmail\.com/.test(modalHtml)
     && /aria-pressed/.test(modalHtml));
+
+  // =========================================================================
+  group('17. Phase 16 — quieter client screen, readable Learn section, deeper footer');
+  // =========================================================================
+
+  const accessSource = src('src/components/ClientAccessScreen.tsx');
+  check('the three lines you singled out are gone from the access screen',
+    !/the last three letters are your project code/i.test(accessSource)
+    && !/Type or paste the key Code Rx Society gave you/i.test(accessSource)
+    && !/never stored in this browser/i.test(accessSource));
+  check('the screen still shows the key format and still promises server-side verification',
+    /\{ACCESS_KEY_PLACEHOLDER\}/.test(accessSource) && /verified on Code Rx servers/.test(accessSource));
+  check('nothing else on the screen repeats the removed helper',
+    !/never stored in this browser/i.test(screenHtml) && !/last three letters/i.test(screenHtml));
+
+  const numberRule = indexCss.match(/\.brand-number\s*\{[^}]*\}/)?.[0] || '';
+  check('the small mono labels are deep green, not lime',
+    /color:\s*var\(--brand-green\)/.test(numberRule) && !/184,\s*255,\s*61/.test(numberRule));
+  check('lime text survives only through the explicit dark-surface modifier',
+    (() => {
+      const rules = [...indexCss.matchAll(/([^{}]*)\{([^}]*)\}/g)]
+        .filter((rule) => /(?<!-)color:\s*rgba\(184,\s*255,\s*61/.test(rule[2]) || /(?<!-)color:\s*#b8ff3d/i.test(rule[2]));
+      return rules.length === 1 && /\.brand-number--lime/.test(rules[0][1]);
+    })());
+  check('the heading gradient fades into a readable green, not pale mint',
+    /linear-gradient\(100deg,\s*var\(--brand-white\)\s*0%,\s*var\(--brand-green\)\s*55%,\s*var\(--brand-lime\)\s*100%\)/.test(indexCss));
+  check('the learning-path card draws its step dashes in deep green',
+    /h-px w-5 bg-\[#15803d\]\/30/.test(src('src/components/Academy.tsx'))
+    && !/bg-\[#b8ff3d\]\/25/.test(src('src/components/Academy.tsx')));
+  check('the learning-path label and the module numbers both use that label style',
+    (src('src/components/Academy.tsx').match(/brand-number/g) || []).length === 2);
+  check('the two labels that sit on something dark keep the lime accent',
+    /\.brand-number--lime\s*\{\s*color:\s*rgba\(184,\s*255,\s*61/.test(indexCss)
+    && /brand-number brand-number--lime/.test(src('src/components/Hero.tsx'))
+    && /brand-number brand-number--lime/.test(src('src/components/Leadership.tsx')));
+  check('no label on a light surface was left on the lime accent',
+    (src('src/components/Footer.tsx').match(/brand-number--lime/g) || []).length === 0
+    && (src('src/components/Terms.tsx').match(/brand-number--lime/g) || []).length === 0
+    && (src('src/components/Projects.tsx').match(/brand-number--lime/g) || []).length === 0);
+
+  check('the footer sits on its own, deeper surface than the white page',
+    /--brand-footer:\s*#e7edf3/.test(indexCss) && /footer\.brand-section\s*\{[^}]*background-color:\s*var\(--brand-footer\)/.test(indexCss)
+    && /footer \{\s*background:\s*var\(--brand-footer\)/.test(indexCss));
+  check('the footer band is darker than the page it closes',
+    (() => {
+      const hex = (v) => [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16));
+      const lum = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const footerHex = indexCss.match(/--brand-footer:\s*(#[0-9a-f]{6})/)?.[1] || '';
+      const pageHex = indexCss.match(/--brand-ink:\s*(#[0-9a-f]{6})/)?.[1] || '';
+      return lum(hex(footerHex)) < lum(hex(pageHex));
+    })());
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
