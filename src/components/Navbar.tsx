@@ -4,6 +4,7 @@ import { NAV_LINKS } from '../data/mockData';
 import { MediaAsset } from '../data/editorSchema';
 import { getCopy, getMedia } from '../data/editorSchema';
 import { EditableImage, EditableRegion, EditableText } from './VisualEditorContext';
+import { ClientPortalEntry } from './ClientPortalEntry';
 
 export const Navbar = ({
   onDashboardToggle,
@@ -72,10 +73,11 @@ export const Navbar = ({
               <EditableText elementKey={`nav.link.${link.id}`} copyKey={`nav.${link.id}`} label={`${link.label} navigation label`}>{navLabel(link.id, link.label)}</EditableText>
             </a>
           ))}
+          {!isDashboard && <ClientPortalEntry variant="icon" className="ml-3" />}
           <button
             type="button"
             onClick={onDashboardToggle}
-            className="brand-button brand-button--small ml-3"
+            className={isDashboard ? 'brand-button brand-button--small ml-3' : 'brand-button brand-button--small ml-2'}
           >
             <EditableText elementKey="nav.portal" copyKey={portalCopyKey} label="Portal button label">{getCopy(copy, portalCopyKey, portalLabel)}</EditableText>
             <ArrowUpRight className="h-3.5 w-3.5" />
@@ -121,6 +123,7 @@ export const Navbar = ({
               <EditableText elementKey="nav.mobile.portal" copyKey={portalCopyKey} label="Mobile portal button label">{getCopy(copy, portalCopyKey, portalLabel)}</EditableText>
               <ArrowUpRight className="h-4 w-4" />
             </button>
+            {!isDashboard && <ClientPortalEntry variant="tile" className="mt-3" />}
           </div>
         </div>
       )}

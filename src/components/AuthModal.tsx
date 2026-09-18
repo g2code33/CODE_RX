@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle, Eye, EyeOff, LoaderCircle } from 'lucide-react';
 import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
+import { ClientPortalEntry } from './ClientPortalEntry';
 
 type Mode = 'join' | 'login' | 'forgot';
 
@@ -264,6 +265,10 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                   )}
                 </button>
               </form>
+
+              <div className="auth-modal-client mt-5">
+                <ClientPortalEntry variant="tile" />
+              </div>
 
               <div className="auth-modal-connect mt-5 text-center">
                 <p className="text-xs font-bold text-slate-400 mb-4 uppercase tracking-widest">Connect with us</p>

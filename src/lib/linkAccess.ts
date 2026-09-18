@@ -270,3 +270,30 @@ export const looksLikeLinkToken = (value: string | null | undefined): boolean =>
   typeof value === 'string' && /^[A-Za-z0-9_-]{32,160}$/.test(value.trim());
 
 export const linkPath = (token: string): string => `/#client-portal/link/${encodeURIComponent(token)}`;
+
+/**
+ * The client workspace has one address, and it is the same one the access key
+ * signs in to: `/#client-portal`. Every public entry point links to this exact
+ * hash — never to a link token, and never with a credential in the URL.
+ */
+export const CLIENT_PORTAL_HASH = '#client-portal';
+
+export const clientPortalPath = (): string => `/${CLIENT_PORTAL_HASH}`;
+
+/**
+ * Wording for the public entry points. A client who already holds this tab's
+ * session is greeted as someone coming back, not as a first-time visitor.
+ * Pure and side-effect free so the entry component and the tests share it.
+ */
+export const clientEntryCopy = (hasSession: boolean): { label: string; hint: string; aria: string } =>
+  hasSession
+    ? {
+      label: 'Open my project',
+      hint: 'Continue in your client project room',
+      aria: 'Continue in the client project room',
+    }
+    : {
+      label: 'Client project room',
+      hint: 'Enter your project access key',
+      aria: 'Open the client project room with your project access key',
+    };

@@ -62,6 +62,7 @@ const bundle = async () => {
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
         export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
+        export { ClientPortalEntry } from './src/components/ClientPortalEntry';
         export * from './functions/lib/client-activity';
       `,
       resolveDir: ROOT,
@@ -104,6 +105,7 @@ const main = async () => {
     linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
     landingFor, linkStateScreen, LINK_STATE_SCREENS, LINK_CONTACT_EMAIL, linkContactHref,
+    CLIENT_PORTAL_HASH, clientPortalPath, clientEntryCopy, ClientPortalEntry,
     looksLikeLinkToken, linkPath, ClientLinkState,
   } = module;
 
@@ -1114,6 +1116,79 @@ const main = async () => {
       const source = src(file);
       return !/freshnessBadge|clientActivityPage|Client notifications \(optional\)/.test(source);
     }), unrelatedSurfaces.join(','));
+
+  // =========================================================================
+  group('15. Client entry points on the public site (Phase 11)');
+  // =========================================================================
+
+  // --- the single destination ---------------------------------------------
+  check('every public entry points at the one client workspace address',
+    CLIENT_PORTAL_HASH === '#client-portal' && clientPortalPath() === '/#client-portal'
+    && linkPath('abc') === '/#client-portal/link/abc');
+  check('the entry never carries a credential in the address',
+    !/[?&]*(token|key|passkey)=/i.test(CLIENT_PORTAL_HASH)
+    && CLIENT_PORTAL_HASH.split('').every((character) => /[#a-z-]/.test(character)));
+  check('a returning client is greeted as returning and a new one is told what is needed',
+    clientEntryCopy(false).label === 'Client project room' && /access key/i.test(clientEntryCopy(false).hint)
+    && clientEntryCopy(true).label === 'Open my project'
+    && clientEntryCopy(true).hint !== clientEntryCopy(false).hint
+    && clientEntryCopy(false).aria !== clientEntryCopy(true).aria);
+
+  // --- the rendered entry --------------------------------------------------
+  const entrySource = src('src/components/ClientPortalEntry.tsx');
+  const entryChip = render(React.createElement(ClientPortalEntry, { variant: 'chip' }));
+  const entryTile = render(React.createElement(ClientPortalEntry, { variant: 'tile' }));
+  const entryIcon = render(React.createElement(ClientPortalEntry, { variant: 'icon' }));
+  check('the client door renders as a plain link to the workspace in every shape',
+    [entryChip, entryTile, entryIcon].every((markup) => /href="#client-portal"/.test(markup)));
+  check('the client door is labelled for screen readers in every shape',
+    [entryChip, entryTile, entryIcon].every((markup) => /aria-label="Open the client project room with your project access key"/.test(markup)));
+  check('the client door grants nothing by itself — it is presentation only',
+    !/fetch\(|apiCall|clientPortal\(|Authorization/.test(entrySource) && !/<script/.test(entryTile));
+  check('the client door reads only this tab\'s session to choose its wording',
+    /clientPortalSession\.read\(\)/.test(entrySource) && !/localStorage/.test(entrySource));
+
+  // --- 1. the footer -------------------------------------------------------
+  const footerSource = src('src/components/Footer.tsx');
+  check('the public footer carries the client door',
+    /<ClientPortalEntry variant="tile"/.test(footerSource) && /footer\.client\.label/.test(footerSource));
+  check('the footer entry sits with the brand block, above the newsletter divider',
+    footerSource.indexOf('footer.client.label') > -1
+    && footerSource.indexOf('footer.client.label') < footerSource.indexOf('footer.newsletter-label'));
+  check('the footer entry lives inside the footer region, so it is edited with the rest of the footer',
+    /EditableRegion as="footer"/.test(footerSource)
+    && footerSource.indexOf('<ClientPortalEntry') > footerSource.indexOf('EditableRegion as="footer"'));
+
+  // --- 2. the project page -------------------------------------------------
+  const projectsSource = src('src/components/Projects.tsx');
+  check('the project page offers the client door at the top right of the list',
+    (projectsSource.match(/<ClientPortalEntry variant="chip" \/>/g) || []).length === 2
+    && /<ClientPortalEntry variant="chip" \/><SectionLink id="projects" \/>/.test(projectsSource));
+  check('the open project keeps the client door at the top right, opposite Back to lab',
+    /justify-between gap-3">[\s\S]{0,900}projects\.back[\s\S]{0,300}<ClientPortalEntry variant="chip" \/>/.test(projectsSource));
+
+  // --- 3. navigation, so the door is reachable from every public page ------
+  const navbarSource = src('src/components/Navbar.tsx');
+  check('every public page carries the client door in the navigation',
+    /<ClientPortalEntry variant="icon"/.test(navbarSource) && /<ClientPortalEntry variant="tile" className="mt-3" \/>/.test(navbarSource));
+  check('the client door never replaces or renames the member portal button',
+    /nav\.portal\.enter/.test(navbarSource) && /Member Portal/.test(navbarSource)
+    && /brand-button brand-button--small ml-2/.test(navbarSource));
+  check('the member dashboard and PHANTOM shell do not advertise the client door',
+    (navbarSource.match(/!isDashboard && <ClientPortalEntry/g) || []).length === 2);
+
+  // --- the sign-in dialog --------------------------------------------------
+  const authModalSource = src('src/components/AuthModal.tsx');
+  check('someone who came to sign in is routed to the client door as well',
+    /<ClientPortalEntry variant="tile" \/>/.test(authModalSource)
+    && authModalSource.indexOf('auth-modal-client') > -1
+    && authModalSource.indexOf('auth-modal-client') < authModalSource.indexOf('auth-modal-connect'));
+
+  // --- the client workspace itself is untouched ---------------------------
+  check('the client screens gain no link back into the public site and no new route',
+    !/ClientPortalEntry/.test(src('src/components/ClientPortal.tsx'))
+    && !/ClientPortalEntry/.test(src('src/components/ClientAccessScreen.tsx'))
+    && !/window\.location\.hash\s*=/.test(entrySource));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
