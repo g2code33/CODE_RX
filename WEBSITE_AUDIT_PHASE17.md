@@ -260,3 +260,47 @@ client-portal dialog** (one shared `Dialog` component) and the Vault **command p
 
 Round C is next: page speed, focus rings, the remaining pale text, image weights, and the sharing tags, robots and
 sitemap.
+
+---
+
+## 10. What the three rounds changed
+
+Every finding above is now closed. The list, in the order the rounds ran:
+
+**Round A — the site stops inventing content (`a5e6279`)**
+
+| Finding | Status |
+| --- | --- |
+| 2.1 invented officers, stock portraits, "Member 1–4" | The team roster ships **empty**; the section explains that officers are published as they are confirmed. Adding a person in the editor creates a **blank row**, never a stock photo. |
+| 2.1 the pravatar strip and the "500+" claim | Gone. The hero shows an honest empty state until PHANTOM enters real members. |
+| 2.2 `[Insert Official Email]` etc. in the Terms | The published address, website and Telegram channel (your choice). |
+| 2.3 twenty-one projects, twenty dead links, one 404 | Sample projects removed; the lab shows a real empty state, and a card can no longer render a link to nowhere. |
+| 2.4 unfinished news copy | Removed with the rest of the sample data. |
+
+**Round B — the controls you can reach actually work (`ece41fd`)**
+
+| Finding | Status |
+| --- | --- |
+| 3.1 decorative dashboard search | A real search over what the member can already see (their Vault, their broadcasts, the portal pages), labelled, keyboard-driven, with a written empty result. |
+| 3.2 27 browser `alert`/`confirm`/`prompt` calls | Replaced by one `AppDialog` system: real modals, prompts as forms that refuse empty input, and destructive actions stating their consequence. |
+| 3.3 modals without Escape, focus or a locked page | One `useModalBehaviour` used by every modal, including the command palette that printed an ESC hint it did not honour. |
+| 4.1 unlabelled newsletter field | Labelled, along with the join and sign-in fields. |
+| 4.2 icon buttons named only by `title` | Every one has an accessible name. |
+
+**Round C — lighter, reachable, keyboard-complete (`47983b0`)**
+
+| Finding | Status |
+| --- | --- |
+| 4.3 pale text on white | No `text-slate-300` anywhere; the crown and the placeholders deepened. |
+| 4.4 controls without a focus ring | Every `outline-none` now has a ring beside it; the harness fails if one is added back. |
+| 5.1 heavy first load | Images 1,263 KB → **400 KB**; every image defers its load. |
+| 5.2 invisible deploys | Cache name is `code-rx-v5` with a bump-me comment and a harness check. |
+| 5.3 oversized PNGs | Palette-optimised at the drawn sizes (WebP deliberately avoided — older iOS mishandles it in `manifest` icons and `apple-touch-icon`). |
+| 6.1 no share preview | Open Graph + Twitter cards + canonical address. |
+| 6.2 no crawler files | `robots.txt` (with `/api/` disallowed) and `sitemap.xml`. |
+| 7.2 dead demo data | `LEADERBOARD`, `EVENTS`, `LEADERSHIP` deleted. |
+| 7.3 phone numbers not tappable | Both are `tel:` links through a helper that keeps the dialling shape. |
+
+**Verified after Round C:** interface suite **487/487** (group 22 adds 13 checks, including an image weight budget and
+a guard against losing a focus ring), backend **1332/1332**, live **8/8** (social card, robots, sitemap, cache version,
+asset weights), type check clean, production build exit 0.
