@@ -484,7 +484,7 @@ export const AdminPanel = ({
   };
 
   const handleAddTeamMember = () => {
-    const newTeam = [...siteContent.about.team, { name: 'New Member', role: 'Role', image: 'https://via.placeholder.com/400' }];
+    const newTeam = [...siteContent.about.team, { name: '', role: '', image: '' }];
     handleUpdateAbout({ team: newTeam });
   };
 
@@ -786,7 +786,7 @@ export const AdminPanel = ({
                         <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-2">Community Member Avatars</label>
                         <button 
                           onClick={() => {
-                            const newMembers = [...siteContent.home.communityMembers, { id: Date.now(), image: 'https://i.pravatar.cc/100', name: 'New Member' }];
+                            const newMembers = [...siteContent.home.communityMembers, { id: Date.now(), image: '', name: '' }];
                             handleUpdateHome({ communityMembers: newMembers });
                           }}
                           className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500 text-white font-bold rounded-lg hover:bg-emerald-600 transition-all text-xs"
@@ -809,7 +809,7 @@ export const AdminPanel = ({
                                 handleUpdateHome({ communityMembers: newMembers });
                               }}
                               className="flex-grow bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium text-xs text-slate-600"
-                              placeholder="Image URL (e.g., https://i.pravatar.cc/100?img=11)"
+                              placeholder="Image URL"
                             />
                             <button 
                               onClick={() => {

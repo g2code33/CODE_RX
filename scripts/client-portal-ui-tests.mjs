@@ -69,6 +69,8 @@ const bundle = async () => {
         export { SiteEmoji, SiteEmojiText, SiteEmojiProvider } from './src/components/SiteEmoji';
         export { SiteEmojiAdmin } from './src/components/SiteEmojiAdmin';
         export { ContactForm } from './src/components/ContactForm';
+        export { SiteFlow } from './src/components/SiteFlow';
+        export { INITIAL_SITE_CONTENT, normalizeSiteContent } from './src/data/siteState';
         export * from './src/data/siteEmojis';
         export * from './functions/lib/client-activity';
       `,
@@ -116,6 +118,7 @@ const main = async () => {
     clientContact, clientSupportMailto, phantomContactHref, PHANTOM_CONTACT_HASH, CLIENT_SITE_HOME,
     ClientSupportContact, ClientAccessKeyField, ClientSiteSign,
     SiteEmoji, SiteEmojiText, SiteEmojiProvider, SiteEmojiAdmin, ContactForm,
+    SiteFlow, INITIAL_SITE_CONTENT, normalizeSiteContent,
     SITE_EMOJIS, SITE_EMOJI_MEDIA_PREFIX, siteEmojiMediaKey, siteEmojiReplacement, splitEmojiRuns, isSiteEmoji,
     splitAccessKey, joinAccessKey, validateAccessKeyGroups,
     ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH,
@@ -1596,6 +1599,117 @@ const main = async () => {
     && !/border-slate-200 focus:border-emerald-400/.test(src('src/components/ClientAccessKeyField.tsx')));
   check('the contact modal placeholder is readable too',
     /placeholder:text-\[#64748b\]/.test(src('src/components/ContactForm.tsx')));
+
+  // =========================================================================
+  group('20. Phase 17 Round A — nothing on the public site is invented');
+  // =========================================================================
+
+  // The site is going public, so every collection is published by PHANTOM and
+  // the pages have to read well while they are still empty. These checks hold
+  // both halves of that: the data layer must contain no fabricated records, and
+  // each screen that used to print them must have a real empty state.
+
+  const readSrc = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8');
+
+  const invented = [
+    ['a stock face', /i\.pravatar\.cc/],
+    ['a placeholder image service', /placeholder\.com/],
+    ['a stock photograph', /images\.unsplash\.com/],
+    ['an invented officer', /Dr\. Tech Pharm|Sarah Script|Alex Code|Elena AI/],
+    ['an invented member', /'Member \d/],
+    ['an unfilled template marker', /\[Insert/],
+    ['an invented member count', /500\+|1,?200\+/],
+  ];
+  const inventedHits = [];
+  for (const file of fs.readdirSync(path.join(ROOT, 'src'), { recursive: true })) {
+    if (!/\.(ts|tsx)$/.test(String(file))) continue;
+    const source = readSrc(path.join('src', String(file)));
+    for (const [label, pattern] of invented) if (pattern.test(source)) inventedHits.push(`${file}: ${label}`);
+  }
+  check('no stock faces, stock photographs or invented people remain in the source', inventedHits.length === 0, inventedHits.join(', '));
+
+  const state = readSrc('src/data/siteState.ts');
+  check('the member count, member strip and news strip start empty',
+    /communityCount:\s*0/.test(state) && /communityMembers:\s*\[\]/.test(state) && /latestNews:\s*\[\]/.test(state));
+  check('there are no pre-seeded projects, officers, resources, partners or opportunities',
+    /team:\s*\[\]/.test(state) && /projects:\s*\[\]/.test(state) && /categories:\s*\[\]/.test(state)
+    && /partnerships:\s*\[\]/.test(state) && /opportunities:\s*\[\]/.test(state));
+  check('the seeded challenge is blank until a real one is opened',
+    /challenges:\s*\{[\s\S]{0,220}?title:\s*''/.test(state) && /participants:\s*0/.test(state));
+  check('the Terms contact block carries the published contacts, not template markers',
+    /coderxsociety@gmail\.com/.test(readSrc('src/data/siteState.ts')) && !/\[Insert/.test(readSrc('src/data/siteState.ts')));
+
+  const removedModules = ['PROJECTS', 'INITIAL_PROJECTS', 'LEADERBOARD', 'EVENTS', 'LEADERSHIP'];
+  const mockData = readSrc('src/data/mockData.ts');
+  check('the unused sample-data tables are gone from mockData',
+    removedModules.every((name) => !new RegExp(`export const ${name}\\b`).test(mockData)));
+
+  check('there is one empty state used by the public pages',
+    /export const SectionEmpty/.test(readSrc('src/components/SectionEmpty.tsx')));
+  const emptyStateUsers = ['Projects.tsx', 'Competitions.tsx', 'Extras.tsx', 'SiteFlow.tsx'];
+  const missingEmptyState = emptyStateUsers.filter((name) => !/SectionEmpty/.test(readSrc(`src/components/${name}`)));
+  check('every page that lost its content has an empty state in its place', missingEmptyState.length === 0, missingEmptyState.join(', '));
+
+  check('a project card can no longer link to nowhere',
+    !/\|\| '#'/.test(readSrc('src/components/Projects.tsx'))
+    && /selectedProject\.github && \(/.test(readSrc('src/components/Projects.tsx'))
+    && /selectedProject\.demo && \(/.test(readSrc('src/components/Projects.tsx')));
+  check('the officers section is hidden rather than shown with placeholders',
+    /if \(!team\.length\) return null;/.test(readSrc('src/components/Leadership.tsx')));
+  check('the member count only renders when a real figure exists',
+    /Number\(content\.communityCount\) > 0 && \(/.test(readSrc('src/components/Hero.tsx'))
+    && !/>\{String\(content\.communityCount\)/.test(readSrc('src/components/Hero.tsx').split('Number(content.communityCount) > 0')[0]));
+  check('the partnerships and opportunities section steps aside until it has real content',
+    /if \(!content\.partnerships\.length && !content\.opportunities\.length\) return null;/.test(readSrc('src/components/Extras.tsx')));
+  check('the challenge card only renders for a real, open challenge',
+    /!active\.title \? \(/.test(readSrc('src/components/Competitions.tsx')));
+
+  const adminSource = readSrc('src/components/AdminPanel.tsx') + readSrc('src/components/VisualEditor.tsx');
+  check('new records added in the editor start blank for PHANTOM to fill in',
+    !/via\.placeholder\.com|i\.pravatar\.cc/.test(adminSource)
+    && /image: ''/.test(adminSource));
+
+  const renderPage = (tab) => render(
+    React.createElement(SiteFlow, {
+      siteContent: normalizeSiteContent(INITIAL_SITE_CONTENT),
+      activeTab: tab,
+      onJoin: () => undefined,
+      includeFooter: true,
+      includeJoinCta: true,
+    }),
+  );
+  const pages = {};
+  for (const tab of ['home', 'about', 'projects', 'challenges', 'resources']) {
+    try { pages[tab] = renderPage(tab); } catch (error) { pages[tab] = `__THREW__ ${error.message}`; }
+  }
+  const unrendered = Object.entries(pages).filter(([, html]) => html.startsWith('__THREW__'));
+  check('every public page still renders with completely empty collections',
+    unrendered.length === 0, unrendered.map(([tab, html]) => `${tab}: ${html.slice(0, 60)}`).join(' | '));
+
+  const renderedFabrications = Object.entries(pages)
+    .flatMap(([tab, html]) => invented.filter(([, pattern]) => pattern.test(html)).map(([label]) => `${tab}: ${label}`));
+  check('no rendered page contains a stock face, stock photograph or invented person',
+    renderedFabrications.length === 0, renderedFabrications.join(', '));
+
+  check('the projects page reads as an empty library rather than an empty grid',
+    /No projects published yet\./.test(pages.projects || ''));
+  check('the challenges page offers a real empty state instead of a blank card',
+    /No challenge is open right now\./.test(pages.challenges || ''));
+  check('the library page says it is being prepared',
+    /The library is being prepared\./.test(pages.resources || ''));
+  check('the home page carries no announcement cards while there are no announcements',
+    /No announcements yet\./.test(pages.home || '')
+    && !/home\.latestNews\.0\.title/.test(pages.home || ''));
+  check('the home page claims no member count and shows no member strip',
+    !/>\s*0{1,3}\+\s*<\/p>/.test(pages.home || '') && !/Members<\/p>/.test(pages.home || ''));
+  check('the about page hides the officer grid instead of showing empty frames',
+    !/leadership\.member\.0/.test(pages.about || '') && !/team member/i.test(pages.about || ''));
+
+  const collections = readSrc('src/components/VisualEditor.tsx');
+  const addable = ['news', 'team', 'projects', 'resources', 'partnerships', 'opportunities'];
+  const notAddable = addable.filter((name) => !new RegExp(`['"]${name}['"]`).test(collections));
+  check('PHANTOM can still add every one of these collections back in the editor',
+    notAddable.length === 0, notAddable.join(', '));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

@@ -1,4 +1,4 @@
-import { INITIAL_PROJECTS, WHAT_WE_DO, Project } from './mockData';
+import { WHAT_WE_DO, Project } from './mockData';
 import {
   CoreValueContent,
   DEFAULT_MEDIA,
@@ -106,13 +106,12 @@ const DEFAULT_CORE_VALUES: CoreValueContent[] = [
   { id: 'innovation', title: 'Innovation', description: 'Turning pharmacy problems into technology solutions.', icon: 'lightbulb' },
 ];
 
+// Partnerships and opportunities are real relationships and real programmes.
+// None are invented here: the cards stay empty until PHANTOM publishes the
+// organisations that have actually agreed to be listed.
 const DEFAULT_EXTRAS: ExtrasContent = {
-  partnerships: ['UCC Pharmacy', 'PharmaLink', 'TechHealth', 'MediCode'],
-  opportunities: [
-    { id: 'clinical-tech-internship', title: 'Clinical Tech Internship', organization: 'PharmaLink AI', icon: 'briefcase' },
-    { id: 'innovation-scholarship', title: 'Tech Innovation Scholarship', organization: 'Code Rx Foundation', icon: 'graduation-cap' },
-    { id: 'startup-grant', title: 'HealthTech Startup Grant', organization: 'Health Launchpad', icon: 'rocket' },
-  ],
+  partnerships: [],
+  opportunities: [],
 };
 
 export const INITIAL_SITE_CONTENT: SiteContent = {
@@ -121,30 +120,22 @@ export const INITIAL_SITE_CONTENT: SiteContent = {
     heroSubtitle: 'SOCIETY',
     heroTagline: 'Coding the Future of Pharmacy',
     heroDescription: 'Where Pharmacy meets Technology, Innovation & Artificial Intelligence. Join the elite community of healthcare innovators.',
-    communityCount: 500,
-    communityMembers: [
-      { id: 1, image: 'https://i.pravatar.cc/100?img=11', name: 'Member 1' },
-      { id: 2, image: 'https://i.pravatar.cc/100?img=5', name: 'Member 2' },
-      { id: 3, image: 'https://i.pravatar.cc/100?img=3', name: 'Member 3' },
-      { id: 4, image: 'https://i.pravatar.cc/100?img=4', name: 'Member 4' },
-    ],
-    latestNews: [
-      { id: 1, category: 'ANNOUNCEMENT', title: 'New Chapter Opening at UCC', text: 'We are excited to announce the expansion of Code Rx...' },
-      { id: 2, category: 'EVENT', title: 'AI in Pharmacy Workshop', text: 'Join us for a deep dive into Large Language Models...' },
-      { id: 3, category: 'RESEARCH', title: 'Medication Safety Algorithm Published', text: 'A new research paper by our Informatics team...' },
-    ],
+    // The member count and the member strip are real figures about real people.
+    // Both stay empty until PHANTOM publishes them: no invented numbers and no
+    // stock faces on a public page.
+    communityCount: 0,
+    communityMembers: [],
+    latestNews: [],
     coreValues: DEFAULT_CORE_VALUES,
   },
   about: {
     mission: 'To bridge Pharmacy and IT by equipping professionals with skills to create tech-driven solutions for healthcare.',
     vision: 'A future where pharmacists actively participate in designing and implementing technology that improves healthcare.',
     motto: 'CODING THE FUTURE OF PHARMACY',
-    team: [
-      { name: 'Dr. Tech Pharm', role: 'President', image: 'https://images.unsplash.com/photo-1559839734-2b71f1e3c77e?w=400&h=400&fit=crop' },
-      { name: 'Sarah Script', role: 'Vice President', image: 'https://images.unsplash.com/photo-1594824476967-48c8b964273f?w=400&h=400&fit=crop' },
-      { name: 'Alex Code', role: 'Technology Director', image: 'https://images.unsplash.com/photo-1612349317150-e413f6a5b16d?w=400&h=400&fit=crop' },
-      { name: 'Elena AI', role: 'AI & Data Lead', image: 'https://images.unsplash.com/photo-1527613426441-4da17471b66d?w=400&h=400&fit=crop' }
-    ],
+    // Officer profiles: added by PHANTOM once the real names, roles and
+    // photographs are ready. The section is hidden from the public site while
+    // this is empty.
+    team: [],
     tracks: DEFAULT_TRACKS
   },
   learn: {
@@ -164,31 +155,32 @@ export const INITIAL_SITE_CONTENT: SiteContent = {
       'Learn with a community that gets both sides',
     ]
   },
-  projects: INITIAL_PROJECTS,
+  // Projects are published by PHANTOM. Nothing is pre-seeded, so no project
+  // card can carry an invented status, an invented progress bar or a dead
+  // repository link.
+  projects: [],
+  // A challenge is a live event with a real deadline and a real prize, so it is
+  // never seeded. The page shows its empty state until PHANTOM opens one.
   challenges: {
     active: {
-      id: 'CRX-DECODER-001',
-      title: 'Database Encryption Breach',
-      difficulty: 'Advanced',
-      participants: 37,
-      timeRemaining: '04:21:18',
-      prize: '₵ 5,000.00',
-      reward: 'Elite Badge',
-      problem: 'A critical database of drug formulas has been encrypted by a legacy system. Your task is to reverse-engineer the hashing algorithm and retrieve the salt keys before the system locks down.'
+      id: '',
+      title: '',
+      difficulty: '',
+      participants: 0,
+      timeRemaining: '',
+      prize: '',
+      reward: '',
+      problem: '',
     }
   },
   community: {
     hubTitle: 'COMMUNITY HUB',
-    description: 'Connect with over 500+ pharmacists and developers around the world on our official channel.',
+    description: 'Connect with pharmacists and developers building the future of pharmacy, on our official channel.',
     telegramLink: 'https://t.me/+EdRpfR1GTGNjM2Q0'
   },
   resources: {
-    categories: [
-      { name: 'Pharmacy', items: ['Documentation', 'Best Practices', 'Cheat Sheets', 'Video Tutorials'] },
-      { name: 'Coding', items: ['Documentation', 'Best Practices', 'Cheat Sheets', 'Video Tutorials'] },
-      { name: 'AI', items: ['Documentation', 'Best Practices', 'Cheat Sheets', 'Video Tutorials'] },
-      { name: 'Research', items: ['Documentation', 'Best Practices', 'Cheat Sheets', 'Video Tutorials'] },
-    ]
+    // Real documents, once the library has them.
+    categories: [],
   },
   terms: {
     version: '1.0',
@@ -626,9 +618,8 @@ Code Rx will seek to operate consistently with applicable requirements relating 
       { id: '31', title: 'OFFICIAL CONTACT', content: `CODE Rx SOCIETY
 Coding the Future of Pharmacy 💊
 
-Email: [Insert Official Email]
-Website: [Insert Website]
-Official Community: [Insert Link]
+Email: coderxsociety@gmail.com
+Official Community: https://t.me/+EdRpfR1GTGNjM2Q0
 Location: Ghana` },
       { id: '32', title: 'ACCEPTANCE', content: `By registering for Code Rx Society membership, participating in Society activities, accessing an official Code Rx platform, or otherwise participating in the Society, a member acknowledges that they have read, understood, and agreed to these Terms & Conditions.
 

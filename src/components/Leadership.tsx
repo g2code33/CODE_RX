@@ -5,6 +5,11 @@ import { PharmacyBackground } from './PharmacyBackground';
 import { EditableImage, EditableRegion, EditableText } from './VisualEditorContext';
 
 export const Leadership = ({ team, copy, media }: { team: Array<{ name: string; role: string; image: string }>; copy?: Record<string, string>; media?: Record<string, MediaAsset> }) => {
+  // Officer profiles are real people. Until PHANTOM publishes them the section
+  // is not rendered at all, rather than shown with invented names or stock
+  // photographs. Adding a "Leadership member" in the editor brings it back.
+  if (!team.length) return null;
+
   return (
     <EditableRegion elementKey="leadership.section" label="Leadership section" collection="team">
       <section id="leadership" className="brand-section brand-section--alt py-28 sm:py-36">

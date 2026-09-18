@@ -110,7 +110,7 @@ const addToCollection = (content: SiteContent, collection: string, page = 'home'
       next.home.coreValues.push({ id: createId('value'), title: 'New value', description: 'Describe this core value.', icon: 'lightbulb' });
       break;
     case 'team':
-      next.about.team.push({ name: 'New team member', role: 'Role', image: 'https://via.placeholder.com/400x400?text=Team+Member' });
+      next.about.team.push({ name: '', role: '', image: '' });
       break;
     case 'tracks':
       next.about.tracks.push({ id: createId('track'), title: 'New track', items: ['First topic'], icon: 'terminal' });

@@ -47,7 +47,9 @@ export const Hero = ({
             </div>
 
             <EditableRegion elementKey="hero.stats" label="Hero statistics" className="mt-12 grid max-w-xl grid-cols-3 divide-x divide-[#15803d]/20 border-y border-[#16a34a]/20 py-5">
+              {Number(content.communityCount) > 0 && (
               <div className="pr-4"><p className="brand-number"><EditableText elementKey="hero.member-count" copyKey="home.communityCount" label="Community member count">{String(content.communityCount).padStart(3, '0')}+</EditableText></p><p className="mt-1 text-[0.66rem] font-bold uppercase tracking-[0.16em] text-[#475569]"><EditableText elementKey="hero.members-label" copyKey="hero.membersLabel" label="Member statistic label">{getCopy(copy, 'hero.membersLabel', 'Members')}</EditableText></p></div>
+              )}
               <div className="px-4"><p className="brand-number"><EditableText elementKey="hero.tracks-value" copyKey="hero.tracksValue" label="Tracks statistic value">{getCopy(copy, 'hero.tracksValue', '06')}</EditableText></p><p className="mt-1 text-[0.66rem] font-bold uppercase tracking-[0.16em] text-[#475569]"><EditableText elementKey="hero.tracks-label" copyKey="hero.tracksLabel" label="Tracks statistic label">{getCopy(copy, 'hero.tracksLabel', 'Tracks')}</EditableText></p></div>
               <div className="pl-4"><p className="brand-number"><EditableText elementKey="hero.curiosity-value" copyKey="hero.curiosityValue" label="Curiosity statistic value">{getCopy(copy, 'hero.curiosityValue', '24/7')}</EditableText></p><p className="mt-1 text-[0.66rem] font-bold uppercase tracking-[0.16em] text-[#475569]"><EditableText elementKey="hero.curiosity-label" copyKey="hero.curiosityLabel" label="Curiosity statistic label">{getCopy(copy, 'hero.curiosityLabel', 'Curiosity')}</EditableText></p></div>
             </EditableRegion>
