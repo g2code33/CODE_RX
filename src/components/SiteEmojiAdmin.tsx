@@ -1,3 +1,4 @@
+import { useModalBehaviour } from './AppDialog';
 import { useRef, useState } from 'react';
 import { Check, ImageUp, RotateCcw, Smile } from 'lucide-react';
 import { db, uploadFile } from '../lib/cloudflare';
@@ -27,6 +28,8 @@ export const SiteEmojiAdmin = ({
   const [message, setMessage] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
   const [preview, setPreview] = useState<SiteEmojiEntry | null>(null);
   const fileInputs = useRef<Record<string, HTMLInputElement | null>>({});
+  const previewPanel = useRef<HTMLDivElement>(null);
+  useModalBehaviour(Boolean(preview), () => setPreview(null), previewPanel);
 
   const media = siteContent.media || {};
   const replacedCount = SITE_EMOJIS.filter((entry) => media[siteEmojiMediaKey(entry.key)]?.src).length;
@@ -182,8 +185,8 @@ export const SiteEmojiAdmin = ({
       </div>
 
       {preview ? (
-        <div className="fixed inset-0 z-[120] grid place-items-center bg-slate-950/60 p-5" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+        <div className="fixed inset-0 z-[120] grid place-items-center bg-slate-950/60 p-5" role="dialog" aria-modal="true" aria-label="Emoji preview">
+          <div ref={previewPanel} tabIndex={-1} className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
             <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Where visitors see it</p>
             <h4 className="mt-1 text-xl font-black text-slate-900">
               {preview.emoji} {preview.label}

@@ -1,5 +1,7 @@
+import { useModalBehaviour } from './AppDialog';
 import { useEffect, useRef, useState } from 'react';
 import { CalendarDays, Check, Copy, Link2, Send, ShieldCheck, Trash2, X } from 'lucide-react';
+import { appDialog } from './AppDialog';
 import { db } from '../lib/cloudflare';
 
 interface VaultShareDialogProps {
@@ -58,6 +60,8 @@ export const VaultShareDialog = ({ document, onClose }: VaultShareDialogProps) =
   const [copiedKey, setCopiedKey] = useState<CopyKey | null>(null);
   const [message, setMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
   const copyTimer = useRef<number | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalBehaviour(true, onClose, panelRef);
 
   const load = async () => {
     setLoading(true);
@@ -155,7 +159,11 @@ export const VaultShareDialog = ({ document, onClose }: VaultShareDialogProps) =
   };
 
   const replaceLegacyLink = async (share: any) => {
-    const confirmed = window.confirm('This link needs a fresh copy. Create one now? Anyone using the current link will need the new link instead.');
+    const confirmed = await appDialog.confirm({
+      title: 'Create a fresh link?',
+      message: 'This link needs a new copy. Anyone using the current link will have to be given the new one instead.',
+      confirmLabel: 'Create new link',
+    });
     if (!confirmed) return;
     setBusyShareId(share.id);
     setMessage(null);
@@ -206,7 +214,7 @@ export const VaultShareDialog = ({ document, onClose }: VaultShareDialogProps) =
     </button>;
   };
 
-  return <div className="fixed inset-0 z-[170] flex items-center justify-center bg-emerald-950/15 p-4 backdrop-blur-sm" onClick={onClose}>
+  return <div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share this document" className="fixed inset-0 z-[170] flex items-center justify-center bg-emerald-950/15 p-4 backdrop-blur-sm" onClick={onClose}>
     <section className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl sm:p-8" onClick={(event) => event.stopPropagation()}>
       <div className="flex items-start justify-between gap-4">
         <div>

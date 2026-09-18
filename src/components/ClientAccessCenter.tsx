@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useModalBehaviour } from './AppDialog';
 import {
   Activity, AlertTriangle, Archive, CheckCircle2, Clock, Copy, Eye, FileText, KeyRound,
   Link2, Loader2, Pencil, Plus, RefreshCw, ShieldAlert, ShieldCheck, Users, X,
 } from 'lucide-react';
 import { clientAccessCenter } from '../lib/cloudflare';
+import { appDialog } from './AppDialog';
 import { ClientProjectRoom, type ClientPortalContext, type RoomTransport } from './ClientProjectRoom';
 import { CATEGORY_LABELS } from '../lib/projectRoom';
 import {
@@ -73,9 +75,12 @@ const Field = ({ label, children, hint }: { label: string; children: any; hint?:
 
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-medium text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50';
 
-const Dialog = ({ title, subtitle, onClose, children, wide }: { title: string; subtitle?: string; onClose: () => void; children: any; wide?: boolean }) => (
-  <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-3 backdrop-blur-sm sm:p-6">
-    <div className={`w-full ${wide ? 'max-w-3xl' : 'max-w-xl'} rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/20`}>
+const Dialog = ({ title, subtitle, onClose, children, wide }: { title: string; subtitle?: string; onClose: () => void; children: any; wide?: boolean }) => {
+  // Escape closes it, the page behind stops scrolling, and Tab stays inside.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalBehaviour(true, onClose, panelRef);
+  return <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-3 backdrop-blur-sm sm:p-6" role="dialog" aria-modal="true" aria-label={title}>
+    <div ref={panelRef} tabIndex={-1} className={`w-full ${wide ? 'max-w-3xl' : 'max-w-xl'} rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/20`}>
       <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
         <div>
           <h4 className="text-lg font-black text-slate-900">{title}</h4>
@@ -85,8 +90,8 @@ const Dialog = ({ title, subtitle, onClose, children, wide }: { title: string; s
       </div>
       <div className="px-5 py-5">{children}</div>
     </div>
-  </div>
-);
+  </div>;
+};
 
 /**
  * PREVIEW AS CLIENT transport.
@@ -1977,7 +1982,13 @@ const revokeAll = async (
   refresh: (message: string) => Promise<void>,
   setError: (message: string | null) => void,
 ) => {
-  if (!window.confirm(`Revoke all client access for ${client.name}? Every access key, session and temporary link is killed immediately.`)) return;
+  const agreed = await appDialog.confirm({
+    title: `Revoke all access for ${client.name}?`,
+    message: 'Every access key, open session and temporary link is cancelled immediately. The client sees the access screen again until you issue a new key.',
+    confirmLabel: 'Revoke everything',
+    tone: 'danger',
+  });
+  if (!agreed) return;
   try {
     await clientAccessCenter.revokeAllAccess(client.id);
     await refresh('All client access revoked: keys, sessions and temporary links are dead.');
@@ -2016,7 +2027,13 @@ const deleteDocument = async (
   refresh: (message: string) => Promise<void>,
   setError: (message: string | null) => void,
 ) => {
-  if (!window.confirm(`Delete "${document.title}"? It moves to the PHANTOM Recycle Bin and leaves the client portal immediately.`)) return;
+  const agreed = await appDialog.confirm({
+    title: `Delete “${document.title}”?`,
+    message: 'It moves to the PHANTOM Recycle Bin and leaves the client portal immediately.',
+    confirmLabel: 'Delete document',
+    tone: 'danger',
+  });
+  if (!agreed) return;
   try {
     await clientAccessCenter.deleteDocument(document.id);
     await refresh('Client document deleted. PHANTOM → Recycle Bin can restore it.');

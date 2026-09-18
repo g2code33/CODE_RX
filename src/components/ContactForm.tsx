@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { useModalBehaviour } from './AppDialog';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -69,6 +70,10 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
   const fieldLabel = 'mb-1.5 block text-[12px] font-black uppercase tracking-[0.12em] text-[#334155]';
   const fieldBox = 'w-full rounded-xl border border-[#cbd5e1] bg-white px-4 py-3 text-[15px] font-medium text-[#0f172a] outline-none transition placeholder:text-[#64748b] focus:border-[#15803d] focus:ring-4 focus:ring-[#16a34a]/15';
 
+  const panelRef = useRef<HTMLElement>(null);
+  // Escape closes the same way the close button does.
+  useModalBehaviour(isOpen, close, panelRef);
+
   const panel = (
     <AnimatePresence>
       {isOpen && (
@@ -89,6 +94,8 @@ export const ContactForm = ({ isOpen, onClose, supportEmail = 'coderxsociety@gma
           />
 
           <motion.section
+            ref={panelRef}
+            tabIndex={-1}
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 12 }}

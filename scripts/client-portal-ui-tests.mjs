@@ -70,6 +70,9 @@ const bundle = async () => {
         export { SiteEmojiAdmin } from './src/components/SiteEmojiAdmin';
         export { ContactForm } from './src/components/ContactForm';
         export { SiteFlow } from './src/components/SiteFlow';
+        export { PortalSearch } from './src/components/PortalSearch';
+        export { AuthModal } from './src/components/AuthModal';
+        export { AppDialogHost, appDialog, Modal, useModalBehaviour } from './src/components/AppDialog';
         export { INITIAL_SITE_CONTENT, normalizeSiteContent } from './src/data/siteState';
         export * from './src/data/siteEmojis';
         export * from './functions/lib/client-activity';
@@ -119,6 +122,7 @@ const main = async () => {
     ClientSupportContact, ClientAccessKeyField, ClientSiteSign,
     SiteEmoji, SiteEmojiText, SiteEmojiProvider, SiteEmojiAdmin, ContactForm,
     SiteFlow, INITIAL_SITE_CONTENT, normalizeSiteContent,
+    PortalSearch, AuthModal, AppDialogHost, appDialog, Modal, useModalBehaviour,
     SITE_EMOJIS, SITE_EMOJI_MEDIA_PREFIX, siteEmojiMediaKey, siteEmojiReplacement, splitEmojiRuns, isSiteEmoji,
     splitAccessKey, joinAccessKey, validateAccessKeyGroups,
     ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH,
@@ -1710,6 +1714,90 @@ const main = async () => {
   const notAddable = addable.filter((name) => !new RegExp(`['"]${name}['"]`).test(collections));
   check('PHANTOM can still add every one of these collections back in the editor',
     notAddable.length === 0, notAddable.join(', '));
+
+  // =========================================================================
+  group('21. Phase 17 Round B — the controls you can reach actually work');
+  // =========================================================================
+
+  // The browser's own alert/confirm/prompt boxes were standing in for real UI in
+  // 27 places. They are gone; these checks keep them gone and hold the
+  // replacement to the behaviour a dialog must have.
+  const nativeDialogSites = [];
+  for (const file of fs.readdirSync(path.join(ROOT, 'src'), { recursive: true })) {
+    if (!/\.(ts|tsx)$/.test(String(file))) continue;
+    const source = readSrc(path.join('src', String(file)));
+    if (/\bwindow\.(alert|confirm|prompt)\s*\(/.test(source)) nativeDialogSites.push(`${file}: window dialog`);
+    if (/[^A-Za-z0-9_.](alert|confirm|prompt)\s*\(/.test(source.replace(/appDialog\.\w+/g, ''))) nativeDialogSites.push(`${file}: bare dialog call`);
+  }
+  check('the browser chrome dialogs are gone from the application',
+    nativeDialogSites.length === 0, nativeDialogSites.join(', '));
+
+  const dialog = readSrc('src/components/AppDialog.tsx');
+  check('the replacement offers alert, confirm and prompt as real methods',
+    /alert:\s*\(/.test(dialog) && /confirm:\s*\(/.test(dialog) && /prompt:\s*\(/.test(dialog));
+  check('a prompt rejects empty input instead of accepting it', /requiredMessage/.test(dialog));
+  check('the dialog host is mounted once for the whole app', /<AppDialogHost \/>/.test(readSrc('src/App.tsx')));
+
+  check('every dialog closes on Escape, locks the page behind it and traps focus',
+    /event\.key === 'Escape'/.test(dialog)
+    && /document\.body\.style\.overflow = 'hidden'/.test(dialog)
+    && /event\.key !== 'Tab'/.test(dialog)
+    && /'aria-modal'|aria-modal=\{?true/.test(dialog) || /aria-modal="true"/.test(dialog));
+  const modalUsers = ['ContactForm.tsx', 'AuthModal.tsx', 'SiteEmojiAdmin.tsx', 'VaultShareDialog.tsx', 'PhantomControlCenter.tsx', 'ClientAccessCenter.tsx', 'VaultDocumentEditor.tsx'];
+  const withoutBehaviour = modalUsers.filter((name) => !/useModalBehaviour/.test(readSrc(`src/components/${name}`)));
+  check('every hand-rolled modal uses that same behaviour', withoutBehaviour.length === 0, withoutBehaviour.join(', '));
+  check('the command palette honours the ESC hint it prints',
+    /useModalBehaviour\(true, onClose, palettePanel\)/.test(readSrc('src/components/VaultDocumentEditor.tsx')));
+
+  const dashboard = readSrc('src/components/Dashboard.tsx');
+  check('the dashboard search is a real search, not decoration',
+    /<PortalSearch /.test(dashboard) && /import \{ PortalSearch \}/.test(dashboard)
+    && !/placeholder="Search resources\.\.\."/.test(dashboard));
+  const search = readSrc('src/components/PortalSearch.tsx');
+  check('the search is labelled, announces its results and can be cleared',
+    /role="combobox"/.test(search) && /aria-expanded=/.test(search) && /aria-controls="portal-search-results"/.test(search)
+    && /aria-label="Clear search"/.test(search));
+  check('the search only reads content the member can already see',
+    /vaultHome\?\.sections/.test(search) && /vaultHome\?\.recentDocuments/.test(search) && /notifications/.test(search));
+
+  const searchResults = render(React.createElement(PortalSearch, {
+    vaultHome: {
+      sections: [{ id: 7, title: 'Formulation notes', slug: 'formulation', documentCount: 2 }],
+      recentDocuments: [{ id: 3, title: 'Dispensing audit 2026', document_code: 'CRX-0003', section_title: 'Formulation notes' }],
+    },
+    notifications: [{ id: 11, title: 'New broadcast from PHANTOM', body: 'Society update' }],
+    onOpenVault: () => undefined,
+    onOpenView: () => undefined,
+  }));
+  check('the search renders as a labelled control with no invented results',
+    /aria-label="Search the portal"|for="portal-search"/.test(searchResults)
+    && /id="portal-search"/.test(searchResults)
+    && !/Search results/.test(searchResults));
+  check('an empty result set is explained rather than left blank',
+    /never appear in these results/.test(search));
+
+  const newsletter = readSrc('src/components/Footer.tsx');
+  check('the newsletter field is labelled for screen readers',
+    /aria-label="Your email address for the Society newsletter"/.test(newsletter));
+  const auth = readSrc('src/components/AuthModal.tsx');
+  check('the join and sign-in fields are all labelled',
+    /aria-label="Full name"/.test(auth) && /aria-label="Telephone number"/.test(auth) && /aria-label="Password"/.test(auth)
+    && /aria-label="Close"/.test(auth));
+  check('the portal navigation buttons say what they do',
+    /aria-label=\{navigationOpen \? 'Hide portal navigation' : 'Show portal navigation'\}/.test(dashboard)
+    && /aria-label="Close the navigation menu"/.test(dashboard));
+
+  const renderedControls = render(React.createElement(AuthModal, {
+    isOpen: true, onClose: () => undefined, onLoginSuccess: () => undefined, onGoToTerms: () => undefined, defaultMode: 'join',
+  }));
+  const unlabelled = [...renderedControls.matchAll(/<(input|textarea|select)\b[^>]*>/g)]
+    .filter((match) => !/aria-label=|aria-labelledby=|\sid="/.test(match[0]));
+  const unnamed = [...renderedControls.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)]
+    .filter((match) => !match[1].replace(/<[^>]*>/g, '').trim())
+    .filter((match) => !/aria-label=|aria-labelledby=|title=/.test(match[0].slice(0, match[0].indexOf('>') + 1)));
+  check('no control on the join form is left without a name',
+    unlabelled.length === 0 && unnamed.length === 0,
+    `${unlabelled.length} unlabelled, ${unnamed.length} unnamed`);
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

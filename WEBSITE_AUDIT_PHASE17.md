@@ -193,3 +193,67 @@ of arriving pre-filled with a stock face or a placeholder image:
 
 Round B (dead dashboard search, the 27 native dialogs, modal behaviour, unlabelled controls) is next, then Round C
 (speed, focus rings, sharing tags, robots and sitemap).
+
+---
+
+# Round B — done: the controls you can reach now work
+
+**Status:** shipped. **Result: 1828 / 1828 checks passing (100.0 %).**
+UI 474/474 · backend 1332/1332 · live 10/10 (Phase 16 set) · live 12/12 (Round A + B set).
+
+## 1. The dashboard search is a real search
+
+The box in the member portal header had no state, no handler and no results — it was decoration. It is now
+`PortalSearch` (`src/components/PortalSearch.tsx`) and it searches **only what the member can already see**: the Vault
+sections and documents their own API response returned, their own PHANTOM broadcasts, and the portal's own pages. Each
+result says where it goes; an empty result says so in words rather than showing nothing. It is a labelled combobox
+(`aria-expanded`, `aria-controls`), Escape closes it, and a clear button empties it.
+
+## 2. Twenty-seven browser dialogs replaced with real UI
+
+`alert`, `confirm` and `prompt` cannot be styled, cannot be validated and look broken in the installed app. All 27 are
+gone (`window.alert/confirm/prompt` now appears **nowhere** in the application):
+
+| Where | Was | Now |
+| --- | --- | --- |
+| AdminPanel (8) | Remove subscriber / contact message / project / Terms section, archive member, reset all content, publish failure | Real dialogs with the consequence written out |
+| PhantomControlCenter (8) | Recycle-bin purge, delete application, release Code Name, archive Vault section, withdraw notification, change Code Name, **phone-number prompt**, **Telegram chat-ID prompt** | Real dialogs; both prompts are proper forms |
+| CommunityHub (5) | Edit post, delete post, report post, edit message, delete message | Real dialogs; edits and reports are proper text areas that refuse to submit empty |
+| ClientAccessCenter (2) | Revoke all client access, delete client document | Real dialogs, both marked as destructive |
+| VisualEditor, VaultShareDialog, VaultDocumentEditor, Footer (4) | Remove selected item, create a fresh share link, archive document, subscribe failure | Real dialogs |
+
+The replacement is one small system, `src/components/AppDialog.tsx`:
+
+* `Modal` — the dialog surface (Escape, focus moved in, focus trapped, focus returned, the page behind locked).
+* `appDialog.alert / confirm / prompt` — promises, so a call site reads `if (!(await appDialog.confirm({...}))) return;`
+* `useModalBehaviour` — the same behaviour for the dialogs that keep their own layout.
+* `AppDialogHost` — mounted once in `App.tsx`.
+
+## 3. Modals behave like modals
+
+Escape now closes them, the page behind stops scrolling, Tab stays inside the panel, focus starts inside and returns to
+the control that opened it. Applied to: **Talk to PHANTOM**, **Join / sign in**, the emoji preview, the Vault share
+sheet, every PHANTOM workspace dialog (create member, activation invitation, Code Name change, member history), **every
+client-portal dialog** (one shared `Dialog` component) and the Vault **command palette** — which until now printed an
+**ESC** key hint it did not honour. The palette and the slash menu also gained a name and a description.
+
+## 4. Every control has a name
+
+* The newsletter email field had a placeholder and nothing else → real label for screen readers.
+* The join and sign-in fields (name, telephone, password) → labelled; the close button → `aria-label="Close"`.
+* The portal's navigation buttons → named ("Show/Hide portal navigation", "Close the navigation menu") instead of relying
+  on the icon alone.
+* Icon-only buttons that relied on a `title` tooltip now carry a matching `aria-label` (activate/deactivate member,
+  archive member, community back button).
+
+## Verification
+
+* A new harness group (20 checks) fails if a `window.alert/confirm/prompt` ever returns, if a modal loses its Escape,
+  scroll lock or focus trap, if the dashboard search becomes decoration again, or if a control loses its name.
+* The rendered join form was checked directly: **0** controls without a label, **0** buttons without a name.
+* The whole rendered surface (eight public pages, join, sign-in and the member portal) reports **no findings at all**:
+  no duplicate ids, no unnamed buttons, no unlabelled controls, no missing image alt text, no heading-level jumps, no
+  `target="_blank"` without `rel`.
+
+Round C is next: page speed, focus rings, the remaining pale text, image weights, and the sharing tags, robots and
+sitemap.

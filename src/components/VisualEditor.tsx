@@ -1,3 +1,4 @@
+import { appDialog } from './AppDialog';
 import { ChangeEvent, useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
@@ -471,7 +472,7 @@ const Inspector = ({
           {showLayout && <StyleControls value={styleValue} onChange={setStyleValue} layoutOnly theme={content.design.theme} />}
           {!isProjectCardContent && <><div className="mt-5 flex gap-2"><button type="button" onClick={() => setStyleValue(currentElementStyle(content, selected, breakpoint))} className="visual-editor-secondary-button flex-1"><RotateCcw className="h-3.5 w-3.5" />Cancel</button><button type="button" disabled={publishing} onClick={saveSelection} className="visual-editor-save-button flex-[1.4]"><Save className="h-4 w-4" />{publishing ? 'Saving…' : 'Save & publish'}</button></div>
           <button type="button" onClick={async () => { const next = resetElementStyle(content, selected, breakpoint); await publish(next, 'Style reset and published.'); }} className="mt-3 w-full text-xs font-bold text-slate-500 hover:text-red-600">Reset {breakpoint} styling</button>
-          {itemRemovalTarget(selected) && <button type="button" onClick={() => { if (window.confirm('Remove this item from the website?')) onRemoveSelection(selected); }} className="mt-3 w-full text-xs font-black text-red-600 hover:text-red-700">Remove selected item</button>}
+          {itemRemovalTarget(selected) && <button type="button" onClick={async () => { if (await appDialog.confirm({ title: 'Remove this item?', message: 'It disappears from the website straight away. Nothing else on the page changes.', confirmLabel: 'Remove item', tone: 'danger' })) onRemoveSelection(selected); }} className="mt-3 w-full text-xs font-black text-red-600 hover:text-red-700">Remove selected item</button>}
           {message && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{message}</p>}</>}
         </>}
       </div>

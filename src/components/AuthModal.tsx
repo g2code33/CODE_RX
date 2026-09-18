@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useModalBehaviour } from './AppDialog';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle, Eye, EyeOff, LoaderCircle } from 'lucide-react';
 import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
@@ -83,13 +84,16 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
     }
   };
 
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalBehaviour(isOpen, onClose, panelRef);
+
   if (isApplied) {
     return (
       <AnimatePresence>
         {isOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-emerald-950/60 backdrop-blur-sm" />
-            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="relative w-full max-w-md bg-white rounded-[2.5rem] p-12 text-center shadow-2xl">
+            <motion.div ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Application sent" initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="relative w-full max-w-md bg-white rounded-[2.5rem] p-12 text-center shadow-2xl">
               <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-6">
                 <CheckCircle className="w-10 h-10" />
               </div>
@@ -116,14 +120,21 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
           />
 
           <motion.div
+            ref={panelRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Join Code Rx or sign in"
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.9, opacity: 0, y: 20 }}
             className="auth-dialog relative w-full max-w-md overflow-hidden rounded-[2.5rem] bg-white shadow-2xl"
           >
             <button
+              type="button"
               onClick={onClose}
-              className="absolute top-6 right-6 p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-all"
+              aria-label="Close"
+              className="absolute top-6 right-6 rounded-full p-2 text-slate-500 transition-all hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
             >
               <X className="w-6 h-6" />
             </button>
@@ -153,6 +164,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                       <input
                         type="text"
                         placeholder="Full Name"
+                        aria-label="Full name"
                         value={formData.name}
                         onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                         className="auth-modal-field w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"
@@ -166,6 +178,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                         <input
                           type="tel"
                           placeholder="Telephone Number"
+                          aria-label="Telephone number"
                           required
                           value={formData.phone}
                           onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
@@ -196,6 +209,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                     <input
                       type={showPassword ? "text" : "password"}
                       placeholder="Password"
+                      aria-label="Password"
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                       className="auth-modal-field w-full pl-12 pr-12 py-3 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-sm"

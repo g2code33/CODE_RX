@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { AdminPanel } from './components/AdminPanel';
+import { AppDialogHost } from './components/AppDialog';
 import { Dashboard } from './components/Dashboard';
 import { CodenameBallot } from './components/CodenameBallot';
 import { Vault } from './components/Vault';
@@ -474,6 +475,9 @@ function App() {
       />
       {!isDashboard && !isAdmin && <button onClick={handleOpenJoin} className="fixed bottom-6 right-5 z-50 grid h-14 w-14 place-items-center rounded-full border border-[#b8ff3d] bg-[#b8ff3d] text-[0.66rem] font-black uppercase tracking-wide text-[#020604] shadow-[0_0_24px_rgba(184,255,61,0.35)] transition-all hover:scale-110 active:scale-95 md:hidden"><span className="text-xl font-black leading-none uppercase">Join</span></button>}
       <main>{mainContent}</main>
+      {/* One dialog surface for the whole app: the real replacement for the
+          browser's alert/confirm/prompt boxes. */}
+      <AppDialogHost />
     </div>
   );
 

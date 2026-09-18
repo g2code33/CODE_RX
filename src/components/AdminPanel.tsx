@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { SiteContent, INITIAL_SITE_CONTENT, normalizeSiteContent } from '../data/siteState';
 import { db, auth, AuthUser } from '../lib/cloudflare';
+import { appDialog } from './AppDialog';
 import { PhantomControlCenter } from './PhantomControlCenter';
 import { VisualEditor } from './VisualEditor';
 import { Vault } from './Vault';
@@ -58,12 +59,24 @@ const CommunicationsSection = () => {
   };
   useEffect(() => { void load(); }, []);
   const removeSubscriber = async (subscriber: any) => {
-    if (!window.confirm(`Remove ${subscriber.email} from subscribers?`)) return;
+    const agreed = await appDialog.confirm({
+      title: 'Remove this subscriber?',
+      message: `${subscriber.email} stops receiving the Society newsletter. They can subscribe again at any time.`,
+      confirmLabel: 'Remove subscriber',
+      tone: 'danger',
+    });
+    if (!agreed) return;
     try { await db.subscribers.remove(subscriber.id); setSubscribers((current) => current.filter((item) => item.id !== subscriber.id)); setMessage({ type: 'success', text: 'Subscriber removed.' }); }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not remove subscriber.' }); }
   };
   const removeContact = async (contact: any) => {
-    if (!window.confirm(`Remove the contact message from ${contact.name}?`)) return;
+    const agreed = await appDialog.confirm({
+      title: 'Remove this message?',
+      message: `The enquiry from ${contact.name} is deleted from the admin inbox. This cannot be undone.`,
+      confirmLabel: 'Remove message',
+      tone: 'danger',
+    });
+    if (!agreed) return;
     try { await db.contacts.remove(contact.id); setContacts((current) => current.filter((item) => item.id !== contact.id)); setMessage({ type: 'success', text: 'Contact message removed.' }); }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not remove contact message.' }); }
   };
@@ -104,7 +117,13 @@ const MembersSection = () => {
     catch (err: any) { flash('error', err?.message || 'Failed to update member.'); }
   };
   const handleRemove = async (member: any) => {
-    if (!window.confirm(`Archive ${member.name}? Their history will be preserved.`)) return;
+    const agreed = await appDialog.confirm({
+      title: 'Archive this member?',
+      message: `${member.name} loses access, but their full history is preserved and can be restored.`,
+      confirmLabel: 'Archive member',
+      tone: 'warning',
+    });
+    if (!agreed) return;
     try { await db.members.remove(member.id); flash('success', `${member.name} archived.`); void loadMembers(); }
     catch (err: any) { flash('error', err?.message || 'Failed to archive member.'); }
   };
@@ -124,7 +143,9 @@ const MemberRow = ({ member, onSave, onToggleActive, onRemove }: { member: any; 
   const level = member.calculated_level || { label: member.level || 'Rx Initiate', description: 'Earned from Calcitonins.', minPoints: 0, nextPoints: 50, progressPercent: 0 };
   const responsibility = member.responsibility || member.role_name || member.role || 'Member Responsibility';
   const status = member.member_status || (member.is_active === 1 ? 'active' : 'inactive');
-  return <tr className={member.is_active === 1 ? '' : 'opacity-50'}><td className="px-6 py-4"><div className="flex items-center gap-3"><div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-sm font-black text-white">{(member.name || '?')[0]}</div><div><p className="font-bold text-slate-900">{member.name}</p><p className="text-xs text-slate-500">{member.email}</p>{member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}{member.codename && <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{member.codename}</p>}</div></div></td><td className="px-6 py-4"><div className="min-w-40"><p className="text-sm font-black text-slate-800">{level.label}</p><p className="mt-1 text-[10px] leading-4 text-slate-500">{level.description}</p><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Number(level.progressPercent || 0)}%` }} /></div><p className="mt-1 text-[10px] font-bold text-emerald-700">{level.nextPoints ? `${pointsValue.toLocaleString()} / ${Number(level.nextPoints).toLocaleString()} CAL` : 'Highest CAL Level'}</p></div></td><td className="px-6 py-4">{editing ? <input type="number" min="0" max="1000000" value={points} onChange={(event) => setPoints(event.target.value)} className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-black text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500" /> : <span className="text-sm font-black text-emerald-600">{pointsValue.toLocaleString()} CAL</span>}</td><td className="px-6 py-4"><span className="inline-flex rounded-full bg-sky-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-sky-700">{responsibility}</span></td><td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${status === 'active' ? 'bg-emerald-50 text-emerald-600' : status === 'pending_activation' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{status.replace(/_/g, ' ')}</span></td><td className="px-6 py-4"><div className="flex items-center gap-2">{editing ? <><button onClick={() => { onSave({ points: Math.max(0, parseInt(points, 10) || 0) }); setEditing(false); }} className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50" title="Save Calcitonins"><CheckCircle className="h-4 w-4" /></button><button onClick={() => { setPoints(String(member.points ?? 0)); setEditing(false); }} className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100" title="Cancel"><X className="h-4 w-4" /></button></> : <button onClick={() => setEditing(true)} className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100" title="Set Calcitonins; CAL Level updates automatically"><Edit3 className="h-4 w-4" /></button>}<button onClick={onToggleActive} className="rounded-lg p-2 text-amber-500 transition hover:bg-amber-50" title={member.is_active === 1 ? 'Deactivate' : 'Activate'}><Power className="h-4 w-4" /></button><button onClick={onRemove} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50" title="Archive member"><Trash2 className="h-4 w-4" /></button></div></td></tr>;
+  return <tr className={member.is_active === 1 ? '' : 'opacity-50'}><td className="px-6 py-4"><div className="flex items-center gap-3"><div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-sm font-black text-white">{(member.name || '?')[0]}</div><div><p className="font-bold text-slate-900">{member.name}</p><p className="text-xs text-slate-500">{member.email}</p>{member.phone && <p className="text-[10px] text-slate-400">{member.phone}</p>}{member.codename && <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{member.codename}</p>}</div></div></td><td className="px-6 py-4"><div className="min-w-40"><p className="text-sm font-black text-slate-800">{level.label}</p><p className="mt-1 text-[10px] leading-4 text-slate-500">{level.description}</p><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Number(level.progressPercent || 0)}%` }} /></div><p className="mt-1 text-[10px] font-bold text-emerald-700">{level.nextPoints ? `${pointsValue.toLocaleString()} / ${Number(level.nextPoints).toLocaleString()} CAL` : 'Highest CAL Level'}</p></div></td><td className="px-6 py-4">{editing ? <input type="number" min="0" max="1000000" value={points} onChange={(event) => setPoints(event.target.value)} className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-black text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500" /> : <span className="text-sm font-black text-emerald-600">{pointsValue.toLocaleString()} CAL</span>}</td><td className="px-6 py-4"><span className="inline-flex rounded-full bg-sky-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-sky-700">{responsibility}</span></td><td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-black uppercase ${status === 'active' ? 'bg-emerald-50 text-emerald-600' : status === 'pending_activation' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{status.replace(/_/g, ' ')}</span></td><td className="px-6 py-4"><div className="flex items-center gap-2">{editing ? <><button onClick={() => { onSave({ points: Math.max(0, parseInt(points, 10) || 0) }); setEditing(false); }} className="rounded-lg p-2 text-emerald-600 transition hover:bg-emerald-50" title="Save Calcitonins"><CheckCircle className="h-4 w-4" /></button><button onClick={() => { setPoints(String(member.points ?? 0)); setEditing(false); }} className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100" title="Cancel"><X className="h-4 w-4" /></button></> : <button onClick={() => setEditing(true)} className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100" title="Set Calcitonins; CAL Level updates automatically"><Edit3 className="h-4 w-4" /></button>}<button onClick={onToggleActive} className="rounded-lg p-2 text-amber-500 transition hover:bg-amber-50" aria-label={member.is_active === 1 ? 'Deactivate this member' : 'Activate this member'}
+                            title={member.is_active === 1 ? 'Deactivate' : 'Activate'}><Power className="h-4 w-4" /></button><button onClick={onRemove} className="rounded-lg p-2 text-red-500 transition hover:bg-red-50" aria-label="Archive member"
+                              title="Archive member"><Trash2 className="h-4 w-4" /></button></div></td></tr>;
 };
 
 // Security Section — change the signed-in admin's password
@@ -388,8 +409,13 @@ export const AdminPanel = ({
     }
   };
 
-  const handleResetToDefault = () => {
-    if (window.confirm('Reset all content to default values? This cannot be undone.')) {
+  const handleResetToDefault = async () => {
+    if (await appDialog.confirm({
+      title: 'Reset all content?',
+      message: 'Every page goes back to the built-in wording and layout. This cannot be undone.',
+      confirmLabel: 'Reset everything',
+      tone: 'danger',
+    })) {
       setSiteContent(INITIAL_SITE_CONTENT);
       localStorage.removeItem(STORAGE_KEY);
       setSavedToStorage(false);
@@ -433,7 +459,14 @@ export const AdminPanel = ({
       showSaveFeedback('error');
       setHasPendingPublish(true);
       setHasUnsavedChanges(true);
-      if (showFailureAlert) alert('Could not publish to the database. Your changes are protected locally; use Publish all to retry.');
+      if (showFailureAlert) {
+        void appDialog.alert({
+          title: 'Publish failed',
+          message: 'The database did not accept the changes. Your work is safe on this device — use Publish all to retry.',
+          tone: 'danger',
+          confirmLabel: 'Close',
+        });
+      }
       return false;
     } finally {
       setIsPublishing(false);
@@ -518,8 +551,14 @@ export const AdminPanel = ({
     setHasUnsavedChanges(true);
   };
 
-  const removePortfolioProject = (project: { id: string; title: string }) => {
-    if (!window.confirm(`Remove “${project.title}” from the public project portfolio?`)) return;
+  const removePortfolioProject = async (project: { id: string; title: string }) => {
+    const agreed = await appDialog.confirm({
+      title: 'Remove this project?',
+      message: `“${project.title}” leaves the public project portfolio. You can add it again later.`,
+      confirmLabel: 'Remove project',
+      tone: 'danger',
+    });
+    if (!agreed) return;
     setSiteContent((current) => ({ ...current, projects: (current.projects || []).filter((item) => item.id !== project.id) }));
     setHasUnsavedChanges(true);
   };
@@ -534,12 +573,23 @@ export const AdminPanel = ({
     setHasUnsavedChanges(true);
   };
 
-  const removeTermsSection = (section: { id: string; title: string }) => {
+  const removeTermsSection = async (section: { id: string; title: string }) => {
     if (siteContent.terms.sections.length <= 1) {
-      window.alert('Keep at least one Terms section in the public document.');
+      await appDialog.alert({
+        title: 'The Terms need a section',
+        message: 'Keep at least one section in the public Terms document so the page is never empty.',
+        tone: 'warning',
+        confirmLabel: 'Close',
+      });
       return;
     }
-    if (!window.confirm(`Remove “${section.title}” from the Terms document?`)) return;
+    const agreed = await appDialog.confirm({
+      title: 'Remove this Terms section?',
+      message: `“${section.title}” is deleted from the public Terms document. Members will no longer see it.`,
+      confirmLabel: 'Remove section',
+      tone: 'danger',
+    });
+    if (!agreed) return;
     setSiteContent((current) => ({ ...current, terms: { ...current.terms, sections: current.terms.sections.filter((item) => item.id !== section.id) } }));
     setHasUnsavedChanges(true);
   };
@@ -622,7 +672,7 @@ export const AdminPanel = ({
                 <RotateCcw className="w-4 h-4" /> Undo
               </button>
               <button 
-                onClick={handleResetToDefault}
+                onClick={() => void handleResetToDefault()}
                 className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-red-50 text-red-600 font-bold rounded-xl hover:bg-red-100 transition-all text-sm"
               >
                 <X className="w-4 h-4" /> Reset Default

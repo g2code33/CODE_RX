@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ChevronLeft, Home, LockKeyhole, Menu, MessageCircle, Plus, Send, X } from 'lucide-react';
 import { db, type AuthUser } from '../lib/cloudflare';
+import { appDialog } from './AppDialog';
 import { SiteEmoji } from './SiteEmoji';
 
 type PublicGuest = { token: string; handle: string; expiresAt: string };
@@ -137,19 +138,42 @@ export const CommunityHub = ({
 
   const editPublicPost = async (post: any) => {
     if (!publicToken || !selectedThread) return;
-    const next = window.prompt('Edit public post', post.body || '');
+    const next = await appDialog.prompt({
+      title: 'Edit your post',
+      message: 'Your name and the discussion stay the same; only the wording changes.',
+      label: 'Post',
+      multiline: true,
+      initialValue: post.body || '',
+      confirmLabel: 'Save post',
+      requiredMessage: 'A post cannot be empty.',
+    });
     if (next === null || !next.trim()) return;
     try { await db.community.editPublicPost(publicToken, post.id, next); setSelectedThread(await db.community.publicThread(selectedThread.thread.id)); }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not edit this public post.' }); }
   };
   const deletePublicPost = async (post: any) => {
-    if (!publicToken || !selectedThread || !window.confirm('Delete this public post?')) return;
+    if (!publicToken || !selectedThread) return;
+    const agreed = await appDialog.confirm({
+      title: 'Delete this post?',
+      message: 'The post and its replies disappear from the discussion straight away.',
+      confirmLabel: 'Delete post',
+      tone: 'danger',
+    });
+    if (!agreed) return;
     try { await db.community.deletePublicPost(publicToken, post.id); setSelectedThread(await db.community.publicThread(selectedThread.thread.id)); }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not delete this public post.' }); }
   };
   const reportPublicPost = async (post: any) => {
     if (!publicToken) return;
-    const reason = window.prompt('Why should PHANTOM review this post?');
+    const reason = await appDialog.prompt({
+      title: 'Report this post',
+      message: 'PHANTOM reviews every report. Say briefly what is wrong so they can act on it.',
+      label: 'Reason',
+      placeholder: 'For example: personal attack, spam, or medical misinformation',
+      multiline: true,
+      confirmLabel: 'Send report',
+      requiredMessage: 'Tell PHANTOM why this post needs review.',
+    });
     if (!reason?.trim()) return;
     try { await db.community.reportPublic(publicToken, { postId: post.id, reason }); setMessage({ type: 'success', text: 'Report sent for PHANTOM review.' }); }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not report this post.' }); }
@@ -192,14 +216,28 @@ export const CommunityHub = ({
   };
 
   const editPrivateMessage = async (chat: any) => {
-    const next = window.prompt('Edit message', chat.body || '');
+    const next = await appDialog.prompt({
+      title: 'Edit your message',
+      message: 'Only the wording changes; the conversation keeps its history.',
+      label: 'Message',
+      multiline: true,
+      initialValue: chat.body || '',
+      confirmLabel: 'Save message',
+      requiredMessage: 'A message cannot be empty.',
+    });
     if (next === null || !next.trim()) return;
     try { await db.community.editMessage(chat.id, next); if (activeConversation) { const data = await db.community.messages(activeConversation.id); setMessages(data.messages || []); } }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not edit this message.' }); }
   };
 
   const deletePrivateMessage = async (chat: any) => {
-    if (!window.confirm('Delete this message?')) return;
+    const agreed = await appDialog.confirm({
+      title: 'Delete this message?',
+      message: 'It is removed from the conversation for everyone.',
+      confirmLabel: 'Delete message',
+      tone: 'danger',
+    });
+    if (!agreed) return;
     try { await db.community.deleteMessage(chat.id); if (activeConversation) { const data = await db.community.messages(activeConversation.id); setMessages(data.messages || []); } }
     catch (error: any) { setMessage({ type: 'error', text: error?.message || 'Could not delete this message.' }); }
   };
@@ -234,7 +272,8 @@ export const CommunityHub = ({
     <header className={`sticky ${standalone ? 'top-0' : 'top-[4.5rem]'} z-40 border-b border-emerald-100 bg-white/95 px-4 py-3 backdrop-blur sm:px-7`}>
       <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-          {onBack && <button onClick={onBack} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50" title={backLabel}><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">{backLabel}</span></button>}
+          {onBack && <button onClick={onBack} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50" aria-label={backLabel}
+                        title={backLabel}><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">{backLabel}</span></button>}
           {onHome && <button onClick={onHome} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs font-black text-emerald-800 transition hover:bg-emerald-100" title="Home"><Home className="h-4 w-4" /><span className="hidden sm:inline">Home</span></button>}
           <img src="/CODE%20RX11.png" alt="Code Rx Society" className="h-10 w-10 shrink-0 object-contain" />
           <div className="min-w-0"><p className="truncate text-sm font-black tracking-wide">CODE <span className="text-emerald-600">Rx</span> COMMUNITY</p><p className="truncate text-[9px] font-black uppercase tracking-[0.16em] text-emerald-700">Public forum + private society messaging</p></div>
