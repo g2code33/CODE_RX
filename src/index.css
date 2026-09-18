@@ -16,7 +16,7 @@
   --brand-text-secondary: #475569;
   /* The footer band sits a shade below the white page and the white cards, so
      the end of the page reads as its own closed block. */
-  --brand-footer: #e7edf3;
+  --brand-footer: #e2e8f0;
 }
 
 * {

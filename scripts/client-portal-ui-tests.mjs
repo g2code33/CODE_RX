@@ -1476,7 +1476,7 @@ const main = async () => {
     && (src('src/components/Projects.tsx').match(/brand-number--lime/g) || []).length === 0);
 
   check('the footer sits on its own, deeper surface than the white page',
-    /--brand-footer:\s*#e7edf3/.test(indexCss) && /footer\.brand-section\s*\{[^}]*background-color:\s*var\(--brand-footer\)/.test(indexCss)
+    /--brand-footer:\s*#e2e8f0/.test(indexCss) && /footer\.brand-section\s*\{[^}]*background-color:\s*var\(--brand-footer\)/.test(indexCss)
     && /footer \{\s*background:\s*var\(--brand-footer\)/.test(indexCss));
   check('the footer band is darker than the page it closes',
     (() => {
@@ -1485,6 +1485,47 @@ const main = async () => {
       const footerHex = indexCss.match(/--brand-footer:\s*(#[0-9a-f]{6})/)?.[1] || '';
       const pageHex = indexCss.match(/--brand-ink:\s*(#[0-9a-f]{6})/)?.[1] || '';
       return lum(hex(footerHex)) < lum(hex(pageHex));
+    })());
+
+  // =========================================================================
+  group('18. Phase 16 follow-up — the lime marks left on white surfaces');
+  // =========================================================================
+
+  const publicComponents = fs.readdirSync(path.join(ROOT, 'src/components'))
+    .filter((name) => name.endsWith('.tsx'))
+    .filter((name) => !['AdminPanel.tsx', 'PhantomControlCenter.tsx', 'ClientAccessCenter.tsx', 'VaultDocumentEditor.tsx'].includes(name));
+  const limeUsers = publicComponents.filter((name) => /#b8ff3d/i.test(src(`src/components/${name}`)));
+  check('the bright lime now survives only on the surfaces that are genuinely dark',
+    JSON.stringify(limeUsers.sort()) === JSON.stringify(['ClientPortalEntry.tsx', 'ContactForm.tsx', 'Footer.tsx', 'Hero.tsx', 'Leadership.tsx']),
+    limeUsers.join(', '));
+  check('where lime is text, it always sits on a deep green or dark chip',
+    (src('src/components/ClientPortalEntry.tsx').match(/text-\[#b8ff3d\]/g) || []).length === 1
+    && /bg-\[#15803d\] text-\[#b8ff3d\]/.test(src('src/components/ClientPortalEntry.tsx'))
+    && /bg-\[#15803d\] text-\[#b8ff3d\]/.test(src('src/components/Footer.tsx'))
+    && /text-\[#b8ff3d\]/.test(src('src/components/ContactForm.tsx')));
+
+  const academySource = src('src/components/Academy.tsx');
+  check('the Learn card is free of lime entirely, dot and wash included',
+    !/#b8ff3d/i.test(academySource) && /h-2 w-2 rounded-full bg-\[#15803d\]/.test(academySource)
+    && /bg-\[#15803d\]\/8 blur-3xl/.test(academySource));
+  check('the Learn module list marks its rows in deep green',
+    /hover:border-\[#16a34a\]\/20 hover:bg-\[#15803d\]\/5/.test(academySource)
+    && /h-px w-5 bg-\[#15803d\]\/30/.test(academySource));
+
+  const heroSource = src('src/components/Hero.tsx');
+  check('the hero marks that sit on the white page are deep green, while the dark card keeps lime',
+    /border-l border-\[#15803d\]\/50/.test(heroSource) && /divide-x divide-\[#15803d\]\/20/.test(heroSource)
+    && /bg-\[#b8ff3d\]\/70/.test(heroSource) && /animate-pulse rounded-full bg-\[#b8ff3d\]/.test(heroSource));
+  check('the cards that used to be washed in lime are washed in deep green',
+    ['About', 'SiteFlow', 'WhatWeDo', 'Competitions', 'Extras', 'Projects', 'Terms', 'SectionLink']
+      .every((name) => !/#b8ff3d/i.test(src(`src/components/${name}.tsx`))));
+
+  check('the footer band took one more step down from the page',
+    /--brand-footer:\s*#e2e8f0/.test(indexCss)
+    && (() => {
+      const hex = (v) => [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16));
+      const lum = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      return lum(hex('#e2e8f0')) <= lum(hex('#e7edf3')) && lum(hex('#e2e8f0')) < 240;
     })());
 
   const passed = results.filter((result) => result.passed).length;

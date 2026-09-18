@@ -7,6 +7,10 @@
 **Result:** interface suite **421/421**, backend suite **1332/1332**, live checks **14/14**, type check clean,
 production build exit 0 → **1767/1767 = 100.0 %**.
 
+> **Follow-up, same request (§7):** the first pass fixed the labels the request named; a second pass then removed the
+> last of the bright lime from every white surface and took the footer band one more shade down. Interface suite is
+> **428/428** there, live checks **10/10** → **1770/1770 = 100.0 %** for the current build.
+
 ---
 
 ## 1. What you asked for
@@ -89,3 +93,47 @@ The band still reads as the closed end of the page; it is simply no longer the s
 ---
 
 **Success rate: 100.0 % — 1767/1767** (421 interface + 1332 backend + 14 live).
+
+---
+
+## 7. Follow-up, same request — the lime marks that were still on white
+
+The first pass moved the shared label style and the Learn card's own marks. It left the *same colour* in a dozen other
+places where it sits on white: the small dots beside a category, the rules under a card title, the chip washes, the
+divider inside the hero statistics, the project progress bars, and two hover tints. On white those read as pale green
+smudges — the same complaint, one component over — so they were swept too.
+
+| Walked over to deep green (`#15803d`) | Kept lime (`#b8ff3d`), because the surface there is dark |
+| --- | --- |
+| `Academy` — the live dot, the card wash, the row hover | `Hero` — the dark panel's "CRX / 001", its signal bars, its progress fill |
+| `About` — the value rules, the quote rule, the two tiles | `Leadership` — "01 / TEAM" over the portrait |
+| `SiteFlow` — the two News dots, the item dot, the rule, the image wash | `ContactForm` — the lime word in the dark green header, its focus ring |
+| `WhatWeDo`, `Competitions`, `Extras`, `Projects`, `Terms`, `SectionLink` | `Footer`, `ClientPortalEntry` — the lime glyph inside a deep green tile |
+| `Hero` — the intro rule and the statistic dividers (they sit on the white page, not on the panel) | |
+
+The lime that remains is a **text colour on a dark chip** in every case; nothing painted on white uses it any more.
+
+**The footer band stepped down again:** `--brand-footer` is now **`#e2e8f0`** (was `#e7edf3`), against the white page
+and the white cards — the band is unmistakably its own surface while all of its text keeps its contrast.
+
+### Verification (current build)
+
+| Check | Result |
+| --- | --- |
+| Type check | clean |
+| Production build | exit 0 — 1,136.82 kB / 290.38 kB gzip |
+| Delivered page | `never stored in this browser` 0 · `last three letters` 0 · `Type or paste the key…` 0 · `.brand-number{color:var(--brand-green)}` present · `--brand-footer:#e2e8f0` present |
+| Interface suite (new group 18, 7 checks) | **428/428** |
+| Backend suite | **1332/1332** |
+| Live: page, published content, PHANTOM sign-in, portal setting, client key sign-in, removed long key refused | **10/10** |
+
+Group 18 asserts the rule as an invariant rather than a spot check: across every public component, the files that may
+still contain the lime hex value are exactly `Hero`, `Leadership`, `ContactForm`, `Footer` and `ClientPortalEntry` —
+the five dark surfaces — and in the last two the value must appear as text on a deep green tile.
+
+**Files edited in the follow-up:** `src/components/{About,Academy,Competitions,Extras,Footer,Hero,Projects,SectionLink,SiteFlow,Terms,WhatWeDo,ClientPortalEntry}.tsx`,
+`src/index.css` (the band tone), `scripts/client-portal-ui-tests.mjs` (group 18).
+
+**Database migrations:** none.
+
+**Success rate for this build: 100.0 % — 1770/1770** (428 interface + 1332 backend + 10 live).

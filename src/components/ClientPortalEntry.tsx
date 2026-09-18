@@ -41,7 +41,7 @@ export const ClientPortalEntry = ({
         href={CLIENT_PORTAL_HASH}
         aria-label={copy.aria}
         title={`${copy.label} — ${copy.hint}`}
-        className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[#16a34a]/25 text-[#15803d] transition-colors hover:border-[#b8ff3d]/60 hover:bg-[#b8ff3d]/10 ${className}`}
+        className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[#16a34a]/25 text-[#15803d] transition-colors hover:border-[#15803d]/60 hover:bg-[#15803d]/10 ${className}`}
       >
         <KeyRound className="h-4 w-4" />
       </a>
@@ -72,7 +72,7 @@ export const ClientPortalEntry = ({
       href={CLIENT_PORTAL_HASH}
       aria-label={copy.aria}
       title={copy.hint}
-      className={`inline-flex items-center gap-1.5 rounded-full border border-[#16a34a]/20 px-3 py-2 text-[0.66rem] font-black uppercase tracking-[0.14em] text-[#475569] no-underline transition-colors hover:border-[#b8ff3d]/60 hover:text-[#15803d] ${className}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border border-[#16a34a]/20 px-3 py-2 text-[0.66rem] font-black uppercase tracking-[0.14em] text-[#475569] no-underline transition-colors hover:border-[#15803d]/60 hover:text-[#15803d] ${className}`}
     >
       <KeyRound className="h-3.5 w-3.5" />
       <span>{text}</span>
