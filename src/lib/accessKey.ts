@@ -4,39 +4,80 @@
  * Pure functions with no DOM or React dependency so the formatting, validation
  * and message rules can be unit tested directly.
  *
+ * Shape: `CRX-XXX-XXX-ABC` — two random groups and a three-letter project code
+ * the client can recognise. Every key is entered in three fixed boxes, so these
+ * helpers work in groups rather than on one long string.
+ *
  * The alphabet matches the server (`functions/lib/client-auth.ts`): the
- * ambiguous glyphs 0, O, 1 and I are never part of a key, which is what makes
- * the format legible when it is read aloud or typed from paper.
+ * ambiguous glyphs 0, O, 1 and I are never part of a random group, which is what
+ * makes the key legible when it is read aloud or typed from paper.
  */
 
 export const ACCESS_KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-export const ACCESS_KEY_GROUP_SIZE = 4;
-/** Canonical body length: 4 groups of 4 characters (80 bits). */
-export const ACCESS_KEY_BODY_LENGTH = 16;
-/** Shorter legacy keys are still accepted by the server (12–32 characters). */
-export const ACCESS_KEY_MIN_BODY_LENGTH = 12;
-export const ACCESS_KEY_MAX_BODY_LENGTH = 32;
 export const ACCESS_KEY_PREFIX = 'CRX';
-export const ACCESS_KEY_PLACEHOLDER = 'CRX-____-____-____-____';
+export const ACCESS_KEY_GROUP_LENGTH = 3;
+export const ACCESS_KEY_GROUPS = 3;
+/** The trailing group is the project code: letters only, never digits. */
+export const ACCESS_KEY_CODE_LENGTH = 3;
+/** Two random groups plus the project code. */
+export const ACCESS_KEY_BODY_LENGTH = ACCESS_KEY_GROUP_LENGTH * (ACCESS_KEY_GROUPS - 1) + ACCESS_KEY_CODE_LENGTH;
+/** Keys issued before the short format are still accepted (12–32 characters). */
+export const ACCESS_KEY_LEGACY_BODY_LENGTH = 16;
+export const ACCESS_KEY_MIN_BODY_LENGTH = 9;
+export const ACCESS_KEY_MAX_BODY_LENGTH = 32;
+export const ACCESS_KEY_PLACEHOLDER = 'CRX-___-___-ABC';
 
 /** Characters that are NOT in the alphabet but are commonly mistyped. */
 const AMBIGUOUS = ['0', 'O', '1', 'I'];
 
 export interface AccessKeyFormat {
-  /** What the input should display, e.g. `CRX-8K4P-X92M-7LQF-B3TD`. */
+  /** What the field shows, e.g. `CRX-8K4-P92-MSD`. */
   display: string;
-  /** The characters that will be sent to the server, e.g. `8K4PX92M7LQFB3TD`. */
+  /** The characters sent to the server, e.g. `8K4P92MSD`. */
   body: string;
-  /** Mistyped characters that were dropped, de-duplicated and ordered. */
+  /** The same body split into the three boxes. */
+  groups: string[];
+  /** Mistyped characters that were kept and reported, de-duplicated and ordered. */
   ignored: string[];
   /** True once the body is a complete canonical key. */
   complete: boolean;
 }
 
 /**
- * Formats whatever the client has typed into the canonical CRX shape.
- * Dashes, spaces, lowercase and the optional prefix are all tolerated; the
- * ambiguous glyphs are dropped and reported so the screen can explain why.
+ * Removes a leading CRX the client typed or pasted in front of the key.
+ *
+ * The rule is length-based on purpose: a body that is exactly the canonical
+ * length is taken as the body, so a key whose own random group happens to start
+ * with the letters C-R-X is never mangled; anything longer that begins with CRX
+ * is a key with the prefix attached.
+ */
+const stripPrefix = (compact: string): string =>
+  compact.length !== ACCESS_KEY_BODY_LENGTH
+    && compact.startsWith(ACCESS_KEY_PREFIX)
+    && compact.length - ACCESS_KEY_PREFIX.length >= ACCESS_KEY_MIN_BODY_LENGTH
+    ? compact.slice(ACCESS_KEY_PREFIX.length)
+    : compact;
+
+/** Exactly the three boxes the client sees, each already trimmed to three characters. */
+export const splitAccessKey = (raw: string): string[] => {
+  const compact = String(raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const body = stripPrefix(compact);
+  const groups: string[] = [];
+  for (let index = 0; index < ACCESS_KEY_GROUPS; index += 1) {
+    groups.push(body.slice(index * ACCESS_KEY_GROUP_LENGTH, (index + 1) * ACCESS_KEY_GROUP_LENGTH));
+  }
+  return groups;
+};
+
+/** The compact body a set of boxes represents, ready for the server. */
+export const joinAccessKey = (groups: string[]): string =>
+  groups.join('').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ACCESS_KEY_MAX_BODY_LENGTH);
+
+/**
+ * Formats anything a client has typed into the canonical CRX shape.
+ * Dashes, spaces, lowercase and the optional prefix are all tolerated; a
+ * character the alphabet cannot contain is kept and reported, never dropped
+ * silently, so the screen can explain what happened.
  */
 export const formatAccessKey = (raw: string): AccessKeyFormat => {
   const upper = String(raw ?? '').toUpperCase();
@@ -48,29 +89,30 @@ export const formatAccessKey = (raw: string): AccessKeyFormat => {
       if (body.length < ACCESS_KEY_MAX_BODY_LENGTH) body += character;
       continue;
     }
-    // Letters typed in lowercase, dashes, spaces and the CRX prefix are expected
-    // input, not mistakes. Everything else that is alphanumeric is a mistyping.
+    // Lowercase letters, dashes, spaces and the CRX prefix are expected input,
+    // not mistakes. Everything else that is alphanumeric is a mistyping.
     if (/[A-Z0-9]/.test(character) && !ignored.includes(character)) ignored.push(character);
   }
 
-  // A pasted key may include the CRX prefix; the alphabet filtering above keeps
-  // those letters, so strip a leading CRX when it is not part of the key itself.
-  if (body.length > ACCESS_KEY_BODY_LENGTH && body.startsWith(ACCESS_KEY_PREFIX)) {
-    body = body.slice(ACCESS_KEY_PREFIX.length);
-  }
+  body = stripPrefix(body);
 
   const groups: string[] = [];
-  for (let index = 0; index < body.length; index += ACCESS_KEY_GROUP_SIZE) {
-    groups.push(body.slice(index, index + ACCESS_KEY_GROUP_SIZE));
+  for (let index = 0; index < body.length; index += ACCESS_KEY_GROUP_LENGTH) {
+    groups.push(body.slice(index, index + ACCESS_KEY_GROUP_LENGTH));
   }
 
   return {
     display: groups.length ? `${ACCESS_KEY_PREFIX}-${groups.join('-')}` : '',
     body,
+    groups: splitAccessKey(body),
     ignored: ignored.sort(),
     complete: body.length === ACCESS_KEY_BODY_LENGTH,
   };
 };
+
+/** Compact a legacy key typed in the free-form field. Never reorders characters. */
+export const compactAccessKey = (raw: string): string =>
+  String(raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ACCESS_KEY_MAX_BODY_LENGTH);
 
 export interface AccessKeyValidation {
   ok: boolean;
@@ -79,15 +121,36 @@ export interface AccessKeyValidation {
   problem: string | null;
 }
 
-/** Client-side validation. The server always validates again. */
+const EMPTY_PROBLEM = 'Enter the project access key Code Rx Society gave you.';
+const SHORT_PROBLEM = 'This access key looks too short. Check it and try again.';
+const CODE_PROBLEM = 'The last group is the project code — three letters, like MSD.';
+
+/** Validation for the three fixed boxes: two random groups, then the project code. */
+export const validateAccessKeyGroups = (boxes: string[]): AccessKeyValidation => {
+  const groups = boxes.map((value) => String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, ''));
+  const body = joinAccessKey(groups);
+  if (!body) return { ok: false, body: '', problem: EMPTY_PROBLEM };
+  if (body.length < ACCESS_KEY_BODY_LENGTH) return { ok: false, body, problem: SHORT_PROBLEM };
+  const ambiguous = groups.join('').split('').filter((character) => AMBIGUOUS.includes(character));
+  if (ambiguous.length) {
+    return { ok: false, body, problem: `Access keys never contain ${[...new Set(ambiguous)].join(', ')} — check the key and try again.` };
+  }
+  const code = groups[ACCESS_KEY_GROUPS - 1] || '';
+  if (code.length < ACCESS_KEY_CODE_LENGTH || /\d/.test(code)) {
+    return { ok: false, body, problem: CODE_PROBLEM };
+  }
+  return { ok: true, body, problem: null };
+};
+
+/**
+ * Validation for a whole key typed as one string — the fixed boxes and the
+ * free-form field for keys issued before the short format both use it.
+ * The server always validates again.
+ */
 export const validateAccessKey = (raw: string): AccessKeyValidation => {
   const formatted = formatAccessKey(raw);
-  if (!formatted.body) {
-    return { ok: false, body: '', problem: 'Enter the project access key Code Rx Society gave you.' };
-  }
-  if (formatted.body.length < ACCESS_KEY_MIN_BODY_LENGTH) {
-    return { ok: false, body: formatted.body, problem: 'This access key looks too short. Check it and try again.' };
-  }
+  if (!formatted.body) return { ok: false, body: '', problem: EMPTY_PROBLEM };
+  if (formatted.body.length < ACCESS_KEY_MIN_BODY_LENGTH) return { ok: false, body: formatted.body, problem: SHORT_PROBLEM };
   if (formatted.ignored.length) {
     return {
       ok: false,
@@ -100,12 +163,12 @@ export const validateAccessKey = (raw: string): AccessKeyValidation => {
 
 const AMBIGUOUS_HINT = `Access keys never contain ${AMBIGUOUS.join(', ')}.`;
 
-/** Short, non-technical guidance shown under the input while typing. */
+/** Short, non-technical guidance shown under the boxes while typing. */
 export const accessKeyHint = (formatted: AccessKeyFormat): string | null => {
   if (formatted.ignored.length) return AMBIGUOUS_HINT;
   if (!formatted.body) return null;
   if (formatted.complete) return null;
-  return 'Keep going — the key has four groups of four characters.';
+  return `Keep going — ${ACCESS_KEY_GROUP_LENGTH} characters in each box, then the project code.`;
 };
 
 /**

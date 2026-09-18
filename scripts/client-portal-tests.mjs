@@ -388,6 +388,7 @@ const request = async (method, url, { body, headers = {}, token, clientSession, 
 
 const uniquePasskey = () => helpers.generateClientPasskey();
 const normalise = (passkey) => helpers.normalizeClientPasskey(passkey);
+const projectCodeFor = (name) => helpers.clientProjectCode(name);
 
 // ---------------------------------------------------------------------------
 // Test fixtures built through the real PHANTOM management API
@@ -587,21 +588,35 @@ const main = async () => {
   // =========================================================================
 
   const keyA = await createKey(phantomToken, clientA.id, projectA.id, { label: 'Primary contact' });
-  check('passkey uses the CRX- format', /^CRX-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(keyA.passkey), keyA.passkey);
+  check('passkey uses the short CRX-XXX-XXX-ABC format',
+    /^CRX-[A-Z2-9]{3}-[A-Z2-9]{3}-[A-Z]{3}$/.test(keyA.passkey), keyA.passkey);
   check('passkey avoids ambiguous characters (0/O/1/I)', !/[01OI]/.test(keyA.passkey.replace(/^CRX-/, '')));
-  check('passkey body carries 80 bits of entropy (16 chars × 5 bits)', normalise(keyA.passkey).length === 16);
+  check('the trailing group is the project code, so the key names its project',
+    keyA.passkey.slice(-3) === projectCodeFor(projectA.name), `${keyA.passkey} vs ${projectA.name}`);
+  check('the random part is two groups from the 32-symbol alphabet (about 30 bits)',
+    normalise(keyA.passkey).length === 9
+    && normalise(keyA.passkey).slice(0, 6).split('').every((character) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'.includes(character)));
+  check('a key issued before the short format still normalises to its body',
+    normalise('CRX-8K4P-X92M-7LQF-B3TD') === '8K4PX92M7LQFB3TD'
+    && normalise('CRX-8K4-P92-MSD') === '8K4P92MSD'
+    && normalise('8k4-p92-msd') === '8K4P92MSD');
+  check('a value that cannot be a key is refused before any hash lookup',
+    normalise('nope') === null && normalise('A'.repeat(120)) === null && normalise('CRX-0O1-8K4') === null);
+  check('the short key is protected by a per-project-code failure throttle',
+    helpers.CLIENT_AUTH_CODE_LIMIT >= 100 && helpers.CLIENT_AUTH_CODE_WINDOW_SECONDS <= 3600
+    && helpers.CLIENT_AUTH_CODE_LOCK_SECONDS >= 60);
   check('raw passkey is NOT stored anywhere in D1',
     Number(db.query('SELECT COUNT(*) AS c FROM client_access_keys WHERE key_hash LIKE ? OR key_hint = ?', `%${normalise(keyA.passkey)}%`, keyA.passkey)[0].c) === 0);
-  check('only a SHA-256 verifier and a 4-character hint are stored',
+  check('only a SHA-256 verifier and the project-code hint are stored',
     db.query('SELECT key_hash, key_hint FROM client_access_keys WHERE public_id = ?', keyA.id)[0].key_hash.length === 64
-    && db.query('SELECT key_hint FROM client_access_keys WHERE public_id = ?', keyA.id)[0].key_hint === normalise(keyA.passkey).slice(-4));
+    && db.query('SELECT key_hint FROM client_access_keys WHERE public_id = ?', keyA.id)[0].key_hint === normalise(keyA.passkey).slice(-3));
   check('the API never returns an internal row id for a credential', keyA.id.startsWith('key_'));
   check('no plaintext or recoverable ciphertext column exists on client_access_keys',
     !db.query('PRAGMA table_info(client_access_keys)').some((column) => /cipher|plain|raw/i.test(column.name)));
 
   const keyList = await request('GET', `/api/phantom/clients/${clientA.id}/keys`, { token: phantomToken });
   check('key list exposes hints but never a verifier',
-    keyList.json.data[0].hint === normalise(keyA.passkey).slice(-4) && !JSON.stringify(keyList.json).includes('key_hash'));
+    keyList.json.data[0].hint === normalise(keyA.passkey).slice(-3) && !JSON.stringify(keyList.json).includes('key_hash'));
 
   const twoKeys = await createKey(phantomToken, clientA.id, projectA.id, { label: 'Second key' });
   check('a second independent key can be issued', twoKeys.passkey !== keyA.passkey);
@@ -1634,8 +1649,8 @@ const main = async () => {
     token: phantomToken, body: { projectId: controlProject.id, label: 'Primary contact' },
   });
   check('a generated key is returned once, in the CRX format, with a short hint',
-    issuedKey.status === 201 && /^CRX(-[0-9A-Z]{4}){4}$/.test(issuedKey.json.data.passkey)
-    && issuedKey.json.data.hint === issuedKey.json.data.passkey.slice(-4));
+    issuedKey.status === 201 && /^CRX-[A-Z2-9]{3}-[A-Z2-9]{3}-[A-Z]{3}$/.test(issuedKey.json.data.passkey)
+    && issuedKey.json.data.hint === issuedKey.json.data.passkey.slice(-3));
   check('the create response warns that the key cannot be shown again',
     /cannot be shown again/i.test(issuedKey.json.message || ''), issuedKey.json.message);
   const storedKey = db.query('SELECT key_hash, key_hint FROM client_access_keys WHERE public_id = ?', issuedKey.json.data.id)[0];
@@ -1653,7 +1668,7 @@ const main = async () => {
   const p5Regenerated = await request('POST', `/api/phantom/client-keys/${issuedKey.json.data.id}/regenerate`, { token: phantomToken });
   check('regenerating issues a different credential, shown once',
     p5Regenerated.status === 200 && p5Regenerated.json.data.passkey !== issuedKey.json.data.passkey
-    && /^CRX(-[0-9A-Z]{4}){4}$/.test(p5Regenerated.json.data.passkey));
+    && /^CRX-[A-Z2-9]{3}-[A-Z2-9]{3}-[A-Z]{3}$/.test(p5Regenerated.json.data.passkey));
   const deadSession = await request('GET', `/api/client/project/${controlProject.id}`, { clientSession: keySession });
   check('regenerating kills every session that used the old credential', deadSession.status !== 200, `got ${deadSession.status}`);
   check('the replaced credential no longer signs in', (await clientLogin(issuedKey.json.data.passkey)).status === 401);

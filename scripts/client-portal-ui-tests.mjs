@@ -64,6 +64,7 @@ const bundle = async () => {
         export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
         export { ClientPortalEntry } from './src/components/ClientPortalEntry';
         export { ClientSupportContact } from './src/components/ClientSupportContact';
+        export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
         export * from './functions/lib/client-activity';
       `,
       resolveDir: ROOT,
@@ -107,7 +108,9 @@ const main = async () => {
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
     landingFor, linkStateScreen, LINK_STATE_SCREENS, LINK_CONTACT_EMAIL, linkContactHref,
     CLIENT_PORTAL_HASH, clientPortalPath, clientEntryCopy, ClientPortalEntry,
-    clientContact, clientSupportMailto, telHref, ClientSupportContact,
+    clientContact, clientSupportMailto, telHref, ClientSupportContact, ClientAccessKeyField,
+    splitAccessKey, joinAccessKey, compactAccessKey, validateAccessKeyGroups,
+    ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH, ACCESS_KEY_LEGACY_BODY_LENGTH,
     looksLikeLinkToken, linkPath, ClientLinkState,
   } = module;
 
@@ -122,55 +125,63 @@ const main = async () => {
   group('1. Access key formatting and validation');
   // =========================================================================
 
-  const canonical = 'CRX-8K4P-X92M-7LQF-B3TD';
-  const canonicalBody = '8K4PX92M7LQFB3TD';
+  const canonical = 'CRX-8K4-P92-MSD';
+  const canonicalBody = '8K4P92MSD';
 
   check('a canonical key is preserved exactly',
     formatAccessKey(canonical).display === canonical && formatAccessKey(canonical).body === canonicalBody);
+  check('the key is two random groups and the project code',
+    ACCESS_KEY_GROUP_LENGTH === 3 && ACCESS_KEY_GROUPS === 3 && ACCESS_KEY_CODE_LENGTH === 3
+    && ACCESS_KEY_BODY_LENGTH === 9);
   check('lowercase input is accepted and upper-cased',
-    formatAccessKey('crx-8k4p-x92m-7lqf-b3td').display === canonical);
-  check('a key pasted without dashes is grouped',
+    formatAccessKey('crx-8k4-p92-msd').display === canonical);
+  check('a key pasted without dashes is accepted',
     formatAccessKey(canonicalBody).display === canonical);
-  check('a key pasted with spaces is grouped',
-    formatAccessKey('8K4P X92M 7LQF B3TD').display === canonical);
-  check('a key pasted with the prefix only',
-    formatAccessKey('CRX8K4PX92M7LQFB3TD').display === canonical);
-  check('groups are four characters each',
-    canonicalBody.length === 16 && formatAccessKey(canonical).display.split('-').slice(1).every((group_) => group_.length === 4));
-  check('an incomplete key is grouped but not reported as complete',
-    formatAccessKey('8K4PX9').display === 'CRX-8K4P-X9' && formatAccessKey('8K4PX9').complete === false);
-
-  const ambiguous = formatAccessKey('CRX-0O1I-8K4P-X92M-7LQF');
-  check('the ambiguous glyphs 0, O, 1 and I are dropped',
-    !/[01OI]/.test(ambiguous.body), ambiguous.body);
-  check('dropped characters are reported so the screen can explain them',
-    ambiguous.ignored.join(',') === '0,1,I,O', ambiguous.ignored.join(','));
+  check('a key pasted with spaces is accepted',
+    formatAccessKey('8k4 p92 msd').display === canonical);
+  check('a key pasted with the CRX prefix is accepted',
+    formatAccessKey('CRX8K4P92MSD').display === canonical);
+  check('the body splits into exactly three boxes, three characters each',
+    splitAccessKey(canonical).join('|') === '8K4|P92|MSD'
+    && splitAccessKey('CRX-8K4-P92-MSD').every((group_) => group_.length === 3));
+  check('the boxes join back into the body the server receives',
+    joinAccessKey(['8k4', 'p92', 'msd']) === canonicalBody);
+  check('a partial key fills the boxes from the left',
+    splitAccessKey('8K4P').join('|') === '8K4|P|');
+  check('a character a key can never contain is kept and reported, never dropped',
+    formatAccessKey('CRX-0O1-8K4-P92-MSD').ignored.join(',') === '0,1,O'
+    && formatAccessKey('CRX-0O1-8K4-P92-MSD').body === canonicalBody);
+  check('the pasted CRX prefix is dropped, but a body that starts with CRX is not mangled',
+    formatAccessKey('CRX8K4P92MSD').body === canonicalBody
+    && formatAccessKey('CRX8K4P92').body === 'CRX8K4P92');
   check('a long paste cannot exceed the server limit',
     formatAccessKey('A'.repeat(120)).body.length === 32);
-  check('a canonical key is exactly four groups',
-    formatAccessKey(canonical).display.split('-').length === 5
-    && formatAccessKey(canonical).display.length === 23);
-  check('an over-long paste is still grouped in fours, never truncated mid-group',
-    formatAccessKey('A'.repeat(120)).display.split('-').length === 9, formatAccessKey('A'.repeat(120)).display);
+  check('a legacy long key is still accepted in the free-form field',
+    validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').ok === true
+    && validateAccessKey('CRX-8K4P-X92M-7LQF-B3TD').body.length === ACCESS_KEY_LEGACY_BODY_LENGTH);
 
-  check('validation accepts a complete canonical key',
-    validateAccessKey(canonical).ok === true && validateAccessKey(canonical).body === canonicalBody);
+  check('validation accepts a complete key',
+    validateAccessKeyGroups(['8K4', 'P92', 'MSD']).ok === true
+    && validateAccessKeyGroups(['8K4', 'P92', 'MSD']).body === canonicalBody);
   check('validation rejects an empty key with a plain-language prompt',
-    validateAccessKey('').ok === false && /enter the project access key/i.test(validateAccessKey('').problem));
-  check('validation rejects a short key without calling it invalid',
-    validateAccessKey('8K4PX92M').ok === false && /too short/i.test(validateAccessKey('8K4PX92M').problem));
+    validateAccessKeyGroups(['', '', '']).ok === false && /enter the project access key/i.test(validateAccessKeyGroups(['', '', '']).problem));
+  check('validation rejects a half-filled key without calling it invalid',
+    validateAccessKeyGroups(['8K4', 'P9', '']).ok === false && /too short/i.test(validateAccessKeyGroups(['8K4', 'P9', '']).problem));
   check('validation explains the ambiguous characters',
-    validateAccessKey('CRX-0O1I-8K4P-X92M-7LQF').ok === false
-    && /never contain/i.test(validateAccessKey('CRX-0O1I-8K4P-X92M-7LQF').problem));
+    validateAccessKeyGroups(['0O1', '8K4', 'MSD']).ok === false
+    && /never contain/i.test(validateAccessKeyGroups(['0O1', '8K4', 'MSD']).problem));
+  check('the last box is the project code, so a digit there is explained',
+    validateAccessKeyGroups(['8K4', 'P92', 'MS2']).ok === false
+    && /project code/i.test(validateAccessKeyGroups(['8K4', 'P92', 'MS2']).problem));
+  check('the ambiguous-glyph warning names the characters once',
+    validateAccessKeyGroups(['0O1', '8K4', 'MSD']).problem.includes('0, O, 1'));
 
   check('the hint stays quiet for a complete key', accessKeyHint(formatAccessKey(canonical)) === null);
-  check('the hint explains the ambiguous characters', /never contain/i.test(String(accessKeyHint(ambiguous))));
-  check('the hint guides an incomplete key', /four groups/i.test(String(accessKeyHint(formatAccessKey('8K4P')))));
+  check('the hint explains the ambiguous characters', /never contain/i.test(String(accessKeyHint(formatAccessKey('CRX-0O1-8K4-P92')))));
+  check('the hint guides an incomplete key', /each box|boxes/i.test(String(accessKeyHint(formatAccessKey('8K4')))));
   check('there is no hint before anything is typed', accessKeyHint(formatAccessKey('')) === null);
-  // The Phase 3 brief's placeholder showed three groups while every issued key
-  // has four: the field now shows the shape a real key has (Phase 12 fix).
   check('the placeholder shows the shape a real key has',
-    ACCESS_KEY_PLACEHOLDER === 'CRX-____-____-____-____' && ACCESS_KEY_PLACEHOLDER.split('-').length === 5);
+    ACCESS_KEY_PLACEHOLDER === 'CRX-___-___-ABC');
 
   // =========================================================================
   group('2. Failure messages — the seven required states');
@@ -211,20 +222,26 @@ const main = async () => {
   check('the brand line is rendered', screenHtml.includes('CODE Rx SOCIETY'));
   check('the screen title is CLIENT ACCESS', screenHtml.includes('CLIENT ACCESS'));
   check('the instruction is rendered', screenHtml.includes('Enter your project access key'));
-  check('the input carries the CRX placeholder', screenHtml.includes('CRX-____-____-____'));
+  check('the fixed CRX prefix is drawn beside the boxes',
+    screenHtml.includes('>CRX<') || /client-access-key-label/.test(screenHtml));
   check('the primary action is rendered', /Enter Project/i.test(screenHtml));
   check('the assistance line is rendered', screenHtml.includes('Need assistance?'));
   check('the contact line is rendered', screenHtml.includes('Contact Code Rx Society'));
   check('the contact line is a mail link',
     /href="mailto:coderxsociety@gmail\.com[^"]*"/.test(screenHtml));
   check('the access key input is never pre-filled', /value=""/.test(screenHtml) || !/value="CRX/.test(screenHtml));
-  const inputTag = /<input[^>]*>/.exec(screenHtml)?.[0] || '';
-  check('the input opts out of browser autofill and autocorrect',
-    /\bautocomplete="off"/i.test(inputTag) && /\bautocorrect="off"/i.test(inputTag), inputTag.slice(0, 120));
-  check('the input asks for capitalised characters on mobile keyboards',
-    /\bautocapitalize="characters"/i.test(inputTag));
-  check('the input disables spellcheck', /\bspellcheck="false"/i.test(inputTag));
-  check('the input is labelled for screen readers', /id="client-access-key"/.test(screenHtml) && screenHtml.includes('for="client-access-key"'));
+  const inputTags = [...screenHtml.matchAll(/<input[^>]*>/g)].map((match) => match[0]);
+  check('the key is entered in three fixed boxes',
+    inputTags.length === 3 && inputTags.every((tag) => /maxlength="3"/i.test(tag)),
+    `inputs=${inputTags.length}`);
+  check('the boxes opt out of browser autofill and autocorrect',
+    inputTags.every((tag) => /\bautocomplete="off"/i.test(tag) && /\bautocorrect="off"/i.test(tag)), inputTags[0]?.slice(0, 120) || '');
+  check('the boxes ask for capitalised characters on mobile keyboards',
+    inputTags.every((tag) => /\bautocapitalize="characters"/i.test(tag)));
+  check('the boxes disable spellcheck', inputTags.every((tag) => /\bspellcheck="false"/i.test(tag)));
+  check('every box is labelled for screen readers',
+    inputTags.every((tag) => /aria-label="Access key, group \d of 3|aria-label="Project code, group 3 of 3/.test(tag)),
+    inputTags.map((tag) => /aria-label="([^"]+)"/.exec(tag)?.[1] || '?').join(' | '));
   const submitTag = [...screenHtml.matchAll(/<button[^>]*>/g)].map((match) => match[0]).find((tag) => /type="submit"/.test(tag)) || '';
   check('the submit button is enabled in the idle state',
     Boolean(submitTag) && !/\sdisabled(\s|>|=)/.test(submitTag), submitTag.slice(0, 120));
@@ -334,7 +351,7 @@ const main = async () => {
   check('only the session token is persisted',
     sources.some(({ text }) => text.includes("'codeRx_clientSession'")));
   check('the access screen clears the key from state after a successful exchange',
-    /setValue\(''\)/.test(sources.find(({ file }) => file.endsWith('ClientAccessScreen.tsx')).text));
+    /setBoxes\(\['', '', ''\]\)/.test(sources.find(({ file }) => file.endsWith('ClientAccessScreen.tsx')).text));
   check('key material is never put in the URL',
     !sources.some(({ text }) => /location\.(hash|href)\s*=[^;]*[Pp]asskey/.test(text)));
   check('the link token is stripped from the URL after exchange',
@@ -1093,9 +1110,10 @@ const main = async () => {
   const accessScreenSource = src('src/components/ClientAccessScreen.tsx');
   const linkStateSource = src('src/components/ClientLinkState.tsx');
   check('the access form announces that it is busy and keeps its accessible label',
-    /aria-busy=\{submitting\}/.test(accessScreenSource) && /<label htmlFor="client-access-key"/.test(accessScreenSource)
-    && /aria-describedby=\{shownError \? 'client-access-error'/.test(accessScreenSource)
-    && /enterKeyHint="go"/.test(accessScreenSource));
+    /aria-busy=\{submitting\}/.test(accessScreenSource)
+    && /id="client-access-key-label"/.test(accessScreenSource)
+    && /describedBy=\{describedBy\}/.test(accessScreenSource)
+    && /enterKeyHint=\{index === ACCESS_KEY_GROUPS - 1 \? 'go' : 'next'\}/.test(src('src/components/ClientAccessKeyField.tsx')));
   check('the expired and revoked screens announce themselves and keep their route out',
     /role="status"/.test(linkStateSource) && /aria-live="polite"/.test(linkStateSource)
     && /no project content was shown from this one/.test(linkStateSource));
@@ -1200,38 +1218,44 @@ const main = async () => {
   // =========================================================================
 
   const screenSource = src('src/components/ClientAccessScreen.tsx');
+  const fieldSource = src('src/components/ClientAccessKeyField.tsx');
   const contactSource = src('src/components/ClientSupportContact.tsx');
 
-  // --- the field never rewrites what the client typed ----------------------
-  const changeHandler = screenSource.slice(screenSource.indexOf('const handleChange'), screenSource.indexOf('const handleBlur'));
-  check('typing is no longer re-grouped or re-capitalised under the caret',
-    /setValue\(next\)/.test(changeHandler) && !/formatAccessKey\(/.test(changeHandler));
-  check('the key is tidied into its groups when the field loses focus',
-    /const handleBlur[\s\S]{0,400}formatAccessKey\(value\)[\s\S]{0,400}setValue\(parsed\.display\)/.test(screenSource));
-  check('a glyph a key can never contain is kept visible and explained, never deleted',
-    /if \(!parsed\.ignored\.length && parsed\.display !== value\) setValue\(parsed\.display\)/.test(screenSource)
-    && /never contain/.test(screenSource));
-  check('a pasted key is tidied at once and verified without another tap',
-    /const handlePaste = \(event[\s\S]{0,500}applyPasted\(text\)/.test(screenSource)
-    && /if \(validation\.ok\) \{\s*void submitKey\(text\)/.test(screenSource));
+  // --- the boxes never move and never rewrite what was typed ---------------
+  const inputHandler = fieldSource.slice(fieldSource.indexOf('const handleInput'), fieldSource.indexOf('const handleKeyDown'));
+  check('each box accepts exactly three characters and nothing is re-flowed',
+    /maxLength=\{ACCESS_KEY_GROUP_LENGTH\}/.test(fieldSource) && /next\[index\] = cleaned\.slice\(0, ACCESS_KEY_GROUP_LENGTH\)/.test(inputHandler));
+  check('typing a full box moves to the next one',
+    /const advance = next\[index\]\.length === ACCESS_KEY_GROUP_LENGTH && index < ACCESS_KEY_GROUPS - 1/.test(inputHandler)
+    && /if \(advance\) focusBox\(index \+ 1\)/.test(inputHandler));
+  check('overflow characters land in the following boxes, so a fast typist is never blocked',
+    /while \(overflow\.length > 0 && cursor < ACCESS_KEY_GROUPS - 1\)/.test(inputHandler));
+  check('Backspace in an empty box steps back and deletes there',
+    /event\.key === 'Backspace' && !input\.value && index > 0/.test(fieldSource));
+  check('the arrow keys walk between the boxes',
+    /event\.key === 'ArrowLeft'/.test(fieldSource) && /event\.key === 'ArrowRight'/.test(fieldSource));
+  check('the CRX prefix is a fixed label, never an input',
+    /<span[\s\S]{0,260}aria-hidden="true"[\s\S]{0,420}\{ACCESS_KEY_PREFIX\}[\s\S]{0,40}<\/span>/.test(fieldSource)
+    && (fieldSource.match(/<input/g) || []).length === 1);
+  check('the boxes are always three, in a fixed order',
+    /Array\.from\(\{ length: ACCESS_KEY_GROUPS \}/.test(fieldSource) && ACCESS_KEY_GROUPS === 3);
+  check('a pasted key is distributed across the boxes and verified at once',
+    /const handlePaste = \(text: string\) => \{[\s\S]{0,320}splitAccessKey\(text\)/.test(screenSource)
+    && /if \(validateAccessKey\(text\)\.ok\) void submitBody\(joinAccessKey\(groups\)\)/.test(screenSource));
   check('a key pasted in any shape still resolves to the canonical form',
-    formatAccessKey('crx 8k4p\tx92m 7lqf b3td').display === 'CRX-8K4P-X92M-7LQF-B3TD'
-    && formatAccessKey('  crx-8k4p-x92m-7lqf-b3td  ').display === 'CRX-8K4P-X92M-7LQF-B3TD');
-  check('the field caps the text without ever moving the caret',
-    /maxLength=\{MAX_TYPED_LENGTH\}/.test(screenSource) && /slice\(0, MAX_TYPED_LENGTH\)/.test(screenSource));
-  check('the field can be cleared without selecting the text',
-    /aria-label="Clear the access key"/.test(screenSource));
-  check('the field offers paste only where the browser can honour it',
-    /navigator\.clipboard\?\.readText/.test(screenSource) && /Paste from clipboard/.test(screenSource));
-  check('progress, length and readiness are shown live',
-    screenSource.includes('of ${ACCESS_KEY_BODY_LENGTH} characters')
-    && /Looks complete/.test(screenSource) && /bg-emerald-500/.test(screenSource)
-    && /accessible the same lines/ === undefined ? true : true);
-  check('the field keeps its label, its busy state and its go key',
-    /<label htmlFor="client-access-key"/.test(screenSource) && /aria-busy=\{submitting\}/.test(screenSource)
-    && /enterKeyHint="go"/.test(screenSource) && /aria-describedby=\{shownError \? 'client-access-error'/.test(screenSource));
-  check('the group markers are decoration only, never a second input',
-    /aria-hidden="true"/.test(screenSource) && (screenSource.match(/<input/g) || []).length === 1);
+    splitAccessKey('crx 8k4-p92 msd').join('|') === '8K4|P92|MSD'
+    && splitAccessKey('  8k4p92msd  ').join('|') === '8K4|P92|MSD');
+  check('a complete key is verified without a second tap (autologin)',
+    /const candidate = validateAccessKeyGroups\(next\);\s*if \(validateAccessKey\(joinAccessKey\(next\)\)\.ok && candidate\.ok\) void submitBody\(candidate\.body\)/.test(screenSource));
+  check('a glyph a key can never contain is kept visible and explained, never deleted',
+    /Access keys never contain/.test(src('src/lib/accessKey.ts'))
+    && !/replace\(\/\[\^A-Z\]/.test(fieldSource));
+  check('keys issued before the short format can still be entered in full',
+    /Using a long key issued earlier\?/.test(screenSource) && /id="client-access-legacy"/.test(screenSource)
+    && /compactAccessKey\(legacy\)/.test(screenSource));
+  check('the field keeps its live guidance, its busy state and its go key',
+    /aria-busy=\{submitting\}/.test(screenSource) && /Looks complete/.test(screenSource)
+    && /of \$\{ACCESS_KEY_BODY_LENGTH\} characters/.test(screenSource));
 
   // --- the contact block actually works ------------------------------------
   check('every client screen uses the one shared contact block',

@@ -35,9 +35,14 @@ import { CLIENT_NOTIFICATION_SETTINGS, notifyClientDocumentEvent } from './lib/c
 import { cleanEmail, cleanOptionalStr, cleanStr } from './lib/validate';
 import {
   clientThrottleKeys,
+  clientPasskeyCodeScope,
+  CLIENT_AUTH_CODE_LIMIT,
+  CLIENT_AUTH_CODE_LOCK_SECONDS,
+  CLIENT_AUTH_CODE_WINDOW_SECONDS,
   consumeClientAuthThrottle,
   createClientSession,
   generateClientPasskey,
+  clientPasskeyHint,
   generateClientSessionToken,
   normalizeClientPasskey,
   clientPasskeyHash,
@@ -396,7 +401,20 @@ export const registerClientRoutes = (app: ClientApp) => {
       return clientJson({ success: false, ...clientFailure(clientFailureStateFor(reason)) }, 401);
     };
 
-    if (!key) return deny('unknown_key');
+    if (!key) {
+      // Anti-enumeration: the short passkey carries its project code, so guesses
+      // aimed at one project are counted together and cooled down. The check runs
+      // only here, on a failed lookup, so a correct key is never blocked.
+      const codeScope = clientPasskeyCodeScope(normalized);
+      if (codeScope) {
+        const codeThrottle = await consumeClientAuthThrottle(db, codeScope,
+          CLIENT_AUTH_CODE_LIMIT, CLIENT_AUTH_CODE_WINDOW_SECONDS, CLIENT_AUTH_CODE_LOCK_SECONDS);
+        if (!codeThrottle.allowed) {
+          return clientJson({ success: false, ...clientFailure('rate_limited') }, 429);
+        }
+      }
+      return deny('unknown_key');
+    }
     if (key.key_status !== 'active') return deny('key_revoked');
     if (key.key_expires_at && new Date(key.key_expires_at).getTime() <= Date.now()) return deny('key_expired');
     if (!clientUsable({ status: key.client_status })) return deny(`client_${key.client_status}`);
@@ -1319,6 +1337,9 @@ export const registerClientRoutes = (app: ClientApp) => {
     const body = await c.req.json().catch(() => ({}));
 
     let projectId: number | null = null;
+    // The passkey's trailing group is this project's code, so the key itself
+    // says which project it opens.
+    let projectName: string | null = null;
     if (body.projectId) {
       const project = await findProjectByPublicId(db, String(body.projectId));
       if (!project || Number(project.client_id) !== Number(client.id)) {
@@ -1326,6 +1347,7 @@ export const registerClientRoutes = (app: ClientApp) => {
       }
       if (project.is_archived === 1) return c.json({ success: false, error: 'Restore the project before scoping a key to it.' }, 409);
       projectId = Number(project.id);
+      projectName = project.name || null;
     }
 
     let expiresAt: string | null = null;
@@ -1337,8 +1359,9 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     // Generation happens exactly once, here. Only the SHA-256 verifier and a
     // four-character hint are stored; the raw value is returned once and is not
-    // recoverable afterwards.
-    const passkey = generateClientPasskey();
+    // recoverable afterwards. The trailing group is the project's own
+    // three-letter code, so the key itself says which project it opens.
+    const passkey = generateClientPasskey(projectName ?? client.name);
     const normalized = normalizeClientPasskey(passkey)!;
     const keyPublicId = newClientPublicId('key');
     const result = await db.prepare(
@@ -1349,7 +1372,7 @@ export const registerClientRoutes = (app: ClientApp) => {
       client.id,
       projectId,
       await clientPasskeyHash(normalized),
-      normalized.slice(-4),
+      clientPasskeyHint(normalized),
       cleanOptionalStr(body.label, 120) || '',
       expiresAt,
       actor?.userId ?? null,
@@ -1362,7 +1385,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     return c.json({
       success: true,
-      data: { id: keyPublicId, passkey, hint: normalized.slice(-4), expiresAt },
+      data: { id: keyPublicId, passkey, hint: clientPasskeyHint(normalized), expiresAt },
       message: 'Copy this access key now and deliver it securely. It cannot be shown again.',
     }, 201);
   });
@@ -1376,13 +1399,20 @@ export const registerClientRoutes = (app: ClientApp) => {
     const key = await one<any>(db.prepare('SELECT * FROM client_access_keys WHERE public_id = ?').bind(keyId));
     if (!key) return c.json({ success: false, error: 'Access key not found.' }, 404);
 
-    const passkey = generateClientPasskey();
+    const codeSource = await one<any>(db.prepare(
+      `SELECT p.name AS project_name, cl.name AS client_name
+       FROM client_access_keys k
+       LEFT JOIN client_projects p ON p.id = k.client_project_id
+       LEFT JOIN clients cl ON cl.id = k.client_id
+       WHERE k.id = ?`
+    ).bind(Number(key.id)));
+    const passkey = generateClientPasskey(codeSource?.project_name ?? codeSource?.client_name);
     const normalized = normalizeClientPasskey(passkey)!;
     await db.prepare(
       `UPDATE client_access_keys SET key_hash = ?, key_hint = ?, status = 'active',
          revoked_at = NULL, revoked_by_user_id = NULL, last_used_at = NULL
        WHERE id = ?`
-    ).bind(await clientPasskeyHash(normalized), normalized.slice(-4), Number(key.id)).run();
+    ).bind(await clientPasskeyHash(normalized), clientPasskeyHint(normalized), Number(key.id)).run();
 
     const sessions = await revokeClientSessionsForKey(db, Number(key.id));
     await revokeClientLinks(db, Number(key.client_id));
@@ -1397,7 +1427,7 @@ export const registerClientRoutes = (app: ClientApp) => {
 
     return c.json({
       success: true,
-      data: { id: key.public_id, passkey, hint: normalized.slice(-4), sessionsRevoked: sessions },
+      data: { id: key.public_id, passkey, hint: clientPasskeyHint(normalized), sessionsRevoked: sessions },
       message: 'New access key generated. The previous key and its sessions no longer work.',
     });
   });

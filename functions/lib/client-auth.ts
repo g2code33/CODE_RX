@@ -27,25 +27,40 @@ import { randomToken, sha256Hex } from './vault';
  */
 export const CLIENT_PASSKEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-/** Displayed grouping: CRX-XXXX-XXXX-XXXX-XXXX */
-export const CLIENT_PASSKEY_GROUP_LENGTH = 4;
-export const CLIENT_PASSKEY_GROUPS = 4;
+/**
+ * Displayed shape: `CRX-XXX-XXX-ABC`.
+ *
+ * The first two groups are random; the last group is a three-letter code
+ * derived from the project the key opens, so a client can recognise which
+ * project a key belongs to (and a support call can be resolved from the key
+ * alone). Generation and parsing stay case-insensitive and separator-free.
+ */
+export const CLIENT_PASSKEY_GROUP_LENGTH = 3;
+export const CLIENT_PASSKEY_GROUPS = 3;
 export const CLIENT_PASSKEY_PREFIX = 'CRX';
+/** The trailing project group is always letters, so it can be validated on its own. */
+export const CLIENT_PASSKEY_CODE_LENGTH = 3;
 
 /**
- * 16 random characters from a 32-symbol alphabet = 80 bits of entropy.
+ * Random part: two groups of three from a 32-symbol alphabet = 32^6 ≈ 2^30
+ * (about 1.07 billion combinations) in front of a project identifier that is
+ * not secret.
  *
- * Why four groups rather than the three shown in the original mock-up: a
- * three-group body (12 characters) is only 60 bits, and this passkey is the
- * only factor in front of a client's project room. Four groups keep the
- * requested CRX-____-____-____ look while removing that weakness. The parser
- * below accepts any grouping (and an optional CRX prefix), so the credential
- * stays a "CRX passkey" either way.
+ * This is deliberately shorter and friendlier than the earlier 16-character
+ * key, at the request of the product owner: a client reads it from a letter,
+ * dictates it, or types it in three fixed boxes. Because the random space is
+ * smaller, the durable throttling below is not optional: the per-IP limit, the
+ * per-attempted-key limit, and the per-project-code limit that is applied after
+ * a failed lookup (so a correct key is never blocked by someone else's attack).
+ * Raising the strength later is a one-line change to
+ * CLIENT_PASSKEY_RANDOM_LENGTH; every parser here accepts longer bodies, and
+ * keys issued before this change (16-character bodies) keep working.
  */
-const PASSKEY_BODY_LENGTH = CLIENT_PASSKEY_GROUPS * CLIENT_PASSKEY_GROUP_LENGTH;
+export const CLIENT_PASSKEY_RANDOM_LENGTH = 6;
+const PASSKEY_BODY_LENGTH = CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH;
 
 /** Accepted body length range. Only a cheap pre-hash format filter — the hash is the verifier. */
-const PASSKEY_MIN_BODY_LENGTH = 12;
+const PASSKEY_MIN_BODY_LENGTH = 9;
 const PASSKEY_MAX_BODY_LENGTH = 32;
 
 /** Domain separator keeps client verifiers distinct from Vault share verifiers. */
@@ -54,7 +69,7 @@ const SESSION_HASH_DOMAIN = 'code-rx:client-session:v1:';
 
 const asRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
   const result = await statement.all<T>();
-  return result.results || [];
+  return result.results ?? [];
 };
 
 /**
@@ -71,19 +86,44 @@ const randomAlphabetIndex = (alphabetLength: number): number => {
   }
 };
 
-/** Display form: CRX-XXXX-XXXX-XXXX-XXXX */
+/**
+ * Three-letter project code: the initials of the project name, ignoring
+ * characters a passkey can never contain (I and O). When a name does not
+ * provide three initials, the remaining letters of the name are used in order,
+ * and `X` fills any gap, so a code always exists and is always typeable.
+ */
+export const clientProjectCode = (name?: string | null): string => {
+  const words = String(name ?? '').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  let code = '';
+  for (const word of words) {
+    if (CLIENT_PASSKEY_ALPHABET.includes(word[0]) && !code.includes(word[0])) code += word[0];
+    if (code.length === CLIENT_PASSKEY_CODE_LENGTH) return code;
+  }
+  for (const word of words) {
+    for (const character of word) {
+      if (CLIENT_PASSKEY_ALPHABET.includes(character) && !code.includes(character)) code += character;
+      if (code.length === CLIENT_PASSKEY_CODE_LENGTH) return code;
+    }
+  }
+  return (code + 'XXX').slice(0, CLIENT_PASSKEY_CODE_LENGTH);
+};
+
+/** Display form: CRX-XXX-XXX-ABC */
 export const formatClientPasskey = (body: string): string => {
   const groups = body.match(new RegExp(`.{1,${CLIENT_PASSKEY_GROUP_LENGTH}}`, 'g')) || [body];
   return `${CLIENT_PASSKEY_PREFIX}-${groups.join('-')}`;
 };
 
-/** Generates a brand-new raw passkey. The caller must show it once and never persist it. */
-export const generateClientPasskey = (): string => {
+/**
+ * Generates a brand-new raw passkey for a project (or, failing that, a client).
+ * The caller must show it once and never persist it.
+ */
+export const generateClientPasskey = (source?: string | null): string => {
   let body = '';
-  for (let index = 0; index < PASSKEY_BODY_LENGTH; index += 1) {
+  for (let index = 0; index < CLIENT_PASSKEY_RANDOM_LENGTH; index += 1) {
     body += CLIENT_PASSKEY_ALPHABET[randomAlphabetIndex(CLIENT_PASSKEY_ALPHABET.length)];
   }
-  return formatClientPasskey(body);
+  return formatClientPasskey(body + clientProjectCode(source));
 };
 
 /**
@@ -557,3 +597,35 @@ export const CLIENT_AUTH_IP_LOCK_SECONDS = 5 * 60;
 export const CLIENT_AUTH_KEY_LIMIT = 10;
 export const CLIENT_AUTH_KEY_WINDOW_SECONDS = 15 * 60;
 export const CLIENT_AUTH_KEY_LOCK_SECONDS = 30 * 60;
+
+/**
+ * Per project code, applied only AFTER a lookup has already failed.
+ *
+ * The short passkey is aimed at the project it opens, so an attacker who wants
+ * one client's project would keep the same three-letter code while guessing the
+ * random part. 500 failures inside 15 minutes (a real client never comes close)
+ * cool that code down, which turns a feasible enumeration into an impractical
+ * one. Because the limit is consulted only on a failed attempt, a client who
+ * holds the correct key is never locked out by somebody else's attack.
+ */
+export const CLIENT_AUTH_CODE_LIMIT = 500;
+export const CLIENT_AUTH_CODE_WINDOW_SECONDS = 15 * 60;
+export const CLIENT_AUTH_CODE_LOCK_SECONDS = 15 * 60;
+
+/**
+ * The four-character-ish hint shown beside a key in the workspace: the project
+ * code for a short key (so the list reads "…MSD"), the last four characters for
+ * a key issued before this format. Display only — never an authentication factor.
+ */
+export const clientPasskeyHint = (normalizedBody: string): string =>
+  normalizedBody.length === CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH
+    ? normalizedBody.slice(-CLIENT_PASSKEY_CODE_LENGTH)
+    : normalizedBody.slice(-4);
+
+/** The project code a well-formed attempt was aimed at, or null for legacy keys. */
+export const clientPasskeyCodeScope = (normalizedPasskey: string | null): string | null => {
+  const expected = CLIENT_PASSKEY_RANDOM_LENGTH + CLIENT_PASSKEY_CODE_LENGTH;
+  if (!normalizedPasskey || normalizedPasskey.length !== expected) return null;
+  const code = normalizedPasskey.slice(-CLIENT_PASSKEY_CODE_LENGTH);
+  return /^[A-Z]{3}$/.test(code) ? `code:${code}` : null;
+};
