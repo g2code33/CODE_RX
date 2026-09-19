@@ -150,11 +150,26 @@ it — the panel simply threw it away, so nothing an operator could send existed
 
 ### Verification
 
-UI harness 544/544 (21 new checks: helper units, both rendered reveal states, no
-credential in any URL), backend 1372/1372 (11 new: the address contract, redemption
-lands on the destination, a passkey address opens nothing, tampering, and that the
-list can never re-show an issued address), live 25/25 (the generated URL is fetched on
-the running site, redeemed, and lands on the destination project).
+UI harness 554/554 (30 new checks: helper units, both rendered reveal states, the
+section chip's copied address, no credential in any URL), backend 1372/1372 (11 new: the
+address contract, redemption lands on the destination, a passkey address opens nothing,
+tampering, and that the list can never re-show an issued address), live 27/27 (the
+generated URL is fetched on the running site, redeemed, and lands on the destination
+project; the shipped bundle carries both the section link and the link parser).
+
+### Every surface that offers a link now generates one
+
+| Surface | Before | Now |
+|---|---|---|
+| Client temporary link (panel) | revealed the raw token only | the full address + **Copy link** + **Open link**, with the token beside it |
+| Access key (panel) | the key value alone | the key + the **client sign-in address** (`/#client-portal`) to send with it |
+| Vault share link | already a full address (`publicVaultShareUrl`) | unchanged |
+| Public site section chips (`#values`, `#learn`, …) | the chip said “Direct link: #values” but only jumped within the page | the chip still jumps, and a **Copy link** button beside it copies `https://<host>/#values` |
+
+The section chip is the one that was still missing: it was *labelled* a direct link and
+produced a fragment, never an address. It now builds the address from the host the site is
+being read on (`sectionDirectLinkUrl` in `src/lib/linkAccess.ts`), so the live domain and a
+preview host both produce a working link.
 
 ### A real address, generated in the preview
 

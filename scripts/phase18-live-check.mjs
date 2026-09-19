@@ -111,6 +111,12 @@ const main = async () => {
   const app = centre || html;
   check('the shipped bundle contains the upload flow', app.includes('Upload a document') || app.includes('upload a document'));
   check('the shipped bundle contains the access-key section', app.includes('Access keys') && app.includes('Issue access key'));
+  check('the shipped site can generate a full http link for a section',
+    app.includes('Copy the full http link to this section'));
+  // The panel builds the address from the path the server returns, and the
+  // client app routes on it — the parser is what proves the two still agree.
+  check('the shipped app still routes the link address the panel sends',
+    /client-portal\\?\/link\\?\//.test(app));
 
   // --- 2. PHANTOM signs in -------------------------------------------------
   const login = await json('POST', '/api/auth/login', PHANTOM);

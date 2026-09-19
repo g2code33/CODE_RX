@@ -363,6 +363,26 @@ export const absoluteLinkUrl = (path: string, origin?: string | null): string =>
 export const linkShareUrl = (token: string, origin?: string | null): string =>
   absoluteLinkUrl(linkPath(token), origin);
 
+/**
+ * The full address of a section of this site. The public sections carry a
+ * visible "Direct link" chip: the chip jumps to the section on this page, and
+ * this is the http link an operator or reader can actually send — copied
+ * straight from the address the site is being read on, so it is correct on the
+ * live domain and on a preview host alike.
+ */
+export const sectionDirectLinkUrl = (
+  id: string,
+  origin?: string | null,
+  pathname?: string | null,
+  search?: string | null,
+): string => {
+  const fragment = String(id || '').trim().replace(/^#+/, '');
+  if (!fragment) return '';
+  const path = String(pathname || '/') || '/';
+  const query = search ? String(search) : '';
+  return absoluteLinkUrl(`${path}${query}#${fragment}`, origin);
+};
+
 /** Where a client holding an access key signs in. Never carries a credential. */
 export const clientSignInUrl = (origin?: string | null): string => absoluteLinkUrl(clientPortalPath(), origin);
 

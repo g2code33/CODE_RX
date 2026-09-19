@@ -67,6 +67,8 @@ const bundle = async () => {
         export { ClientSupportContact } from './src/components/ClientSupportContact';
         export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
         export { ClientSiteSign } from './src/components/ClientSiteSign';
+        export { SectionLink } from './src/components/SectionLink';
+        export { sectionDirectLinkUrl } from './src/lib/linkAccess';
         export { SiteEmoji, SiteEmojiText, SiteEmojiProvider } from './src/components/SiteEmoji';
         export { SiteEmojiAdmin } from './src/components/SiteEmojiAdmin';
         export { ContactForm } from './src/components/ContactForm';
@@ -118,6 +120,7 @@ const main = async () => {
     activityAccessMethod, activityKindFor, activityLabelFor, clientActivityEvent, CLIENT_ACTIVITY_KINDS,
     LINK_DESTINATIONS, LINK_DESTINATION_IDS, LINK_ACCESS_MODES, LINK_TTL_PRESETS,
     absoluteLinkUrl, linkShareUrl, clientSignInUrl, linkShareHint, KeyRevealDialog,
+    SectionLink, sectionDirectLinkUrl,
     LINK_TTL_MINUTES_FALLBACK, LINK_TTL_MIN_MINUTES, LINK_TTL_MAX_MINUTES, LINK_MAX_USES_LIMIT,
     linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
@@ -2145,6 +2148,46 @@ const main = async () => {
   check('no credential is ever placed in a url anywhere in the panel',
     !/[?#&](passkey|key|token|linkToken)=/i.test(centerLink)
     && !/linkPath\(|#client-portal\/link/.test(centerLink.replace(/url: absoluteLinkUrl\(payload\.path, origin\)/g, '')));
+
+  // -------------------------------------------------------------------------
+  // Phase 18 follow-up — the public site's "Direct link" chips.
+  //
+  // The chips said "Direct link: #values" but only produced a fragment: there
+  // was no http link to send. They now copy the section's full address.
+  // -------------------------------------------------------------------------
+  group('25. Phase 18 follow-up — the public section links become http links');
+  const sectionHost = 'https://coderxsociety.pages.dev';
+  const sectionLinkSource = fs.readFileSync(path.join(ROOT, 'src/components/SectionLink.tsx'), 'utf8');
+
+  check('a section id becomes the full address of that section',
+    sectionDirectLinkUrl('values', sectionHost) === `${sectionHost}/#values`
+    && sectionDirectLinkUrl('#challenges', sectionHost) === `${sectionHost}/#challenges`
+    && sectionDirectLinkUrl('learn', sectionHost, '/', '?from=home') === `${sectionHost}/?from=home#learn`);
+  check('an unknown host degrades to the on-page fragment instead of inventing a domain',
+    sectionDirectLinkUrl('values') === '/#values' && sectionDirectLinkUrl('', sectionHost) === '');
+  check('the site title tells a reader what the full link is',
+    sectionDirectLinkUrl('values', sectionHost).includes('#values'));
+
+  const chip = render(React.createElement(SectionLink, { id: 'values' }));
+  const chipWithHost = render(React.createElement(SectionLink, { id: 'values', origin: sectionHost }));
+  check('the chip still jumps to the section on this page',
+    chip.includes('href="#values"') && chip.includes('#values'));
+  check('the chip can generate the http link for that section',
+    chipWithHost.includes(`${sectionHost}/#values`) && /Copy the full link/.test(chipWithHost));
+  check('the generated link is announced for assistive technology and on hover',
+    new RegExp(`aria-label="Copy the full http link to this section \\(${sectionHost.replace(/[.]/g, '\\.')}/#values\\)"`).test(chipWithHost)
+    && new RegExp(`title="Direct link: ${sectionHost.replace(/[./]/g, (m) => `\\${m}`)}/#values"`).test(chipWithHost));
+  const sectionLinkCode = sectionLinkSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  check('the address is built from the site being read, never a hardcoded domain',
+    sectionLinkCode.includes('window.location')
+    && sectionLinkCode.includes('sectionDirectLinkUrl(')
+    && !/coderxsociety\.pages\.dev|coderxsociety\.com/.test(sectionLinkCode));
+  check('copying gives feedback without pretending to have copied on failure',
+    sectionLinkSource.includes('await navigator.clipboard.writeText(fullUrl)')
+    && sectionLinkSource.includes('setCopied(true)') && /catch \{[\s\S]{0,80}setCopied\(false\)/.test(sectionLinkSource));
+  check('every public section that carries the chip gets the same http link',
+    ['values', 'about', 'learn', 'challenges', 'extras', 'leadership', 'news', 'projects', 'resources', 'join', 'what-we-do']
+      .every((id) => sectionDirectLinkUrl(id, sectionHost) === `${sectionHost}/#${id}`));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
