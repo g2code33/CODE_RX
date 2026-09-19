@@ -193,7 +193,11 @@ export const FAILURE_MESSAGES: Record<string, string> = {
   link_exhausted: 'This access link has already been used the maximum number of times.',
   rate_limited: 'Too many attempts. Please wait a moment and try again.',
   session_expired: 'Your secure session has ended. Enter your access key to continue.',
-  unavailable: 'Client access is not available right now. Please try again shortly.',
+  // Shown when the client surface answers an opaque 404 — which is what a
+  // switched-off portal does. “Try again shortly” promised a retry that would
+  // never come true, so it now says what is actually the case, and reassures
+  // the client that a key they were given still works once it is switched on.
+  unavailable: 'Client access is not open at the moment. If you were given an access key it is still valid — please contact Code Rx Society.',
   offline: 'We could not reach Code Rx Society. Check your connection and try again.',
   server_error: 'Something went wrong on our side. Please try again shortly.',
 };

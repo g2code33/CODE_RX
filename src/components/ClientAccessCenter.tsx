@@ -446,9 +446,10 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
             <ShieldAlert className="h-4 w-4" /> Client access is switched off
           </p>
           <p className="mt-2 max-w-3xl text-xs font-semibold leading-6 text-amber-900">
-            Every link and every access key you issue while this is off shows the client
-            <strong className="font-black"> “Client access is not available right now. Please try again shortly.”</strong>
-            {' '}— the addresses are valid, the door is simply closed. Switch it on and the same address works.
+            Every link and every access key you issue while this is off shows the client a short
+            “closed” message — <strong className="font-black">“Client access is not open at the moment.”</strong>
+            {' '}The addresses and keys are valid, the door is simply shut. Switch it on and the same
+            address and key work immediately, with nothing to reissue.
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-3">
             {can('clients.settings.manage') ? (

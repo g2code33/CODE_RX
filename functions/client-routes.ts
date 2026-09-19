@@ -2484,7 +2484,17 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
   // switches, so existing clients of this endpoint see no change.
   const NOTIFICATION_SETTING_KEYS = CLIENT_NOTIFICATION_SETTINGS.map((entry) => entry.key);
   const SETTING_GROUPS: Record<string, { keys: string[]; labels: Record<string, string>; audit: string }> = {
-    portal: { keys: PORTAL_SETTING_KEYS, labels: {}, audit: 'client.portal_settings.updated' },
+    portal: {
+      keys: PORTAL_SETTING_KEYS,
+      // The switches decide whether any client can get in at all, so they are
+      // named in the operator's words rather than by their database key.
+      labels: {
+        client_portal_enabled: 'Client access — the client portal and everything in it',
+        client_downloads_enabled: 'Client downloads — stamped client copies',
+        client_all_links_enabled: 'Temporary links — the link panel is active',
+      },
+      audit: 'client.portal_settings.updated',
+    },
     notifications: {
       keys: [...NOTIFICATION_SETTING_KEYS],
       labels: Object.fromEntries(CLIENT_NOTIFICATION_SETTINGS.map((entry) => [entry.key, entry.label])),

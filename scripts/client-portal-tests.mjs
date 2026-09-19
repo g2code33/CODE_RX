@@ -4176,6 +4176,18 @@ const main = async () => {
     && JSON.stringify(documentRedeem.json.data).includes(addressDocument.id),
     JSON.stringify(documentRedeem.json.data).slice(0, 240));
 
+  // The operator who opens Permissions must see the switch in their own words,
+  // not a database column name — the labels travel on the same route.
+  const labelledSettings = await request('GET', '/api/phantom/client-portal-settings', { token: phantomToken });
+  const labelledRows = labelledSettings.json?.data || [];
+  check('the portal switches arrive with operator-facing labels',
+    labelledRows.length === 3
+    && labelledRows.every((row) => typeof row.label === 'string' && row.label.length > 0)
+    && labelledRows.some((row) => row.key === 'client_portal_enabled' && /Client access/.test(row.label)),
+    JSON.stringify(labelledRows).slice(0, 200));
+  check('the labels never leak an implementation key as the only description',
+    labelledRows.every((row) => !/^[a-z_]+$/.test(String(row.label))));
+
   const addressList = await request('GET', `/api/phantom/clients/${addressClient.id}/links`, { token: phantomToken });
   check('the links list can never re-show the address it already issued',
     addressList.status === 200

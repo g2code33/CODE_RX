@@ -2289,14 +2289,17 @@ const main = async () => {
     && /void loadPortalSwitch\(\)/.test(accessCenter));
   check('it warns plainly that every link and key is refused while the switch is off',
     accessCenter.includes('Client access is switched off')
-    && accessCenter.includes('Client access is not available right now')
-    && accessCenter.includes('the addresses are valid, the door is simply closed'));
+    && accessCenter.includes('“Client access is not open at the moment.”')
+    && accessCenter.includes('the door is simply shut'));
   check('the warning offers the fix through the same settings route, guarded by the same capability',
     accessCenter.includes('clientAccessCenter.savePortalSettings(')
     && accessCenter.includes("key: 'client_portal_enabled', value: true")
     && accessCenter.includes("can('clients.settings.manage')"));
   check('a member without the capability is told who to ask instead of getting a dead button',
     accessCenter.includes('Ask PHANTOM to switch client access on.'));
+  check('the switches in Permissions are named, not shown as database keys',
+    accessCenter.includes('{entry.label || entry.key}')
+    && accessCenter.includes("title: 'Client portal settings'"));
   check('the warning is announced, not just drawn',
     /role="alert"[\s\S]{0,400}Client access is switched off/.test(accessCenter));
   check('the unknown state stays quiet rather than accusing the wrong thing',
