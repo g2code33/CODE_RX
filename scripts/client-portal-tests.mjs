@@ -4157,6 +4157,25 @@ const main = async () => {
     || (await redeem('not-a-real-token-aaaaaaaaaaaaaaaaaaaaaaaa')).status === 410,
     'expected a controlled refusal');
 
+  // A direct link generated from a document itself: one press, and the address
+  // it produces opens that document — which is what "lead directly there" means.
+  const addressDocument = await createDocument(phantomToken, addressClient.id, addressProject.id, { title: 'Address document' });
+  await publish(phantomToken, addressDocument.id);
+  const documentDirectLink = await linkFor({
+    projectId: addressProject.id, destination: 'document', documentId: addressDocument.id,
+    mode: 'DIRECT_ACCESS', expiresInMinutes: 1440, maxUses: null, allowView: true, allowDownload: false,
+  });
+  check('a direct link generated from a document names that document',
+    documentDirectLink.status === 201
+    && documentDirectLink.json.data.destination === 'document'
+    && String(documentDirectLink.json.data.url).endsWith(`/l/${documentDirectLink.json.data.token}`)
+    && !String(documentDirectLink.json.data.url).includes(addressDocument.id));
+  const documentRedeem = await redeem(documentDirectLink.json.data.token);
+  check('opening it lands on that document, not merely the client',
+    documentRedeem.status === 200 && Boolean(documentRedeem.json?.data?.session?.token)
+    && JSON.stringify(documentRedeem.json.data).includes(addressDocument.id),
+    JSON.stringify(documentRedeem.json.data).slice(0, 240));
+
   const addressList = await request('GET', `/api/phantom/clients/${addressClient.id}/links`, { token: phantomToken });
   check('the links list can never re-show the address it already issued',
     addressList.status === 200

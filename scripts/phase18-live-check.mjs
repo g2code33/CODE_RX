@@ -266,6 +266,20 @@ const main = async () => {
   const keyedSignIn = await json('POST', '/api/client/auth/login', { passkey: key.json.data.passkey, linkToken: keyedLink.json.data.token });
   check('the same address opens once the client signs in with their key',
     keyedSignIn.status === 200 && Boolean(keyedSignIn.json?.data?.session?.token));
+  // A direct link generated from the document itself: opening it lands on that
+  // document, which is what an operator means by "lead directly there".
+  const documentLink = await json('POST', `/api/phantom/clients/${clientId}/links`, {
+    projectId, destination: 'document', documentId: document.json.data.id,
+    mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 1440, allowView: true, allowDownload: false,
+  }, token, { Origin: previewHost });
+  const documentAddress = String(documentLink.json?.data?.url || '');
+  const documentRedeem = await json('POST', `/api/client/link/${encodeURIComponent(documentLink.json?.data?.token || '')}`);
+  check('a direct link generated for a document opens that document',
+    documentLink.status === 201 && documentAddress === `${previewHost}/l/${documentLink.json?.data?.token}`
+    && documentRedeem.status === 200
+    && JSON.stringify(documentRedeem.json?.data || {}).includes(document.json.data.id),
+    JSON.stringify(documentRedeem.json?.data || {}).slice(0, 200));
+
   const linkList = await json('GET', `/api/phantom/clients/${clientId}/links`, null, token);
   check('the panel can never re-show an address it already issued',
     !JSON.stringify(linkList.json).includes(linkToken) && !JSON.stringify(linkList.json).includes('#client-portal'));

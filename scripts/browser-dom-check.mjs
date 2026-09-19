@@ -70,12 +70,15 @@ const link = await fetch(`${BASE}/api/phantom/clients/${client.id}/links`, {
 console.log('server-generated address :', link.data.url);
 void created;
 
-// --- 2. open that address in a real DOM -------------------------------------
-const pageUrl = `${BASE}/l/${link.data.token}`;
+// --- 2. helpers to run the shipped bundle at an address ---------------------
+const boot = async (token) => {
+const pageUrl = `${BASE}/l/${token}`;
 const html = await (await fetch(pageUrl)).text();
 const bundle = /<script type="module"[^>]*>([\s\S]*?)<\/script>/.exec(html);
 if (!bundle) { console.log('FAIL — the shipped page carries no application bundle'); process.exit(1); }
-const appFile = path.join(os.tmpdir(), `code-rx-app-${Date.now()}.mjs`);
+// A unique path per boot: an imported module is cached by URL, and each address
+// must genuinely execute the bundle in its own window.
+const appFile = path.join(os.tmpdir(), `code-rx-app-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
 fs.writeFileSync(appFile, bundle[1]);
 
 const virtualConsole = new VirtualConsole();
@@ -93,7 +96,9 @@ for (const key of Object.getOwnPropertyNames(window)) {
   if (keep.has(key)) continue;
   try { Object.defineProperty(globalThis, key, { value: window[key], configurable: true, writable: true }); } catch { /* frozen global */ }
 }
-const nodeFetch = globalThis.fetch;
+// Point the app's relative requests at the page it is running in.
+const nodeFetch = globalThis.__codeRxNodeFetch || globalThis.fetch;
+globalThis.__codeRxNodeFetch = nodeFetch;
 const localFetch = (input, init) => nodeFetch(new URL(typeof input === 'string' ? input : input.url, pageUrl), init);
 window.fetch = localFetch;
 globalThis.fetch = localFetch;
@@ -111,14 +116,34 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = () => window.document.body.textContent.replace(/\s+/g, ' ').trim();
 for (let attempt = 0; attempt < 60 && text().length < 40; attempt += 1) await wait(250);
 
-const body = text();
-const addressBar = window.location.href;
-const landed = body.includes(project.name);
-const cleared = !addressBar.includes(link.data.token);
+  return { body: text(), addressBar: window.location.href, cleared: !window.location.href.includes(token) };
+};
 
-console.log('address bar after open  :', addressBar);
-console.log('window rendered         :', body.slice(0, 300));
-console.log('landed in the room      :', landed);
-console.log('token cleared from URL  :', cleared);
-console.log(landed && cleared ? 'RESULT: the address leads directly there' : 'RESULT: FAILED');
-process.exit(landed && cleared ? 0 : 1);
+// --- 3. the room, and the document inside it, reached through the address ----
+const room = await boot(link.data.token);
+console.log('address bar after open  :', room.addressBar);
+console.log('window rendered         :', room.body.slice(0, 300));
+const landedInRoom = room.body.includes(project.name);
+console.log('landed in the room      :', landedInRoom);
+console.log('token cleared from URL  :', room.cleared);
+
+// A link generated from a document, opened the same way, must land on that
+// document rather than on the client or a menu.
+const documents = await api('GET', `/api/phantom/clients/${client.id}/documents`, null, token);
+const published = (documents.json?.data?.documents || documents.json?.data || [])
+  .filter((entry) => String(entry.lifecycle || '').toLowerCase() === 'published')[0];
+let landedOnDocument = false;
+if (published) {
+  const documentLink = await fetch(`${BASE}/api/phantom/clients/${client.id}/links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Origin: HOST },
+    body: JSON.stringify({ projectId: project.id, destination: 'document', documentId: published.id, mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 1440, allowView: true, allowDownload: false }),
+  }).then((response) => response.json());
+  const onDocument = await boot(documentLink.data.token);
+  landedOnDocument = onDocument.body.includes(published.title);
+  console.log('document address        :', documentLink.data.url);
+  console.log('landed on the document  :', landedOnDocument, `(“${published.title}”)`);
+}
+
+console.log(landedInRoom && landedOnDocument ? 'RESULT: the addresses lead directly there' : 'RESULT: FAILED');
+process.exit(landedInRoom && landedOnDocument ? 0 : 1);

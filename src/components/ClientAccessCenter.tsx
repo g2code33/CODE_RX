@@ -471,6 +471,10 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                   onArchive={(project: any) => void setProjectArchived(project, true, refresh, setError)}
                   onRestore={(project: any) => void setProjectArchived(project, false, refresh, setError)}
                   onIssueKey={(project: any) => setKeyDialog({ clientId: detail.id, projectId: project.id })}
+                  onDirectLink={(project: any) => void sendDirectLink(
+                    { clientId: detail.id, projectId: project.id, destination: 'project', label: project.name },
+                    refresh, onMessage, setError, setRevealedKey, setBusy,
+                  )}
                   busy={busy}
                 />
               )}
@@ -480,6 +484,16 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                   can={can} client={detail} documents={documents} projects={projects}
                   onPrepare={(document: any) => void prepareStampedCopy(document, refresh, onMessage, setError)}
                   onUpload={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id, upload: true })}
+                  onDirectLink={(document: any) => void sendDirectLink(
+                    {
+                      clientId: detail.id,
+                      projectId: document.project?.id || projects[0]?.id,
+                      documentId: document.id,
+                      destination: 'document',
+                      label: document.title,
+                    },
+                    refresh, onMessage, setError, setRevealedKey, setBusy,
+                  )}
                   onPublish={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id })}
                   onLifecycle={(document: any, state: string) => void changeLifecycle(document, state, refresh, setError)}
                   onEdit={(document: any) => setPublishFlow({ clientId: detail.id, projectId: document.project?.id, document })}
@@ -695,11 +709,13 @@ const ClientsPanel = ({
 );
 
 const ProjectsPanel = ({
-  can, client, projects, documents, keys, onCreate, onEdit, onArchive, onRestore, onIssueKey, busy,
+  can, client, projects, documents, keys, onCreate, onEdit, onArchive, onRestore, onIssueKey, onDirectLink, busy,
 }: {
   can: (capability: string) => boolean;
   client: any; projects: any[]; documents: any[]; keys: any[]; onCreate: () => void; onEdit: (project: any) => void;
-  onArchive: (project: any) => void; onRestore: (project: any) => void; onIssueKey: (project: any) => void; busy: boolean;
+  onArchive: (project: any) => void; onRestore: (project: any) => void; onIssueKey: (project: any) => void;
+  /** Generates a link that opens this project room straight away, with no key. */
+  onDirectLink: (project: any) => void; busy: boolean;
 }) => (
   <div>
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -730,6 +746,16 @@ const ProjectsPanel = ({
               {can('clients.keys.create') && !project.isArchived ? (
                 <button onClick={() => onIssueKey(project)} disabled={busy} className="mini-button"><KeyRound className="h-4 w-4" /> Issue access key</button>
               ) : null}
+              {can('clients.links.create') ? (
+                <button
+                  onClick={() => onDirectLink(project)}
+                  disabled={busy}
+                  className="mini-button"
+                  title={`Generate an address that opens ${project.name} straight away, without asking for a key`}
+                >
+                  <Link2 className="h-4 w-4" /> Direct link
+                </button>
+              ) : null}
               {can('clients.projects.edit') ? <button onClick={() => onEdit(project)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
               {can('clients.projects.archive') ? (project.isArchived
                 ? <button onClick={() => onRestore(project)} className="mini-button border border-emerald-200 bg-emerald-50 !text-emerald-800">Restore</button>
@@ -743,7 +769,7 @@ const ProjectsPanel = ({
 );
 
 const DocumentsPanel = ({
-  can, client, documents, projects, onPublish, onUpload, onLifecycle, onEdit, onDelete, onPrepare, busy,
+  can, client, documents, projects, onPublish, onUpload, onLifecycle, onEdit, onDelete, onPrepare, onDirectLink, busy,
 }: {
   can: (capability: string) => boolean;
   client: any; documents: any[]; projects: any[]; onPublish: () => void;
@@ -753,6 +779,8 @@ const DocumentsPanel = ({
   onDelete: (document: any) => void;
   /** Renders (or refreshes) the stamped client copy on the server. */
   onPrepare: (document: any) => void;
+  /** Generates a link that opens this document straight away, with no key. */
+  onDirectLink: (document: any) => void;
   busy: boolean;
 }) => {
   const projectName = (document: any) => projects.find((project) => project.id === document.project?.id)?.name || '';
@@ -819,6 +847,16 @@ const DocumentsPanel = ({
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {can('clients.links.create') ? (
+                <button
+                  onClick={() => onDirectLink(document)}
+                  className="mini-button border border-emerald-200 !bg-emerald-50 !text-emerald-800"
+                  disabled={busy}
+                  title={`Generate an address that opens ${document.title} straight away, without asking for a key`}
+                >
+                  <Link2 className="h-4 w-4" /> Direct link
+                </button>
+              ) : null}
               {can('clients.documents.edit') ? (
                 <button onClick={() => onPrepare(document)} className="mini-button border border-emerald-200 !bg-emerald-50 !text-emerald-800" disabled={busy}>
                   <ShieldCheck className="h-4 w-4" /> {document.hasClientArtifact ? 'Refresh stamped copy' : 'Prepare stamped copy'}
@@ -2099,7 +2137,10 @@ const LinkDialogHost = ({
   const [projectId, setProjectId] = useState(projects.find((project) => !project.isArchived)?.id || '');
   const [destination, setDestination] = useState<LinkDestinationId>('project');
   const [documentId, setDocumentId] = useState('');
-  const [mode, setMode] = useState<LinkAccessMode>('REQUIRE_PASSKEY');
+  // Direct access is the default because a direct link is what an operator is
+  // usually sending: opening it lands on the destination. The key-gated mode is
+  // one click away and the dialog explains both before anything is created.
+  const [mode, setMode] = useState<LinkAccessMode>('DIRECT_ACCESS');
   const [expiryMinutes, setExpiryMinutes] = useState(String(LINK_TTL_MINUTES_FALLBACK));
   const [customExpiry, setCustomExpiry] = useState('');
   const [unlimitedUses, setUnlimitedUses] = useState(false);
@@ -2411,6 +2452,64 @@ const revokeAll = async (
  * size and cache state, or the server's controlled refusal — in which case the
  * operator sees the reason and no file is produced.
  */
+/**
+ * How long a one-press direct link lives. Long enough to send and be opened
+ * today, short enough that an address forgotten in a chat stops working.
+ */
+const DIRECT_LINK_TTL_MINUTES = 1440;
+
+/**
+ * A direct link in one press. The operator is looking at a project or a
+ * document, so the address is generated for exactly that and opening it lands
+ * there — no key prompt, no menu. The link itself is the credential, which is
+ * why the reveal says so, the lifetime is finite, and the link appears in the
+ * links list where it can be revoked like any other.
+ */
+const sendDirectLink = async (
+  input: { clientId: string; projectId?: string; documentId?: string; destination: 'project' | 'document'; label: string },
+  refresh: (message: string) => Promise<void> | void,
+  onMessage: (message: string) => void,
+  setError: (message: string | null) => void,
+  setRevealed: (payload: { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string; url?: string; urlHint?: string }) => void,
+  setBusy: (busy: boolean) => void,
+) => {
+  if (!input.projectId) {
+    setError('This client needs a project before a link can be created.');
+    return;
+  }
+  setBusy(true);
+  setError(null);
+  try {
+    const result = await clientAccessCenter.createLink(input.clientId, {
+      projectId: input.projectId,
+      destination: input.destination,
+      documentId: input.destination === 'document' ? input.documentId : undefined,
+      mode: 'DIRECT_ACCESS',
+      expiresInMinutes: DIRECT_LINK_TTL_MINUTES,
+      maxUses: null,
+      allowView: true,
+      allowDownload: false,
+    });
+    const origin = typeof window === 'undefined' ? '' : window.location.origin;
+    setRevealed({
+      passkey: result.data.token,
+      hint: '',
+      expiresAt: result.data.expiresAt,
+      message: result.message,
+      label: `Direct link — opens ${input.label}`,
+      url: result.data.url || linkAddressUrl(result.data.token, origin),
+      urlHint: linkShareHint('DIRECT_ACCESS', result.data.destinationLabel, origin),
+    });
+    const message = `A direct link to ${input.label} was created and is shown once.`;
+    onMessage(message);
+    await refresh(message);
+  } catch (failure: any) {
+    setError(failure?.message || 'A direct link could not be created.');
+  } finally {
+    setBusy(false);
+  }
+};
+
 const prepareStampedCopy = async (
   document: any,
   refresh: (message: string) => Promise<void> | void,

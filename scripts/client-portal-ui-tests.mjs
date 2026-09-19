@@ -2230,6 +2230,43 @@ const main = async () => {
     ['values', 'about', 'learn', 'challenges', 'extras', 'leadership', 'news', 'projects', 'resources', 'join', 'what-we-do']
       .every((id) => sectionDirectLinkUrl(id, sectionHost) === `${sectionHost}/#${id}`));
 
+  // -------------------------------------------------------------------------
+  // Phase 18 follow-up — a direct link in one press.
+  //
+  // The gap behind "make it generate an http link to lead directly there" was
+  // that a newly created link defaulted to the key-gated mode: opening it
+  // stopped at a key prompt instead of landing. Direct access is now the
+  // default, and the document and project rows generate their own address.
+  // -------------------------------------------------------------------------
+  group('26. Phase 18 follow-up — a direct link in one press');
+  const onePress = fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessCenter.tsx'), 'utf8');
+
+  check('the link dialog opens on direct access, the mode that leads straight there',
+    /const \[mode, setMode\] = useState<LinkAccessMode>\('DIRECT_ACCESS'\)/.test(onePress));
+  check('the key-gated mode is still the deliberate other choice',
+    onePress.includes('REQUIRE_PASSKEY') && onePress.includes('LINK_ACCESS_MODES')
+    && /setMode\(/.test(onePress));
+  check('a document row generates its own address in one press',
+    /onClick=\{\(\) => onDirectLink\(document\)\}/.test(onePress)
+    && onePress.includes('Generate an address that opens')
+    && onePress.includes('straight away, without asking for a key'));
+  check('a project row does the same for the room',
+    /onClick=\{\(\) => onDirectLink\(project\)\}/.test(onePress));
+  check('the one-press link is created by the server, with a finite lifetime',
+    onePress.includes("mode: 'DIRECT_ACCESS'")
+    && onePress.includes('expiresInMinutes: DIRECT_LINK_TTL_MINUTES')
+    && /const DIRECT_LINK_TTL_MINUTES = \d+/.test(onePress)
+    && onePress.includes('await clientAccessCenter.createLink('));
+  check('the one-press link obeys the same capability as the links panel',
+    /clients\.links\.create'\) \? \(\s*<button\s*onClick=\{\(\) => onDirectLink\(document\)\}/.test(onePress));
+  check('it reveals the same one-time address, ready to copy or open',
+    onePress.includes('url: result.data.url || linkAddressUrl(result.data.token, origin)')
+    && onePress.includes("urlHint: linkShareHint('DIRECT_ACCESS'"));
+  check('the reveal says what the address opens',
+    onePress.includes('Direct link — opens '));
+  check('a client with no project is told why instead of a dead press',
+    onePress.includes('This client needs a project before a link can be created.'));
+
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
   console.log('\n' + '='.repeat(64));
