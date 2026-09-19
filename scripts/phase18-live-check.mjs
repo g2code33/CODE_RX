@@ -46,12 +46,13 @@ const check = (name, condition, detail = '') => {
   console.log(`  ${passed ? '\u001b[32mPASS\u001b[0m' : '\u001b[31mFAIL\u001b[0m'}  ${name}${passed || !detail ? '' : ` — ${detail}`}`);
 };
 
-const json = async (method, path, body, token) => {
+const json = async (method, path, body, token, extraHeaders = {}) => {
   const response = await fetch(`${BASE}${path}`, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...extraHeaders,
       'cf-connecting-ip': `203.0.113.${Math.floor(Math.random() * 200) + 1}`,
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -218,9 +219,23 @@ const main = async () => {
   // in a browser preview the same path becomes the preview host. Printed here so
   // the address can be opened and checked by hand.
   const previewHost = process.env.E2B_SANDBOX_ID ? `https://8788-${process.env.E2B_SANDBOX_ID}.e2b.app` : BASE;
-  console.log(`\n  → direct link to send (valid 15 minutes):\n    ${previewHost}${linkPath}\n`);
+  // The server generates the whole address from the origin of the request that
+  // asked for it, so the address below is the server's, generated for the host
+  // the operator's browser is on.
+  const previewLink = await json('POST', `/api/phantom/clients/${clientId}/links`, {
+    projectId, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 15,
+  }, token, { Origin: previewHost });
+  const previewUrl = String(previewLink.json?.data?.url || '');
+  check('the server generates a complete http address for the site in use',
+    previewLink.status === 201 && previewUrl.startsWith(`${previewHost}/#client-portal/link/`),
+    previewUrl || JSON.stringify(previewLink.json).slice(0, 160));
+  check('that address is the server\u2019s own, not one the harness assembled',
+    previewUrl === `${previewHost}${String(previewLink.json?.data?.path || '')}`
+    && previewUrl.endsWith(String(previewLink.json?.data?.token || 'none')));
+  console.log(`\n  → direct link the server generated (valid 15 minutes):\n    ${previewUrl || `${previewHost}${linkPath}`}\n`);
   check('creating a link returns the address to send',
-    directLink.status === 201 && linkPath === `/#client-portal/link/${linkToken}`, linkPath);
+    directLink.status === 201 && linkPath === `/#client-portal/link/${linkToken}`
+    && String(directLink.json?.data?.url || '') === `${BASE}${linkPath}`, linkPath);
   check('the address is a full http link that resolves on the running site',
     /^http:\/\/[^/]+\/#client-portal\/link\/[A-Za-z0-9_-]{32,160}$/.test(linkUrl)
     && (await fetch(linkUrl)).status === 200);

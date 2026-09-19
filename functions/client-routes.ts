@@ -33,6 +33,7 @@ import {
 } from './lib/client-activity';
 import { CLIENT_NOTIFICATION_SETTINGS, notifyClientDocumentEvent } from './lib/client-notifications';
 import { cleanEmail, cleanOptionalStr, cleanStr } from './lib/validate';
+import { absoluteLinkAddress, requestOrigin } from './lib/link-address';
 import {
   clientThrottleKeys,
   clientPasskeyCodeScope,
@@ -1655,14 +1656,20 @@ export const registerClientRoutes = (app: ClientApp) => {
       },
     });
 
+    // The client app is hash-routed, so the link matches the existing
+    // #vault-share / #reset / #activate convention. It is returned as a
+    // complete address (and the path it was built from) so the operator — or
+    // any other API reader — holds one usable http link, never a fragment.
+    const linkPath = `/#client-portal/link/${token}`;
+    const linkUrl = absoluteLinkAddress(linkPath, requestOrigin(c.req.raw), c.env);
+
     return c.json({
       success: true,
       data: {
         id: publicId,
         token,
-        // The client app is hash-routed, so the copyable path matches the
-        // existing #vault-share / #reset / #activate convention.
-        path: `/#client-portal/link/${token}`,
+        path: linkPath,
+        url: linkUrl,
         mode: linkAccessMode(storedMode),
         destination,
         destinationLabel: describeLinkDestination({

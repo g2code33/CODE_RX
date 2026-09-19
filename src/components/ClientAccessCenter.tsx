@@ -589,7 +589,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
               expiresAt: payload.expiresAt,
               message,
               label: payload.mode === 'DIRECT_ACCESS' ? 'Temporary link — direct access' : 'Temporary link — access key required',
-              url: absoluteLinkUrl(payload.path, origin),
+              url: payload.url || absoluteLinkUrl(payload.path, origin),
               urlHint: linkShareHint(payload.mode, payload.destinationLabel, origin),
             });
             await refresh('A temporary link was created and is shown once.');
@@ -2089,7 +2089,7 @@ const LinkDialogHost = ({
 }: {
   client: any; projects: any[]; documents: any[]; onClose: () => void;
   onIssued: (
-    payload: { token: string; expiresAt: string; path: string; mode: LinkAccessMode; destinationLabel: string },
+    payload: { token: string; expiresAt: string; path: string; url?: string; mode: LinkAccessMode; destinationLabel: string },
     message: string,
   ) => void | Promise<void>;
 }) => {
@@ -2151,9 +2151,11 @@ const LinkDialogHost = ({
       await onIssued({
         token: result.data.token,
         expiresAt: result.data.expiresAt,
-        // The server returns the path the client app routes on; the panel makes
-        // it a full http address so the operator can send one usable thing.
+        // The server generates the full http address from the address the
+        // panel is being used on; the path is kept so an older response (or a
+        // response with no host) still becomes a usable link here.
         path: result.data.path,
+        url: result.data.url,
         mode: (result.data.mode === 'DIRECT_ACCESS' ? 'DIRECT_ACCESS' : 'REQUIRE_PASSKEY') as LinkAccessMode,
         destinationLabel: result.data.destinationLabel,
       }, result.message);

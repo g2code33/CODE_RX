@@ -4089,6 +4089,39 @@ const main = async () => {
   check('the address states its mode so the panel can explain what will happen',
     directLink.json.data.mode === 'DIRECT_ACCESS' && Boolean(directLink.json.data.destinationLabel));
 
+  // The server generates the whole address, not just the path: the operator —
+  // or any other reader of this response — holds one usable http link.
+  const directUrl = String(directLink.json?.data?.url || '');
+  check('creating a link generates a complete http address, not only a path',
+    /^https:\/\/portal\.test\/#client-portal\/link\/[A-Za-z0-9_-]{32,160}$/.test(directUrl), directUrl);
+  check('the generated address is the request origin joined to the routed path',
+    directUrl === `https://portal.test${directPath}` && directUrl.endsWith(directToken));
+  check('the generated address carries no client, project or database identifier',
+    !directUrl.includes(addressClient.id) && !directUrl.includes(addressProject.id)
+    && !/cli_|prj_|doc_|client_id|project_id/.test(directUrl));
+  check('the token is only ever in the fragment, so a request never carries it',
+    directUrl.indexOf('#') > 0 && !directUrl.slice(0, directUrl.indexOf('#')).includes(directToken));
+
+  const addressFromBrowser = await request('POST', `/api/phantom/clients/${addressClient.id}/links`, {
+    token: phantomToken,
+    headers: { Origin: 'https://preview.example.test' },
+    body: { projectId: addressProject.id, destination: 'project', mode: 'DIRECT_ACCESS' },
+  });
+  const browserUrl = String(addressFromBrowser.json?.data?.url || '');
+  check('the address is generated for the site the operator is actually using',
+    browserUrl.startsWith('https://preview.example.test/#client-portal/link/')
+    && browserUrl.endsWith(String(addressFromBrowser.json?.data?.token || 'none'))
+    && String(addressFromBrowser.json?.data?.path || '').startsWith('/#client-portal/link/'),
+    browserUrl);
+  const addressBadOrigin = await request('POST', `/api/phantom/clients/${addressClient.id}/links`, {
+    token: phantomToken,
+    headers: { Origin: 'https://evil.test/#/../x' },
+    body: { projectId: addressProject.id, destination: 'project', mode: 'DIRECT_ACCESS' },
+  });
+  check('a malformed or hostile origin is never echoed into the generated address',
+    String(addressBadOrigin.json?.data?.url || '').startsWith('https://portal.test/#client-portal/link/'),
+    String(addressBadOrigin.json?.data?.url || ''));
+
   const directRedeem = await redeem(directToken);
   check('opening the generated address lands on the destination with a live session',
     directRedeem.status === 200 && Boolean(directRedeem.json?.data?.session?.token)

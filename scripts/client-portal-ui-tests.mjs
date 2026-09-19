@@ -2076,6 +2076,19 @@ const main = async () => {
     clientSignInUrl(host) === `${host}/#client-portal`
     && !/TOKEN|passkey|CRX-/.test(clientSignInUrl(host)));
 
+  // The server generates the address too (from the request's own origin), so
+  // the panel spends it rather than making one up.
+  const apiLink = linkRead('src/lib/cloudflare.ts');
+  check('the link API contract carries the generated address, not only the path',
+    /id: string; token: string; path: string; url: string;/.test(apiLink));
+  check('the panel sends the address the server generated',
+    centerLink.includes('url: payload.url || absoluteLinkUrl(payload.path, origin)'));
+  check('the create dialog hands the generated address up to the reveal',
+    centerLink.includes('url: result.data.url,')
+    && centerLink.includes('path: result.data.path,'));
+  check('a response without a host still becomes a usable link in the panel',
+    centerLink.includes('absoluteLinkUrl(payload.path, origin)'));
+
   const directHint = linkShareHint('DIRECT_ACCESS', 'Project room', host);
   const passkeyHint = linkShareHint('REQUIRE_PASSKEY', 'Project room', host);
   check('direct access is explained in the operator’s words',
@@ -2135,8 +2148,8 @@ const main = async () => {
     !/href="[^"]*(CRX|passkey|key=|UC2)/i.test(keyReveal)
     && !/value="[^"]*#client-portal\?[^"]*"/.test(keyReveal));
 
-  check('the panel builds the address from the server path and the host it is served from',
-    centerLink.includes('url: absoluteLinkUrl(payload.path, origin)')
+  check('the panel uses the server address, and still builds one from the path it is served from',
+    centerLink.includes('url: payload.url || absoluteLinkUrl(payload.path, origin)')
     && centerLink.includes("window.location.origin")
     && !/#client-portal\/link\/\$\{/.test(centerLink));
   check('the panel explains both modes where the operator reads them',

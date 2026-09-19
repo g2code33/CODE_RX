@@ -832,7 +832,7 @@ export const clientAccessCenter = {
   createLink: (clientId: string, data: any) =>
     apiCall<{
       data: {
-        id: string; token: string; path: string; expiresAt: string; expiresInMinutes: number;
+        id: string; token: string; path: string; url: string; expiresAt: string; expiresInMinutes: number;
         mode: string; destination: string; destinationLabel: string; intent: string;
         maxUses: number | null; allowView: boolean; allowDownload: boolean;
         document: { id: string; title: string; reference: string } | null;

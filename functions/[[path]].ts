@@ -19,6 +19,7 @@ import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parse
 import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLevel, type CalLevelDefinition, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
+import { publicSiteUrl } from './lib/link-address';
 import { registerClientRoutes } from './client-routes';
 import { moveToRecycleBin } from './lib/recycle';
 import { CLIENT_ARTIFACT_PREFIX } from './lib/client-document-delivery';
@@ -63,13 +64,9 @@ const syncStoredCalLevelLabels = async (db: D1Database, levels: readonly CalLeve
 };
 
 // Never derive security links from an incoming Host header. A configured
-// SITE_URL is preferred; the known Pages URL is the safe fallback.
-const publicSiteUrl = (env: Env) => {
-  const configured = String(env.SITE_URL || '').trim().replace(/\/+$/, '');
-  return /^https?:\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(configured)
-    ? configured
-    : 'https://coderxsociety.pages.dev';
-};
+// SITE_URL is preferred; the known Pages URL is the safe fallback. Shared with
+// client-routes so every generated link comes from one rule.
+// (publicSiteUrl is imported from ./lib/link-address.)
 
 const publicVaultShareUrl = (env: Env, token: string) => `${publicSiteUrl(env)}/#vault-share?token=${encodeURIComponent(token)}`;
 
