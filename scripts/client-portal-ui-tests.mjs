@@ -77,6 +77,9 @@ const bundle = async () => {
         export { INITIAL_SITE_CONTENT, normalizeSiteContent } from './src/data/siteState';
         export * from './src/data/siteEmojis';
         export * from './functions/lib/client-activity';
+        export * from './src/lib/vaultUploads';
+        export { VaultUploadField } from './src/components/VaultUploadField';
+        export { VaultUploadDialog } from './src/components/VaultUploadDialog';
       `,
       resolveDir: ROOT,
       loader: 'tsx',
@@ -126,6 +129,8 @@ const main = async () => {
     SiteFlow, INITIAL_SITE_CONTENT, normalizeSiteContent,
     PortalSearch, AuthModal, AppDialogHost, appDialog, Modal, useModalBehaviour,
     SITE_EMOJIS, SITE_EMOJI_MEDIA_PREFIX, siteEmojiMediaKey, siteEmojiReplacement, splitEmojiRuns, isSiteEmoji,
+    titleFromFileName, isStampableUploadMime, STAMPABLE_UPLOAD_ACCEPT, STAMPABLE_UPLOAD_LABEL,
+    MAX_UPLOAD_BYTES, sectionAcceptsDocuments, uploadDocumentStatus, VaultUploadField, VaultUploadDialog,
     splitAccessKey, joinAccessKey, validateAccessKeyGroups,
     ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH,
     looksLikeLinkToken, linkPath, ClientLinkState,
@@ -505,10 +510,11 @@ const main = async () => {
   check('the workspace renders inside the existing PHANTOM shell', /CLIENT ACCESS CENTER/.test(centerHtml));
   const centerSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessCenter.tsx'), 'utf8');
   const orderedSections = centerSource.match(/const SECTIONS:[\s\S]*?\];/)[0];
-  check('the workspace defines exactly the six required sections in order',
-    (orderedSections.match(/'([a-z]+)'(?=,)/g) || []).join(',') === "'clients','projects','documents','links','activity','permissions'",
-    orderedSections.replace(/\s+/g, ' ').slice(0, 160));
-  for (const label of ['Clients', 'Projects', 'Documents', 'Temporary Links', 'Activity', 'Permissions']) {
+  check('the workspace defines the required sections in order',
+    // Phase 18 restores the access-key section between Documents and Links.
+    (orderedSections.match(/'([a-z]+)'(?=,)/g) || []).join(',') === "'clients','projects','documents','keys','links','activity','permissions'",
+    orderedSections.replace(/\s+/g, ' ').slice(0, 200));
+  for (const label of ['Clients', 'Projects', 'Documents', 'Access keys', 'Temporary Links', 'Activity', 'Permissions']) {
     check(`the ${label} section is offered in the workspace navigation`, centerHtml.includes(label));
   }
   check('the client list shows name, contact summary, status and activity',
@@ -1886,6 +1892,152 @@ const main = async () => {
     !/text-slate-300|placeholder:text-slate-300/.test(
       fs.readdirSync(path.join(ROOT, 'src/components')).filter((n) => n.endsWith('.tsx'))
         .map((n) => readSrc(`src/components/${n}`)).join('\n')));
+
+  // -------------------------------------------------------------------------
+  // Phase 18 — uploading a document file, and issuing an access key.
+  //
+  // The rules under test: the upload reuses the endpoints that already exist
+  // (no second storage, no second stamp), the stamping pipeline is still the
+  // only artifact producer, and access-key creation is reachable again.
+  // -------------------------------------------------------------------------
+  group('23. Phase 18 — upload a document, stamp it, issue an access key');
+  const phase18Read = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8');
+  const center18 = phase18Read('src/components/ClientAccessCenter.tsx');
+  const vault18 = phase18Read('src/components/Vault.tsx');
+  const uploads18 = phase18Read('src/lib/vaultUploads.ts');
+  const uploadField18 = phase18Read('src/components/VaultUploadField.tsx');
+  const uploadDialog18 = phase18Read('src/components/VaultUploadDialog.tsx');
+  const functionSource18 = phase18Read('functions/[[path]].ts');
+
+  check('a file name becomes a usable document title', titleFromFileName('Phase 1_report-final.pdf') === 'Phase 1 report final'
+    && titleFromFileName('deliverable.docx') === 'deliverable');
+  check('the upload field accepts exactly what the stamping engine can render',
+    isStampableUploadMime('application/pdf')
+    && isStampableUploadMime('image/png')
+    && isStampableUploadMime('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    && isStampableUploadMime('application/vnd.oasis.opendocument.text')
+    && isStampableUploadMime('text/plain') && isStampableUploadMime('text/csv')
+    && isStampableUploadMime('application/json')
+    && !isStampableUploadMime('image/jpeg') && !isStampableUploadMime('image/gif')
+    && !isStampableUploadMime('image/webp') && !isStampableUploadMime('application/zip')
+    && !isStampableUploadMime('application/msword')
+    && !isStampableUploadMime('application/x-msdownload') && !isStampableUploadMime(''));
+  check('the file picker advertises the accepted formats', STAMPABLE_UPLOAD_ACCEPT.includes('.pdf')
+    && STAMPABLE_UPLOAD_ACCEPT.includes('.docx') && STAMPABLE_UPLOAD_ACCEPT.includes('.odt')
+    && STAMPABLE_UPLOAD_ACCEPT.includes('image/png') && STAMPABLE_UPLOAD_LABEL.includes('Word'));
+  check('the upload ceiling matches the server', MAX_UPLOAD_BYTES === 10 * 1024 * 1024);
+  check('a section only offers documents when the operator may create there',
+    sectionAcceptsDocuments({ permissions: { create: true } }) === true
+    && sectionAcceptsDocuments({ permissions: { create: false } }) === false
+    && sectionAcceptsDocuments(null) === false);
+  check('a manager files the upload as an active document and everyone else as a draft',
+    uploadDocumentStatus({ permissions: { manage: true } }) === 'active'
+    && uploadDocumentStatus({ permissions: { create: true } }) === 'draft'
+    && uploadDocumentStatus(null) === 'draft');
+
+  // --- the upload field renders for real ------------------------------------
+  const uploadFieldHtml = render(React.createElement(VaultUploadField, { file: null, onFile: () => {} }));
+  check('the upload field offers a drag target and a file picker',
+    uploadFieldHtml.includes('Drag the document here') && uploadFieldHtml.includes('choose a file')
+    && uploadFieldHtml.includes('type="file"') && uploadFieldHtml.includes('Up to 10 MB'));
+  const chosenHtml = render(React.createElement(VaultUploadField, {
+    file: { name: 'phase-18-report.pdf', size: 512 * 1024, type: 'application/pdf' }, onFile: () => {},
+  }));
+  check('a chosen file shows its name, size and the replace control',
+    chosenHtml.includes('phase-18-report.pdf') && chosenHtml.includes('512 KB')
+    && chosenHtml.includes('Replace') && chosenHtml.includes('Remove'));
+  check('removing focus outlines in the new field is not allowed',
+    !/outline-none(?![\s\S]{0,80}focus-visible:ring)/.test(uploadField18.replace(/className="sr-only"/g, '')));
+
+  const uploadDialogHtml = render(React.createElement(VaultUploadDialog, {
+    section: { title: 'Technology', slug: 'technology', permissions: { create: true, manage: true } },
+    onClose: () => {}, onCreated: () => {}, onError: () => {},
+  }));
+  check('the internal upload dialog names the section it files into and blocks an empty submit',
+    uploadDialogHtml.includes('Upload a document') && uploadDialogHtml.includes('Technology')
+    && uploadDialogHtml.includes('Document title') && /disabled=""/.test(uploadDialogHtml));
+
+  // --- the client document side ---------------------------------------------
+  check('the documents panel has an upload section of its own',
+    center18.includes('Upload a document') && center18.includes('Upload &amp; stamp')
+    && (center18.match(/onClick=\{onUpload\}/g) || []).length >= 2
+    && center18.includes('onUpload={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id, upload: true })}'));
+  check('the publishing dialog offers uploading as a third source',
+    /useState<'text' \| 'vault' \| 'upload'>/.test(center18) && center18.includes('1 · Upload a document')
+    && center18.includes('VaultUploadField'));
+  check('the upload is filed in the Vault and then published, in that order',
+    center18.indexOf('uploadFileAsVaultDocument({') > -1
+    && center18.indexOf('uploadFileAsVaultDocument({') < center18.indexOf('clientAccessCenter.createDocument(client.id', center18.indexOf('uploadFileAsVaultDocument({')));
+  check('the client document pins the internal document the upload created',
+    /vaultDocumentId: String\(filed\.documentId\)/.test(center18));
+  check('the stamped copy is produced by the existing pipeline, not by the browser',
+    /clientAccessCenter\.prepareDelivery\(documentId, true\)/.test(center18)
+    && !/new FileReader|arrayBuffer\(\)|toBase64|base64/.test(center18));
+  check('the browser never builds a document payload out of file bytes',
+    !/new FormData\(\)/.test(center18) && !/fetch\(/.test(center18));
+  check('the upload reuses the two Vault endpoints that already exist',
+    uploads18.includes('db.vault.uploadFile(file, section)')
+    && uploads18.includes('db.vault.createDocument({')
+    && !/fetch\(|apiCall</.test(uploads18));
+  check('the uploaded file becomes the whole document — one attachment block, no prose',
+    /contentJson: JSON\.stringify\(\{ version: 1, blocks: \[block\] \}\)/.test(uploads18));
+  check('a half-finished upload says which half happened',
+    uploads18.includes('The file was uploaded, but the internal document could not be created')
+    && center18.includes('retry to publish it'));
+
+  // --- the internal document side -------------------------------------------
+  check('the Vault offers uploading next to New Document',
+    vault18.includes('<Upload className="h-4 w-4" />Upload Document')
+    && vault18.includes('onUpload={() => setUploadOpen(true)}'));
+  check('the internal upload opens the document it just created',
+    /onCreated=\{async \(created\) => \{[\s\S]{0,200}openDocument\(created\.documentId\)/.test(vault18)
+    && vault18.includes('VaultUploadDialog'));
+  check('the internal upload dialog is only shown for a section that accepts documents',
+    /uploadOpen && activeSection \?/.test(vault18));
+
+  // --- access key creation is reachable again -------------------------------
+  check('the access-key section is on the client workspace again',
+    /'keys', 'Access keys', KeyRound/.test(center18) && center18.includes("type Section = 'clients' | 'projects' | 'documents' | 'keys'"));
+  check('the header offers issuing an access key',
+    /<KeyRound className="h-4 w-4" \/> Issue access key/.test(center18));
+  check('project cards can issue a key already pinned to that project',
+    /onIssueKey=\{\(project: any\) => setKeyDialog\(\{ clientId: detail\.id, projectId: project\.id \}\)\}/.test(center18));
+  check('the key dialog is opened from the UI, not only closed',
+    (center18.match(/setKeyDialog\(\{ clientId/g) || []).length >= 2
+    && /keyDialog && detail[\s\S]{0,200}<KeyDialog/.test(center18));
+  check('a generated key is still shown once and never listed',
+    center18.includes('onIssued={(payload) => { setKeyDialog(null); setRevealedKey(payload);')
+    && center18.includes('KeyRevealDialog') && !/key_hint.*rawKey/i.test(center18));
+  check('the keys panel keeps regeneration and revocation on the existing endpoints',
+    center18.includes('clientAccessCenter.regenerateKey(key.id)')
+    && center18.includes('clientAccessCenter.revokeKey(key.id)')
+    && center18.includes('clients.keys.regenerate') && center18.includes('clients.keys.revoke'));
+  check('an empty key list is a professional empty state, not a blank panel',
+    center18.includes('No access key has been issued yet'));
+
+  // --- one stamping pipeline, and nothing new to keep alive ------------------
+  const stampOwners = fs.readdirSync(path.join(ROOT, 'functions/lib'))
+    .filter((name) => name.endsWith('.ts'))
+    .filter((name) => phase18Read(`functions/lib/${name}`).includes('CLIENT PROJECT DOCUMENT'));
+  check('the stamp is defined in exactly one place and the upload did not add a second',
+    stampOwners.length === 1 && stampOwners[0] === 'client-delivery-pdf.ts');
+  check('the delivery decision is still a single planner',
+    (phase18Read('functions/lib/client-document-delivery.ts').match(/export const planClientDelivery/g) || []).length === 1
+    && (phase18Read('functions/lib/client-delivery-context.ts').match(/export const resolveClientDelivery/g) || []).length === 1);
+  const publicMimeBlock = (functionSource18.match(/const SAFE_UPLOAD_MIME_TYPES = new Set\(\[([\s\S]*?)\]\);/) || [])[1] || '';
+  const vaultMimeBlock = (functionSource18.match(/const SAFE_VAULT_UPLOAD_MIME_TYPES = new Set\(\[([\s\S]*?)\]\);/) || [])[1] || '';
+  check('the Vault allow-list was widened for office files, and the public one was not',
+    vaultMimeBlock.includes('openxmlformats') && vaultMimeBlock.includes('oasis.opendocument')
+    && vaultMimeBlock.includes('...SAFE_UPLOAD_MIME_TYPES')
+    && publicMimeBlock.length > 0 && !publicMimeBlock.includes('openxmlformats')
+    && functionSource18.includes('const isSafeVaultUploadMime = (mime: string) => SAFE_VAULT_UPLOAD_MIME_TYPES.has(mime.toLowerCase());'),
+    publicMimeBlock.replace(/\s+/g, ' ').slice(0, 120));
+  check('the Vault upload route is the one that accepts office documents',
+    /if \(!isSafeVaultUploadMime\(mime\)\) return c\.json\(\{ success: false, error: `File type "\$\{mime\}" is not allowed\.` \}, 415\);/.test(functionSource18));
+  check('no client-side upload collects the raw key or the artifact',
+    !/storageReference|client-exports/.test(center18) && !/storageReference|client-exports/.test(uploads18));
+  check('the new surfaces keep the readable-text rule from Phase 16',
+    !/text-slate-300|placeholder:text-slate-300/.test([center18, vault18, uploads18, uploadField18, uploadDialog18].join('\n')));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

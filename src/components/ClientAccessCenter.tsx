@@ -1,10 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useModalBehaviour } from './AppDialog';
 import {
-  Activity, AlertTriangle, Archive, CheckCircle2, Clock, Copy, Eye, FileText, KeyRound,
+  Activity, AlertTriangle, Archive, CheckCircle2, Clock, Copy, Eye, FileText, FileUp, KeyRound,
   Link2, Loader2, Pencil, Plus, RefreshCw, ShieldAlert, ShieldCheck, Users, X,
 } from 'lucide-react';
-import { clientAccessCenter } from '../lib/cloudflare';
+import { clientAccessCenter, db } from '../lib/cloudflare';
+import { VaultUploadField } from './VaultUploadField';
+import {
+  STAMPABLE_UPLOAD_ACCEPT,
+  STAMPABLE_UPLOAD_LABEL,
+  isStampableUploadMime,
+  sectionAcceptsDocuments,
+  uploadDocumentStatus,
+  uploadFileAsVaultDocument,
+  type UploadedVaultDocument,
+} from '../lib/vaultUploads';
 import { appDialog } from './AppDialog';
 import { ClientProjectRoom, type ClientPortalContext, type RoomTransport } from './ClientProjectRoom';
 import { CATEGORY_LABELS } from '../lib/projectRoom';
@@ -26,12 +36,13 @@ import {
   type LinkDestinationId,
 } from '../lib/linkAccess';
 
-type Section = 'clients' | 'projects' | 'documents' | 'links' | 'activity' | 'permissions';
+type Section = 'clients' | 'projects' | 'documents' | 'keys' | 'links' | 'activity' | 'permissions';
 
 const SECTIONS: Array<[Section, string, any]> = [
   ['clients', 'Clients', Users],
   ['projects', 'Projects', Archive],
   ['documents', 'Documents', FileText],
+  ['keys', 'Access keys', KeyRound],
   ['links', 'Temporary Links', Link2],
   ['activity', 'Activity', Activity],
   ['permissions', 'Permissions', ShieldCheck],
@@ -150,7 +161,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [showProjectForm, setShowProjectForm] = useState<null | { mode: 'create' } | { mode: 'edit'; project: any }>(null);
   const [keyDialog, setKeyDialog] = useState<null | { clientId: string; projectId?: string }>(null);
   const [revealedKey, setRevealedKey] = useState<null | { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string }>(null);
-  const [publishFlow, setPublishFlow] = useState<null | { clientId: string; projectId?: string; document?: any }>(null);
+  const [publishFlow, setPublishFlow] = useState<null | { clientId: string; projectId?: string; document?: any; upload?: boolean }>(null);
   const [linkDialog, setLinkDialog] = useState<null | { clientId: string }>(null);
   const [previewClient, setPreviewClient] = useState<null | { client: any; projectId: string; room: any; projects: any[] }>(null);
 
@@ -439,6 +450,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                   onArchive={() => void setStatus(clientAccessCenter.setClientStatus, detail.id, 'archived', 'Client archived and access closed.', refresh, setError)}
                   onRevokeAll={() => void revokeAll(detail, refresh, setError)}
                   onPreview={() => void openPreview(detail)}
+                  onIssueKey={() => setKeyDialog({ clientId: detail.id })}
                   busy={busy}
                 />
               )}
@@ -450,6 +462,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                   onEdit={(project: any) => setShowProjectForm({ mode: 'edit', project })}
                   onArchive={(project: any) => void setProjectArchived(project, true, refresh, setError)}
                   onRestore={(project: any) => void setProjectArchived(project, false, refresh, setError)}
+                  onIssueKey={(project: any) => setKeyDialog({ clientId: detail.id, projectId: project.id })}
                   busy={busy}
                 />
               )}
@@ -458,10 +471,21 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                 <DocumentsPanel
                   can={can} client={detail} documents={documents} projects={projects}
                   onPrepare={(document: any) => void prepareStampedCopy(document, refresh, onMessage, setError)}
+                  onUpload={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id, upload: true })}
                   onPublish={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id })}
                   onLifecycle={(document: any, state: string) => void changeLifecycle(document, state, refresh, setError)}
                   onEdit={(document: any) => setPublishFlow({ clientId: detail.id, projectId: document.project?.id, document })}
                   onDelete={(document: any) => void deleteDocument(document, refresh, setError)}
+                  busy={busy}
+                />
+              )}
+
+              {section === 'keys' && (
+                <KeysPanel
+                  can={can} client={detail} keys={keys}
+                  onIssue={() => setKeyDialog({ clientId: detail.id })}
+                  onRegenerated={(payload) => { setRevealedKey(payload); void refresh('A replacement key was generated. The previous key and its sessions no longer work.'); }}
+                  onRevoked={(key: any) => void revokeKey(key, refresh, setError)}
                   busy={busy}
                 />
               )}
@@ -540,6 +564,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
           projects={projects}
           existing={publishFlow.document}
           presetProjectId={publishFlow.projectId}
+          startWithUpload={publishFlow.upload === true}
           onClose={() => setPublishFlow(null)}
           onSaved={async (message) => { setPublishFlow(null); await refresh(message); }}
         />
@@ -567,12 +592,12 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
 // ---------------------------------------------------------------------------
 
 const ClientsPanel = ({
-  can, client, keyCount, projectCount, publishedCount, lastActivityAt, onEdit, onSuspend, onReactivate, onArchive, onRevokeAll, onPreview, busy,
+  can, client, keyCount, projectCount, publishedCount, lastActivityAt, onEdit, onSuspend, onReactivate, onArchive, onRevokeAll, onPreview, onIssueKey, busy,
 }: {
   can: (capability: string) => boolean;
   client: any; keyCount: number; projectCount: number; publishedCount: number; lastActivityAt: string | null;
   onEdit: () => void; onSuspend: () => void; onReactivate: () => void; onArchive: () => void;
-  onRevokeAll: () => void; onPreview: () => void; busy: boolean;
+  onRevokeAll: () => void; onPreview: () => void; onIssueKey: () => void; busy: boolean;
 }) => (
   <div>
     <div className="rounded-2xl border border-slate-100 bg-white p-5">
@@ -591,6 +616,11 @@ const ClientsPanel = ({
           {client.notes ? <p className="mt-3 rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs font-medium text-slate-600">Internal note: {client.notes}</p> : null}
         </div>
         <div className="flex flex-wrap gap-2">
+          {can('clients.keys.create') ? (
+            <button onClick={onIssueKey} disabled={busy} className="mini-button mini-button--primary">
+              <KeyRound className="h-4 w-4" /> Issue access key
+            </button>
+          ) : null}
           {can('clients.edit') ? <button onClick={onEdit} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
           {can('clients.preview') ? (
             <button onClick={onPreview} disabled={busy} className="mini-button !border-emerald-200 !bg-emerald-50 !text-emerald-800">
@@ -649,11 +679,11 @@ const ClientsPanel = ({
 );
 
 const ProjectsPanel = ({
-  can, client, projects, documents, keys, onCreate, onEdit, onArchive, onRestore, busy,
+  can, client, projects, documents, keys, onCreate, onEdit, onArchive, onRestore, onIssueKey, busy,
 }: {
   can: (capability: string) => boolean;
   client: any; projects: any[]; documents: any[]; keys: any[]; onCreate: () => void; onEdit: (project: any) => void;
-  onArchive: (project: any) => void; onRestore: (project: any) => void; busy: boolean;
+  onArchive: (project: any) => void; onRestore: (project: any) => void; onIssueKey: (project: any) => void; busy: boolean;
 }) => (
   <div>
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -681,6 +711,9 @@ const ProjectsPanel = ({
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {can('clients.keys.create') && !project.isArchived ? (
+                <button onClick={() => onIssueKey(project)} disabled={busy} className="mini-button"><KeyRound className="h-4 w-4" /> Issue access key</button>
+              ) : null}
               {can('clients.projects.edit') ? <button onClick={() => onEdit(project)} className="mini-button"><Pencil className="h-4 w-4" /> Edit</button> : null}
               {can('clients.projects.archive') ? (project.isArchived
                 ? <button onClick={() => onRestore(project)} className="mini-button border border-emerald-200 bg-emerald-50 !text-emerald-800">Restore</button>
@@ -694,10 +727,12 @@ const ProjectsPanel = ({
 );
 
 const DocumentsPanel = ({
-  can, client, documents, projects, onPublish, onLifecycle, onEdit, onDelete, onPrepare, busy,
+  can, client, documents, projects, onPublish, onUpload, onLifecycle, onEdit, onDelete, onPrepare, busy,
 }: {
   can: (capability: string) => boolean;
   client: any; documents: any[]; projects: any[]; onPublish: () => void;
+  /** Phase 18 — publish a document straight from an uploaded file. */
+  onUpload: () => void;
   onLifecycle: (document: any, state: string) => void; onEdit: (document: any) => void;
   onDelete: (document: any) => void;
   /** Renders (or refreshes) the stamped client copy on the server. */
@@ -715,11 +750,36 @@ const DocumentsPanel = ({
         </p>
       </div>
       {can('clients.documents.create') ? (
-        <button onClick={onPublish} className="mini-button mini-button--primary" disabled={busy || !projects.length}>
-          <Plus className="h-4 w-4" /> Publish to client
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onUpload} className="mini-button mini-button--primary" disabled={busy || !projects.length}>
+            <FileUp className="h-4 w-4" /> Upload a document
+          </button>
+          <button onClick={onPublish} className="mini-button" disabled={busy || !projects.length}>
+            <Plus className="h-4 w-4" /> Publish to client
+          </button>
+        </div>
       ) : null}
     </div>
+
+    {can('clients.documents.create') && projects.length ? (
+      <button
+        onClick={onUpload}
+        disabled={busy}
+        className="mt-4 flex w-full flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
+      >
+        <span className="flex items-center gap-3">
+          <FileUp className="h-5 w-5 text-emerald-600" />
+          <span>
+            <span className="block text-sm font-black text-slate-800">Upload a document for {client.name}</span>
+            <span className="block text-[11px] font-semibold text-slate-500">
+              Pick the file, choose the Vault section that keeps the internal original, and the stamped client copy is rendered
+              by the same pipeline — the client never receives the source file.
+            </span>
+          </span>
+        </span>
+        <span className="text-[11px] font-black uppercase tracking-wider text-emerald-700">Upload &amp; stamp</span>
+      </button>
+    ) : null}
     <div className="mt-4 space-y-3">
       {documents.length ? documents.map((document) => (
         <article key={document.id} className="rounded-2xl border border-slate-100 bg-white p-4">
@@ -772,6 +832,107 @@ const DocumentsPanel = ({
       )) : <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">Nothing has been published to {client.name} yet.</p>}
     </div>
   </div>
+  );
+};
+
+const KeysPanel = ({
+  can, client, keys, onIssue, onRegenerated, onRevoked, busy,
+}: {
+  can: (capability: string) => boolean;
+  client: any; keys: any[]; onIssue: () => void;
+  onRegenerated: (payload: { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string }) => void;
+  onRevoked: (key: any) => void; busy: boolean;
+}) => {
+  const [hideRevoked, setHideRevoked] = useState(false);
+  const [workingId, setWorkingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const visible = hideRevoked ? keys.filter((key) => key.status !== 'revoked') : keys;
+
+  const regenerate = async (key: any) => {
+    setError(null);
+    setWorkingId(key.id);
+    try {
+      const result = await clientAccessCenter.regenerateKey(key.id);
+      onRegenerated({
+        passkey: result.data.passkey,
+        hint: result.data.hint,
+        expiresAt: null,
+        message: result.message,
+        label: key.label || undefined,
+      });
+    } catch (failure: any) {
+      setError(failure?.message || 'A replacement key could not be generated.');
+    } finally {
+      setWorkingId(null);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-lg font-black text-slate-900">Access keys</h4>
+          <p className="text-xs font-medium text-slate-500">
+            Keys open {client.name}&apos;s project room from the sign-in page. A key is shown once when it is generated and is
+            never stored in readable form, so it can never be listed or recovered here.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {keys.length ? (
+            <button onClick={() => setHideRevoked((value) => !value)} className="mini-button">
+              {hideRevoked ? 'Show revoked' : 'Hide revoked'}
+            </button>
+          ) : null}
+          {can('clients.keys.create') ? (
+            <button onClick={onIssue} className="mini-button mini-button--primary" disabled={busy}>
+              <KeyRound className="h-4 w-4" /> Issue access key
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-sm font-semibold text-rose-800">{error}</p> : null}
+
+      <div className="mt-4 space-y-3">
+        {visible.length ? visible.map((key) => (
+          <article key={key.id} className="rounded-2xl border border-slate-100 bg-white p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-mono text-sm font-black tracking-wider text-slate-900">{key.hint || 'key'}</p>
+                  <Pill tone={key.status === 'active' ? 'active' : 'revoked'}>{key.status}</Pill>
+                  {key.project ? <Pill>{key.project.name}</Pill> : <Pill>no project pin</Pill>}
+                </div>
+                <p className="mt-1 text-[11px] font-semibold text-slate-500">
+                  {key.label ? `${key.label} · ` : ''}Issued {formatWhen(key.createdAt)}
+                  {' · '}{key.lastUsedAt ? `last used ${formatWhen(key.lastUsedAt)}` : 'never used'}
+                  {key.expiresAt ? ` · expires ${formatWhen(key.expiresAt)}` : ' · no expiry'}
+                  {key.revokedAt ? ` · revoked ${formatWhen(key.revokedAt)}` : ''}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {can('clients.keys.regenerate') ? (
+                  <button onClick={() => void regenerate(key)} disabled={workingId === key.id} className="mini-button" title="Replace this key with a new one">
+                    {workingId === key.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Regenerate
+                  </button>
+                ) : null}
+                {can('clients.keys.revoke') && key.status === 'active' ? (
+                  <button onClick={() => onRevoked(key)} disabled={workingId === key.id} className="mini-button border border-rose-200 bg-rose-50 !text-rose-700">
+                    Revoke
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </article>
+        )) : (
+          <p className="rounded-2xl border border-slate-100 bg-white px-5 py-10 text-center text-sm font-semibold text-slate-500">
+            {keys.length
+              ? 'Every key for this client has been revoked. Issue a new one to let them back in.'
+              : 'No access key has been issued yet. Issue one and hand it to the client — it opens only their project room.'}
+          </p>
+        )}
+      </div>
+    </div>
   );
 };
 
@@ -1508,14 +1669,24 @@ const KeyRevealDialog = ({
  * source → client → project → section → view/download → publish.
  */
 const PublishDialog = ({
-  client, projects, existing, presetProjectId, onClose, onSaved,
+  client, projects, existing, presetProjectId, startWithUpload, onClose, onSaved,
 }: {
   client: any; projects: any[]; existing?: any; presetProjectId?: string;
+  /** Phase 18 — open directly on the upload step from the documents panel. */
+  startWithUpload?: boolean;
   onClose: () => void; onSaved: (message: string) => void | Promise<void>;
 }) => {
-  const [source, setSource] = useState<'text' | 'vault'>(existing?.source === 'vault' ? 'vault' : 'text');
+  const [source, setSource] = useState<'text' | 'vault' | 'upload'>(
+    existing?.source === 'vault' ? 'vault' : startWithUpload && !existing ? 'upload' : 'text',
+  );
   const [vaultSources, setVaultSources] = useState<any[]>([]);
   const [vaultDocumentId, setVaultDocumentId] = useState<string>('');
+  // Phase 18 — upload a document file: the bytes go to the Vault through the
+  // existing upload endpoint, and the client copy is produced by the one
+  // stamping pipeline. The source file is never sent to the client.
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [vaultSections, setVaultSections] = useState<any[]>([]);
+  const [sectionSlug, setSectionSlug] = useState<string>('');
   const [projectId, setProjectId] = useState(existing?.projectId || presetProjectId || projects.find((project) => !project.isArchived)?.id || '');
   const [category, setCategory] = useState(existing?.category || 'document');
   const [title, setTitle] = useState(existing?.title || '');
@@ -1534,17 +1705,71 @@ const PublishDialog = ({
       .catch(() => setVaultSources([]));
   }, [source]);
 
+  useEffect(() => {
+    if (source !== 'upload') return;
+    // The internal original has to be filed somewhere in the Vault, so the
+    // operator picks from the sections they may create documents in.
+    db.vault.sections()
+      .then((rows) => {
+        const usable = (rows || []).filter((row: any) => sectionAcceptsDocuments(row) && !row.is_sensitive);
+        setVaultSections(usable);
+        setSectionSlug((current) => current || usable[0]?.slug || '');
+      })
+      .catch(() => setVaultSections([]));
+  }, [source]);
+
   const submit = async (publishNow: boolean) => {
     setError(null);
     if (!projectId) { setError('Choose the client and project this document belongs to.'); return; }
     if (title.trim().length < 1) { setError('A document title is required.'); return; }
     if (!existing && source === 'vault' && !vaultDocumentId) { setError('Choose the internal document to publish.'); return; }
     if (!existing && source === 'text' && contentText.trim().length < 1) { setError('Provide the client-facing document text.'); return; }
+    if (!existing && source === 'upload') {
+      if (!uploadFile) { setError('Choose the document file to upload.'); return; }
+      if (!isStampableUploadMime(uploadFile.type)) {
+        setError(`A stamped Code Rx copy cannot be produced from ${uploadFile.type || 'that file type'}. Upload ${STAMPABLE_UPLOAD_LABEL}.`);
+        return;
+      }
+      if (!sectionSlug) { setError('Choose the Vault section that should keep the internal original.'); return; }
+    }
 
     setSaving(true);
+    // Declared outside the try so the catch can name the internal document if
+    // the second half of the upload flow fails.
+    let filedDocument: UploadedVaultDocument | null = null;
     try {
       let documentId = existing?.id as string | undefined;
-      if (!existing) {
+      let stampNote = '';
+      if (!existing && source === 'upload' && uploadFile) {
+        // 1 — the file becomes a real internal Vault document (existing upload
+        //     endpoint + existing create endpoint; one attachment, one snapshot)
+        const filed = await uploadFileAsVaultDocument({
+          file: uploadFile,
+          section: sectionSlug,
+          title: title.trim(),
+          status: uploadDocumentStatus(vaultSections.find((row) => row.slug === sectionSlug)),
+        });
+        filedDocument = filed;
+        // 2 — the client document pins that internal document, exactly like the
+        //     "use an internal document" path does
+        const created = await clientAccessCenter.createDocument(client.id, {
+          projectId,
+          category,
+          title: title.trim(),
+          summary: summary.trim(),
+          version: version.trim() || '1.0',
+          vaultDocumentId: String(filed.documentId),
+        });
+        documentId = created.data.id;
+        // 3 — the one existing stamping pipeline renders the watermarked copy
+        try {
+          const delivery = await clientAccessCenter.prepareDelivery(documentId, true);
+          const kilobytes = Math.max(1, Math.round(Number(delivery.data?.sizeBytes || 0) / 1024));
+          stampNote = ` Stamped client copy: ${delivery.data?.label || 'client copy'} (${kilobytes} KB, ${delivery.data?.cached ? 'cached' : 'newly rendered'}).`;
+        } catch (deliveryFailure: any) {
+          stampNote = ` The stamped client copy could not be prepared yet — ${deliveryFailure?.message || 'try again from the document list.'}`;
+        }
+      } else if (!existing) {
         const created = await clientAccessCenter.createDocument(client.id, {
           projectId,
           category,
@@ -1568,10 +1793,16 @@ const PublishDialog = ({
         }
       }
       await onSaved(publishNow
-        ? `Published to ${client.name}. The client can see it now.`
-        : 'Saved as a draft. Nothing is visible to the client yet.');
+        ? `Published to ${client.name}. The client can see it now.${stampNote}`
+        : `Saved as a draft. Nothing is visible to the client yet.${stampNote}`);
     } catch (failure: any) {
-      setError(failure?.message || 'This document could not be saved.');
+      // A file that reached the Vault is a real internal document: say which
+      // one, so a failed second step is never mistaken for a lost upload.
+      const filed = filedDocument as UploadedVaultDocument | null;
+      setError([
+        failure?.message || 'This document could not be saved.',
+        filed ? `The file is filed in the Vault as ${filed.documentCode || `document #${filed.documentId}`} — retry to publish it.` : '',
+      ].filter(Boolean).join(' '));
     } finally {
       setSaving(false);
     }
@@ -1595,6 +1826,39 @@ const PublishDialog = ({
             <button onClick={() => setSource('vault')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'vault' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
               1 · Use an internal document
             </button>
+            <button onClick={() => setSource('upload')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'upload' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-600'}`}>
+              1 · Upload a document
+            </button>
+          </div>
+        ) : null}
+
+        {!existing && source === 'upload' ? (
+          <div className="space-y-4">
+            <VaultUploadField
+              file={uploadFile}
+              onFile={setUploadFile}
+              accept={STAMPABLE_UPLOAD_ACCEPT}
+              disabled={saving}
+              busy={saving}
+              hint={`Accepted: ${STAMPABLE_UPLOAD_LABEL}. The file is filed in the Vault as the internal original and the stamped Code Rx copy is rendered for the client — the source file itself is never delivered.`}
+            />
+            <Field
+              label="Vault section for the internal original"
+              hint="The upload becomes a real internal document in this section, so the original is filed, searchable and auditable in the Vault before anything reaches the client."
+            >
+              <select className={inputClass} value={sectionSlug} onChange={(event) => setSectionSlug(event.target.value)} disabled={saving}>
+                <option value="">Choose a section…</option>
+                {vaultSections.map((row) => (
+                  <option key={row.slug} value={row.slug}>{row.title}</option>
+                ))}
+              </select>
+            </Field>
+            {!vaultSections.length ? (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs font-semibold text-amber-900">
+                No Vault section currently accepts a new document for you. Ask a section manager for create rights — without a
+                section there is nowhere to file the internal original.
+              </p>
+            ) : null}
           </div>
         ) : null}
 
@@ -2052,6 +2316,19 @@ const changeLifecycle = async (
     await refresh(result.message || `Document moved to ${state}.`);
   } catch (failure: any) {
     setError(failure?.message || 'That lifecycle change was refused.');
+  }
+};
+
+const revokeKey = async (
+  key: any,
+  refresh: (message: string) => Promise<void>,
+  setError: (message: string | null) => void,
+) => {
+  try {
+    await clientAccessCenter.revokeKey(key.id);
+    await refresh('Access key revoked. Its sessions no longer work.');
+  } catch (failure: any) {
+    setError(failure?.message || 'That access key could not be revoked.');
   }
 };
 

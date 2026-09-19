@@ -1,0 +1,101 @@
+# Phase 18 — Upload a document, stamp it, and issue an access key
+
+**Delivered:** 2026-09-19 · branch `arena/01a0b09c-code-rx`
+**Result: 1903 / 1903 checks = 100.0 %** — UI 523, backend 1361, live 19.
+
+---
+
+## 1. What you asked for, and what was actually missing
+
+| Your words | What the codebase had | What was missing |
+|---|---|---|
+| "documents should have an upload section for PHANTOM to just upload the document and make the stamp be used there too" | Documents could only be *typed* (`contentText`) or *picked* from an existing Vault document (`vaultDocumentId`). Nothing accepted a file. | A file path: upload → internal original → published client document → the stamp. |
+| "allow upload of documents by phantom in client document side and also in internal document creating" | The Vault editor could *insert* an attachment into a document you had already started. No way to create a document *from* a file, and no upload at all on the client-document side. | An upload entry point in both places. |
+| "access key creation is not there" | `KeyDialog` and `KeyRevealDialog` were complete, but `setKeyDialog` was only ever passed `null` — nothing in the UI ever opened it. | The buttons that open it (and a place to see keys). |
+
+---
+
+## 2. What was built
+
+### 2.1 Client documents — "Upload a document" (PHANTOM panel → Documents)
+
+* A permanent **upload area** at the top of the Documents panel and an **Upload a document** primary button next to *Publish to client*.
+* The publishing dialog gains a third source: **1 · Upload a document** — drag/drop or pick a file, choose the Vault section that keeps the internal original, then *Save as draft* or *Approve & publish*.
+* On submit, in order:
+  1. **the file is stored** through `POST /api/vault/upload` (the endpoint that already exists, 10 MB, allow-listed types),
+  2. **an internal Vault document is created** from it through `POST /api/vault/documents` — the attachment is linked to that document, and the snapshot is exactly one attachment block, which is what makes the file *be* the document,
+  3. **the client document pins that internal document** (same `vaultDocumentId` path the "use an internal document" source uses),
+  4. **the stamp is rendered** by `POST /api/phantom/client-documents/:id/delivery` — the same pipeline, the same watermark. The panel reports `Stamped client copy: Stamped PDF (42 KB, newly rendered)`.
+* If step 1 succeeds and a later step fails, the operator is told exactly that: *"The file is filed in the Vault as CRX-DOC-0007 — retry to publish it."*
+
+### 2.2 Internal document creation (Vault)
+
+* **Upload Document** sits next to *New Document* in the section heading and next to *New* in the Vault app bar.
+* The dialog takes the file plus a title (pre-filled from the file name) and files it as an ordinary Vault document, then **opens it in the editor** — editable, versioned, searchable, shareable, and publishable to a client later.
+
+### 2.3 Access keys are reachable again
+
+* **Access keys** is a section in the client workspace again (between Documents and Temporary Links).
+* **Issue access key** appears in three places: the client header, the Access-keys panel, and every active project card (pre-pinned to that project).
+* The panel lists hint, status, project pin, label, issue/last-used/expiry dates, and offers **Regenerate** (new key shown once, old key and its sessions dead) and **Revoke** — both the endpoints that already existed.
+* The raw key is still shown once and never stored or listed in readable form; the empty state explains what to do next.
+
+---
+
+## 3. Reuse: nothing was duplicated
+
+| Need | Used | New code |
+|---|---|---|
+| Store bytes | `POST /api/vault/upload` | none |
+| Create the internal document | `POST /api/vault/documents` | none |
+| Link the attachment to the document | existing `attachmentIdsFromBlocks` → `UPDATE vault_attachments` | none |
+| Publish to a client | `POST /api/phantom/clients/:clientId/documents` | none |
+| Produce the watermarked copy | `resolveClientDelivery` → `planClientDelivery` (`ensureClientDeliveryArtifact`) | none |
+| Issue / regenerate / revoke keys | `POST /api/phantom/clients/:id/keys`, `…/client-keys/:id/regenerate`, `…/revoke` | none |
+| Front-end composition | `src/lib/vaultUploads.ts` (existing endpoints only) + one shared field component | 3 small UI files |
+
+* **No new database table, column or migration.** The upload writes to the tables that already exist (`vault_attachments`, `vault_documents`, `document_versions`, `client_documents`).
+* **No second router, no new fetch, no new storage.** `src/lib/vaultUploads.ts` calls the two `db.vault.*` helpers; the browser never sees a key or an artifact.
+* **One stamping pipeline.** The words `CLIENT PROJECT DOCUMENT` still live in exactly one file (`functions/lib/client-delivery-pdf.ts`), and `planClientDelivery` / `resolveClientDelivery` are each still defined once — asserted by the harness.
+
+**The only server change** is three lines of allow-list: Vault uploads now accept Word (`.doc`, `.docx`) and OpenDocument (`.odt`) files, because the delivery engine already converts them (`client-delivery-office.ts` reads the ZIP container). The **public media** allow-list (`/api/upload`) is deliberately untouched — those files are served publicly, Vault files never are.
+
+---
+
+## 4. Security
+
+* `vault/` objects stay unreachable from the public file route (`403`), and client artifacts stay under `client-exports/` behind the client portal.
+* Delivery is still **fail-closed**: a `.gif`, a plain `.zip`, or anything else the engine cannot render answers `409 delivery_unavailable` with **no bytes** — the original is never a fallback.
+* The upload is authorised twice: `clients.documents.create` for the client document, and the Vault section's own `create` permission for filing the original. A member with neither is refused.
+* A file type outside the allow-list is `415`, over 10 MB is `413`, a missing section is `400`.
+* Files the engine cannot stamp are refused **before** a byte is sent (the field mirrors the planner's rules); the server remains the authority.
+
+---
+
+## 5. Verification
+
+| Suite | Before | After |
+|---|---|---|
+| UI harness (`npm run test:client-portal-ui`) | 487 | **523 / 523** |
+| Backend harness (`npm run test:client-portal`) | 1332 | **1361 / 1361** |
+| Live check against the built `dist` (`scripts/phase18-live-check.mjs`) | — | **19 / 19** |
+| `tsc --noEmit` | clean | clean |
+| **Total** | 1827 | **1903 / 1903 = 100.0 %** |
+
+The live check drives the real server on port 8788: PHANTOM signs in, uploads a PDF, it becomes a Vault document, it is published to a client, an access key is issued, the client signs in with that key and downloads the stamped copy — which is asserted to be a real PDF, watermarked `CODE Rx SOCIETY` / `CLIENT PROJECT DOCUMENT`, carrying the document text, and **not** byte-identical to the file that was uploaded.
+
+### Deliberate decisions
+
+1. **`.docx`/`.odt`/`.doc` added to the Vault allow-list only.** `.doc` is accepted as a Vault attachment but is not offered for client publication, because the converter cannot read the legacy binary format — the UI says so before a byte is sent instead of promising a stamp that cannot be produced.
+2. **The upload files the original in the Vault.** A client document must never be the only home of a file. The section picker makes that explicit, and a manager's upload is filed `active`, everyone else's as `draft` (the rule the Vault create route already enforces).
+3. **The harness R2 shim was made truer.** It could only read values it had stored as buffers; an upload stores what `file.arrayBuffer()` produced. The shim now normalises `ArrayBuffer` and typed arrays exactly like R2 — without it, real uploads looked like missing files.
+
+### Try it in the preview
+
+The preview is running at port 8788 (`npx wrangler pages dev dist`).
+PHANTOM: `coderxsociety@gmail.com` / `DevPreviewPassword1`.
+
+1. **PHANTOM Control → Client Access Center → Documents → Upload a document.**
+2. Pick any PDF, `.docx` or PNG, choose the section, then *Approve & publish* — the message reports the stamped copy.
+3. **Access keys** → *Issue access key* → copy the `CRX-…` key, sign in with it on the client page and download the stamped copy.
+4. **Vault → any section → Upload Document** creates an internal document straight from a file.

@@ -326,7 +326,15 @@ class ShimBucket {
   async get(key) {
     const stored = this.objects.get(key);
     if (!stored) return null;
-    const bytes = typeof stored.value === 'string' ? Buffer.from(stored.value, 'utf8') : stored.value;
+    // Phase 18: an upload stores what `file.arrayBuffer()` produced, so the
+    // stub normalises ArrayBuffer / typed arrays / strings exactly like the
+    // real bucket does before handing back an R2ObjectBody.
+    const value = stored.value;
+    const bytes = typeof value === 'string'
+      ? Buffer.from(value, 'utf8')
+      : value instanceof ArrayBuffer
+        ? Buffer.from(new Uint8Array(value))
+        : Buffer.from(value.buffer || value, value.byteOffset || 0, value.byteLength);
     return {
       key,
       body: bytes,
@@ -365,12 +373,16 @@ const uniqueIp = () => {
   return `10.${Math.floor(ipCounter / 250) % 250}.${ipCounter % 250}.7`;
 };
 
-const request = async (method, url, { body, headers = {}, token, clientSession, ip } = {}) => {
+const request = async (method, url, { body, form, headers = {}, token, clientSession, ip } = {}) => {
   const init = { method, headers: { ...headers } };
   // The passkey endpoint throttles per client IP. Fixtures use distinct IPs so
   // they stay independent; the rate-limit group pins one on purpose.
   init.headers['cf-connecting-ip'] = ip || uniqueIp();
-  if (body !== undefined) {
+  if (form !== undefined) {
+    // Phase 18: a real multipart body, exactly what a browser sends. The
+    // boundary is set by the runtime, so no Content-Type is forced here.
+    init.body = form;
+  } else if (body !== undefined) {
     init.body = JSON.stringify(body);
     init.headers['Content-Type'] = 'application/json';
   }
@@ -385,6 +397,53 @@ const request = async (method, url, { body, headers = {}, token, clientSession, 
   const bytes = new Uint8Array(await response.clone().arrayBuffer());
   return { status: response.status, json, headers: response.headers, text, bytes };
 };
+
+/**
+ * PHASE 18 — multipart fixtures.
+ *
+ * The upload endpoints read a real FormData body, so the harness builds one:
+ * a File carries the bytes and the declared MIME type the allow-list checks.
+ */
+const fileOf = ({ name, type, bytes }) => new File([bytes], name, { type });
+
+const multipart = (entries) => {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(entries)) {
+    if (value === undefined || value === null) continue;
+    form.append(key, value);
+  }
+  return form;
+};
+
+const uploadToVault = (token, { section, documentId, name, type, bytes }) =>
+  request('POST', '/api/vault/upload', {
+    token,
+    form: multipart({ section, ...(documentId ? { documentId } : {}), file: fileOf({ name, type, bytes }) }),
+  });
+
+/** Files an uploaded attachment as the body of an internal Vault document. */
+const fileVaultDocumentFromUpload = (token, { section, title, uploaded, fileName, blockType = 'file', status = 'active' }) =>
+  request('POST', '/api/vault/documents', {
+    token,
+    body: {
+      section,
+      title,
+      status,
+      visibility: 'section',
+      fileKey: uploaded.json.fileKey,
+      contentJson: JSON.stringify({
+        version: 1,
+        blocks: [{
+          id: 'uploaded-attachment',
+          type: blockType,
+          content: fileName,
+          caption: fileName,
+          fileKey: uploaded.json.fileKey,
+          attachmentId: uploaded.json.attachment.id,
+        }],
+      }),
+    },
+  });
 
 const uniquePasskey = () => helpers.generateClientPasskey();
 const normalise = (passkey) => helpers.normalizeClientPasskey(passkey);
@@ -3770,6 +3829,235 @@ const main = async () => {
   const freshnessSections = await request('GET', `/api/client/project/${freshnessProject.id}/sections/reports`, { clientSession: freshnessSession });
   check('the badge reaches the client room through the existing section payload',
     (freshnessSections.json?.data?.documents || []).every((document) => [null, 'new', 'updated'].includes(document.freshness)));
+
+  // -------------------------------------------------------------------------
+  // PHASE 18 — a document file PHANTOM uploads, and the stamp that follows it.
+  //
+  // The feature adds no storage and no delivery of its own: the file goes in
+  // through the existing Vault upload endpoint, becomes an ordinary internal
+  // Vault document, and the client copy is produced by the one stamping
+  // pipeline. These checks walk that path with a real multipart upload.
+  // -------------------------------------------------------------------------
+  group('25. Uploaded documents — Vault filing, then the stamped client copy (Phase 18)');
+  const uploadClient = await createClient(phantomToken, 'Phase 18 Upload Client');
+  const uploadProject = await createProject(phantomToken, uploadClient.id, 'Phase 18 Upload Project');
+  const uploadKey = await createKey(phantomToken, uploadClient.id, uploadProject.id, { label: 'Phase 18 key' });
+  const uploadSession = await clientSession(uploadKey.passkey, 'phase 18 session');
+  const uploadSection = db.query(
+    'SELECT slug FROM vault_sections WHERE is_archived = 0 AND is_sensitive = 0 ORDER BY sort_order, id LIMIT 1',
+  )[0].slug;
+  const readClientDocument = (documentId) => request(
+    'GET', `/api/client/project/${uploadProject.id}/documents/${documentId}`, { clientSession: uploadSession },
+  );
+
+  // --- 1. the file itself, through the existing upload endpoint -------------
+  const pdfUpload = await uploadToVault(phantomToken, {
+    section: uploadSection, name: 'phase-18-deliverable.pdf', type: 'application/pdf',
+    bytes: buildSourcePdf('PHASE 18 UPLOADED PDF BODY'),
+  });
+  check('an operator can upload a document file into the Vault',
+    pdfUpload.status === 200 && String(pdfUpload.json?.fileKey || '').startsWith(`vault/${uploadSection}/`)
+    && pdfUpload.json?.attachment?.id > 0,
+    JSON.stringify(pdfUpload.json).slice(0, 200));
+  check('the uploaded file is not publicly readable',
+    (await request('GET', `/api/files/${encodeURIComponent(pdfUpload.json.fileKey).replace(/%2F/g, '/')}`)).status === 403);
+  check('an uploaded file starts unlinked — filing it as a document is explicit',
+    db.query('SELECT document_id FROM vault_attachments WHERE id = ?', pdfUpload.json.attachment.id)[0].document_id === null);
+
+  // --- 2. the file becomes an ordinary internal Vault document --------------
+  const filedPdf = await fileVaultDocumentFromUpload(phantomToken, {
+    section: uploadSection, title: 'Phase 18 uploaded deliverable',
+    uploaded: pdfUpload, fileName: 'phase-18-deliverable.pdf',
+  });
+  check('the uploaded file becomes a real internal Vault document',
+    filedPdf.status === 200 && Number(filedPdf.json?.data?.id) > 0 && Boolean(filedPdf.json?.data?.documentCode),
+    JSON.stringify(filedPdf.json).slice(0, 200));
+  const filedPdfId = Number(filedPdf.json.data.id);
+  check('the attachment is filed with that document — the delivery gate',
+    Number(db.query('SELECT document_id FROM vault_attachments WHERE id = ?', pdfUpload.json.attachment.id)[0].document_id) === filedPdfId
+    && Number(db.query('SELECT section_id FROM vault_attachments WHERE id = ?', pdfUpload.json.attachment.id)[0].section_id)
+      === Number(db.query('SELECT id FROM vault_sections WHERE slug = ?', uploadSection)[0].id));
+  check('the uploaded document carries a single attachment block, which is what makes the file the document',
+    (() => {
+      const snapshot = JSON.parse(db.query('SELECT content_json FROM vault_documents WHERE id = ?', filedPdfId)[0].content_json);
+      const blocks = snapshot.blocks || [];
+      return blocks.length === 1 && blocks[0].type === 'file'
+        && blocks[0].fileKey === pdfUpload.json.fileKey
+        && Number(blocks[0].attachmentId) === Number(pdfUpload.json.attachment.id);
+    })());
+  check('the uploaded document is an ordinary document in its section',
+    (await request('GET', `/api/vault/documents?section=${uploadSection}`, { token: phantomToken }))
+      .json?.data?.some((document) => Number(document.id) === filedPdfId) === true);
+  check('it is offered by the existing publishing picker as publishable',
+    (await request('GET', '/api/phantom/client-vault-sources', { token: phantomToken }))
+      .json?.data?.some((source) => Number(source.id) === filedPdfId && source.publishable === true) === true);
+
+  // --- 3. the client copy is produced by the one stamping pipeline ----------
+  const uploadedDocument = await createDocument(phantomToken, uploadClient.id, uploadProject.id, {
+    title: 'Phase 18 uploaded deliverable', category: 'deliverable', vaultDocumentId: filedPdfId,
+  });
+  const pinnedUpload = db.query(
+    'SELECT vault_document_id, vault_version_number, content_snapshot_format FROM client_documents WHERE public_id = ?',
+    uploadedDocument.id,
+  )[0];
+  check('publishing the upload pins a client document to the internal original',
+    Number(pinnedUpload.vault_document_id) === filedPdfId
+    && Number(pinnedUpload.vault_version_number) === 1
+    && pinnedUpload.content_snapshot_format === 'blocks',
+    JSON.stringify(pinnedUpload));
+  const preparedUpload = await prepareDelivery(phantomToken, uploadedDocument.id, true);
+  check('the stamping pipeline renders a stamped PDF from the uploaded file',
+    preparedUpload.status === 200 && preparedUpload.json?.data?.kind === 'stamped_pdf'
+    && preparedUpload.json?.data?.sizeBytes > 0
+    && /^[0-9a-f]{64}$/.test(preparedUpload.json?.data?.sha256 || ''),
+    JSON.stringify(preparedUpload.json).slice(0, 200));
+  check('the prepared upload reports no storage key or Vault identifier',
+    !/vault\/|client-exports|storage_reference/.test(JSON.stringify(preparedUpload.json)));
+
+  await publish(phantomToken, uploadedDocument.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${uploadedDocument.id}`, { token: phantomToken, body: { allowDownload: true } });
+  const uploadPreview = await request(
+    'GET', `/api/client/project/${uploadProject.id}/documents/${uploadedDocument.id}/preview`, { clientSession: uploadSession },
+  );
+  const uploadDownload = await request(
+    'GET', `/api/client/project/${uploadProject.id}/documents/${uploadedDocument.id}/download`, { clientSession: uploadSession },
+  );
+  check('the client is served the stamped copy, never the uploaded source file',
+    uploadDownload.status === 200
+    && isPdf(uploadDownload.bytes)
+    && !Buffer.from(uploadDownload.bytes).equals(Buffer.from(buildSourcePdf('PHASE 18 UPLOADED PDF BODY')))
+    && isStampedFor(uploadDownload.bytes, { reference: uploadedDocument.reference }));
+  check('the stamped copy from the upload is a watermarked Code Rx client copy',
+    uploadPreview.status === 200 && isStampedFor(uploadPreview.bytes, {
+      projectName: 'Phase 18 Upload Project', reference: uploadedDocument.reference, clientName: 'Phase 18 Upload Client',
+    }));
+  const uploadClientRead = await readClientDocument(uploadedDocument.id);
+  check('the client payload from an uploaded document leaks no Vault key or internal id',
+    uploadClientRead.status === 200
+    && !/vault\/|client-exports|storage_reference|vault_document_id/.test(JSON.stringify(uploadClientRead.json)),
+    JSON.stringify(uploadClientRead.json).slice(0, 160));
+
+  // --- 4. a Word document is exactly the case the upload must serve ---------
+  const docxBytes = buildDocx('PHASE 18 WORD DOCUMENT BODY');
+  const docxUpload = await uploadToVault(phantomToken, {
+    section: uploadSection, name: 'phase-18-report.docx',
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: docxBytes,
+  });
+  check('a Word document is accepted for the Vault, which the delivery engine can convert',
+    docxUpload.status === 200 && docxUpload.json?.attachment?.mimeType
+      === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    JSON.stringify(docxUpload.json).slice(0, 200));
+  check('the public media upload was not widened to office documents',
+    (await request('POST', '/api/upload', {
+      token: phantomToken,
+      form: multipart({ folder: 'phase18', file: fileOf({ name: 'phase-18-report.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: docxBytes }) }),
+    })).status !== 200);
+  const filedDocx = await fileVaultDocumentFromUpload(phantomToken, {
+    section: uploadSection, title: 'Phase 18 uploaded Word report',
+    uploaded: docxUpload, fileName: 'phase-18-report.docx',
+  });
+  const docxClient = await createDocument(phantomToken, uploadClient.id, uploadProject.id, {
+    title: 'Phase 18 uploaded Word report', category: 'report', vaultDocumentId: Number(filedDocx.json.data.id),
+  });
+  await publish(phantomToken, docxClient.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${docxClient.id}`, { token: phantomToken, body: { allowDownload: true } });
+  const docxClientView = await request(
+    'GET', `/api/client/project/${uploadProject.id}/documents/${docxClient.id}/preview`, { clientSession: uploadSession },
+  );
+  check('an uploaded Word document is delivered as a stamped PDF carrying its text',
+    docxClientView.status === 200 && isPdf(docxClientView.bytes)
+    && artifactText(docxClientView.bytes).includes('PHASE 18 WORD DOCUMENT BODY')
+    && isStampedFor(docxClientView.bytes, { reference: docxClient.reference }),
+    JSON.stringify(docxClientView.json || {}).slice(0, 160));
+  check('the original Word container is never served to the client',
+    !Buffer.from(docxClientView.bytes).includes(Buffer.from('word/document.xml'))
+    && !Buffer.from(docxClientView.bytes).includes(Buffer.from([0x50, 0x4b, 0x03, 0x04])));
+
+  // --- 5. refusals: the source file is never a fallback ---------------------
+  const gifUpload = await uploadToVault(phantomToken, {
+    section: uploadSection, name: 'phase-18-motion.gif', type: 'image/gif',
+    bytes: Buffer.concat([Buffer.from('GIF89a', 'latin1'), Buffer.from('PHASE-18-UNSTAMPABLE', 'latin1')]),
+  });
+  const filedGif = await fileVaultDocumentFromUpload(phantomToken, {
+    section: uploadSection, title: 'Phase 18 animated source', uploaded: gifUpload, fileName: 'phase-18-motion.gif',
+  });
+  const gifClient = await createDocument(phantomToken, uploadClient.id, uploadProject.id, {
+    title: 'Phase 18 animated source', vaultDocumentId: Number(filedGif.json.data.id),
+  });
+  const gifPrepared = await prepareDelivery(phantomToken, gifClient.id, true);
+  check('a format the engine cannot stamp is refused, not exposed',
+    gifPrepared.status === 409 && gifPrepared.json?.code === 'delivery_unavailable'
+    && gifPrepared.json?.data?.reason === 'unsupported_attachment_mime',
+    JSON.stringify(gifPrepared.json).slice(0, 200));
+  await publish(phantomToken, gifClient.id, 'published');
+  await request('PATCH', `/api/phantom/client-documents/${gifClient.id}`, { token: phantomToken, body: { allowDownload: true } });
+  const gifDownload = await request(
+    'GET', `/api/client/project/${uploadProject.id}/documents/${gifClient.id}/download`, { clientSession: uploadSession },
+  );
+  check('the refusal serves no bytes of the uploaded original',
+    gifDownload.status === 409 && !Buffer.from(gifDownload.bytes).includes(Buffer.from('PHASE-18-UNSTAMPABLE')));
+
+  const zipUpload = await uploadToVault(phantomToken, {
+    section: uploadSection, name: 'phase-18-archive.zip', type: 'application/zip',
+    bytes: buildZip({ 'notes.txt': 'PHASE 18 PLAIN ZIP ENTRY' }),
+  });
+  const filedZip = await fileVaultDocumentFromUpload(phantomToken, {
+    section: uploadSection, title: 'Phase 18 archive source', uploaded: zipUpload, fileName: 'phase-18-archive.zip',
+  });
+  const zipClient = await createDocument(phantomToken, uploadClient.id, uploadProject.id, {
+    title: 'Phase 18 archive source', vaultDocumentId: Number(filedZip.json.data.id),
+  });
+  const zipPrepared = await prepareDelivery(phantomToken, zipClient.id, true);
+  check('an archive that is not a readable office document fails closed at render time',
+    zipPrepared.status === 409 && zipPrepared.json?.code === 'delivery_unavailable'
+    && zipPrepared.json?.data?.reason === 'office_conversion_unsupported',
+    JSON.stringify(zipPrepared.json).slice(0, 200));
+  check('a refused render records no storage reference',
+    !db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', zipClient.id)[0].storage_reference
+    && !db.query('SELECT storage_reference FROM client_documents WHERE public_id = ?', gifClient.id)[0].storage_reference);
+
+  check('a file type outside the allow-list is refused at the door',
+    (await uploadToVault(phantomToken, {
+      section: uploadSection, name: 'phase-18-payload.exe', type: 'application/x-msdownload', bytes: Buffer.from('MZ', 'latin1'),
+    })).status === 415);
+  check('an oversized upload is refused at the door',
+    (await uploadToVault(phantomToken, {
+      section: uploadSection, name: 'phase-18-huge.pdf', type: 'application/pdf',
+      bytes: Buffer.alloc(10 * 1024 * 1024 + 1, 0x20),
+    })).status === 413);
+  check('the upload requires a real section',
+    (await request('POST', '/api/vault/upload', {
+      token: phantomToken,
+      form: multipart({ file: fileOf({ name: 'phase-18-orphan.pdf', type: 'application/pdf', bytes: buildSourcePdf('ORPHAN') }) }),
+    })).status === 400);
+
+  // --- 6. authorization: filing an original is a Vault action too -----------
+  db.execute(
+    "INSERT INTO users (email, name, password_hash, role) SELECT 'phase18@example.test', 'Phase 18 Member', password_hash, 'member' FROM users WHERE email = 'member@example.test'",
+  );
+  const phase18Login = await request('POST', '/api/auth/login', { body: { identifier: 'phase18@example.test', password: 'MemberPassword1' } });
+  const phase18Token = phase18Login.json?.token;
+  check('a member with no Vault rights cannot upload a file into a section',
+    (await uploadToVault(phase18Token, {
+      section: uploadSection, name: 'phase-18-member.pdf', type: 'application/pdf', bytes: buildSourcePdf('MEMBER UPLOAD'),
+    })).status === 403);
+  check('a member with no client permission cannot publish an uploaded file to a client (403)',
+    (await request('POST', `/api/phantom/clients/${uploadClient.id}/documents`, {
+      token: phase18Token, body: { projectId: uploadProject.id, category: 'report', title: 'Nope', vaultDocumentId: filedPdfId },
+    })).status === 403);
+
+  // --- 7. the upload created no parallel system -----------------------------
+  check('the uploaded bytes live in the existing Vault prefix and nowhere else',
+    db.query('SELECT COUNT(*) AS c FROM vault_attachments WHERE file_key LIKE ?', `vault/${uploadSection}/%`)[0].c > 0
+    && db.query("SELECT COUNT(*) AS c FROM client_documents WHERE storage_reference LIKE 'vault/%'")[0].c === 0);
+  check('no new table or column was introduced for uploads',
+    Number(db.query("SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name LIKE '%upload%'")[0].c) === 0
+    && Number(db.query("SELECT COUNT(*) AS c FROM pragma_table_info('client_documents') WHERE name LIKE '%upload%' OR name LIKE '%file%'")[0].c) === 0
+    && Number(db.query(
+      "SELECT COUNT(*) AS c FROM pragma_table_info('vault_attachments') WHERE name NOT IN "
+      + "('id','document_id','section_id','name','file_key','mime_type','size_bytes','uploaded_by_member_profile_id','created_at')",
+    )[0].c) === 0,
+    JSON.stringify(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%upload%'")));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

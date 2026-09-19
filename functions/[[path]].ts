@@ -5697,6 +5697,21 @@ const SAFE_UPLOAD_MIME_TYPES = new Set([
 ]);
 const isSafeUploadMime = (mime: string) => SAFE_UPLOAD_MIME_TYPES.has(mime.toLowerCase());
 
+/**
+ * Vault uploads only (Phase 18). Client deliverables usually arrive as Word or
+ * OpenDocument files, and the client-delivery engine can convert both (it reads
+ * the ZIP container). These types are accepted under `vault/` — a prefix that is
+ * never publicly readable and is served only to an authorised Vault session — so
+ * the public media upload allow-list above is deliberately left untouched.
+ */
+const SAFE_VAULT_UPLOAD_MIME_TYPES = new Set([
+  ...SAFE_UPLOAD_MIME_TYPES,
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.oasis.opendocument.text',
+]);
+const isSafeVaultUploadMime = (mime: string) => SAFE_VAULT_UPLOAD_MIME_TYPES.has(mime.toLowerCase());
+
 const publicUploadFolder = (value: unknown) => {
   const raw = cleanOptionalStr(value, 100) || 'uploads';
   const folder = raw.trim().replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
@@ -5724,7 +5739,7 @@ app.post('/api/vault/upload', requireAuth, async (c) => {
     if (!(file instanceof File)) return c.json({ success: false, error: 'No file provided.' }, 400);
     if (file.size > MAX_UPLOAD_BYTES) return c.json({ success: false, error: 'File too large (max 10 MB).' }, 413);
     const mime = file.type || 'application/octet-stream';
-    if (!isSafeUploadMime(mime)) return c.json({ success: false, error: `File type "${mime}" is not allowed.` }, 415);
+    if (!isSafeVaultUploadMime(mime)) return c.json({ success: false, error: `File type "${mime}" is not allowed.` }, 415);
     const safeName = (file.name || 'vault-file').replace(/[^\w.\-() ]/g, '_').slice(-100);
     const key = `vault/${section}/${access.actor!.profileId}/${Date.now()}-${safeName}`;
     await c.env.BUCKET.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: mime } });
