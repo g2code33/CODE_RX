@@ -2119,13 +2119,18 @@ const main = async () => {
     payload: { passkey: 'CRX-UC2-GUK-MSD', hint: 'MSD', expiresAt: null, message: 'Generated.', label: 'Client access key' },
     onClose: () => {},
   }));
-  check('an access key is still revealed as a key, with no link affordance',
+  check('an access key is still revealed as a key, not as a link',
     keyReveal.includes('CRX-UC2-GUK-MSD') && /Copy/.test(keyReveal)
-    && !keyReveal.includes('Open link') && !keyReveal.includes('Copy link')
-    && !keyReveal.includes('Token only'));
-  check('a key never turns into a url',
-    !/href="[^"]*(CRX|passkey|key=)/i.test(keyReveal)
-    && !/<a\b/.test(keyReveal));
+    && !keyReveal.includes('Open link') && !keyReveal.includes('Token only')
+    // The only address a key reveal may carry is the credential-free sign-in page.
+    && !keyReveal.includes('#client-portal/link/'));
+  check('a key is handed over with the address it is used on',
+    keyReveal.includes('Where the client uses it') && keyReveal.includes('Client sign-in link')
+    && /href="[^"]*\/?#client-portal"/.test(keyReveal) && keyReveal.includes('Copy link')
+    && keyReveal.includes('The key itself never goes in the link'));
+  check('the key itself never appears in any url in the reveal',
+    !/href="[^"]*(CRX|passkey|key=|UC2)/i.test(keyReveal)
+    && !/value="[^"]*#client-portal\?[^"]*"/.test(keyReveal));
 
   check('the panel builds the address from the server path and the host it is served from',
     centerLink.includes('url: absoluteLinkUrl(payload.path, origin)')

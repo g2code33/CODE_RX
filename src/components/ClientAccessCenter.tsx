@@ -1687,9 +1687,9 @@ export const KeyRevealDialog = ({
   };
   onClose: () => void;
 }) => {
-  const [copied, setCopied] = useState<'url' | 'token' | null>(null);
+  const [copied, setCopied] = useState<'url' | 'token' | 'signin' | null>(null);
   const urlField = useRef<HTMLInputElement>(null);
-  const copy = async (value: string, which: 'url' | 'token') => {
+  const copy = async (value: string, which: 'url' | 'token' | 'signin') => {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(which);
@@ -1699,6 +1699,9 @@ export const KeyRevealDialog = ({
     }
   };
   const isLink = Boolean(payload.url);
+  // A key is useless without the address it is used on, so every key reveal
+  // carries the sign-in link too — with no credential in it.
+  const signInUrl = clientSignInUrl(typeof window === 'undefined' ? '' : window.location.origin);
 
   return (
     <Dialog
@@ -1750,6 +1753,27 @@ export const KeyRevealDialog = ({
             {payload.expiresAt ? <p className="mt-2 text-[11px] font-bold text-emerald-800">Expires {formatWhen(payload.expiresAt)}</p> : null}
           </div>
         )}
+        {!isLink ? (
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">Where the client uses it</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <input
+                readOnly
+                value={signInUrl}
+                aria-label="Client sign-in link"
+                onFocus={(event) => event.currentTarget.select()}
+                className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs font-bold text-slate-800 outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+              />
+              <button onClick={() => void copy(signInUrl, 'signin')} className="mini-button">
+                {copied === 'signin' ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copied === 'signin' ? 'Copied' : 'Copy link'}
+              </button>
+              <a href={signInUrl || '/'} target="_blank" rel="noreferrer" className="mini-button"><Link2 className="h-4 w-4" /> Open</a>
+            </div>
+            <p className="mt-2 text-[11px] font-medium text-slate-600">
+              Send this address with the key: the client opens it and enters the key. The key itself never goes in the link.
+            </p>
+          </div>
+        ) : null}
         <p className="text-sm font-medium text-slate-600">{payload.message}</p>
         <p className="rounded-xl bg-slate-50 px-3.5 py-3 text-xs font-medium text-slate-600">
           Deliver this to the client out of band. Code Rx stores only a secure hash, so nobody — including PHANTOM — can read it back.

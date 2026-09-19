@@ -203,11 +203,16 @@ const main = async () => {
 
   // --- 9. the temporary link an operator sends ----------------------------
   const directLink = await json('POST', `/api/phantom/clients/${clientId}/links`, {
-    projectId, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+    projectId, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 15,
   }, token);
   const linkPath = String(directLink.json?.data?.path || '');
   const linkToken = String(directLink.json?.data?.token || '');
   const linkUrl = `${BASE}${linkPath}`;
+  // The panel makes the address absolute against the origin it is served on, so
+  // in a browser preview the same path becomes the preview host. Printed here so
+  // the address can be opened and checked by hand.
+  const previewHost = process.env.E2B_SANDBOX_ID ? `https://8788-${process.env.E2B_SANDBOX_ID}.e2b.app` : BASE;
+  console.log(`\n  → direct link to send (valid 15 minutes):\n    ${previewHost}${linkPath}\n`);
   check('creating a link returns the address to send',
     directLink.status === 201 && linkPath === `/#client-portal/link/${linkToken}`, linkPath);
   check('the address is a full http link that resolves on the running site',

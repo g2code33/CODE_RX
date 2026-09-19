@@ -142,8 +142,9 @@ it — the panel simply threw it away, so nothing an operator could send existed
   **Open link** (checked with the same string), the token beside it, and the expiry.
 * The mode label explains what will happen: *Temporary link — direct access* or
   *Temporary link — access key required*, with a sentence in the operator's words.
-* The keys panel hands over the **client sign-in address** (`/#client-portal`) with the
-  same copy/open controls — the key is never put in a URL.
+* Every **key reveal** now carries the **client sign-in address** (`/#client-portal`) with
+  Copy/Open beside the key, so the operator can send both in one message — and the key is
+  never put in a URL. The Access-keys panel shows the same address permanently.
 * The links list states the rule plainly: the address is shown once, a lost link is
   replaced.
 
@@ -154,3 +155,16 @@ credential in any URL), backend 1372/1372 (11 new: the address contract, redempt
 lands on the destination, a passkey address opens nothing, tampering, and that the
 list can never re-show an issued address), live 25/25 (the generated URL is fetched on
 the running site, redeemed, and lands on the destination project).
+
+### A real address, generated in the preview
+
+Created by `scripts/phase18-live-check.mjs` against the running preview (15-minute link,
+direct access, destination = the project room):
+
+```
+https://8788-i4j4ygttn17km89mawt8s.e2b.app/#client-portal/link/396b9f7bfde72ab1cd949343d5794acc4b9da3ad81002f6be630340d4d00d531
+```
+
+In production the same link is `https://coderxsociety.pages.dev/#client-portal/link/…` —
+the panel builds it from the origin the browser is actually on, so the preview host and
+the live domain both produce a working address with no configuration.
