@@ -125,10 +125,24 @@ const main = async () => {
   check('PHANTOM signs in against the real database', login.status === 200 && Boolean(token), JSON.stringify(login.json).slice(0, 160));
   if (!token) throw new Error('PHANTOM login failed; cannot continue');
 
-  // --- 3. the portal is switched on (it is off in a fresh database) -------
+  // --- 3. the switch is real, in both directions ---------------------------
+  // A fresh database has client access off, and every client route answers 404
+  // — which is exactly the failure an operator reported as "Client access is
+  // not available right now." So the check owns the whole cycle: off, assert the
+  // door is shut, on, assert it opens.
+  await json('PUT', '/api/phantom/client-portal-settings', {
+    settings: [{ key: 'client_portal_enabled', value: false }],
+  }, token);
+  const whileOff = await json('POST', '/api/client/auth/login', { passkey: 'CRX-000-000-000' });
+  check('with client access off the client door is shut, exactly as reported',
+    whileOff.status === 404, `status ${whileOff.status}`);
+
   const portalSettings = await json('PUT', '/api/phantom/client-portal-settings', {
     settings: [{ key: 'client_portal_enabled', value: true }, { key: 'client_downloads_enabled', value: true }],
   }, token);
+  const whileOn = await json('POST', '/api/client/auth/login', { passkey: 'CRX-000-000-000' });
+  check('the same door opens once client access is switched on',
+    whileOn.status !== 404, `status ${whileOn.status}`);
   check('the client portal and downloads can be switched on', portalSettings.status === 200,
     JSON.stringify(portalSettings.json).slice(0, 140));
 

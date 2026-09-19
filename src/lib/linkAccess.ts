@@ -460,7 +460,7 @@ export const clientEntryCopy = (hasSession: boolean): { label: string; hint: str
       aria: 'Continue in the client project room',
     }
     : {
-      label: 'Client project room',
-      hint: 'Enter your project access key',
-      aria: 'Open the client project room with your project access key',
+      label: 'Client access',
+      hint: 'Enter the access key Code Rx gave you',
+      aria: 'Client access — enter the access key Code Rx gave you and open your project room',
     };

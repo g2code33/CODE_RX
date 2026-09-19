@@ -72,7 +72,15 @@ export const Navbar = ({
               <EditableText elementKey={`nav.link.${link.id}`} copyKey={`nav.${link.id}`} label={`${link.label} navigation label`}>{navLabel(link.id, link.label)}</EditableText>
             </a>
           ))}
-          {!isDashboard && <ClientPortalEntry variant="icon" className="ml-3" />}
+          {/* The client door. A client who was sent an access key has one
+              question — where do I type it — so on wide screens the header says
+              the words, and the key icon stays on narrow ones. */}
+          {!isDashboard && (
+            <>
+              <span className="ml-3 hidden xl:inline-flex"><ClientPortalEntry variant="chip" /></span>
+              <span className="ml-3 xl:hidden"><ClientPortalEntry variant="icon" /></span>
+            </>
+          )}
           <button
             type="button"
             onClick={onDashboardToggle}

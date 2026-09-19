@@ -157,6 +157,13 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [activityLoading, setActivityLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<any>({ capabilities: [], legacy: [], mine: [] });
   const [portalSettings, setPortalSettings] = useState<any[]>([]);
+  /**
+   * `null` until the portal switch has been read. When it is `false`, every
+   * link and access key this workspace issues shows the client “Client access
+   * is not available right now.” — so the warning below is worth more than a
+   * silent panel.
+   */
+  const [clientAccessOn, setClientAccessOn] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -249,6 +256,18 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
     }
   }, []);
 
+  /** Reads just the portal switch, so the warning is right on every section. */
+  const loadPortalSwitch = useCallback(async () => {
+    try {
+      const settings = await clientAccessCenter.portalSettings('portal');
+      const entry = (settings || []).find((row: any) => row.key === 'client_portal_enabled');
+      setClientAccessOn(entry ? Boolean(entry.value) : null);
+    } catch {
+      // Without the answer the panel stays quiet rather than guessing.
+      setClientAccessOn(null);
+    }
+  }, []);
+
   const loadPermissionMatrix = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -269,9 +288,28 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
     }
   }, []);
 
-  useEffect(() => { void loadCapabilities(); void loadClients(); }, [loadCapabilities, loadClients]);
+  useEffect(() => { void loadCapabilities(); void loadClients(); void loadPortalSwitch(); }, [loadCapabilities, loadClients, loadPortalSwitch]);
   useEffect(() => { if (selectedClientId) void loadClientWorkspace(selectedClientId); }, [selectedClientId, loadClientWorkspace]);
   useEffect(() => { if (section === 'permissions') void loadPermissionMatrix(); }, [section, loadPermissionMatrix]);
+
+  /**
+   * Switches client access on from the warning itself, through the same settings
+   * route the Permissions section uses — no second endpoint, no second switch.
+   */
+  const switchClientAccessOn = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await clientAccessCenter.savePortalSettings([{ key: 'client_portal_enabled', value: true }]);
+      setClientAccessOn(true);
+      await loadPortalSwitch();
+      onMessage('Client access is on. Links and access keys now open for your clients.');
+    } catch (failure: any) {
+      setError(failure?.message || 'Client access could not be switched on.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /** Does the operator hold this capability? PHANTOM always does. */
   const can = (capability: string) => Boolean(capabilities.isPhantom || (capabilities.mine || []).includes(capability));
@@ -400,6 +438,31 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
           You do not have permission to view client records. PHANTOM can grant CLIENT_VIEW (or the granular
           capabilities you need) in the Permissions section of this workspace.
         </p>
+      ) : null}
+
+      {clientAccessOn === false ? (
+        <div role="alert" className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-5">
+          <p className="flex items-center gap-2 text-sm font-black text-amber-900">
+            <ShieldAlert className="h-4 w-4" /> Client access is switched off
+          </p>
+          <p className="mt-2 max-w-3xl text-xs font-semibold leading-6 text-amber-900">
+            Every link and every access key you issue while this is off shows the client
+            <strong className="font-black"> “Client access is not available right now. Please try again shortly.”</strong>
+            {' '}— the addresses are valid, the door is simply closed. Switch it on and the same address works.
+          </p>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            {can('clients.settings.manage') ? (
+              <button onClick={() => void switchClientAccessOn()} className="mini-button mini-button--primary" disabled={busy}>
+                <ShieldCheck className="h-4 w-4" /> Switch client access on
+              </button>
+            ) : (
+              <span className="text-xs font-bold text-amber-900">Ask PHANTOM to switch client access on.</span>
+            )}
+            <span className="text-[11px] font-semibold text-amber-800">
+              The same switch lives in Permissions → Client portal settings.
+            </span>
+          </div>
+        </div>
       ) : null}
 
       <div className="mt-5 grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">

@@ -68,7 +68,7 @@ const bundle = async () => {
         export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
         export { ClientSiteSign } from './src/components/ClientSiteSign';
         export { SectionLink } from './src/components/SectionLink';
-        export { sectionDirectLinkUrl, linkTokenFromAddress, linkAddressUrl, linkAddressPath, isLinkAddress } from './src/lib/linkAccess';
+        export { sectionDirectLinkUrl, linkTokenFromAddress, linkAddressUrl, linkAddressPath, isLinkAddress, clientEntryCopy } from './src/lib/linkAccess';
         export { SiteEmoji, SiteEmojiText, SiteEmojiProvider } from './src/components/SiteEmoji';
         export { SiteEmojiAdmin } from './src/components/SiteEmojiAdmin';
         export { ContactForm } from './src/components/ContactForm';
@@ -1181,7 +1181,7 @@ const main = async () => {
     !/[?&]*(token|key|passkey)=/i.test(CLIENT_PORTAL_HASH)
     && CLIENT_PORTAL_HASH.split('').every((character) => /[#a-z-]/.test(character)));
   check('a returning client is greeted as returning and a new one is told what is needed',
-    clientEntryCopy(false).label === 'Client project room' && /access key/i.test(clientEntryCopy(false).hint)
+    clientEntryCopy(false).label === 'Client access' && /access key/i.test(clientEntryCopy(false).hint)
     && clientEntryCopy(true).label === 'Open my project'
     && clientEntryCopy(true).hint !== clientEntryCopy(false).hint
     && clientEntryCopy(false).aria !== clientEntryCopy(true).aria);
@@ -1194,7 +1194,7 @@ const main = async () => {
   check('the client door renders as a plain link to the workspace in every shape',
     [entryChip, entryTile, entryIcon].every((markup) => /href="#client-portal"/.test(markup)));
   check('the client door is labelled for screen readers in every shape',
-    [entryChip, entryTile, entryIcon].every((markup) => /aria-label="Open the client project room with your project access key"/.test(markup)));
+    [entryChip, entryTile, entryIcon].every((markup) => /aria-label="Client access — enter the access key Code Rx gave you/.test(markup)));
   check('the client door grants nothing by itself — it is presentation only',
     !/fetch\(|apiCall|clientPortal\(|Authorization/.test(entrySource) && !/<script/.test(entryTile));
   check('the client door reads only this tab\'s session to choose its wording',
@@ -1227,7 +1227,9 @@ const main = async () => {
     /nav\.portal\.enter/.test(navbarSource) && /Member Portal/.test(navbarSource)
     && /brand-button brand-button--small ml-2/.test(navbarSource));
   check('the member dashboard and PHANTOM shell do not advertise the client door',
-    (navbarSource.match(/!isDashboard && <ClientPortalEntry/g) || []).length === 2);
+    (navbarSource.match(/\{!isDashboard && \(/g) || []).length === 1
+    && (navbarSource.match(/!isDashboard && <ClientPortalEntry/g) || []).length === 1
+    && (navbarSource.match(/ClientPortalEntry variant=/g) || []).length >= 3);
 
   // --- the sign-in dialog --------------------------------------------------
   const authModalSource = src('src/components/AuthModal.tsx');
@@ -2266,6 +2268,50 @@ const main = async () => {
     onePress.includes('Direct link — opens '));
   check('a client with no project is told why instead of a dead press',
     onePress.includes('This client needs a project before a link can be created.'));
+
+  // -------------------------------------------------------------------------
+  // Phase 18 follow-up — the failure the operator reported.
+  //
+  // A real browser showed “Client access is not available right now.” while the
+  // client portal switch was off: the addresses were valid, the door was shut.
+  // Nothing in the panel said so. The workspace now says it and offers the one
+  // switch that fixes it, and the header door is labelled so a client who was
+  // only sent a key can find where to type it.
+  // -------------------------------------------------------------------------
+  group('27. Phase 18 follow-up — client access switched off, and where a key is entered');
+  const accessCenter = fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessCenter.tsx'), 'utf8');
+  const navbarDoorSource = fs.readFileSync(path.join(ROOT, 'src/components/Navbar.tsx'), 'utf8');
+  const entryCopy = clientEntryCopy(false);
+
+  check('the panel reads the client-access switch, not only the permissions section',
+    accessCenter.includes("clientAccessCenter.portalSettings('portal')")
+    && accessCenter.includes("row.key === 'client_portal_enabled'")
+    && /void loadPortalSwitch\(\)/.test(accessCenter));
+  check('it warns plainly that every link and key is refused while the switch is off',
+    accessCenter.includes('Client access is switched off')
+    && accessCenter.includes('Client access is not available right now')
+    && accessCenter.includes('the addresses are valid, the door is simply closed'));
+  check('the warning offers the fix through the same settings route, guarded by the same capability',
+    accessCenter.includes('clientAccessCenter.savePortalSettings(')
+    && accessCenter.includes("key: 'client_portal_enabled', value: true")
+    && accessCenter.includes("can('clients.settings.manage')"));
+  check('a member without the capability is told who to ask instead of getting a dead button',
+    accessCenter.includes('Ask PHANTOM to switch client access on.'));
+  check('the warning is announced, not just drawn',
+    /role="alert"[\s\S]{0,400}Client access is switched off/.test(accessCenter));
+  check('the unknown state stays quiet rather than accusing the wrong thing',
+    accessCenter.includes('setClientAccessOn(null)') && accessCenter.includes('clientAccessOn === false'));
+
+  check('the header door is labelled, not an unexplained key icon',
+    navbarDoorSource.includes('<ClientPortalEntry variant="chip" />')
+    && navbarDoorSource.includes('<ClientPortalEntry variant="icon" />')
+    && navbarDoorSource.includes('hidden xl:inline-flex'));
+  check('the entry tells the client what to do with the key they were given',
+    entryCopy.label === 'Client access'
+    && entryCopy.hint === 'Enter the access key Code Rx gave you'
+    && entryCopy.aria.includes('access key'));
+  check('a returning client sees their own workspace wording instead',
+    clientEntryCopy(true).label === 'Open my project');
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

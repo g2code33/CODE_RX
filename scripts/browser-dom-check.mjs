@@ -71,8 +71,8 @@ console.log('server-generated address :', link.data.url);
 void created;
 
 // --- 2. helpers to run the shipped bundle at an address ---------------------
-const boot = async (token) => {
-const pageUrl = `${BASE}/l/${token}`;
+const boot = async (address) => {
+const pageUrl = address.startsWith('http') ? address : `${BASE}${address}`;
 const html = await (await fetch(pageUrl)).text();
 const bundle = /<script type="module"[^>]*>([\s\S]*?)<\/script>/.exec(html);
 if (!bundle) { console.log('FAIL — the shipped page carries no application bundle'); process.exit(1); }
@@ -116,16 +116,16 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = () => window.document.body.textContent.replace(/\s+/g, ' ').trim();
 for (let attempt = 0; attempt < 60 && text().length < 40; attempt += 1) await wait(250);
 
-  return { body: text(), addressBar: window.location.href, cleared: !window.location.href.includes(token) };
+  return { body: text(), addressBar: window.location.href, html: window.document.body.innerHTML };
 };
 
 // --- 3. the room, and the document inside it, reached through the address ----
-const room = await boot(link.data.token);
+const room = await boot(`/l/${link.data.token}`);
 console.log('address bar after open  :', room.addressBar);
 console.log('window rendered         :', room.body.slice(0, 300));
 const landedInRoom = room.body.includes(project.name);
 console.log('landed in the room      :', landedInRoom);
-console.log('token cleared from URL  :', room.cleared);
+console.log('token cleared from URL  :', room.addressBar === `${BASE}/#client-portal`);
 
 // A link generated from a document, opened the same way, must land on that
 // document rather than on the client or a menu.
@@ -139,11 +139,28 @@ if (published) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Origin: HOST },
     body: JSON.stringify({ projectId: project.id, destination: 'document', documentId: published.id, mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 1440, allowView: true, allowDownload: false }),
   }).then((response) => response.json());
-  const onDocument = await boot(documentLink.data.token);
+  const onDocument = await boot(`/l/${documentLink.data.token}`);
   landedOnDocument = onDocument.body.includes(published.title);
   console.log('document address        :', documentLink.data.url);
   console.log('landed on the document  :', landedOnDocument, `(“${published.title}”)`);
 }
 
-console.log(landedInRoom && landedOnDocument ? 'RESULT: the addresses lead directly there' : 'RESULT: FAILED');
-process.exit(landedInRoom && landedOnDocument ? 0 : 1);
+// --- 4. the client who was sent only an access key ---------------------------
+// No link at all: the client opens the site and comes in through the client
+// door, which must show the key entry screen itself — not a dead end.
+const door = await boot('/#client-portal');
+const asksForKey = /Enter your project access key/i.test(door.body)
+  && /key field|access key/i.test(door.body)
+  && door.html.includes('#client-portal') === false;
+// The key format is CRX-123-123-ABC: two access-key groups and one project
+// code, three labelled boxes, and the screen asks for them by name.
+const accessKeyGroups = (door.html.match(/aria-label="Access key, group \d+ of \d+"/g) || []).length;
+const codeGroups = (door.html.match(/aria-label="Project code, group \d+ of \d+/g) || []).length;
+const hasBoxes = accessKeyGroups === 2 && codeGroups === 1;
+console.log('client door rendered    :', door.body.slice(0, 220));
+console.log('the door asks for the key:', asksForKey);
+console.log('the key boxes are there :', hasBoxes);
+
+const honest = landedInRoom && landedOnDocument && asksForKey && hasBoxes;
+console.log(honest ? 'RESULT: the addresses lead directly there, and the door takes a key' : 'RESULT: FAILED');
+process.exit(honest ? 0 : 1);
