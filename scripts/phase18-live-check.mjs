@@ -201,6 +201,37 @@ const main = async () => {
     && !download.buffer.equals(sourcePdf(bodyText)));
   check('the client copy carries the document content', asText.includes(bodyText));
 
+  // --- 9. the temporary link an operator sends ----------------------------
+  const directLink = await json('POST', `/api/phantom/clients/${clientId}/links`, {
+    projectId, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null,
+  }, token);
+  const linkPath = String(directLink.json?.data?.path || '');
+  const linkToken = String(directLink.json?.data?.token || '');
+  const linkUrl = `${BASE}${linkPath}`;
+  check('creating a link returns the address to send',
+    directLink.status === 201 && linkPath === `/#client-portal/link/${linkToken}`, linkPath);
+  check('the address is a full http link that resolves on the running site',
+    /^http:\/\/[^/]+\/#client-portal\/link\/[A-Za-z0-9_-]{32,160}$/.test(linkUrl)
+    && (await fetch(linkUrl)).status === 200);
+  const redeemed = await json('POST', `/api/client/link/${encodeURIComponent(linkToken)}`);
+  check('opening it lands on the destination with a live session',
+    redeemed.status === 200 && Boolean(redeemed.json?.data?.session?.token)
+    && JSON.stringify(redeemed.json.data).includes(projectId),
+    JSON.stringify(redeemed.json).slice(0, 200));
+
+  const keyedLink = await json('POST', `/api/phantom/clients/${clientId}/links`, {
+    projectId, destination: 'project', mode: 'REQUIRE_PASSKEY', maxUses: null,
+  }, token);
+  const keyedRedeem = await json('POST', `/api/client/link/${encodeURIComponent(keyedLink.json.data.token)}`);
+  check('a passkey address asks for the key before anything opens',
+    keyedRedeem.status === 200 && keyedRedeem.json?.data?.requiresPasskey === true && !keyedRedeem.json?.data?.session);
+  const keyedSignIn = await json('POST', '/api/client/auth/login', { passkey: key.json.data.passkey, linkToken: keyedLink.json.data.token });
+  check('the same address opens once the client signs in with their key',
+    keyedSignIn.status === 200 && Boolean(keyedSignIn.json?.data?.session?.token));
+  const linkList = await json('GET', `/api/phantom/clients/${clientId}/links`, null, token);
+  check('the panel can never re-show an address it already issued',
+    !JSON.stringify(linkList.json).includes(linkToken) && !JSON.stringify(linkList.json).includes('#client-portal'));
+
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
   console.log('\n' + '='.repeat(64));

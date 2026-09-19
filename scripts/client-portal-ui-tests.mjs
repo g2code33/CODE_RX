@@ -62,7 +62,7 @@ const bundle = async () => {
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
-        export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext } from './src/components/ClientAccessCenter';
+        export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext, KeyRevealDialog } from './src/components/ClientAccessCenter';
         export { ClientPortalEntry } from './src/components/ClientPortalEntry';
         export { ClientSupportContact } from './src/components/ClientSupportContact';
         export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
@@ -117,6 +117,7 @@ const main = async () => {
     ActivityPanel, buildClientActivityEntry, clientActivityPage, safeActivityDetails,
     activityAccessMethod, activityKindFor, activityLabelFor, clientActivityEvent, CLIENT_ACTIVITY_KINDS,
     LINK_DESTINATIONS, LINK_DESTINATION_IDS, LINK_ACCESS_MODES, LINK_TTL_PRESETS,
+    absoluteLinkUrl, linkShareUrl, clientSignInUrl, linkShareHint, KeyRevealDialog,
     LINK_TTL_MINUTES_FALLBACK, LINK_TTL_MIN_MINUTES, LINK_TTL_MAX_MINUTES, LINK_MAX_USES_LIMIT,
     linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
@@ -2038,6 +2039,107 @@ const main = async () => {
     !/storageReference|client-exports/.test(center18) && !/storageReference|client-exports/.test(uploads18));
   check('the new surfaces keep the readable-text rule from Phase 16',
     !/text-slate-300|placeholder:text-slate-300/.test([center18, vault18, uploads18, uploadField18, uploadDialog18].join('\n')));
+
+  // -------------------------------------------------------------------------
+  // Phase 18 follow-up — the address an operator sends.
+  //
+  // The panel used to reveal a bare token, which is not something a person can
+  // send. The panel now shows the full http address the client opens, copies
+  // it, and can open it to check where it leads — while the key flow keeps its
+  // sign-in address free of any credential.
+  // -------------------------------------------------------------------------
+  group('24. Phase 18 follow-up — a temporary link becomes a real http address');
+  const linkRead = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8');
+  const centerLink = linkRead('src/components/ClientAccessCenter.tsx');
+  const portalLink = linkRead('src/components/ClientPortal.tsx');
+  const host = 'https://coderxsociety.pages.dev';
+
+  check('a site-relative path becomes a full http address',
+    absoluteLinkUrl('/#client-portal/link/TOKEN123', host) === `${host}/#client-portal/link/TOKEN123`);
+  check('an address that is already absolute is left alone',
+    absoluteLinkUrl(`${host}/#client-portal/link/TOKEN123`, host) === `${host}/#client-portal/link/TOKEN123`);
+  check('a trailing slash on the host never doubles up',
+    absoluteLinkUrl('/#client-portal/link/TOKEN123', `${host}/`) === `${host}/#client-portal/link/TOKEN123`);
+  check('an unknown host degrades to the path instead of inventing one',
+    absoluteLinkUrl('/#client-portal/link/TOKEN123') === '/#client-portal/link/TOKEN123'
+    && absoluteLinkUrl('') === '');
+  check('the shared address is built from the one path helper',
+    linkShareUrl('TOKEN123', host) === absoluteLinkUrl(linkPath('TOKEN123'), host)
+    && linkPath('TOKEN123') === '/#client-portal/link/TOKEN123');
+  check('the address the panel generates is the hash the client app parses',
+    new RegExp('^#client-portal\\/link\\/([^/?#]+)$').test(linkPath('TOKEN123').slice(1))
+    && portalLink.includes("window.location.hash"));
+  check('the client sign-in address carries no credential at all',
+    clientSignInUrl(host) === `${host}/#client-portal`
+    && !/TOKEN|passkey|CRX-/.test(clientSignInUrl(host)));
+
+  const directHint = linkShareHint('DIRECT_ACCESS', 'Project room', host);
+  const passkeyHint = linkShareHint('REQUIRE_PASSKEY', 'Project room', host);
+  check('direct access is explained in the operator’s words',
+    directHint.includes('Project room') && /immediately|straight away/i.test(directHint) && /no access key/i.test(directHint)
+    && /credential/i.test(directHint));
+  check('a passkey link is explained as needing the client’s key',
+    passkeyHint.includes('Project room') && /access key/i.test(passkeyHint));
+
+  const directReveal = render(React.createElement(KeyRevealDialog, {
+    payload: {
+      passkey: 'TOKEN1234567890TOKEN1234567890TOKEN12',
+      hint: '',
+      expiresAt: '2026-09-20T12:00:00.000Z',
+      message: 'Copy this link now and deliver it securely.',
+      label: 'Temporary link — direct access',
+      url: linkShareUrl('TOKEN1234567890TOKEN1234567890TOKEN12', host),
+      urlHint: directHint,
+    },
+    onClose: () => {},
+  }));
+  check('the generated link is shown as an address that can be selected and copied',
+    directReveal.includes(`value="${host}/#client-portal/link/TOKEN1234567890TOKEN1234567890TOKEN12"`)
+    && directReveal.includes('Copy link') && directReveal.includes('readOnly'));
+  check('the link can be opened straight from the panel to check where it leads',
+    directReveal.includes(`href="${host}/#client-portal/link/TOKEN1234567890TOKEN1234567890TOKEN12"`)
+    && directReveal.includes('target="_blank"') && directReveal.includes('rel="noreferrer"') && directReveal.includes('Open link'));
+  check('the address and the open button are the same string',
+    (directReveal.match(/TOKEN1234567890TOKEN1234567890TOKEN12/g) || []).length >= 3);
+  check('the token is still available on its own for an operator who needs just that part',
+    directReveal.includes('Token only') && directReveal.includes('copy token'));
+  check('the reveal says what the link will do, in the mode it was created with',
+    directReveal.includes('Temporary link — direct access') && directReveal.includes('Expires'));
+  check('a passkey link is revealed as a link too, not as a bare token',
+    render(React.createElement(KeyRevealDialog, {
+      payload: {
+        passkey: 'TOKEN1234567890TOKEN1234567890TOKEN12', hint: '', expiresAt: null,
+        message: 'Copy this link now.', label: 'Temporary link — access key required',
+        url: linkShareUrl('TOKEN1234567890TOKEN1234567890TOKEN12', host), urlHint: passkeyHint,
+      },
+      onClose: () => {},
+    })).includes('Temporary link — access key required'));
+
+  const keyReveal = render(React.createElement(KeyRevealDialog, {
+    payload: { passkey: 'CRX-UC2-GUK-MSD', hint: 'MSD', expiresAt: null, message: 'Generated.', label: 'Client access key' },
+    onClose: () => {},
+  }));
+  check('an access key is still revealed as a key, with no link affordance',
+    keyReveal.includes('CRX-UC2-GUK-MSD') && /Copy/.test(keyReveal)
+    && !keyReveal.includes('Open link') && !keyReveal.includes('Copy link')
+    && !keyReveal.includes('Token only'));
+  check('a key never turns into a url',
+    !/href="[^"]*(CRX|passkey|key=)/i.test(keyReveal)
+    && !/<a\b/.test(keyReveal));
+
+  check('the panel builds the address from the server path and the host it is served from',
+    centerLink.includes('url: absoluteLinkUrl(payload.path, origin)')
+    && centerLink.includes("window.location.origin")
+    && !/#client-portal\/link\/\$\{/.test(centerLink));
+  check('the panel explains both modes where the operator reads them',
+    centerLink.includes("payload.mode === 'DIRECT_ACCESS' ? 'Temporary link — direct access' : 'Temporary link — access key required'")
+    && centerLink.includes('a direct-access link opens the destination immediately'));
+  check('the keys panel hands over the sign-in address the key is used on',
+    centerLink.includes('clientSignInUrl(origin)') && centerLink.includes('Client sign-in address')
+    && centerLink.includes('The client opens this address and enters their access key.'));
+  check('no credential is ever placed in a url anywhere in the panel',
+    !/[?#&](passkey|key|token|linkToken)=/i.test(centerLink)
+    && !/linkPath\(|#client-portal\/link/.test(centerLink.replace(/url: absoluteLinkUrl\(payload\.path, origin\)/g, '')));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

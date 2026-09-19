@@ -4059,6 +4059,73 @@ const main = async () => {
     )[0].c) === 0,
     JSON.stringify(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%upload%'")));
 
+  // -------------------------------------------------------------------------
+  // PHASE 18 FOLLOW-UP — the address an operator actually sends.
+  //
+  // A temporary link is only useful as one thing you can paste into a message:
+  // a full http address. The server returns the path (`/#client-portal/link/…`,
+  // the hash the client app routes on) and the panel makes it absolute against
+  // the host it is served from. These checks pin the contract the panel relies
+  // on, and that the address cannot be recovered afterwards.
+  // -------------------------------------------------------------------------
+  group('26. The link an operator sends — the address contract (Phase 18 follow-up)');
+  const addressClient = await createClient(phantomToken, 'Phase 18 Link Client');
+  const addressProject = await createProject(phantomToken, addressClient.id, 'Phase 18 Link Project');
+  const addressKey = await createKey(phantomToken, addressClient.id, addressProject.id, { label: 'Address key' });
+  const linkFor = (body) => request('POST', `/api/phantom/clients/${addressClient.id}/links`, { token: phantomToken, body });
+  const redeem = (token) => request('POST', `/api/client/link/${encodeURIComponent(token)}`);
+
+  const directLink = await linkFor({ projectId: addressProject.id, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null });
+  const directPath = String(directLink.json?.data?.path || '');
+  const directToken = String(directLink.json?.data?.token || '');
+  check('creating a link returns the address to send, not a bare token',
+    directLink.status === 201 && directPath === `/#client-portal/link/${directToken}`,
+    directPath);
+  check('the returned address is the exact hash the client app routes on',
+    /^\/#client-portal\/link\/[A-Za-z0-9_-]{32,160}$/.test(directPath));
+  check('the address carries the token and no client, project or database identifier',
+    !directPath.includes(addressClient.id) && !directPath.includes(addressProject.id)
+    && !/cli_|prj_|doc_|client_id|project_id/.test(directPath));
+  check('the address states its mode so the panel can explain what will happen',
+    directLink.json.data.mode === 'DIRECT_ACCESS' && Boolean(directLink.json.data.destinationLabel));
+
+  const directRedeem = await redeem(directToken);
+  check('opening the generated address lands on the destination with a live session',
+    directRedeem.status === 200 && Boolean(directRedeem.json?.data?.session?.token)
+    && JSON.stringify(directRedeem.json.data).includes(addressProject.id),
+    JSON.stringify(directRedeem.json).slice(0, 200));
+
+  const addressPasskeyLink = await linkFor({ projectId: addressProject.id, destination: 'project', mode: 'REQUIRE_PASSKEY', maxUses: null });
+  const addressPasskeyRedeem = await redeem(addressPasskeyLink.json.data.token);
+  check('a passkey address opens nothing until the access key is given',
+    addressPasskeyRedeem.status === 200 && addressPasskeyRedeem.json?.data?.requiresPasskey === true
+    && !addressPasskeyRedeem.json?.data?.session,
+    JSON.stringify(addressPasskeyRedeem.json).slice(0, 200));
+  const addressPasskeySignIn = await request('POST', '/api/client/auth/login', {
+    body: { passkey: addressKey.passkey, linkToken: addressPasskeyLink.json.data.token },
+  });
+  check('the same address works once the client signs in with their key',
+    addressPasskeySignIn.status === 200 && Boolean(addressPasskeySignIn.json?.data?.session?.token));
+  check('both addresses share one template, so one copy button is enough',
+    /^\/#client-portal\/link\//.test(String(addressPasskeyLink.json.data.path))
+    && String(addressPasskeyLink.json.data.path).endsWith(addressPasskeyLink.json.data.token));
+
+  check('a tampered address opens nothing and reveals nothing',
+    (await redeem('not-a-real-token-aaaaaaaaaaaaaaaaaaaaaaaa')).status === 404
+    || (await redeem('not-a-real-token-aaaaaaaaaaaaaaaaaaaaaaaa')).status === 410,
+    'expected a controlled refusal');
+
+  const addressList = await request('GET', `/api/phantom/clients/${addressClient.id}/links`, { token: phantomToken });
+  check('the links list can never re-show the address it already issued',
+    addressList.status === 200
+    && !JSON.stringify(addressList.json).includes(directToken)
+    && !JSON.stringify(addressList.json).includes(addressPasskeyLink.json.data.token)
+    && !JSON.stringify(addressList.json).includes('#client-portal'));
+  check('the address is not stored anywhere, only the hash of its token',
+    !JSON.stringify(db.query('SELECT * FROM client_links WHERE public_id IN (?, ?)', directLink.json.data.id, addressPasskeyLink.json.data.id))
+      .includes('#client-portal')
+    && Number(db.query('SELECT COUNT(*) AS c FROM client_links WHERE public_id = ?', directLink.json.data.id)[0].c) === 1);
+
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;
   console.log('\n' + '='.repeat(64));

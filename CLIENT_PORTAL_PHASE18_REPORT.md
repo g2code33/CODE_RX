@@ -1,7 +1,8 @@
 # Phase 18 — Upload a document, stamp it, and issue an access key
 
 **Delivered:** 2026-09-19 · branch `arena/01a0b09c-code-rx`
-**Result: 1903 / 1903 checks = 100.0 %** — UI 523, backend 1361, live 19.
+**Result: 1941 / 1941 checks = 100.0 %** — UI 544, backend 1372, live 25.
+(Includes the follow-up in §6: a temporary link is now generated as a full http address.)
 
 ---
 
@@ -76,11 +77,11 @@
 
 | Suite | Before | After |
 |---|---|---|
-| UI harness (`npm run test:client-portal-ui`) | 487 | **523 / 523** |
-| Backend harness (`npm run test:client-portal`) | 1332 | **1361 / 1361** |
-| Live check against the built `dist` (`scripts/phase18-live-check.mjs`) | — | **19 / 19** |
+| UI harness (`npm run test:client-portal-ui`) | 487 | **544 / 544** |
+| Backend harness (`npm run test:client-portal`) | 1332 | **1372 / 1372** |
+| Live check against the built `dist` (`scripts/phase18-live-check.mjs`) | — | **25 / 25** |
 | `tsc --noEmit` | clean | clean |
-| **Total** | 1827 | **1903 / 1903 = 100.0 %** |
+| **Total** | 1827 | **1941 / 1941 = 100.0 %** |
 
 The live check drives the real server on port 8788: PHANTOM signs in, uploads a PDF, it becomes a Vault document, it is published to a client, an access key is issued, the client signs in with that key and downloads the stamped copy — which is asserted to be a real PDF, watermarked `CODE Rx SOCIETY` / `CLIENT PROJECT DOCUMENT`, carrying the document text, and **not** byte-identical to the file that was uploaded.
 
@@ -99,3 +100,57 @@ PHANTOM: `coderxsociety@gmail.com` / `DevPreviewPassword1`.
 2. Pick any PDF, `.docx` or PNG, choose the section, then *Approve & publish* — the message reports the stamped copy.
 3. **Access keys** → *Issue access key* → copy the `CRX-…` key, sign in with it on the client page and download the stamped copy.
 4. **Vault → any section → Upload Document** creates an internal document straight from a file.
+
+---
+
+## 6. Follow-up — a temporary link is now generated as a real http address
+
+**The gap.** Creating a temporary link revealed only the raw token. The server had
+always returned the address (`data.path`), and the client app had always routed on
+it — the panel simply threw it away, so nothing an operator could send existed.
+
+### How a direct link is used
+
+1. PHANTOM creates the link: *Temporary Links → Create temporary link*, choosing the
+   project, the destination (project room, section, document, or the stamped file),
+   the access mode, and the lifetime.
+2. The panel now shows the **address**, e.g.
+
+   ```
+   https://coderxsociety.pages.dev/#client-portal/link/9tR2…xQ
+   ```
+
+   with **Copy link**, an **Open link** button, and the token on its own underneath.
+3. That one string is what the operator sends. The client opens it and lands on the
+   destination:
+   * **Direct access** — the link itself is the credential. It opens the destination
+     immediately and records the use; no access key is involved. Send it only to the client.
+   * **Access key required** — the address names the destination and nothing opens
+     until the client signs in with their access key.
+4. Limits still apply: lifetime and uses are enforced server-side; an expired, revoked
+   or used-up address shows the controlled end state, never a partial room.
+5. The token is a credential, so it is stripped from the address bar the moment it is
+   redeemed, and only a hash is stored — a lost link is replaced, not recovered.
+
+### What changed
+
+* `absoluteLinkUrl` / `linkShareUrl` / `clientSignInUrl` / `linkShareHint` in
+  `src/lib/linkAccess.ts` — pure helpers that turn the server's path into an absolute
+  address against the origin the panel is actually served on (so the preview host and
+  production both work, with no hardcoded domain).
+* The shown-once dialog renders the address in a selectable field with **Copy link**,
+  **Open link** (checked with the same string), the token beside it, and the expiry.
+* The mode label explains what will happen: *Temporary link — direct access* or
+  *Temporary link — access key required*, with a sentence in the operator's words.
+* The keys panel hands over the **client sign-in address** (`/#client-portal`) with the
+  same copy/open controls — the key is never put in a URL.
+* The links list states the rule plainly: the address is shown once, a lost link is
+  replaced.
+
+### Verification
+
+UI harness 544/544 (21 new checks: helper units, both rendered reveal states, no
+credential in any URL), backend 1372/1372 (11 new: the address contract, redemption
+lands on the destination, a passkey address opens nothing, tampering, and that the
+list can never re-show an issued address), live 25/25 (the generated URL is fetched on
+the running site, redeemed, and lands on the destination project).

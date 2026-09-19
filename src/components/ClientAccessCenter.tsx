@@ -19,6 +19,9 @@ import { appDialog } from './AppDialog';
 import { ClientProjectRoom, type ClientPortalContext, type RoomTransport } from './ClientProjectRoom';
 import { CATEGORY_LABELS } from '../lib/projectRoom';
 import {
+  absoluteLinkUrl,
+  clientSignInUrl,
+  linkShareHint,
   LINK_ACCESS_MODES,
   LINK_DESTINATIONS,
   LINK_MAX_USES_LIMIT,
@@ -160,7 +163,11 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [showClientForm, setShowClientForm] = useState<null | { mode: 'create' } | { mode: 'edit'; client: any }>(null);
   const [showProjectForm, setShowProjectForm] = useState<null | { mode: 'create' } | { mode: 'edit'; project: any }>(null);
   const [keyDialog, setKeyDialog] = useState<null | { clientId: string; projectId?: string }>(null);
-  const [revealedKey, setRevealedKey] = useState<null | { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string }>(null);
+  const [revealedKey, setRevealedKey] = useState<null | {
+    passkey: string; hint: string; expiresAt: string | null; message: string; label?: string;
+    /** The full http address a temporary link opens (shown once). */
+    url?: string; urlHint?: string;
+  }>(null);
   const [publishFlow, setPublishFlow] = useState<null | { clientId: string; projectId?: string; document?: any; upload?: boolean }>(null);
   const [linkDialog, setLinkDialog] = useState<null | { clientId: string }>(null);
   const [previewClient, setPreviewClient] = useState<null | { client: any; projectId: string; room: any; projects: any[] }>(null);
@@ -575,9 +582,15 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
           client={detail} projects={projects} documents={documents}
           onClose={() => setLinkDialog(null)}
           onIssued={async (payload, message) => {
+            const origin = typeof window === 'undefined' ? '' : window.location.origin;
             setRevealedKey({
-              passkey: payload.token, hint: '', expiresAt: payload.expiresAt, message,
-              label: 'Temporary link token',
+              passkey: payload.token,
+              hint: '',
+              expiresAt: payload.expiresAt,
+              message,
+              label: payload.mode === 'DIRECT_ACCESS' ? 'Temporary link — direct access' : 'Temporary link — access key required',
+              url: absoluteLinkUrl(payload.path, origin),
+              urlHint: linkShareHint(payload.mode, payload.destinationLabel, origin),
             });
             await refresh('A temporary link was created and is shown once.');
           }}
@@ -846,7 +859,19 @@ const KeysPanel = ({
   const [hideRevoked, setHideRevoked] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copiedSignIn, setCopiedSignIn] = useState(false);
   const visible = hideRevoked ? keys.filter((key) => key.status !== 'revoked') : keys;
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  const signInUrl = clientSignInUrl(origin);
+  const copySignIn = async () => {
+    try {
+      await navigator.clipboard.writeText(signInUrl);
+      setCopiedSignIn(true);
+      setTimeout(() => setCopiedSignIn(false), 2500);
+    } catch {
+      setCopiedSignIn(false);
+    }
+  };
 
   const regenerate = async (key: any) => {
     setError(null);
@@ -889,6 +914,27 @@ const KeysPanel = ({
             </button>
           ) : null}
         </div>
+      </div>
+
+      <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+        <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">Send this with the key</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            readOnly
+            value={signInUrl}
+            aria-label="Client sign-in address"
+            onFocus={(event) => event.currentTarget.select()}
+            className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs font-bold text-slate-800 outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+          />
+          <button onClick={() => void copySignIn()} className="mini-button" disabled={!signInUrl}>
+            {copiedSignIn ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copiedSignIn ? 'Copied' : 'Copy'}
+          </button>
+          <a href={signInUrl || '/'} target="_blank" rel="noreferrer" className="mini-button"><Link2 className="h-4 w-4" /> Open</a>
+        </div>
+        <p className="mt-2 text-[11px] font-medium text-slate-600">
+          The client opens this address and enters their access key. The key is never part of the address, so the link stays safe
+          to resend.
+        </p>
       </div>
 
       {error ? <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-sm font-semibold text-rose-800">{error}</p> : null}
@@ -948,7 +994,9 @@ const LinksPanel = ({
       <div>
         <h4 className="text-lg font-black text-slate-900">Temporary project links</h4>
         <p className="text-xs font-medium text-slate-500">
-          Each link opens one destination, for a limited time. Tokens are hashed on the server and shown once.
+          Each link opens one destination, for a limited time. Tokens are hashed on the server and shown once, so each link is
+          generated as a full http address you can send as-is: a direct-access link opens the destination immediately, a passkey
+          link asks for the client&apos;s access key first. A lost link is replaced, not recovered.
         </p>
       </div>
       {can('clients.links.create') ? (
@@ -1623,40 +1671,95 @@ const KeyDialog = ({
   );
 };
 
-const KeyRevealDialog = ({
+/**
+ * The one "shown once" dialog. For an access key the credential is the value
+ * itself; for a temporary link it is the address the client opens, so the
+ * address is what is shown and copied — with the raw token kept beside it for
+ * an operator who needs only that part.
+ */
+export const KeyRevealDialog = ({
   payload, onClose,
-}: { payload: { passkey: string; hint: string; expiresAt: string | null; message: string; label?: string }; onClose: () => void }) => {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
+}: {
+  payload: {
+    passkey: string; hint: string; expiresAt: string | null; message: string; label?: string;
+    /** Phase 18 follow-up: the full http address a temporary link opens. */
+    url?: string; urlHint?: string;
+  };
+  onClose: () => void;
+}) => {
+  const [copied, setCopied] = useState<'url' | 'token' | null>(null);
+  const urlField = useRef<HTMLInputElement>(null);
+  const copy = async (value: string, which: 'url' | 'token') => {
     try {
-      await navigator.clipboard.writeText(payload.passkey);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
+      await navigator.clipboard.writeText(value);
+      setCopied(which);
+      setTimeout(() => setCopied(null), 2500);
     } catch {
-      setCopied(false);
+      setCopied(null);
     }
   };
+  const isLink = Boolean(payload.url);
 
   return (
     <Dialog
       title="Copy this now"
-      subtitle={payload.label === 'Temporary link token'
+      subtitle={isLink
         ? 'This link is shown once. Deliver it securely; it cannot be retrieved — only replaced.'
         : 'This value is shown once. Close this window and it cannot be retrieved — only regenerated.'}
       onClose={onClose}
     >
       <div className="space-y-4">
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center">
-          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-700">{payload.label || 'Client credential'}</p>
-          <p className="mt-2 break-all font-mono text-lg font-black tracking-[0.12em] text-emerald-900 sm:text-2xl">{payload.passkey}</p>
-          {payload.expiresAt ? <p className="mt-2 text-[11px] font-bold text-emerald-800">Expires {formatWhen(payload.expiresAt)}</p> : null}
-        </div>
+        {isLink ? (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-700">{payload.label || 'Temporary link'}</p>
+            <input
+              ref={urlField}
+              readOnly
+              value={payload.url}
+              aria-label="The link to send"
+              onFocus={() => urlField.current?.select()}
+              className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2.5 font-mono text-xs font-bold text-emerald-900 outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+            />
+            {payload.expiresAt ? <p className="mt-2 text-[11px] font-bold text-emerald-800">Expires {formatWhen(payload.expiresAt)}</p> : null}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button onClick={() => void copy(String(payload.url), 'url')} className="mini-button mini-button--primary">
+                {copied === 'url' ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copied === 'url' ? 'Copied' : 'Copy link'}
+              </button>
+              <a
+                href={payload.url}
+                target="_blank"
+                rel="noreferrer"
+                className="mini-button"
+              >
+                <Link2 className="h-4 w-4" /> Open link
+              </a>
+            </div>
+            {payload.urlHint ? <p className="mt-3 text-[11px] font-semibold text-emerald-900">{payload.urlHint}</p> : null}
+            <p className="mt-3 border-t border-emerald-200 pt-3 text-[11px] font-medium text-emerald-900">
+              Token only: <span className="break-all font-mono">{payload.passkey}</span>
+              {' '}
+              <button onClick={() => void copy(payload.passkey, 'token')} className="font-black underline underline-offset-2">
+                {copied === 'token' ? 'copied' : 'copy token'}
+              </button>
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center">
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-700">{payload.label || 'Client credential'}</p>
+            <p className="mt-2 break-all font-mono text-lg font-black tracking-[0.12em] text-emerald-900 sm:text-2xl">{payload.passkey}</p>
+            {payload.expiresAt ? <p className="mt-2 text-[11px] font-bold text-emerald-800">Expires {formatWhen(payload.expiresAt)}</p> : null}
+          </div>
+        )}
         <p className="text-sm font-medium text-slate-600">{payload.message}</p>
         <p className="rounded-xl bg-slate-50 px-3.5 py-3 text-xs font-medium text-slate-600">
           Deliver this to the client out of band. Code Rx stores only a secure hash, so nobody — including PHANTOM — can read it back.
         </p>
         <div className="flex justify-end gap-2">
-          <button onClick={copy} className="mini-button">{copied ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copied ? 'Copied' : 'Copy'}</button>
+          {!isLink ? (
+            <button onClick={() => void copy(payload.passkey, 'token')} className="mini-button">
+              {copied === 'token' ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copied === 'token' ? 'Copied' : 'Copy'}
+            </button>
+          ) : null}
           <button onClick={onClose} className="mini-button mini-button--primary">Done</button>
         </div>
       </div>
@@ -1961,7 +2064,10 @@ const LinkDialogHost = ({
   client, projects, documents, onClose, onIssued,
 }: {
   client: any; projects: any[]; documents: any[]; onClose: () => void;
-  onIssued: (payload: { token: string; expiresAt: string; path: string }, message: string) => void | Promise<void>;
+  onIssued: (
+    payload: { token: string; expiresAt: string; path: string; mode: LinkAccessMode; destinationLabel: string },
+    message: string,
+  ) => void | Promise<void>;
 }) => {
   const [projectId, setProjectId] = useState(projects.find((project) => !project.isArchived)?.id || '');
   const [destination, setDestination] = useState<LinkDestinationId>('project');
@@ -2018,7 +2124,15 @@ const LinkDialogHost = ({
         allowView: effectiveAllowView,
         allowDownload: effectiveAllowDownload,
       });
-      await onIssued({ token: result.data.token, expiresAt: result.data.expiresAt, path: result.data.path }, result.message);
+      await onIssued({
+        token: result.data.token,
+        expiresAt: result.data.expiresAt,
+        // The server returns the path the client app routes on; the panel makes
+        // it a full http address so the operator can send one usable thing.
+        path: result.data.path,
+        mode: (result.data.mode === 'DIRECT_ACCESS' ? 'DIRECT_ACCESS' : 'REQUIRE_PASSKEY') as LinkAccessMode,
+        destinationLabel: result.data.destinationLabel,
+      }, result.message);
     } catch (failure: any) {
       setError(failure?.message || 'A temporary link could not be created.');
     } finally {

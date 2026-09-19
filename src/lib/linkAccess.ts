@@ -339,6 +339,51 @@ export const looksLikeLinkToken = (value: string | null | undefined): boolean =>
 export const linkPath = (token: string): string => `/#client-portal/link/${encodeURIComponent(token)}`;
 
 /**
+ * A temporary link is only useful as one thing an operator can send: a full
+ * address. The server already returns the right path (`/#client-portal/link/…`
+ * — the hash the client app routes on), so this makes it absolute against the
+ * address the panel is served from. A path that is already absolute is returned
+ * untouched, and an unknown origin degrades to the path rather than an invented
+ * host.
+ */
+export const absoluteLinkUrl = (path: string, origin?: string | null): string => {
+  const candidate = String(path || '').trim();
+  if (!candidate) return '';
+  if (/^https?:\/\//i.test(candidate)) return candidate;
+  const base = String(origin || '').trim().replace(/\/+$/, '');
+  const relative = candidate.startsWith('/') ? candidate : `/${candidate}`;
+  return base ? `${base}${relative}` : relative;
+};
+
+/**
+ * The exact address an operator copies and sends. Opening it lands on the
+ * destination: DIRECT_ACCESS opens it straight away, REQUIRE_PASSKEY asks for
+ * the client's access key first.
+ */
+export const linkShareUrl = (token: string, origin?: string | null): string =>
+  absoluteLinkUrl(linkPath(token), origin);
+
+/** Where a client holding an access key signs in. Never carries a credential. */
+export const clientSignInUrl = (origin?: string | null): string => absoluteLinkUrl(clientPortalPath(), origin);
+
+/**
+ * How the generated link behaves, in the operator's words. `origin` is reported
+ * back so the panel can show the host the link will actually open on.
+ */
+export const linkShareHint = (
+  mode: LinkAccessMode,
+  destinationLabel: string,
+  origin?: string | null,
+): string => {
+  const host = String(origin || '').trim();
+  const where = destinationLabel ? `“${destinationLabel}”` : 'the destination';
+  return mode === 'DIRECT_ACCESS'
+    ? `Anyone who opens this address lands on ${where} immediately — no access key. The link is the credential, so send it only to the client.`
+    : `This address names ${where}. The client still signs in with their access key before anything opens.`
+      + (host ? '' : ' (Copy it from the address bar of this site so it carries the right host.)');
+};
+
+/**
  * The client workspace has one address, and it is the same one the access key
  * signs in to: `/#client-portal`. Every public entry point links to this exact
  * hash — never to a link token, and never with a credential in the URL.
