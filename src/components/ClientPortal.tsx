@@ -5,23 +5,41 @@ import { ClientLinkState } from './ClientLinkState';
 import { ClientProjectRoom, type ClientPortalContext } from './ClientProjectRoom';
 import { clientPortal, clientPortalSession, ClientPortalError } from '../lib/cloudflare';
 import { messageForFailure } from '../lib/accessKey';
-import { clientContact, linkStateScreen, type LinkStateScreen } from '../lib/linkAccess';
+import {
+  CLIENT_PORTAL_HASH,
+  clientContact,
+  clientPortalPath,
+  isLinkAddress,
+  linkStateScreen,
+  linkTokenFromAddress,
+  type LinkStateScreen,
+} from '../lib/linkAccess';
 
 /**
- * Reads a temporary link token out of `#client-portal/link/<token>`.
+ * Reads a temporary link token out of the address, in either form: the clean
+ * address `/l/<token>`, or the original `#client-portal/link/<token>`. One
+ * parser, so a link sent today and a link sent last week open the same way.
  */
-const linkTokenFromHash = (): string => {
-  const match = /^#client-portal\/link\/([^/?#]+)/.exec(window.location.hash);
-  return match ? decodeURIComponent(match[1]) : '';
-};
+const linkTokenFromAddressBar = (): string =>
+  linkTokenFromAddress(window.location.pathname, window.location.hash);
+
+/** True when the credential is the path itself (`/l/<token>`), not a fragment. */
+const linkIsInPath = (): boolean => isLinkAddress(window.location.pathname);
 
 /**
  * The token is a credential: once it has been exchanged it is removed from the
- * address bar so it cannot linger in history, a bookmark or a shared link.
+ * address bar so it cannot linger in history, a bookmark or a shared link. When
+ * the token was the path (`/l/<token>`), the whole path is replaced by the
+ * portal address rather than left behind.
  */
-const stripLinkTokenFromUrl = () => {
+const stripLinkTokenFromUrl = (fromPath: boolean) => {
   try {
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#client-portal`);
+    // An absolute path: a bare `#client-portal` would keep the link path in the
+    // address bar, which is exactly what must disappear.
+    const target = fromPath
+      ? clientPortalPath()
+      : `${window.location.pathname}${window.location.search}${CLIENT_PORTAL_HASH}`;
+    window.history.replaceState(null, '', target);
   } catch {
     /* history is unavailable in some embedded browsers */
   }
@@ -67,11 +85,11 @@ export const ClientPortal = ({ links }: { links?: Record<string, string> } = {})
     let cancelled = false;
 
     const bootstrap = async () => {
-      const linkToken = linkTokenFromHash();
+      const linkToken = linkTokenFromAddressBar();
       if (linkToken) {
         if (redeemedLink.current) return;
         redeemedLink.current = true;
-        stripLinkTokenFromUrl();
+        stripLinkTokenFromUrl(linkIsInPath());
         try {
           const response = await clientPortal.redeemLink(linkToken);
           if (cancelled) return;

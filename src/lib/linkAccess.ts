@@ -339,6 +339,41 @@ export const looksLikeLinkToken = (value: string | null | undefined): boolean =>
 export const linkPath = (token: string): string => `/#client-portal/link/${encodeURIComponent(token)}`;
 
 /**
+ * The clean address of a temporary link: an ordinary path on this site,
+ * `/l/<token>`, with no fragment at all. The app is served for any path (the
+ * catch-all falls back to index.html), so `https://site.example/l/<token>` opens
+ * the client portal and lands on the destination. The hash form above is still
+ * accepted, so links that were already sent keep working.
+ */
+export const LINK_ADDRESS_PREFIX = '/l/';
+
+export const linkAddressPath = (token: string): string =>
+  `${LINK_ADDRESS_PREFIX}${encodeURIComponent(String(token || '').trim())}`;
+
+/**
+ * The credential in an address, whichever form it arrived in: the clean path
+ * (`/l/<token>`) or the original hash (`#client-portal/link/<token>`). Only the
+ * shape is checked; the server is what actually decides whether it is valid.
+ */
+export const linkTokenFromAddress = (
+  pathname?: string | null,
+  hash?: string | null,
+): string => {
+  const fromPath = /^\/l\/([A-Za-z0-9_-]{1,200})$/.exec(String(pathname || '').trim());
+  if (fromPath) return decodeURIComponent(fromPath[1]);
+  const fromHash = /^#client-portal\/link\/([^/?#]+)/.exec(String(hash || ''));
+  return fromHash ? decodeURIComponent(fromHash[1]) : '';
+};
+
+/** True when this address is a link address, so the portal view must open. */
+export const isLinkAddress = (pathname?: string | null): boolean =>
+  /^\/l\/[A-Za-z0-9_-]{1,200}$/.test(String(pathname || '').trim());
+
+/** The complete http address of a temporary link, `/l/<token>` on this site. */
+export const linkAddressUrl = (token: string, origin?: string | null): string =>
+  token ? absoluteLinkUrl(linkAddressPath(token), origin) : '';
+
+/**
  * A temporary link is only useful as one thing an operator can send: a full
  * address. The server already returns the right path (`/#client-portal/link/…`
  * — the hash the client app routes on), so this makes it absolute against the

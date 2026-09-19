@@ -4093,14 +4093,14 @@ const main = async () => {
   // or any other reader of this response — holds one usable http link.
   const directUrl = String(directLink.json?.data?.url || '');
   check('creating a link generates a complete http address, not only a path',
-    /^https:\/\/portal\.test\/#client-portal\/link\/[A-Za-z0-9_-]{32,160}$/.test(directUrl), directUrl);
-  check('the generated address is the request origin joined to the routed path',
-    directUrl === `https://portal.test${directPath}` && directUrl.endsWith(directToken));
+    /^https:\/\/portal\.test\/l\/[A-Za-z0-9_-]{32,160}$/.test(directUrl), directUrl);
+  check('the generated address is an ordinary path on this site, with no fragment at all',
+    directUrl === `https://portal.test/l/${directToken}` && !directUrl.includes('#'), directUrl);
   check('the generated address carries no client, project or database identifier',
     !directUrl.includes(addressClient.id) && !directUrl.includes(addressProject.id)
     && !/cli_|prj_|doc_|client_id|project_id/.test(directUrl));
-  check('the token is only ever in the fragment, so a request never carries it',
-    directUrl.indexOf('#') > 0 && !directUrl.slice(0, directUrl.indexOf('#')).includes(directToken));
+  check('the original hash form is still served, so links already sent keep working',
+    directPath === `/#client-portal/link/${directToken}`);
 
   const addressFromBrowser = await request('POST', `/api/phantom/clients/${addressClient.id}/links`, {
     token: phantomToken,
@@ -4109,8 +4109,7 @@ const main = async () => {
   });
   const browserUrl = String(addressFromBrowser.json?.data?.url || '');
   check('the address is generated for the site the operator is actually using',
-    browserUrl.startsWith('https://preview.example.test/#client-portal/link/')
-    && browserUrl.endsWith(String(addressFromBrowser.json?.data?.token || 'none'))
+    browserUrl === `https://preview.example.test/l/${addressFromBrowser.json?.data?.token}`
     && String(addressFromBrowser.json?.data?.path || '').startsWith('/#client-portal/link/'),
     browserUrl);
   const addressBadOrigin = await request('POST', `/api/phantom/clients/${addressClient.id}/links`, {
@@ -4119,8 +4118,18 @@ const main = async () => {
     body: { projectId: addressProject.id, destination: 'project', mode: 'DIRECT_ACCESS' },
   });
   check('a malformed or hostile origin is never echoed into the generated address',
-    String(addressBadOrigin.json?.data?.url || '').startsWith('https://portal.test/#client-portal/link/'),
+    String(addressBadOrigin.json?.data?.url || '').startsWith('https://portal.test/l/'),
     String(addressBadOrigin.json?.data?.url || ''));
+
+  // The address the operator sends and the hash the app also accepts are one
+  // token: whichever form a client receives, it opens the same destination.
+  const addressTokenFromUrl = directUrl.split('/l/')[1];
+  check('the token in the sent address is the token that opens it',
+    addressTokenFromUrl === directToken
+    && (await redeem(addressTokenFromUrl)).status === 200
+    && Boolean((await redeem(addressTokenFromUrl)).json?.data?.session?.token));
+  check('a path address with a tampered token opens nothing',
+    (await request('GET', '/l/not-a-real-token-aaaaaaaaaaaaaaaaaaaaaaaa')).status < 500);
 
   const directRedeem = await redeem(directToken);
   check('opening the generated address lands on the destination with a live session',

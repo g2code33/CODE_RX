@@ -68,7 +68,7 @@ const bundle = async () => {
         export { ClientAccessKeyField } from './src/components/ClientAccessKeyField';
         export { ClientSiteSign } from './src/components/ClientSiteSign';
         export { SectionLink } from './src/components/SectionLink';
-        export { sectionDirectLinkUrl } from './src/lib/linkAccess';
+        export { sectionDirectLinkUrl, linkTokenFromAddress, linkAddressUrl, linkAddressPath, isLinkAddress } from './src/lib/linkAccess';
         export { SiteEmoji, SiteEmojiText, SiteEmojiProvider } from './src/components/SiteEmoji';
         export { SiteEmojiAdmin } from './src/components/SiteEmojiAdmin';
         export { ContactForm } from './src/components/ContactForm';
@@ -120,7 +120,7 @@ const main = async () => {
     activityAccessMethod, activityKindFor, activityLabelFor, clientActivityEvent, CLIENT_ACTIVITY_KINDS,
     LINK_DESTINATIONS, LINK_DESTINATION_IDS, LINK_ACCESS_MODES, LINK_TTL_PRESETS,
     absoluteLinkUrl, linkShareUrl, clientSignInUrl, linkShareHint, KeyRevealDialog,
-    SectionLink, sectionDirectLinkUrl,
+    SectionLink, sectionDirectLinkUrl, linkTokenFromAddress, linkAddressUrl, linkAddressPath, isLinkAddress,
     LINK_TTL_MINUTES_FALLBACK, LINK_TTL_MIN_MINUTES, LINK_TTL_MAX_MINUTES, LINK_MAX_USES_LIMIT,
     linkDestination, linkDestinationLabel, linkAccessModeLabel, ttlLabel,
     validateLinkLifetime, validateLinkMaxUses, linkPermissionSummary, linkUsesLabel,
@@ -2082,7 +2082,7 @@ const main = async () => {
   check('the link API contract carries the generated address, not only the path',
     /id: string; token: string; path: string; url: string;/.test(apiLink));
   check('the panel sends the address the server generated',
-    centerLink.includes('url: payload.url || absoluteLinkUrl(payload.path, origin)'));
+    centerLink.includes('url: payload.url || linkAddressUrl(payload.token, origin)'));
   check('the create dialog hands the generated address up to the reveal',
     centerLink.includes('url: result.data.url,')
     && centerLink.includes('path: result.data.path,'));
@@ -2148,10 +2148,38 @@ const main = async () => {
     !/href="[^"]*(CRX|passkey|key=|UC2)/i.test(keyReveal)
     && !/value="[^"]*#client-portal\?[^"]*"/.test(keyReveal));
 
-  check('the panel uses the server address, and still builds one from the path it is served from',
-    centerLink.includes('url: payload.url || absoluteLinkUrl(payload.path, origin)')
+  check('the panel uses the server address, and still builds one from the token it holds',
+    centerLink.includes('url: payload.url || linkAddressUrl(payload.token, origin)')
     && centerLink.includes("window.location.origin")
     && !/#client-portal\/link\/\$\{/.test(centerLink));
+
+  // A link is handed over as an ordinary address on the site: /l/<token>. The
+  // hash form stays supported, so links that were already sent keep working.
+  check('a link token becomes an ordinary path address on this site',
+    linkAddressPath('TOKEN123') === '/l/TOKEN123'
+    && linkAddressUrl('TOKEN123', host) === `${host}/l/TOKEN123`);
+  check('the address carries no fragment, so a link preview cannot mangle it',
+    !linkAddressUrl('TOKEN123', host).includes('#'));
+  check('the token is read back out of the path address',
+    linkTokenFromAddress('/l/TOKEN123', '') === 'TOKEN123'
+    && isLinkAddress('/l/TOKEN123'));
+  check('a link that was already sent by hash still opens the same way',
+    linkTokenFromAddress('/', '#client-portal/link/TOKEN123') === 'TOKEN123'
+    && linkTokenFromAddress('/', '#client-portal') === '');
+  check('an address that is not a link is never treated as one',
+    !isLinkAddress('/') && !isLinkAddress('/l/') && !isLinkAddress('/values')
+    && linkTokenFromAddress('/values', '#values') === '');
+
+  const appLink = linkRead('src/App.tsx');
+  const portalAddressSource = linkRead('src/components/ClientPortal.tsx');
+  check('the app opens the client portal for a path address, not only a hash',
+    appLink.includes('isLinkAddress(window.location.pathname)'));
+  check('the portal reads the credential from either form of the address',
+    portalAddressSource.includes('linkTokenFromAddress(window.location.pathname, window.location.hash)'));
+  check('once exchanged, a path address is cleared rather than left in history',
+    portalAddressSource.includes('stripLinkTokenFromUrl(linkIsInPath())')
+    && portalAddressSource.includes('clientPortalPath()')
+    && !/fromPath\s*\?\s*CLIENT_PORTAL_HASH/.test(portalAddressSource));
   check('the panel explains both modes where the operator reads them',
     centerLink.includes("payload.mode === 'DIRECT_ACCESS' ? 'Temporary link — direct access' : 'Temporary link — access key required'")
     && centerLink.includes('a direct-access link opens the destination immediately'));

@@ -1656,12 +1656,15 @@ export const registerClientRoutes = (app: ClientApp) => {
       },
     });
 
-    // The client app is hash-routed, so the link matches the existing
-    // #vault-share / #reset / #activate convention. It is returned as a
-    // complete address (and the path it was built from) so the operator — or
-    // any other API reader — holds one usable http link, never a fragment.
+    // Two shapes, one token:
+    //   `path` — the original hash form, kept so links that were already sent
+    //            (and anything reading this response) keep working;
+    //   `url`  — the address an operator actually sends: an ordinary path on
+    //            this site, `/l/<token>`, with no fragment at all. The app is
+    //            served for any path, so opening it lands on the destination.
     const linkPath = `/#client-portal/link/${token}`;
-    const linkUrl = absoluteLinkAddress(linkPath, requestOrigin(c.req.raw), c.env);
+    const linkAddress = `/l/${token}`;
+    const linkUrl = absoluteLinkAddress(linkAddress, requestOrigin(c.req.raw), c.env);
 
     return c.json({
       success: true,

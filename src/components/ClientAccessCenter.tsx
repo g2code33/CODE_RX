@@ -20,6 +20,7 @@ import { ClientProjectRoom, type ClientPortalContext, type RoomTransport } from 
 import { CATEGORY_LABELS } from '../lib/projectRoom';
 import {
   absoluteLinkUrl,
+  linkAddressUrl,
   clientSignInUrl,
   linkShareHint,
   LINK_ACCESS_MODES,
@@ -589,7 +590,9 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
               expiresAt: payload.expiresAt,
               message,
               label: payload.mode === 'DIRECT_ACCESS' ? 'Temporary link — direct access' : 'Temporary link — access key required',
-              url: payload.url || absoluteLinkUrl(payload.path, origin),
+              // The server's own address, and if a response ever arrives
+              // without one, the same clean address built from the token.
+              url: payload.url || linkAddressUrl(payload.token, origin) || absoluteLinkUrl(payload.path, origin),
               urlHint: linkShareHint(payload.mode, payload.destinationLabel, origin),
             });
             await refresh('A temporary link was created and is shown once.');

@@ -226,20 +226,32 @@ const main = async () => {
     projectId, destination: 'project', mode: 'DIRECT_ACCESS', maxUses: null, expiresInMinutes: 15,
   }, token, { Origin: previewHost });
   const previewUrl = String(previewLink.json?.data?.url || '');
+  const previewToken = String(previewLink.json?.data?.token || '');
   check('the server generates a complete http address for the site in use',
-    previewLink.status === 201 && previewUrl.startsWith(`${previewHost}/#client-portal/link/`),
+    previewLink.status === 201 && previewUrl === `${previewHost}/l/${previewToken}`,
     previewUrl || JSON.stringify(previewLink.json).slice(0, 160));
-  check('that address is the server\u2019s own, not one the harness assembled',
-    previewUrl === `${previewHost}${String(previewLink.json?.data?.path || '')}`
-    && previewUrl.endsWith(String(previewLink.json?.data?.token || 'none')));
+  check('the address is an ordinary path on the site, with no fragment at all',
+    !previewUrl.includes('#') && previewUrl.endsWith(`/l/${previewToken}`));
+  // The running site serves the app for that address, so it leads there instead
+  // of returning a 404 or a directory page.
+  const servedAddress = await fetch(`${BASE}/l/${previewToken}`);
+  const servedAddressBody = await servedAddress.text();
+  check('the running site serves the app itself at that address',
+    servedAddress.status === 200 && servedAddressBody.includes('<div id="root"'),
+    `status ${servedAddress.status}`);
+  const servedHash = await fetch(`${BASE}/#client-portal/link/${previewToken}`);
+  check('the original hash address still resolves on the running site', servedHash.status === 200);
   console.log(`\n  → direct link the server generated (valid 15 minutes):\n    ${previewUrl || `${previewHost}${linkPath}`}\n`);
   check('creating a link returns the address to send',
     directLink.status === 201 && linkPath === `/#client-portal/link/${linkToken}`
-    && String(directLink.json?.data?.url || '') === `${BASE}${linkPath}`, linkPath);
+    && String(directLink.json?.data?.url || '') === `${BASE}/l/${linkToken}`, linkPath);
   check('the address is a full http link that resolves on the running site',
     /^http:\/\/[^/]+\/#client-portal\/link\/[A-Za-z0-9_-]{32,160}$/.test(linkUrl)
-    && (await fetch(linkUrl)).status === 200);
-  const redeemed = await json('POST', `/api/client/link/${encodeURIComponent(linkToken)}`);
+    && (await fetch(linkUrl)).status === 200
+    && String(directLink.json?.data?.url || '') === `${BASE}/l/${linkToken}`);
+  // The token read out of the clean path address is the token that opens it.
+  const tokenFromAddress = String(directLink.json?.data?.url || '').split('/l/')[1] || '';
+  const redeemed = await json('POST', `/api/client/link/${encodeURIComponent(tokenFromAddress)}`);
   check('opening it lands on the destination with a live session',
     redeemed.status === 200 && Boolean(redeemed.json?.data?.session?.token)
     && JSON.stringify(redeemed.json.data).includes(projectId),

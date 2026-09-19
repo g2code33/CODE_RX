@@ -17,6 +17,7 @@ import { SiteEmojiProvider } from './components/SiteEmoji';
 import { SECTION_MAP } from './data/mockData';
 import { INITIAL_SITE_CONTENT, SiteContent, normalizeSiteContent } from './data/siteState';
 import { auth, AuthUser, db, isAdminUser } from './lib/cloudflare';
+import { isLinkAddress } from './lib/linkAccess';
 
 type CommunityOrigin = 'public' | 'member' | 'phantom' | 'admin';
 
@@ -45,7 +46,11 @@ function App() {
   const [isSharedVaultView, setIsSharedVaultView] = useState(() => window.location.hash.startsWith('#vault-share'));
   // The client portal is its own workspace, like the shared Vault document: it
   // is reachable by hash and never renders inside the member shell.
-  const [isClientPortalView, setIsClientPortalView] = useState(() => window.location.hash.startsWith('#client-portal'));
+  // Reachable two ways: the hash (`#client-portal`, `#client-portal/link/…`) and
+  // a clean link address (`/l/<token>`) that the server serves the app for.
+  const [isClientPortalView, setIsClientPortalView] = useState(
+    () => window.location.hash.startsWith('#client-portal') || isLinkAddress(window.location.pathname),
+  );
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
   useEffect(() => {
@@ -169,7 +174,7 @@ function App() {
         setIsResetView(false);
         return;
       }
-      if (window.location.hash.startsWith('#client-portal')) {
+      if (window.location.hash.startsWith('#client-portal') || isLinkAddress(window.location.pathname)) {
         setIsCommunityWorkspace(false);
         setIsClientPortalView(true);
         setIsSharedVaultView(false);
