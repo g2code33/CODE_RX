@@ -4188,6 +4188,187 @@ const main = async () => {
   check('the labels never leak an implementation key as the only description',
     labelledRows.every((row) => !/^[a-z_]+$/.test(String(row.label))));
 
+  // -------------------------------------------------------------------------
+  // PHASE 19 — the four things the operator asked for:
+  //   1. every delete lands in the Recycle Bin and can be restored;
+  //   2. the client works on a sent document, saves it and sends it back;
+  //   3. saving at the client's side changes the Code Rx Vault copy too;
+  //   4. the Vault shelf says which client and project each document belongs to.
+  // -------------------------------------------------------------------------
+  group('27. Deleting goes to the Recycle Bin — Vault documents and client documents (Phase 19)');
+  const p19BinClient = await createClient(phantomToken, 'Phase 19 Client');
+  const p19BinProject = await createProject(phantomToken, p19BinClient.id, 'Phase 19 Project');
+  const p19BinKey = await createKey(phantomToken, p19BinClient.id, p19BinProject.id, { label: 'Phase 19 key' });
+  const p19BinSession = await clientSession(p19BinKey.passkey, 'phase 19');
+  const p19BinSection = (await request('GET', '/api/vault/sections', { token: phantomToken })).json.data
+    .find((entry) => entry.permissions?.create && Number(entry.is_sensitive) !== 1);
+  const p19MakeVaultDocument = async (title) => {
+    const response = await request('POST', '/api/vault/documents', {
+      token: phantomToken, body: { section: p19BinSection.slug, title, content: 'Vault body for Phase 19.' },
+    });
+    if (response.status !== 200) throw new Error(`vault document fixture failed: ${JSON.stringify(response.json)}`);
+    return response.json.data.id;
+  };
+  const p19RecycleBin = async () => (await request('GET', '/api/phantom/recycle-bin', { token: phantomToken })).json.data || [];
+  const p19BinRowFor = async (type, id) => (await p19RecycleBin())
+    .find((row) => row.resource_type === type && String(row.resource_id) === String(id));
+  const p19VaultShelf = async (archived = false) => (await request('GET', `/api/vault/documents?section=${p19BinSection.slug}${archived ? '&archived=1' : ''}`, { token: phantomToken })).json.data || [];
+
+  // A Vault document: the delete the Vault editor offers must be recoverable.
+  const p19BinVaultId = await p19MakeVaultDocument('Phase 19 Vault document');
+  const p19VaultDeleteResponse = await request('POST', `/api/vault/documents/${p19BinVaultId}/delete`, { token: phantomToken });
+  check('a Vault document can be deleted, and the answer says where it went',
+    p19VaultDeleteResponse.status === 200 && /Recycle Bin/i.test(String(p19VaultDeleteResponse.json?.message || '')),
+    JSON.stringify(p19VaultDeleteResponse.json).slice(0, 160));
+  check('the deleted Vault document leaves the active shelf',
+    !(await p19VaultShelf()).some((row) => row.id === p19BinVaultId));
+  const p19VaultBinRow = await p19BinRowFor('vault_document', p19BinVaultId);
+  check('the deleted Vault document is in the same Recycle Bin every other deletion uses',
+    Boolean(p19VaultBinRow), JSON.stringify((await p19RecycleBin()).map((row) => row.resource_type)));
+  check('its Recycle Bin entry is titled so an operator recognises it',
+    /Vault document/i.test(String(p19VaultBinRow?.title || '')), String(p19VaultBinRow?.title || ''));
+  check('a document that is already deleted cannot be deleted into the bin a second time',
+    (await request('POST', `/api/vault/documents/${p19BinVaultId}/delete`, { token: phantomToken })).status === 404);
+  const p19VaultRestore = await request('POST', `/api/phantom/recycle-bin/${p19VaultBinRow.id}/restore`, { token: phantomToken });
+  check('restoring it from the Recycle Bin succeeds', p19VaultRestore.status === 200, p19VaultRestore.text?.slice(0, 120) ?? '');
+  check('the restored Vault document is readable and on the shelf again',
+    (await request('GET', `/api/vault/documents/${p19BinVaultId}`, { token: phantomToken })).status === 200
+    && (await p19VaultShelf()).some((row) => row.id === p19BinVaultId));
+  check('its version history is intact after the round trip',
+    ((await request('GET', `/api/vault/documents/${p19BinVaultId}/versions`, { token: phantomToken })).json.data || []).length >= 1);
+  check('the Recycle Bin entry is consumed by the restore',
+    !(await p19BinRowFor('vault_document', p19BinVaultId)));
+
+  // Deleting and archiving stay two different things: the Vault's own archive
+  // route still archives, and the new delete is what reaches the Recycle Bin.
+  const p19ArchiveId = await p19MakeVaultDocument('Phase 19 archived document');
+  await request('DELETE', `/api/vault/documents/${p19ArchiveId}`, { token: phantomToken });
+  check('archiving still archives rather than deleting',
+    (await p19VaultShelf(true)).some((row) => row.id === p19ArchiveId)
+    && !(await p19BinRowFor('vault_document', p19ArchiveId)));
+  await request('POST', `/api/vault/documents/${p19ArchiveId}/unarchive`, { token: phantomToken });
+
+  // A client document linked to a Vault document: the link must survive.
+  const p19BinLinked = await createDocument(phantomToken, p19BinClient.id, p19BinProject.id, {
+    title: 'Phase 19 linked letter', vaultDocumentId: p19BinVaultId,
+  });
+  await publish(phantomToken, p19BinLinked.id);
+  const p19LinkedDelete = await request('DELETE', `/api/phantom/client-documents/${p19BinLinked.id}`, { token: phantomToken });
+  check('a published client document deletes without an error',
+    p19LinkedDelete.status === 200, JSON.stringify(p19LinkedDelete.json).slice(0, 140));
+  const p19LinkedBinRow = await p19BinRowFor('client_document', null) || (await p19RecycleBin())
+    .find((row) => row.resource_type === 'client_document' && String(row.title || '').includes('Phase 19 linked letter'));
+  check('it is in the Recycle Bin too', Boolean(p19LinkedBinRow));
+  await request('POST', `/api/phantom/recycle-bin/${p19LinkedBinRow.id}/restore`, { token: phantomToken });
+  const p19RestoredDocument = (await request('GET', `/api/phantom/clients/${p19BinClient.id}/documents`, { token: phantomToken })).json.data
+    .find((row) => row.id === p19BinLinked.id);
+  check('it comes back to the client\'s documents with its Vault link intact',
+    Boolean(p19RestoredDocument) && Number(p19RestoredDocument.vaultDocumentId) === Number(p19BinVaultId),
+    JSON.stringify(p19RestoredDocument).slice(0, 160));
+  check('a restored document is not published to the client until an operator says so',
+    restored.lifecycle !== 'published', String(restored.lifecycle));
+
+  group('28. The client works on a document, saves it, and sends it back (Phase 19)');
+  await publish(phantomToken, p19BinLinked.id);
+  const p19WorkspacePath = `/api/client/project/${p19BinProject.id}/documents/${p19BinLinked.id}/workspace`;
+  const p19ReadWorkspace = await request('GET', p19WorkspacePath, { clientSession: p19BinSession });
+  check('the document opens for work in the client room',
+    p19ReadWorkspace.status === 200 && p19ReadWorkspace.json?.data?.editable === true,
+    JSON.stringify(p19ReadWorkspace.json).slice(0, 160));
+  check('the room says the document is kept in the Code Rx Vault',
+    p19ReadWorkspace.json.data.vaultLinked === true);
+  check('the working copy arrives as readable text, not as an internal structure',
+    typeof p19ReadWorkspace.json.data.plainText === 'string' && p19ReadWorkspace.json.data.plainText.length > 0);
+  check('the working copy never carries a database identifier',
+    !/\b(client_id|project_id|vault_document_id)\b/.test(JSON.stringify(p19ReadWorkspace.json.data))
+    && !/\b\d+\b/.test(String(p19ReadWorkspace.json.data.documentId || '')));
+
+  const revision = 'The client rewrote this letter.\nSecond line of the client revision.';
+  const p19SaveResponse = await request('POST', p19WorkspacePath, { clientSession: p19BinSession, body: { text: revision } });
+  check('the client can save their revision', p19SaveResponse.status === 200, JSON.stringify(p19SaveResponse.json).slice(0, 160));
+  check('saving says the Vault copy carries the revision as well',
+    /Vault/i.test(String(p19SaveResponse.json?.message || '')), String(p19SaveResponse.json?.message || ''));
+  const p19SendResponse = await request('POST', `${p19WorkspacePath}/send`, { clientSession: p19BinSession });
+  check('the client can send the finished document back to Code Rx',
+    p19SendResponse.status === 200, JSON.stringify(p19SendResponse.json).slice(0, 160));
+  const p19InboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
+  const p19Inbox = Array.isArray(p19InboxPayload) ? p19InboxPayload : (p19InboxPayload?.items || []);
+  const p19Notice = p19Inbox.find((row) => String(row.message || '').includes('Phase 19 linked letter'));
+  check('PHANTOM is notified in the existing p19Inbox, naming the client and the project',
+    Boolean(p19Notice) && String(p19Notice.message).includes('Phase 19 Client') && String(p19Notice.message).includes('Phase 19 Project'),
+    String(p19Notice?.message || '').slice(0, 160));
+  check('sending refuses without a client session',
+    (await request('POST', `${p19WorkspacePath}/send`)).status === 401);
+  check('saving refuses without a client session',
+    (await request('POST', p19WorkspacePath, { body: { text: 'x' } })).status === 401);
+  check('an empty revision is refused rather than saved as blank',
+    (await request('POST', p19WorkspacePath, { clientSession: p19BinSession, body: { text: '   ' } })).status === 400);
+  check('a document that cannot be worked on answers with a reason, not an error page',
+    typeof p19ReadWorkspace.json?.data?.reason === 'undefined'
+    || typeof p19ReadWorkspace.json.data.reason === 'string');
+
+  group('29. The client\'s change reaches the Vault copy and is attributed to the client (Phase 19)');
+  const p19VaultAfterSave = await request('GET', `/api/vault/documents/${p19BinVaultId}`, { token: phantomToken });
+  const p19VaultBlocks = p19VaultAfterSave.json?.data?.contentJson?.blocks || [];
+  check('the Vault document now carries the client\'s wording',
+    p19VaultBlocks.map((block) => String(block?.content || '')).join('\n').includes('The client rewrote this letter'));
+  check('no member is credited with the client\'s work',
+    p19VaultAfterSave.json?.data?.updated_by_name == null
+    && p19VaultAfterSave.json?.data?.updated_by_member_id !== undefined
+      ? p19VaultAfterSave.json.data.updated_by_member_id === null || p19VaultAfterSave.json.data.updated_by_member_id === 0
+      : true);
+  const p19VersionHistory = (await request('GET', `/api/vault/documents/${p19BinVaultId}/versions`, { token: phantomToken })).json.data || [];
+  const p19ClientRevision = p19VersionHistory.find((entry) => /client portal/i.test(String(entry.change_note || '')));
+  check('the client\'s revision is a version in the Vault history, not a silent overwrite',
+    Boolean(p19ClientRevision), JSON.stringify(p19VersionHistory.map((entry) => entry.change_note)).slice(0, 200));
+  check('that version is attributed to the client portal rather than to a member',
+    Boolean(p19ClientRevision) && Number(p19ClientRevision.changed_by_member_profile_id || 0) === 0);
+  check('the wording that was there before the client\'s revision is still recoverable',
+    p19VersionHistory.length >= 2);
+  const p19ClientCopy = (await request('GET', `/api/phantom/clients/${p19BinClient.id}/documents`, { token: phantomToken })).json.data
+    .find((row) => row.id === p19BinLinked.id);
+  check('the client copy records which Vault version it now carries',
+    Number(p19ClientCopy?.vaultVersion || 0) >= 1, `vaultVersion=${p19ClientCopy?.vaultVersion}`);
+  check('the client copy version moved on as well', String(p19ClientCopy?.version) !== '1.0', String(p19ClientCopy?.version));
+  const p19ClientActivity = (await request('GET', `/api/phantom/clients/${p19BinClient.id}/activity`, { token: phantomToken })).json.data || [];
+  check('the client\'s activity history records the save in plain words',
+    JSON.stringify(p19ClientActivity).includes('Saved a revision'), JSON.stringify(p19ClientActivity).slice(0, 200));
+  check('the client\'s activity history records the send in plain words',
+    JSON.stringify(p19ClientActivity).includes('Sent a document to Code Rx'));
+  check('the save and the send are in the audit trail',
+    JSON.stringify(p19ClientActivity).toLowerCase().includes('document_saved')
+    && JSON.stringify(p19ClientActivity).toLowerCase().includes('document_sent'));
+
+  group('30. Client isolation and the Vault shelf grouping (Phase 19)');
+  const p19OtherClient = await createClient(phantomToken, 'Phase 19 Other Client');
+  const p19OtherProject = await createProject(phantomToken, p19OtherClient.id, 'Phase 19 Other Project');
+  const p19OtherKey = await createKey(phantomToken, p19OtherClient.id, p19OtherProject.id, { label: 'Phase 19 other key' });
+  const p19OtherSession = await clientSession(p19OtherKey.passkey, 'phase 19 other');
+  check('another client cannot read this client\'s working copy',
+    (await request('GET', p19WorkspacePath, { clientSession: p19OtherSession })).status === 404);
+  check('another client cannot save into it',
+    (await request('POST', p19WorkspacePath, { clientSession: p19OtherSession, body: { text: 'not mine' } })).status === 404);
+  check('another client cannot send it back to Code Rx',
+    (await request('POST', `${p19WorkspacePath}/send`, { clientSession: p19OtherSession })).status === 404);
+  check('a client who is not signed in cannot read a working copy at all',
+    (await request('GET', p19WorkspacePath)).status === 401);
+
+  const p19ShelfRows = await p19VaultShelf();
+  const p19LinkedShelfRow = (await request('GET', `/api/vault/documents?section=${p19BinSection.slug}`, { token: phantomToken }))
+    .json.data.find((row) => row.id === p19BinVaultId);
+  check('the Vault shelf names the client a document belongs to',
+    p19LinkedShelfRow?.client_name === 'Phase 19 Client', String(p19LinkedShelfRow?.client_name));
+  check('the Vault shelf names that client\'s project',
+    p19LinkedShelfRow?.client_project_name === 'Phase 19 Project', String(p19LinkedShelfRow?.client_project_name));
+  check('the Vault shelf names a client by public id, never by database id',
+    String(p19LinkedShelfRow?.client_id || '').startsWith('cli_') && !/^\d+$/.test(String(p19LinkedShelfRow?.client_id)));
+  check('the shelf also carries the client document a reader can recognise',
+    String(p19LinkedShelfRow?.client_document_reference || '').startsWith('CRX-'), String(p19LinkedShelfRow?.client_document_reference));
+  check('a document with no client link is still listed, and is not given another client\'s name',
+    p19ShelfRows.some((row) => row.id === p19ArchiveId && !row.client_name));
+  check('grouping needs no new table: the link is the existing client_documents.vault_document_id',
+    (await request('GET', '/api/vault/documents?section=' + p19BinSection.slug, { token: phantomToken })).status === 200);
+
   const addressList = await request('GET', `/api/phantom/clients/${addressClient.id}/links`, { token: phantomToken });
   check('the links list can never re-show the address it already issued',
     addressList.status === 200

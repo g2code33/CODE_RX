@@ -307,6 +307,14 @@ export const db = {
     updateDocument: (id: number, data: any) =>
       apiCall<{ data: any }>(`/api/vault/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     archiveDocument: (id: number) => apiCall('/api/vault/documents/' + id, { method: 'DELETE' }),
+    /**
+     * Delete a Vault document into the Recycle Bin. Distinct from archiving:
+     * an archived document stays on the shelf, a deleted one leaves it and can
+     * be restored from PHANTOM → Recycle Bin.
+     */
+    deleteDocument: (id: number) => apiCall<{ message: string; data?: { recycleId?: number } }>(
+      '/api/vault/documents/' + id + '/delete', { method: 'POST' },
+    ),
     unarchiveDocument: (id: number) => apiCall('/api/vault/documents/' + id + '/unarchive', { method: 'POST' }),
     documentVersions: async (id: number) => (await apiCall<{ data: any[] }>(`/api/vault/documents/${id}/versions`)).data || [],
     documentVersion: async (id: number, version: number) => (await apiCall<{ data: any }>(`/api/vault/documents/${id}/versions/${version}`)).data,
@@ -679,6 +687,29 @@ export const clientPortal = {
   section: (projectId: string, section: string) =>
     clientCall<{ data: { project: any; section: string; documents: any[] } }>(
       `/api/client/project/${encodeURIComponent(projectId)}/sections/${encodeURIComponent(section)}`,
+    ),
+
+  /**
+   * The client's working copy of a document: what they may edit, saving it, and
+   * sending it back to Code Rx. Saving writes the same content into the linked
+   * Vault document, so the room and the Vault never disagree.
+   */
+  workspace: (projectId: string, documentId: string) =>
+    clientCall<{ data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace`,
+    ),
+  saveWorkspace: (projectId: string, documentId: string, payload: { blocks?: unknown[]; text?: string }) =>
+    clientCall<{ message: string; data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace`,
+      // `clientCall` serialises the body itself, exactly as it does for every
+      // other client request: passing a string here would send a JSON string
+      // instead of the object the route reads.
+      { method: 'POST', body: payload },
+    ),
+  sendWorkspace: (projectId: string, documentId: string) =>
+    clientCall<{ message: string; data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace/send`,
+      { method: 'POST' },
     ),
 
   document: (projectId: string, documentId: string) =>

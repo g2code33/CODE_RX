@@ -10,6 +10,8 @@ import {
   Loader2,
   LockKeyhole,
   LogOut,
+  Save,
+  Send,
   ShieldCheck,
 } from 'lucide-react';
 import { clientPortal, ClientPortalError } from '../lib/cloudflare';
@@ -20,6 +22,21 @@ import {
   type LinkLanding,
 } from '../lib/linkAccess';
 import { ClientSiteSign } from './ClientSiteSign';
+/**
+ * The editable text of a document. Blocks carry rich content, so headings and
+ * lists keep their line structure rather than collapsing into one paragraph —
+ * editing a letter should read like the letter.
+ */
+const blocksToPlainText = (blocks: unknown): string => {
+  if (!Array.isArray(blocks)) return '';
+  return blocks.map((block: any) => {
+    if (!block) return '';
+    if (Array.isArray(block.items)) return block.items.map((item: any) => `• ${String(item?.text ?? item ?? '')}`).join('\n');
+    if (Array.isArray(block.rows)) return block.rows.map((row: any[]) => row.map((cell: any) => String(cell?.text ?? cell ?? '')).join(' | ')).join('\n');
+    return String(block.content ?? block.caption ?? '');
+  }).filter((line) => line.trim().length > 0).join('\n\n');
+};
+
 import {
   CATEGORY_LABELS,
   canDownload,
@@ -75,6 +92,11 @@ export interface RoomTransport {
   download?: (projectId: string, documentId: string, fileName: string) => Promise<void>;
   /** Fetches the stamped client copy as a local object URL. Absent in preview. */
   stampedCopy?: (projectId: string, documentId: string, action: 'preview' | 'print') => Promise<{ url: string; filename: string }>;
+  /** The client's own copy of a document they may work on, and the two actions
+   *  that save it and send it back to Code Rx. */
+  workspace?: (projectId: string, documentId: string) => Promise<{ data: any }>;
+  saveWorkspace?: (projectId: string, documentId: string, payload: { text?: string; blocks?: unknown[] }) => Promise<{ message: string; data: any }>;
+  sendWorkspace?: (projectId: string, documentId: string) => Promise<{ message: string; data: any }>;
 }
 
 interface ClientProjectRoomProps {
@@ -432,6 +454,55 @@ export const ClientProjectRoom = ({
     }
   };
 
+  /**
+   * The client's working copy. Loaded when a document is opened, it is what the
+   * client may edit and send back; saving it also updates the Code Rx Vault copy
+   * of the same document, so the two never drift apart.
+   */
+  const [workspace, setWorkspace] = useState<any | null>(null);
+  const [workspaceText, setWorkspaceText] = useState('');
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceNotice, setWorkspaceNotice] = useState<string | null>(null);
+
+  const loadWorkspace = async (documentId: string) => {
+    setWorkspace(null);
+    setWorkspaceNotice(null);
+    if (!transport.workspace) return;
+    try {
+      const response = await transport.workspace(projectId, documentId);
+      const data = response.data || {};
+      if (!data.editable) return;
+      setWorkspace(data);
+      setWorkspaceText(blocksToPlainText(data.blocks));
+    } catch {
+      // A document that cannot be worked on is simply not offered; the reader
+      // below never fails because of it.
+      setWorkspace(null);
+    }
+  };
+
+  const saveWorkspace = async (send: boolean) => {
+    if (!openDocument || !workspace) return;
+    setWorkspaceBusy(true);
+    setWorkspaceNotice(null);
+    try {
+      const saved = await transport.saveWorkspace!(projectId, String(openDocument.id), { text: workspaceText });
+      setWorkspaceNotice(saved.message || 'Saved.');
+      setWorkspace((current: any) => ({ ...current, version: saved.data?.version || current.version }));
+      if (send) {
+        const sent = await transport.sendWorkspace!(projectId, String(openDocument.id));
+        setWorkspaceNotice(sent.message || 'Sent to Code Rx.');
+      }
+      // The room's own copy of the document is refreshed so the version the
+      // client sees is the version they just saved.
+      await openDocumentById(String(openDocument.id));
+    } catch (failure) {
+      handleFailure(failure);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
   const openDocumentById = async (documentId: string) => {
     setBusy(true);
     setError(null);
@@ -439,6 +510,7 @@ export const ClientProjectRoom = ({
     try {
       const response = await transport.document(projectId, documentId);
       setOpenDocument(response.data.document);
+      void loadWorkspace(documentId);
       const delivery = parseDelivery(response.data.delivery);
       setOpenDelivery(delivery);
       // The stamped copy is fetched eagerly only when the viewer can show it.
@@ -709,6 +781,57 @@ export const ClientProjectRoom = ({
                 </div>
                 {openDocument.summary ? (
                   <p className="mt-5 rounded-xl bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">{openDocument.summary}</p>
+                ) : null}
+                {workspace ? (
+                  <section className="mt-6 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4 sm:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-black uppercase tracking-[0.14em] text-emerald-800">Work on this document</h3>
+                        <p className="mt-1 max-w-2xl text-xs font-medium leading-5 text-emerald-900">
+                          Write your changes here, save them, and send them to Code Rx when you are ready.
+                          {workspace.vaultLinked
+                            ? ' Saving keeps your revision with the Code Rx copy of this document — there is nothing to email separately.'
+                            : ''}
+                        </p>
+                      </div>
+                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-emerald-700 ring-1 ring-emerald-100">
+                        Version {workspace.version}
+                      </span>
+                    </div>
+                    <label className="mt-4 block">
+                      <span className="sr-only">Your revision of {openDocument.title}</span>
+                      <textarea
+                        value={workspaceText}
+                        onChange={(event) => setWorkspaceText(event.target.value)}
+                        rows={12}
+                        spellCheck
+                        aria-label={`Your revision of ${openDocument.title}`}
+                        className="w-full rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm leading-7 text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+                      />
+                    </label>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void saveWorkspace(false)}
+                        disabled={workspaceBusy || !workspaceText.trim()}
+                        className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 disabled:opacity-60"
+                      >
+                        {workspaceBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void saveWorkspace(true)}
+                        disabled={workspaceBusy || !workspaceText.trim()}
+                        className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-800 transition hover:bg-emerald-50 disabled:opacity-60"
+                      >
+                        <Send className="h-3.5 w-3.5" /> Save &amp; send to Code Rx
+                      </button>
+                      {workspace.savedAt ? <span className="text-[11px] font-semibold text-emerald-900">Last saved {String(workspace.savedAt).slice(0, 16).replace('T', ' ')}</span> : null}
+                    </div>
+                    {workspaceNotice ? (
+                      <p role="status" className="mt-3 rounded-xl bg-white px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100">{workspaceNotice}</p>
+                    ) : null}
+                  </section>
                 ) : null}
                 <StampedCopyPanel
                   delivery={openDelivery}

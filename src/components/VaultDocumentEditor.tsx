@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Archive, Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy, Download,
+  Archive, Bold, Check, ChevronLeft, ChevronRight, Code2, Command, Copy, Download, Trash2,
   FileText, Heading1, Heading2, History, ImagePlus, Italic, Link2,
   List, Maximize2, Minimize2, Minus, MoreHorizontal,
   Paperclip, Plus, Quote, Redo2, Save, Search, Share2, Strikethrough, Table2,
@@ -37,6 +37,8 @@ interface VaultDocumentEditorProps {
   canEdit: boolean;
   canManage: boolean;
   canArchive?: boolean;
+  /** Delete into the Recycle Bin — recoverable, unlike leaving the shelf. */
+  onDelete?: (id: number) => void | Promise<void>;
   canShare?: boolean;
   canDownload?: boolean;
   onArchive?: (id: number) => void | Promise<void>;
@@ -59,7 +61,7 @@ const initialDraft = (document: any | null): VaultDocumentDraft => ({
 
 const draftStorageKey = (documentId: number | null, sectionSlug: string) => `codeRx_vault_draft_${documentId || `new_${sectionSlug}`}`;
 
-export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, canShare = false, canDownload = false, onArchive, onClose, onSaved }: VaultDocumentEditorProps) => {
+export const VaultDocumentEditor = ({ document, section, projects, canEdit, canManage, canArchive = false, canShare = false, canDownload = false, onArchive, onDelete, onClose, onSaved }: VaultDocumentEditorProps) => {
   const [documentId, setDocumentId] = useState<number | null>(document?.id || null);
   const [draft, setDraft] = useState<VaultDocumentDraft>(() => initialDraft(document));
   const [saveState, setSaveState] = useState<SaveState>('saved');
@@ -384,7 +386,7 @@ export const VaultDocumentEditor = ({ document, section, projects, canEdit, canM
   const canPublicShare = canShare && !section?.is_sensitive && draft.visibility !== 'restricted';
   const shellClass = focusMode ? 'vault-editor vault-editor--focus' : 'vault-editor';
 
-  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canPublicShare && documentId && <button onClick={() => setShowShare(true)} className="editor-icon-button text-emerald-700 hover:!text-emerald-900" title="Share document"><Share2 className="h-4 w-4" /></button>}{canDownload && documentId && <button onClick={() => void downloadDocument()} className="editor-icon-button text-sky-700 hover:!text-sky-900" title="Download document"><Download className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={async () => { if (await appDialog.confirm({ title: 'Archive this document?', message: 'It leaves the active Vault but its history stays available for PHANTOM to restore.', confirmLabel: 'Archive', tone: 'warning' })) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
+  return <div className={shellClass}><div className="vault-editor__header"><div className="vault-editor__crumb"><button onClick={focusMode ? () => setFocusMode(false) : onClose} className="vault-editor__back"><ChevronLeft className="h-4 w-4" />{focusMode ? 'Exit focus mode' : `Vault / ${section.title}`}</button><span>/</span><span className="truncate">{draft.title || 'Untitled document'}</span></div><div className="vault-editor__actions"><SaveIndicator state={saveState} message={saveMessage} /><button onClick={() => setShowOutline((value) => !value)} className="editor-icon-button" title="Document outline">Outline</button><button onClick={() => { if (documentId) void db.vault.documentVersions(documentId).then(setVersions).then(() => setShowHistory(true)); }} disabled={!documentId} className="editor-icon-button" title="Version history"><History className="h-4 w-4" /></button><button onClick={() => setFocusMode((value) => !value)} className="editor-icon-button" title="Focus mode">{focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>{canPublicShare && documentId && <button onClick={() => setShowShare(true)} className="editor-icon-button text-emerald-700 hover:!text-emerald-900" title="Share document"><Share2 className="h-4 w-4" /></button>}{canDownload && documentId && <button onClick={() => void downloadDocument()} className="editor-icon-button text-sky-700 hover:!text-sky-900" title="Download document"><Download className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={async () => { if (await appDialog.confirm({ title: 'Archive this document?', message: 'It leaves the active Vault but its history stays available for PHANTOM to restore.', confirmLabel: 'Archive', tone: 'warning' })) void onArchive?.(documentId); }} className="editor-icon-button text-slate-500 hover:!text-red-600" title="Archive document"><Archive className="h-4 w-4" /></button>}{canArchive && documentId && <button onClick={async () => { if (await appDialog.confirm({ title: 'Delete this document?', message: 'It leaves the Vault and goes to PHANTOM → Recycle Bin, where it can be restored with its version history.', confirmLabel: 'Delete to Recycle Bin', tone: 'danger' })) void onDelete?.(documentId); }} className="editor-icon-button text-rose-600 hover:!text-rose-800" title="Delete to Recycle Bin"><Trash2 className="h-4 w-4" /></button>}{canEdit && <button onClick={() => void persist(true)} className="vault-editor__save"><Save className="h-4 w-4" />Save</button>}</div></div>
     <div className={`vault-editor__layout ${showOutline && !focusMode ? 'has-outline' : ''}`}><section className="vault-editor__document"><div className="vault-editor__titlebar">
         <input
           disabled={!canEdit}

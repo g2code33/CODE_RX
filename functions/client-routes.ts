@@ -31,7 +31,13 @@ import {
   type ActivityLinkRef,
   type ActivityProjectRef,
 } from './lib/client-activity';
-import { CLIENT_NOTIFICATION_SETTINGS, notifyClientDocumentEvent } from './lib/client-notifications';
+import {
+  CLIENT_NOTIFICATION_SETTINGS,
+  clientNotificationRecipients,
+  notifyClientDocumentEvent,
+} from './lib/client-notifications';
+import { normalizeDocumentContent, parseStoredDocumentContent, recordVaultActivity } from './lib/vault-document';
+import { createNotification } from './lib/notifications';
 import { cleanEmail, cleanOptionalStr, cleanStr } from './lib/validate';
 import { absoluteLinkAddress, requestOrigin } from './lib/link-address';
 import {
@@ -166,6 +172,247 @@ const SECTION_CATEGORY: Record<Exclude<ClientSection, 'overview'>, ClientDocumen
 const asRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
   const result = await statement.all<T>();
   return result.results || [];
+};
+
+// ---------------------------------------------------------------------------
+// THE CLIENT'S WORKING REVISION
+//
+// One document, two audiences. The client's room and the internal Vault read the
+// SAME content: saving from the client side writes a new version of the linked
+// Vault document (`document_versions` keeps every earlier one) and stores the
+// client's copy in `client_documents.content_snapshot`. No second document, no
+// new table, no copied content that can drift.
+// ---------------------------------------------------------------------------
+
+/** A revision may not grow past what a document can reasonably hold. */
+const MAX_CLIENT_WORKSPACE_BLOCKS = 400;
+const MAX_CLIENT_WORKSPACE_CHARS = 200_000;
+
+/** True when a revision actually carries something to save. */
+const contentReady = (content: any) => {
+  if (content === null || content === undefined) return false;
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    return content.some((block: any) => block && (
+      String(block.content || '').trim().length > 0
+      || String(block.url || '').trim().length > 0
+      || (Array.isArray(block.items) && block.items.length > 0)
+    ));
+  }
+  return Boolean(content && typeof content === 'object' && Object.keys(content).length);
+};
+
+/**
+ * The content the client can edit, if they can edit it at all.
+ *
+ * A document whose stored representation is a document (blocks or plain text) is
+ * editable. A delivered FILE is not: its content is the file itself, and a
+ * client's revision is what they save from their own writing, never a rewriting
+ * of a stamped PDF.
+ *
+ * The answer is always a verdict, never a bare null: a client who opens a
+ * document that cannot be worked on is told why, in their own words.
+ */
+const clientDocumentWorkspace = async (db: D1Database, document: any): Promise<
+  | { editable: true; blocks: unknown[]; plainText: string; format: string; version: any; savedAt: any }
+  | { editable: false; reason: string }
+> => {
+  // The session middleware never loads stored content — that is deliberate, so
+  // that browsing a project cannot pull document bodies. The working copy is
+  // read here, for this one document, on a route the client is already
+  // authorized for.
+  const row = await one<any>(db.prepare(
+    'SELECT id, content_snapshot, content_snapshot_format, version, updated_at, vault_document_id FROM client_documents WHERE id = ?'
+  ).bind(Number(document.id)));
+  if (!row) return { editable: false, reason: 'This document is no longer available.' };
+
+  const format = String(row.content_snapshot_format || 'blocks');
+  const raw = row.content_snapshot;
+  const vaultId = Number(row.vault_document_id || document?.vault_document_id || 0) || null;
+
+  // Prefer the linked Vault document's live content when it exists: the client
+  // edits what Code Rx holds, so a change made internally is visible here too.
+  if (vaultId) {
+    const live = await one<any>(db.prepare(
+      'SELECT content_json, content, content_format, updated_at FROM vault_documents WHERE id = ?'
+    ).bind(vaultId));
+    if (live && (live.content_json || live.content)) {
+      const parsed = parseStoredDocumentContent(live.content_json, live.content);
+      if (parsed.plainText.trim() || parsed.blocks.length) {
+        return {
+          editable: true, blocks: parsed.blocks, plainText: parsed.plainText,
+          format: 'blocks', version: row.version, savedAt: live.updated_at,
+        };
+      }
+    }
+  }
+
+  const asText = ['plain', 'text', 'markdown'].includes(format);
+  if (raw !== null && raw !== undefined && raw !== '' && (asText || format === 'blocks')) {
+    const stored = parseStoredDocumentContent(asText ? null : raw, asText ? String(raw) : '');
+    if (stored.plainText.trim() || stored.blocks.length) {
+      return {
+        editable: true, blocks: stored.blocks, plainText: stored.plainText,
+        format: 'blocks', version: row.version, savedAt: row.updated_at,
+      };
+    }
+  }
+
+  return { editable: false, reason: workspaceReason(format, Boolean(vaultId)) };
+};
+
+/**
+ * Why a document cannot be worked on, said in the client's own language.
+ * A delivered file is read-only by design; a document with no text yet is
+ * simply waiting for Code Rx to add one.
+ */
+const workspaceReason = (format: string, vaultLinked: boolean) => {
+  if (['pdf', 'file', 'image', 'artifact', 'stamped'].includes(format)) {
+    return 'This is a delivered file. You can read it and download your stamped copy, but its wording cannot be edited here.';
+  }
+  if (vaultLinked) return 'The Code Rx copy of this document has no editable text yet. When it has one, it will appear here.';
+  return 'This document has no editable text yet. When Code Rx adds one, it will appear here.';
+};
+
+/** "1.0" -> "1.1", "3" -> "3.1" — the same shape the panel already shows. */
+const bumpDocumentVersionLabel = (current: unknown) => {
+  const value = String(current || '1').trim();
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match) return `${value}.1`;
+  return `${match[1]}.${Number(match[2] || 0) + 1}`;
+};
+
+/**
+ * Saves the client's revision.
+ *
+ * The Vault keeps the history: what it held before is preserved as a version,
+ * the client's revision becomes the next one, and every entry says it came from
+ * the client portal rather than claiming a member wrote it.
+ */
+const saveClientDocumentRevision = async (
+  db: D1Database,
+  input: { document: any; principal: ClientPrincipal; content: { blocks: unknown[]; contentJson: string; plainText: string; wordCount: number }; format: string },
+) => {
+  const { document, principal, content, format } = input;
+  const serialized = content.contentJson;
+  const stored = format === 'plain' ? content.plainText : content.contentJson;
+  const now = new Date().toISOString();
+  const nextVersion = bumpDocumentVersionLabel(document.version);
+
+  await db.prepare(
+    `UPDATE client_documents
+     SET content_snapshot = ?, content_snapshot_format = ?, version = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(stored, format, nextVersion, Number(document.id)).run();
+
+  let vaultVersion: number | null = null;
+  if (document.vault_document_id) {
+    const vaultId = Number(document.vault_document_id);
+    const live = await one<any>(db.prepare(
+      'SELECT id, section_id, title, status, visibility, tags_json, related_project_id, word_count, file_key, content, content_json FROM vault_documents WHERE id = ?'
+    ).bind(vaultId));
+    if (live) {
+      // The Vault keeps versions in `document_versions` — the document row holds
+      // the current state only. The next number is therefore read from the
+      // history, exactly as the Vault's own editor does.
+      const latest = await one<any>(db.prepare(
+        'SELECT MAX(version_number) AS version FROM document_versions WHERE document_id = ?'
+      ).bind(vaultId));
+      const nextVaultVersion = Number(latest?.version || 0) + 1;
+      const wordCount = Number(content.wordCount || 0);
+      const note = `Client revision — ${principal.clientName} (client portal)`;
+
+      // 1. What the Vault held before the client touched it stays recoverable,
+      //    even when the team had not saved a version of their own yet.
+      await db.prepare(
+        `INSERT OR IGNORE INTO document_versions
+         (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, change_note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        vaultId, nextVaultVersion - 1, String(live.title || ''),
+        String(live.content ?? ''), live.content_json ?? null,
+        String(live.status || 'draft'), String(live.tags_json || '[]'),
+        live.related_project_id ?? null, Number(live.word_count || 0),
+        live.file_key ?? null,
+        `Kept before the client revision of ${now.slice(0, 10)}.`,
+      ).run();
+
+      // 2. The Vault copy becomes the client's revision, and the revision is a
+      //    version of its own — attributed to the client portal, never to a
+      //    member who did not write it.
+      await db.batch([
+        db.prepare(
+          `UPDATE vault_documents
+           SET content = ?, content_json = ?, content_format = 'blocks', word_count = ?,
+               updated_by_member_profile_id = NULL, last_saved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        ).bind(content.plainText, content.contentJson, wordCount, vaultId),
+        db.prepare(
+          `INSERT OR IGNORE INTO document_versions
+           (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`
+        ).bind(
+          vaultId, nextVaultVersion, String(live.title || ''),
+          content.plainText, content.contentJson, String(live.status || 'draft'),
+          String(live.tags_json || '[]'), live.related_project_id ?? null,
+          wordCount, live.file_key ?? null, note,
+        ),
+      ]);
+      vaultVersion = nextVaultVersion;
+
+      await recordVaultActivity(db, null, 'document.edited', Number(live.section_id), vaultId, {
+        version: nextVaultVersion, note, source: 'client portal', client: principal.clientName,
+      });
+    }
+  }
+
+  // The client copy records which Vault version it now carries, so the panel can
+  // tell at a glance whether the two are in step.
+  if (vaultVersion) {
+    await db.prepare('UPDATE client_documents SET vault_version_number = ? WHERE id = ?')
+      .bind(vaultVersion, Number(document.id)).run();
+  }
+
+  return { version: nextVersion, savedAt: now, vaultVersion };
+};
+
+/**
+ * Tells PHANTOM a document is ready, through the notification inbox the platform
+ * already uses for client events. A failure here never loses the revision: it is
+ * already saved, and the client is told their work is safe either way.
+ */
+const sendClientRevisionToPhantom = async (
+  db: D1Database,
+  input: { principal: ClientPrincipal; project: any; document: any; workspace: any },
+) => {
+  const { principal, project, document, workspace } = input;
+  const sentAt = new Date().toISOString();
+  let recipients = 0;
+  try {
+    const targets = await clientNotificationRecipients(db);
+    if (targets.length) {
+      await createNotification(db, {
+        title: 'Client sent a document back',
+        message: `${principal.clientName}: ${document.title} (${document.reference_code}) was worked on and sent back from the client portal — ${project.name}, version ${workspace.version}.`,
+        audience: 'system',
+        audienceLabel: 'Client portal',
+        recipientProfileIds: targets,
+      });
+      recipients = targets.length;
+    }
+  } catch (error) {
+    console.error('[code-rx] client revision notification failed:', error);
+  }
+
+  await audit(db, null, 'client.document.sent_to_phantom', 'client_document', Number(document.id), {
+    clientId: principal.clientPublicId,
+    documentPublicId: document.public_id,
+    projectId: project.public_id,
+    version: String(workspace.version || document.version || '1'),
+    recipients,
+  });
+
+  return { recipients, sentAt };
 };
 
 const one = async <T>(statement: D1PreparedStatement): Promise<T | null> => {
@@ -711,6 +958,165 @@ export const registerClientRoutes = (app: ClientApp) => {
       },
     });
   });
+
+  /**
+   * THE CLIENT'S OWN COPY OF A DOCUMENT THEY CAN WORK ON.
+   *
+   * A document the client may read is not a dead end: the client edits its text
+   * in their room, saves it, and sends it back. Saving writes the client's
+   * revision into the SAME Vault document the letter came from (a new version,
+   * kept in `document_versions`), so the Vault copy and the client copy never
+   * drift apart — one document, one content, two audiences. Sending tells
+   * PHANTOM through the platform's existing notification inbox.
+   *
+   * Everything here is scoped by the guards that already protect the document:
+   * the client portal must be on, the session must be live, the project must
+   * belong to that client, and the document must be published to them. A
+   * document that fails any of those is answered as "not found", exactly like
+   * every other client route.
+   */
+  app.get('/api/client/project/:projectId/documents/:documentId/workspace',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      const db = c.env.DB;
+      const workspace = await clientDocumentWorkspace(db, document);
+      if (!workspace.editable) {
+        return clientJson({
+          success: false,
+          data: { editable: false, reason: workspace.reason },
+          error: 'This document is read-only.',
+          code: 'document_read_only',
+        }, 200);
+      }
+
+      return clientJson({
+        success: true,
+        data: {
+          editable: true,
+          blocks: workspace.blocks,
+          plainText: workspace.plainText,
+          documentId: document.public_id,
+          reference: document.reference_code,
+          title: document.title,
+          category: document.category,
+          version: String(workspace.version || document.version || '1'),
+          savedAt: workspace.savedAt,
+          format: workspace.format,
+          vaultLinked: Boolean(document.vault_document_id),
+          hint: document.vault_document_id
+            ? 'Saving keeps your revision with the Code Rx Vault copy of this document.'
+            : 'Saving keeps your revision with this document in your project room.',
+        },
+      });
+    });
+
+  app.post('/api/client/project/:projectId/documents/:documentId/workspace',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      const db = c.env.DB;
+      const current = await clientDocumentWorkspace(db, document);
+      if (!current.editable) return clientJson({ success: false, error: current.reason, code: 'document_read_only' }, 409);
+
+      const body = await c.req.json().catch(() => ({}));
+      const blocks = body.blocks;
+      const text = body.text === undefined ? null : String(body.text);
+      if (!Array.isArray(blocks) && text === null) {
+        return clientJson({ success: false, error: 'Write something before saving.', code: 'empty_revision' }, 400);
+      }
+      if (Array.isArray(blocks) && blocks.length > MAX_CLIENT_WORKSPACE_BLOCKS) {
+        return clientJson({ success: false, error: 'This document has too many blocks to save in one go.', code: 'revision_too_large' }, 413);
+      }
+      if (text !== null && text.length > MAX_CLIENT_WORKSPACE_CHARS) {
+        return clientJson({ success: false, error: 'This revision is longer than a document can hold.', code: 'revision_too_large' }, 413);
+      }
+
+      // The input decides whether there is anything to save; normalizeDocumentContent
+      // always supplies a fallback block, so it cannot answer that question.
+      if (!contentReady(Array.isArray(blocks) ? blocks : text)) {
+        return clientJson({ success: false, error: 'Write something before saving.', code: 'empty_revision' }, 400);
+      }
+      const format = Array.isArray(blocks) ? 'blocks' : 'plain';
+      const content = normalizeDocumentContent(Array.isArray(blocks) ? blocks : null, text || '');
+
+      const saved = await saveClientDocumentRevision(db, {
+        document, principal, content, format,
+      });
+
+      await recordClientActivity(db, 'DOCUMENT_SAVED', {
+        principal,
+        details: {
+          documentId: document.public_id,
+          reference: document.reference_code,
+          version: saved.version,
+          vaultDocumentId: document.vault_document_id ? Number(document.vault_document_id) : null,
+          vaultVersion: saved.vaultVersion,
+        },
+      });
+
+      return clientJson({
+        success: true,
+        message: saved.vaultVersion
+          ? `Saved. Your revision is version ${saved.version} and the Code Rx Vault copy now carries it too.`
+          : `Saved. Your revision is version ${saved.version}.`,
+        data: {
+          version: saved.version,
+          savedAt: saved.savedAt,
+          vaultVersion: saved.vaultVersion,
+          vaultLinked: Boolean(document.vault_document_id),
+        },
+      });
+    });
+
+  /**
+   * SEND IT BACK. The client has finished working on a document and hands it to
+   * Code Rx. Nothing is unlocked by this: the revision is already saved, and
+   * this only tells the people who manage client content that it is ready, in
+   * the platform's own notification inbox, recorded in the client's activity
+   * and in the audit trail.
+   */
+  app.post('/api/client/project/:projectId/documents/:documentId/workspace/send',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const project = c.get('clientProject') as any;
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      const db = c.env.DB;
+      const workspace = await clientDocumentWorkspace(db, document);
+      if (!workspace.editable) return clientJson({ success: false, error: workspace.reason, code: 'document_read_only' }, 409);
+
+      const delivered = await sendClientRevisionToPhantom(db, { principal, project, document, workspace });
+
+      await recordClientActivity(db, 'DOCUMENT_SENT', {
+        principal,
+        details: {
+          documentId: document.public_id,
+          reference: document.reference_code,
+          version: String(workspace.version || document.version || '1'),
+          recipients: delivered.recipients,
+        },
+      });
+
+      return clientJson({
+        success: true,
+        message: delivered.recipients
+          ? 'Sent to Code Rx. PHANTOM has been told this document is ready.'
+          : 'Sent to Code Rx. It is recorded on this document and PHANTOM can see it in the client workspace.',
+        data: { recipients: delivered.recipients, sentAt: delivered.sentAt },
+      });
+    });
 
   /**
    * Serves the stamped artifact for a document.

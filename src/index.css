@@ -1534,6 +1534,47 @@ h3.vault-rich-text {
   background: #f0fdf4;
 }
 
+/* Grouping by client: a heading row opens each client's shelf. It is a label,
+   never a document, so it must not look or behave like one. */
+.vault-document-table tbody tr.vault-client-group-row,
+.vault-document-table tbody tr.vault-client-group-row:hover {
+  cursor: default;
+  background: #f8fafc;
+}
+
+.vault-client-group-row td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 1.15rem 0.8rem 0.4rem;
+}
+
+.vault-client-group__client {
+  display: block;
+  color: #065f46;
+  font-size: 0.72rem;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.vault-client-group__project {
+  display: block;
+  margin-top: 0.15rem;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.vault-client-group__count {
+  float: right;
+  border-radius: 999px;
+  background: #ecfdf5;
+  padding: 0.15rem 0.55rem;
+  color: #047857;
+  font-size: 0.62rem;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+}
+
 .vault-status-pill {
   display: inline-flex;
   border-radius: 999px;

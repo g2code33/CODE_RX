@@ -82,6 +82,8 @@ const bundle = async () => {
         export * from './src/lib/vaultUploads';
         export { VaultUploadField } from './src/components/VaultUploadField';
         export { VaultUploadDialog } from './src/components/VaultUploadDialog';
+        export { VaultDocumentEditor } from './src/components/VaultDocumentEditor';
+        export { groupDocumentsByClient } from './src/components/Vault';
       `,
       resolveDir: ROOT,
       loader: 'tsx',
@@ -135,6 +137,7 @@ const main = async () => {
     SITE_EMOJIS, SITE_EMOJI_MEDIA_PREFIX, siteEmojiMediaKey, siteEmojiReplacement, splitEmojiRuns, isSiteEmoji,
     titleFromFileName, isStampableUploadMime, STAMPABLE_UPLOAD_ACCEPT, STAMPABLE_UPLOAD_LABEL,
     MAX_UPLOAD_BYTES, sectionAcceptsDocuments, uploadDocumentStatus, VaultUploadField, VaultUploadDialog,
+    VaultDocumentEditor, groupDocumentsByClient,
     splitAccessKey, joinAccessKey, validateAccessKeyGroups,
     ACCESS_KEY_GROUPS, ACCESS_KEY_GROUP_LENGTH, ACCESS_KEY_CODE_LENGTH, ACCESS_KEY_BODY_LENGTH,
     looksLikeLinkToken, linkPath, ClientLinkState,
@@ -2315,6 +2318,97 @@ const main = async () => {
     && entryCopy.aria.includes('access key'));
   check('a returning client sees their own workspace wording instead',
     clientEntryCopy(true).label === 'Open my project');
+
+  // -------------------------------------------------------------------------
+  // PHASE 19 — the four things the operator asked for, in the interface.
+  // -------------------------------------------------------------------------
+  group('28. Deleting in the interface, and where a deleted thing goes (Phase 19)');
+  const p19EditorSection = { id: 1, slug: 'policies', title: 'Policies' };
+  const p19EditorDocument = {
+    id: 41, title: 'Client letter', document_code: 'CRX-DOC-0041', status: 'draft',
+    content: 'Body', contentFormat: 'blocks', tags: [], attachments: [],
+  };
+  const p19EditorWithDelete = render(React.createElement(VaultDocumentEditor, {
+    document: p19EditorDocument, section: p19EditorSection, projects: [],
+    canEdit: true, canManage: true, canArchive: true, onDelete: () => {}, onArchive: () => {}, onClose: () => {}, onSaved: () => {},
+  }));
+  check('the Vault editor offers a delete that names the Recycle Bin, not a silent archive',
+    /Delete to Recycle Bin/.test(p19EditorWithDelete) && /Recycle Bin/.test(p19EditorWithDelete));
+  check('the archive action is still there and still says it stays recoverable',
+    /Archive/.test(p19EditorWithDelete));
+  const p19EditorWithoutDelete = render(React.createElement(VaultDocumentEditor, {
+    document: p19EditorDocument, section: p19EditorSection, projects: [],
+    canEdit: true, canManage: true, canArchive: false, onDelete: () => {}, onClose: () => {}, onSaved: () => {},
+  }));
+  check('a reader who may not delete is not shown a delete control',
+    !/Delete to Recycle Bin/.test(p19EditorWithoutDelete));
+
+  const p19VaultSource = fs.readFileSync(path.join(ROOT, 'src/components/Vault.tsx'), 'utf8');
+  check('the editor\'s delete is wired to the delete route, not to the archive route',
+    /onDelete=\{async \(id: number\) => \{[^}]*db\.vault\.deleteDocument\(id\)/.test(p19VaultSource));
+  check('the panel tells the operator the document is in the Recycle Bin',
+    /PHANTOM → Recycle Bin/.test(p19VaultSource));
+  const p19ApiSource19 = fs.readFileSync(path.join(ROOT, 'src/lib/cloudflare.ts'), 'utf8');
+  check('the browser layer deletes a Vault document through its own route',
+    /deleteDocument: \(id: number\) => apiCall<\{ message: string; data\?: \{ recycleId\?: number \} \}>\(\s*'\/api\/vault\/documents\/' \+ id \+ '\/delete'/.test(p19ApiSource19));
+  check('deleting is a POST that keeps archiving as its own, separate action',
+    /archiveDocument: \(id: number\) => apiCall\('\/api\/vault\/documents\/' \+ id, \{ method: 'DELETE' \}\)/.test(p19ApiSource19));
+
+  const p19BinSource = fs.readFileSync(path.join(ROOT, 'functions/lib/recycle.ts'), 'utf8');
+  check('there is still exactly one Recycle Bin implementation',
+    /export const moveToRecycleBin/.test(p19BinSource)
+    && !fs.existsSync(path.join(ROOT, 'functions/lib/recycle-bin.ts')));
+
+  group('29. The client works on a sent document, saves it and sends it back (Phase 19)');
+  const p19RoomSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientProjectRoom.tsx'), 'utf8');
+  check('the client room offers a place to work on the document',
+    /Work on this document/.test(p19RoomSource));
+  check('the client gets a Save action and a send action, named in their words',
+    /\} Save\b/.test(p19RoomSource) && /Save &amp; send to Code Rx/.test(p19RoomSource));
+  check('the client is told their revision is kept with the Code Rx copy',
+    /keeps your revision with the Code Rx copy/.test(p19RoomSource));
+  check('saving goes through the room\'s existing transport, not a second one',
+    /transport\.saveWorkspace!/.test(p19RoomSource) && /transport\.sendWorkspace!/.test(p19RoomSource));
+  check('the working copy is only offered when the server says it is editable',
+    /if \(!data\.editable\) return;/.test(p19RoomSource));
+  check('a document that cannot be edited simply shows no editor, and the reader still works',
+    /setWorkspace\(null\);\n  \};/.test(p19RoomSource) || /catch \{[\s\S]{0,160}setWorkspace\(null\)/.test(p19RoomSource));
+  check('the room never prints a database identifier in the editor heading',
+    !/vault_document_id|client_id/.test(p19RoomSource));
+  check('the browser layer carries the two new calls on the client session, in its own header',
+    /saveWorkspace: \(projectId: string, documentId: string, payload: \{ blocks\?: unknown\[\]; text\?: string \}\)/.test(p19ApiSource19));
+
+  group('30. The Vault groups documents by client and by that client\'s project (Phase 19)');
+  const p19Grouped = groupDocumentsByClient([
+    { id: 1, title: 'A', client_name: 'Acme Ghana', client_project_name: 'Website' },
+    { id: 2, title: 'B', client_name: 'Acme Ghana', client_project_name: 'Website' },
+    { id: 3, title: 'C', client_name: 'Acme Ghana', client_project_name: 'App' },
+    { id: 4, title: 'D', client_name: 'Beta Ltd', client_project_name: 'Rebrand' },
+    { id: 5, title: 'E' },
+  ]);
+  check('documents of one client and one project sit together', p19Grouped.length === 4);
+  check('a second project of the same client is its own group, never merged',
+    p19Grouped.filter((entry) => entry.client === 'Acme Ghana').length === 2);
+  check('every document is placed, so nothing is silently dropped',
+    p19Grouped.reduce((total, entry) => total + entry.documents.length, 0) === 5);
+  check('the heading is the client\'s name and then their project',
+    p19Grouped[0].client === 'Acme Ghana' && p19Grouped[0].project === 'Website');
+  check('a document with no client is its own internal group, and is not given a client\'s name',
+    p19Grouped.some((entry) => entry.key === '__internal__' && entry.client === '' && entry.documents.length === 1)
+    && p19Grouped[p19Grouped.length - 1].documents[0].id === 5);
+  check('two clients never share a group',
+    p19Grouped.filter((entry) => entry.client === 'Beta Ltd').length === 1);
+  const p19ShelfRenderSource = p19VaultSource;
+  check('the shelf renders a heading row for each group',
+    /vault-client-group-row/.test(p19ShelfRenderSource) && /vault-client-group__client/.test(p19ShelfRenderSource));
+  check('a group heading is a label, not a document that looks clickable',
+    fs.readFileSync(path.join(ROOT, 'src/index.css'), 'utf8')
+      .includes('.vault-document-table tbody tr.vault-client-group-row'));
+  check('the shelf names a client by the public id the panel already uses',
+    /cd\.public_id AS client_document_id/.test(fs.readFileSync(path.join(ROOT, 'functions/[[path]].ts'), 'utf8'))
+    && /c\.public_id AS client_id/.test(fs.readFileSync(path.join(ROOT, 'functions/[[path]].ts'), 'utf8')));
+  check('grouping uses the link the platform already has, with no new table',
+    !/CREATE TABLE[^;]*client_document_groups/i.test(fs.readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8')));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

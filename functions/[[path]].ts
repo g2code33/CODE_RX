@@ -2882,17 +2882,29 @@ app.get('/api/vault/documents', requireAuth, async (c) => {
   const access = await vaultAccess(c, slug, archived ? 'manage' : 'view');
   if (access.response) return access.response;
   const canViewProjects = await hasVaultPermission(c.env.DB, access.actor!, 'projects', 'view');
+  // A document that was published to a client belongs to that client, and to one
+  // of their projects. Carrying both here is what lets the Vault group its
+  // shelves by client instead of mixing every client's papers together: the link
+  // already exists (`client_documents.vault_document_id`), so nothing new is
+  // stored and nothing is guessed.
   const documents = await dbRows<any>(c.env.DB.prepare(
     `SELECT d.id, d.document_code, d.title, d.status, d.visibility, d.file_key, d.tags_json, d.related_project_id, d.word_count, d.archived_from_status, d.archived_at, d.created_at, d.updated_at,
             creator.member_code AS created_by_member_id, creator_user.name AS created_by_name,
             updater.member_code AS updated_by_member_id, updater_user.name AS updated_by_name,
-            p.title AS related_project_title
+            p.title AS related_project_title,
+            cd.public_id AS client_document_id, cd.reference_code AS client_document_reference,
+            cd.lifecycle_status AS client_document_status, cd.version AS client_document_version,
+            c.public_id AS client_id, c.name AS client_name,
+            cp.public_id AS client_project_id, cp.name AS client_project_name
      FROM vault_documents d
      LEFT JOIN member_profiles creator ON creator.id = d.created_by_member_profile_id
      LEFT JOIN users creator_user ON creator_user.id = creator.user_id
      LEFT JOIN member_profiles updater ON updater.id = d.updated_by_member_profile_id
      LEFT JOIN users updater_user ON updater_user.id = updater.user_id
      LEFT JOIN vault_projects p ON p.id = d.related_project_id
+     LEFT JOIN client_documents cd ON cd.vault_document_id = d.id
+     LEFT JOIN clients c ON c.id = cd.client_id
+     LEFT JOIN client_projects cp ON cp.id = cd.client_project_id
      WHERE d.section_id = ? AND d.is_archived = ? ORDER BY d.updated_at DESC, d.id DESC`
   ).bind(access.section.id, archived ? 1 : 0));
   const visibleDocuments = canViewProjects ? documents : documents.map((document) => ({
@@ -3114,6 +3126,68 @@ app.delete('/api/vault/documents/:id', requireAuth, async (c) => {
   ).bind(id).run();
   await recordVaultActivity(c.env.DB, access.actor, 'document.archived', document.section_id, id, { section: document.section_slug });
   return c.json({ success: true, message: 'Document archived. Its history remains preserved.' });
+});
+
+/**
+ * DELETE A VAULT DOCUMENT INTO THE RECYCLE BIN.
+ *
+ * Archiving (DELETE /api/vault/documents/:id) is the Vault's own reversible
+ * state and keeps the document on the shelf, which is why it never appeared in
+ * the Recycle Bin — an operator who pressed Delete saw nothing to recover. This
+ * is the delete they meant: the document leaves the active shelf, a complete
+ * snapshot is written to the SAME recycle bin every other deletion uses, and
+ * PHANTOM can restore it from there with its history intact.
+ */
+app.post('/api/vault/documents/:id/delete', requireAuth, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id < 1) return c.json({ success: false, error: 'Invalid document id' }, 400);
+  const rows = await dbRows<any>(c.env.DB.prepare(
+    `SELECT d.*, s.slug AS section_slug FROM vault_documents d
+     JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+  ).bind(id));
+  const document = rows[0];
+  if (!document || document.is_archived) return c.json({ success: false, error: 'Active document not found' }, 404);
+  const access = await vaultAccess(c, document.section_slug, 'delete');
+  if (access.response) return access.response;
+  const actor = await actorFromContext(c);
+
+  const versions = await dbRows<any>(c.env.DB.prepare(
+    'SELECT version_number, title, content, content_json, status, tags_json, related_project_id, word_count, change_note, created_at FROM document_versions WHERE document_id = ? ORDER BY version_number ASC'
+  ).bind(id));
+
+  const recycleId = await moveToRecycleBin(
+    c.env.DB, actor, 'vault_document', id,
+    `Vault document · ${document.title}`,
+    { document, versions },
+  );
+
+  // The row stays so nothing that references it (a client document, a version
+  // history, an attachment) is left dangling; it is archived, so it leaves the
+  // active shelf exactly like a deletion, and restoring from the bin clears it.
+  await c.env.DB.prepare(
+    `UPDATE vault_documents
+     SET is_archived = 1,
+         archived_from_status = CASE
+           WHEN status IN ('draft', 'in_review', 'approved', 'active') THEN status
+           WHEN archived_from_status IN ('draft', 'in_review', 'approved', 'active') THEN archived_from_status
+           ELSE 'draft'
+         END,
+         archived_at = CURRENT_TIMESTAMP, status = 'archived', updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(id).run();
+
+  await recordVaultActivity(c.env.DB, actor, 'document.deleted', document.section_id, id, {
+    section: document.section_slug, recycleId,
+  });
+  await audit(c.env.DB, actor, 'vault.document.deleted_to_recycle_bin', 'vault_document', id, {
+    title: document.title, recycleId, versions: versions.length,
+  });
+
+  return c.json({
+    success: true,
+    message: `“${document.title}” was deleted. It is in PHANTOM → Recycle Bin and can be restored from there.`,
+    data: { recycleId },
+  });
 });
 
 app.post('/api/vault/documents/:id/unarchive', requireAuth, async (c) => {
@@ -4535,6 +4609,34 @@ const restoreRecycleBinItem = async (db: D1Database, item: any) => {
       row.content_snapshot_format || 'blocks', null, null, null, null,
       row.created_by_user_id ?? null, row.created_at ?? null, row.updated_at ?? null,
     ).run();
+    return;
+  }
+  if (item.resource_type === 'vault_document') {
+    const row = payload?.document;
+    if (!row?.id) throw new Error('The Vault document snapshot is incomplete.');
+    const existing = await dbRows<any>(db.prepare('SELECT id, is_archived FROM vault_documents WHERE id = ?').bind(row.id));
+    if (!existing[0]) throw new Error('This Vault document no longer exists.');
+    // Restoring returns it to the shelf in the state it left in, exactly as the
+    // Vault's own unarchive does, and puts back any version the snapshot carried.
+    const restoredStatus = row.archived_from_status && !['archived', null].includes(row.archived_from_status)
+      ? row.archived_from_status
+      : (row.status && row.status !== 'archived' ? row.status : 'draft');
+    await db.prepare(
+      'UPDATE vault_documents SET is_archived = 0, status = ?, archived_from_status = NULL, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+    ).bind(restoredStatus, row.id).run();
+    const versions = Array.isArray(payload.versions) ? payload.versions : [];
+    for (const version of versions) {
+      await db.prepare(
+        `INSERT OR IGNORE INTO document_versions
+         (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, change_note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        row.id, version.version_number, version.title ?? row.title ?? '', version.content ?? '',
+        version.content_json ?? null, version.status || 'draft', version.tags_json || '[]',
+        version.related_project_id ?? null, version.word_count ?? 0, version.change_note ?? null,
+        version.created_at ?? null,
+      ).run();
+    }
     return;
   }
   if (item.resource_type === 'notification_recipient') {
