@@ -21,6 +21,7 @@ import {
   encodePng,
   isPng,
   sha256Hex,
+  squareCropArtwork,
   type DecodedImage,
 } from './client-delivery';
 import {
@@ -514,11 +515,27 @@ export const buildStampedImage = async (options: StampedImageOptions): Promise<U
   const artwork = new Canvas(drawWidth, drawHeight);
   artwork.drawImage(Canvas.from(image), 0, 0, 1, 1);
   const watermarkScale = Math.max(2, Math.floor(Math.min(drawWidth / 26, drawHeight / 9) / 6));
-  artwork.drawRotatedText('CODE RX SOCIETY', drawWidth / 2, drawHeight / 2, watermarkScale, -Math.atan2(1, 2.6), [12, 32, 24], 0.18);
-  artwork.drawRotatedText(STAMP_DESIGNATION, drawWidth / 2, drawHeight / 2 + (8 + 3) * watermarkScale, Math.max(1, Math.floor(watermarkScale / 3)), -Math.atan2(1, 2.6), [12, 32, 24], 0.16);
+  const artCenterX = drawWidth / 2;
+  const artCenterY = drawHeight / 2;
+  // The rotated wordmark stays low-left; the full logo sits top-right of
+  // centre, so the two never overlap.
+  const textAnchorX = artCenterX - drawWidth * 0.17;
+  const textAnchorY = artCenterY + drawHeight * 0.11;
+  artwork.drawRotatedText('CODE RX SOCIETY', textAnchorX, textAnchorY, watermarkScale, -Math.atan2(1, 2.6), [12, 32, 24], 0.10);
+  artwork.drawRotatedText(STAMP_DESIGNATION, textAnchorX, textAnchorY + (8 + 3) * watermarkScale, Math.max(1, Math.floor(watermarkScale / 3)), -Math.atan2(1, 2.6), [12, 32, 24], 0.08);
   if (logo) {
-    const markOverlay = Math.min(drawWidth, drawHeight) * 0.45;
-    artwork.drawImage(Canvas.from(logo), (drawWidth - markOverlay) / 2, (drawHeight - markOverlay) / 2, markOverlay / logo.width, 0.10);
+    // One full, square logo — no source padding — at the documented 10% opacity.
+    const cropped = squareCropArtwork(logo);
+    const markSize = Math.max(24, Math.round(Math.min(drawWidth, drawHeight) * 0.38));
+    const markCenterX = drawWidth * 0.66;
+    const markCenterY = drawHeight * 0.32;
+    artwork.drawImage(
+      Canvas.from(cropped),
+      Math.round(markCenterX - markSize / 2),
+      Math.round(markCenterY - markSize / 2),
+      markSize / cropped.width,
+      0.10,
+    );
   }
   canvas.drawImage(artwork, pad, cursorY, 1, 1);
   canvas.strokeRect(pad, cursorY, drawWidth, drawHeight, [216, 232, 224], Math.max(1, scale), 1);
