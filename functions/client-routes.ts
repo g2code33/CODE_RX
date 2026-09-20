@@ -20,7 +20,7 @@
 
 import type { Hono } from 'hono';
 import { requireAuth } from './lib/auth';
-import { actorFromContext, audit } from './lib/vault';
+import { actorFromContext, audit, randomToken } from './lib/vault';
 import { checkRateLimit } from './lib/rate-limit';
 import {
   buildClientActivityEntry,
@@ -184,96 +184,6 @@ const asRows = async <T>(statement: D1PreparedStatement): Promise<T[]> => {
 // new table, no copied content that can drift.
 // ---------------------------------------------------------------------------
 
-/** A revision may not grow past what a document can reasonably hold. */
-const MAX_CLIENT_WORKSPACE_BLOCKS = 400;
-const MAX_CLIENT_WORKSPACE_CHARS = 200_000;
-
-/** True when a revision actually carries something to save. */
-const contentReady = (content: any) => {
-  if (content === null || content === undefined) return false;
-  if (typeof content === 'string') return content.trim().length > 0;
-  if (Array.isArray(content)) {
-    return content.some((block: any) => block && (
-      String(block.content || '').trim().length > 0
-      || String(block.url || '').trim().length > 0
-      || (Array.isArray(block.items) && block.items.length > 0)
-    ));
-  }
-  return Boolean(content && typeof content === 'object' && Object.keys(content).length);
-};
-
-/**
- * The content the client can edit, if they can edit it at all.
- *
- * A document whose stored representation is a document (blocks or plain text) is
- * editable. A delivered FILE is not: its content is the file itself, and a
- * client's revision is what they save from their own writing, never a rewriting
- * of a stamped PDF.
- *
- * The answer is always a verdict, never a bare null: a client who opens a
- * document that cannot be worked on is told why, in their own words.
- */
-const clientDocumentWorkspace = async (db: D1Database, document: any): Promise<
-  | { editable: true; blocks: unknown[]; plainText: string; format: string; version: any; savedAt: any }
-  | { editable: false; reason: string }
-> => {
-  // The session middleware never loads stored content — that is deliberate, so
-  // that browsing a project cannot pull document bodies. The working copy is
-  // read here, for this one document, on a route the client is already
-  // authorized for.
-  const row = await one<any>(db.prepare(
-    'SELECT id, content_snapshot, content_snapshot_format, version, updated_at, vault_document_id FROM client_documents WHERE id = ?'
-  ).bind(Number(document.id)));
-  if (!row) return { editable: false, reason: 'This document is no longer available.' };
-
-  const format = String(row.content_snapshot_format || 'blocks');
-  const raw = row.content_snapshot;
-  const vaultId = Number(row.vault_document_id || document?.vault_document_id || 0) || null;
-
-  // Prefer the linked Vault document's live content when it exists: the client
-  // edits what Code Rx holds, so a change made internally is visible here too.
-  if (vaultId) {
-    const live = await one<any>(db.prepare(
-      'SELECT content_json, content, content_format, updated_at FROM vault_documents WHERE id = ?'
-    ).bind(vaultId));
-    if (live && (live.content_json || live.content)) {
-      const parsed = parseStoredDocumentContent(live.content_json, live.content);
-      if (parsed.plainText.trim() || parsed.blocks.length) {
-        return {
-          editable: true, blocks: parsed.blocks, plainText: parsed.plainText,
-          format: 'blocks', version: row.version, savedAt: live.updated_at,
-        };
-      }
-    }
-  }
-
-  const asText = ['plain', 'text', 'markdown'].includes(format);
-  if (raw !== null && raw !== undefined && raw !== '' && (asText || format === 'blocks')) {
-    const stored = parseStoredDocumentContent(asText ? null : raw, asText ? String(raw) : '');
-    if (stored.plainText.trim() || stored.blocks.length) {
-      return {
-        editable: true, blocks: stored.blocks, plainText: stored.plainText,
-        format: 'blocks', version: row.version, savedAt: row.updated_at,
-      };
-    }
-  }
-
-  return { editable: false, reason: workspaceReason(format, Boolean(vaultId)) };
-};
-
-/**
- * Why a document cannot be worked on, said in the client's own language.
- * A delivered file is read-only by design; a document with no text yet is
- * simply waiting for Code Rx to add one.
- */
-const workspaceReason = (format: string, vaultLinked: boolean) => {
-  if (['pdf', 'file', 'image', 'artifact', 'stamped'].includes(format)) {
-    return 'This is a delivered file. You can read it and download your stamped copy, but its wording cannot be edited here.';
-  }
-  if (vaultLinked) return 'The Code Rx copy of this document has no editable text yet. When it has one, it will appear here.';
-  return 'This document has no editable text yet. When Code Rx adds one, it will appear here.';
-};
-
 /** "1.0" -> "1.1", "3" -> "3.1" — the same shape the panel already shows. */
 const bumpDocumentVersionLabel = (current: unknown) => {
   const value = String(current || '1').trim();
@@ -283,18 +193,28 @@ const bumpDocumentVersionLabel = (current: unknown) => {
 };
 
 /**
- * Saves the client's revision.
+ * Saves what the client did to their copy of a document.
  *
  * The Vault keeps the history: what it held before is preserved as a version,
- * the client's revision becomes the next one, and every entry says it came from
- * the client portal rather than claiming a member wrote it.
+ * the client's version becomes the next one, and every entry says it came from
+ * the client portal rather than claiming a member wrote it. Signing a document
+ * goes through this same path, so a signed letter is in the Code Rx Vault with
+ * its signature and its history intact.
  */
 const saveClientDocumentRevision = async (
   db: D1Database,
-  input: { document: any; principal: ClientPrincipal; content: { blocks: unknown[]; contentJson: string; plainText: string; wordCount: number }; format: string },
+  input: {
+    document: any;
+    principal: ClientPrincipal;
+    content: { blocks: unknown[]; contentJson: string; plainText: string; wordCount: number };
+    format: string;
+    /** What the version in the Vault history should say it is. */
+    note?: string;
+    /** What the Vault activity feed should call it. */
+    activityAction?: string;
+  },
 ) => {
   const { document, principal, content, format } = input;
-  const serialized = content.contentJson;
   const stored = format === 'plain' ? content.plainText : content.contentJson;
   const now = new Date().toISOString();
   const nextVersion = bumpDocumentVersionLabel(document.version);
@@ -320,10 +240,10 @@ const saveClientDocumentRevision = async (
       ).bind(vaultId));
       const nextVaultVersion = Number(latest?.version || 0) + 1;
       const wordCount = Number(content.wordCount || 0);
-      const note = `Client revision — ${principal.clientName} (client portal)`;
+      const note = input.note || `Client revision — ${principal.clientName} (client portal)`;
 
-      // 1. What the Vault held before the client touched it stays recoverable,
-      //    even when the team had not saved a version of their own yet.
+      // 1. What the Vault held before the client acted stays recoverable, even
+      //    when the team had not saved a version of their own yet.
       await db.prepare(
         `INSERT OR IGNORE INTO document_versions
          (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, change_note)
@@ -334,12 +254,11 @@ const saveClientDocumentRevision = async (
         String(live.status || 'draft'), String(live.tags_json || '[]'),
         live.related_project_id ?? null, Number(live.word_count || 0),
         live.file_key ?? null,
-        `Kept before the client revision of ${now.slice(0, 10)}.`,
+        `Kept before the client version of ${now.slice(0, 10)}.`,
       ).run();
 
-      // 2. The Vault copy becomes the client's revision, and the revision is a
-      //    version of its own — attributed to the client portal, never to a
-      //    member who did not write it.
+      // 2. The Vault copy becomes the client's version, and it is a version of
+      //    its own — attributed to the client portal, never to a member.
       await db.batch([
         db.prepare(
           `UPDATE vault_documents
@@ -360,7 +279,7 @@ const saveClientDocumentRevision = async (
       ]);
       vaultVersion = nextVaultVersion;
 
-      await recordVaultActivity(db, null, 'document.edited', Number(live.section_id), vaultId, {
+      await recordVaultActivity(db, null, input.activityAction || 'document.edited', Number(live.section_id), vaultId, {
         version: nextVaultVersion, note, source: 'client portal', client: principal.clientName,
       });
     }
@@ -449,23 +368,25 @@ const notifyPhantomOfReview = async (
 };
 
 /**
- * Tells PHANTOM a document is ready, through the notification inbox the platform
- * already uses for client events. A failure here never loses the revision: it is
- * already saved, and the client is told their work is safe either way.
+ * Tells PHANTOM a client is done with a document, through the notification inbox
+ * the platform already uses for client events. A failure here never loses the
+ * record: the client's signature is already stored and their activity shows it.
  */
-const sendClientRevisionToPhantom = async (
+const sendClientDocumentToPhantom = async (
   db: D1Database,
-  input: { principal: ClientPrincipal; project: any; document: any; workspace: any },
+  input: { principal: ClientPrincipal; project: any; document: any; version: string; signed: boolean; signerName?: string | null },
 ) => {
-  const { principal, project, document, workspace } = input;
+  const { principal, project, document, version, signed } = input;
   const sentAt = new Date().toISOString();
   let recipients = 0;
   try {
     const targets = await clientNotificationRecipients(db);
     if (targets.length) {
       await createNotification(db, {
-        title: 'Client sent a document back',
-        message: `${principal.clientName}: ${document.title} (${document.reference_code}) was worked on and sent back from the client portal — ${project.name}, version ${workspace.version}.`,
+        title: signed ? 'Client signed a document and sent it back' : 'Client sent a document back',
+        message: signed
+          ? `${principal.clientName}: ${document.title} (${document.reference_code}) was signed${input.signerName ? ` by ${input.signerName}` : ''} in the client portal and sent back — ${project.name}, version ${version}.`
+          : `${principal.clientName}: ${document.title} (${document.reference_code}) was sent back from the client portal — ${project.name}, version ${version}.`,
         audience: 'system',
         audienceLabel: 'Client portal',
         recipientProfileIds: targets,
@@ -473,18 +394,86 @@ const sendClientRevisionToPhantom = async (
       recipients = targets.length;
     }
   } catch (error) {
-    console.error('[code-rx] client revision notification failed:', error);
+    console.error('[code-rx] client document notification failed:', error);
   }
 
   await audit(db, null, 'client.document.sent_to_phantom', 'client_document', Number(document.id), {
     clientId: principal.clientPublicId,
     documentPublicId: document.public_id,
     projectId: project.public_id,
-    version: String(workspace.version || document.version || '1'),
+    version,
+    signed,
     recipients,
   });
 
   return { recipients, sentAt };
+};
+
+// ---------------------------------------------------------------------------
+// SIGNING, AND TALKING TO PHANTOM
+//
+// The client does not rewrite what Code Rx sends them. They read it, sign it,
+// and hand it back — and when they have something to say they say it to PHANTOM
+// directly from their own room. Both actions travel through the notification
+// inbox the platform already uses, and both are recorded in the client's
+// activity history and in the audit trail.
+// ---------------------------------------------------------------------------
+
+/** How long a signature line and a message to PHANTOM may be. */
+const MAX_SIGNATURE_NAME_CHARS = 120;
+const MAX_SIGNATURE_TITLE_CHARS = 80;
+const MAX_CLIENT_MESSAGE_CHARS = 4000;
+
+/**
+ * The signature, written into the document in blocks the Vault editor already
+ * renders: a heading, the signature line, and where and when it was given.
+ */
+const signatureBlocks = (input: { signerName: string; signerTitle: string; signedAt: string }) => [
+  { id: 'client-signature-heading', type: 'heading', level: 3, content: 'Signature' },
+  { id: 'client-signature-line', type: 'quote', content: `Signed: ${input.signerName}${input.signerTitle ? `, ${input.signerTitle}` : ''}` },
+  {
+    id: 'client-signature-note',
+    type: 'paragraph',
+    content: `Signed electronically in the Code Rx client portal on ${input.signedAt.slice(0, 10)}.`,
+  },
+];
+
+/** The newest signature on a document, or null when it has not been signed. */
+const latestSignature = async (db: D1Database, documentId: number) => {
+  const row = await one<any>(db.prepare(
+    `SELECT signer_name, signer_title, document_version, signed_at FROM client_document_signatures
+     WHERE client_document_id = ? ORDER BY signed_at DESC, id DESC LIMIT 1`
+  ).bind(documentId));
+  if (!row) return null;
+  return {
+    signerName: String(row.signer_name || ''),
+    signerTitle: String(row.signer_title || ''),
+    version: String(row.document_version || ''),
+    signedAt: row.signed_at || null,
+  };
+};
+
+/** The blocks a document currently holds, read from the Vault copy or the client copy. */
+const documentContentBlocks = async (db: D1Database, document: any) => {
+  const row = await one<any>(db.prepare(
+    'SELECT content_snapshot, content_snapshot_format, vault_document_id FROM client_documents WHERE id = ?'
+  ).bind(Number(document.id)));
+  if (!row) return null;
+  const vaultId = Number(row.vault_document_id || 0) || null;
+  if (vaultId) {
+    const live = await one<any>(db.prepare('SELECT content_json, content FROM vault_documents WHERE id = ?').bind(vaultId));
+    if (live && (live.content_json || live.content)) {
+      const parsed = parseStoredDocumentContent(live.content_json, live.content);
+      if (parsed.blocks.length) return { blocks: parsed.blocks, vaultLinked: true };
+    }
+  }
+  const format = String(row.content_snapshot_format || 'blocks');
+  const asText = ['plain', 'text', 'markdown'].includes(format);
+  if (row.content_snapshot !== null && row.content_snapshot !== undefined && row.content_snapshot !== '') {
+    const parsed = parseStoredDocumentContent(asText ? null : row.content_snapshot, asText ? String(row.content_snapshot) : '');
+    return { blocks: parsed.blocks, vaultLinked: Boolean(vaultId) };
+  }
+  return { blocks: [], vaultLinked: Boolean(vaultId) };
 };
 
 const one = async <T>(statement: D1PreparedStatement): Promise<T | null> => {
@@ -956,18 +945,25 @@ export const registerClientRoutes = (app: ClientApp) => {
     if (!clientLinkAllowsSection(clientLinkScope(principal), section)) return clientNotFound();
 
     const db = c.env.DB;
+    // The client's own signature travels with each row, so the room can say at
+    // a glance which documents they have already signed.
+    const signatureJoin = `LEFT JOIN client_document_signatures sg ON sg.id = (
+         SELECT id FROM client_document_signatures WHERE client_document_id = client_documents.id
+         ORDER BY signed_at DESC, id DESC LIMIT 1
+       )`;
+    const signatureColumns = 'sg.signer_name AS signature_name, sg.signer_title AS signature_title, sg.signed_at AS signature_at';
     const rows = section === 'overview'
       ? await asRows<any>(db.prepare(
-        `SELECT * FROM client_documents
-         WHERE client_id = ? AND client_project_id = ? AND is_archived = 0
-           AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
-         ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 50`
+        `SELECT client_documents.*, ${signatureColumns} FROM client_documents ${signatureJoin}
+         WHERE client_documents.client_id = ? AND client_documents.client_project_id = ? AND client_documents.is_archived = 0
+           AND client_documents.lifecycle_status = 'published' AND client_documents.client_visible = 1 AND client_documents.allow_view = 1
+         ORDER BY COALESCE(client_documents.published_at, client_documents.updated_at) DESC, client_documents.id DESC LIMIT 50`
       ).bind(principal.clientId, Number(project.id)))
       : await asRows<any>(db.prepare(
-        `SELECT * FROM client_documents
-         WHERE client_id = ? AND client_project_id = ? AND category = ? AND is_archived = 0
-           AND lifecycle_status = 'published' AND client_visible = 1 AND allow_view = 1
-         ORDER BY COALESCE(published_at, updated_at) DESC, id DESC LIMIT 200`
+        `SELECT client_documents.*, ${signatureColumns} FROM client_documents ${signatureJoin}
+         WHERE client_documents.client_id = ? AND client_documents.client_project_id = ? AND client_documents.category = ? AND client_documents.is_archived = 0
+           AND client_documents.lifecycle_status = 'published' AND client_documents.client_visible = 1 AND client_documents.allow_view = 1
+         ORDER BY COALESCE(client_documents.published_at, client_documents.updated_at) DESC, client_documents.id DESC LIMIT 200`
       ).bind(principal.clientId, Number(project.id), SECTION_CATEGORY[section]));
 
     await recordClientActivity(db, 'SECTION_OPENED', { principal, details: { section } });
@@ -1047,108 +1043,6 @@ export const registerClientRoutes = (app: ClientApp) => {
    * document that fails any of those is answered as "not found", exactly like
    * every other client route.
    */
-  app.get('/api/client/project/:projectId/documents/:documentId/workspace',
-    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
-    async (c: any) => {
-      const principal = c.get('client') as ClientPrincipal;
-      const document = c.get('clientDocument') as any;
-      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
-      if (!exposure.canView) return clientNotFound();
-
-      const db = c.env.DB;
-      const workspace = await clientDocumentWorkspace(db, document);
-      if (!workspace.editable) {
-        return clientJson({
-          success: false,
-          data: { editable: false, reason: workspace.reason },
-          error: 'This document is read-only.',
-          code: 'document_read_only',
-        }, 200);
-      }
-
-      return clientJson({
-        success: true,
-        data: {
-          editable: true,
-          blocks: workspace.blocks,
-          plainText: workspace.plainText,
-          documentId: document.public_id,
-          reference: document.reference_code,
-          title: document.title,
-          category: document.category,
-          version: String(workspace.version || document.version || '1'),
-          savedAt: workspace.savedAt,
-          format: workspace.format,
-          vaultLinked: Boolean(document.vault_document_id),
-          hint: document.vault_document_id
-            ? 'Saving keeps your revision with the Code Rx Vault copy of this document.'
-            : 'Saving keeps your revision with this document in your project room.',
-        },
-      });
-    });
-
-  app.post('/api/client/project/:projectId/documents/:documentId/workspace',
-    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
-    async (c: any) => {
-      const principal = c.get('client') as ClientPrincipal;
-      const document = c.get('clientDocument') as any;
-      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
-      if (!exposure.canView) return clientNotFound();
-
-      const db = c.env.DB;
-      const current = await clientDocumentWorkspace(db, document);
-      if (!current.editable) return clientJson({ success: false, error: current.reason, code: 'document_read_only' }, 409);
-
-      const body = await c.req.json().catch(() => ({}));
-      const blocks = body.blocks;
-      const text = body.text === undefined ? null : String(body.text);
-      if (!Array.isArray(blocks) && text === null) {
-        return clientJson({ success: false, error: 'Write something before saving.', code: 'empty_revision' }, 400);
-      }
-      if (Array.isArray(blocks) && blocks.length > MAX_CLIENT_WORKSPACE_BLOCKS) {
-        return clientJson({ success: false, error: 'This document has too many blocks to save in one go.', code: 'revision_too_large' }, 413);
-      }
-      if (text !== null && text.length > MAX_CLIENT_WORKSPACE_CHARS) {
-        return clientJson({ success: false, error: 'This revision is longer than a document can hold.', code: 'revision_too_large' }, 413);
-      }
-
-      // The input decides whether there is anything to save; normalizeDocumentContent
-      // always supplies a fallback block, so it cannot answer that question.
-      if (!contentReady(Array.isArray(blocks) ? blocks : text)) {
-        return clientJson({ success: false, error: 'Write something before saving.', code: 'empty_revision' }, 400);
-      }
-      const format = Array.isArray(blocks) ? 'blocks' : 'plain';
-      const content = normalizeDocumentContent(Array.isArray(blocks) ? blocks : null, text || '');
-
-      const saved = await saveClientDocumentRevision(db, {
-        document, principal, content, format,
-      });
-
-      await recordClientActivity(db, 'DOCUMENT_SAVED', {
-        principal,
-        details: {
-          documentId: document.public_id,
-          reference: document.reference_code,
-          version: saved.version,
-          vaultDocumentId: document.vault_document_id ? Number(document.vault_document_id) : null,
-          vaultVersion: saved.vaultVersion,
-        },
-      });
-
-      return clientJson({
-        success: true,
-        message: saved.vaultVersion
-          ? `Saved. Your revision is version ${saved.version} and the Code Rx Vault copy now carries it too.`
-          : `Saved. Your revision is version ${saved.version}.`,
-        data: {
-          version: saved.version,
-          savedAt: saved.savedAt,
-          vaultVersion: saved.vaultVersion,
-          vaultLinked: Boolean(document.vault_document_id),
-        },
-      });
-    });
-
   /**
    * THE REVIEW SECTION, READ. Available on every document the client may see —
    * not only on the ones they can edit — because the answer is about the
@@ -1283,7 +1177,40 @@ export const registerClientRoutes = (app: ClientApp) => {
    * the platform's own notification inbox, recorded in the client's activity
    * and in the audit trail.
    */
-  app.post('/api/client/project/:projectId/documents/:documentId/workspace/send',
+  /**
+   * SIGNING, READ. Every document a client can open can be signed — a letter,
+   * an agreement, a report — and the room says who signed it and when.
+   */
+  app.get('/api/client/project/:projectId/documents/:documentId/signature',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      const signed = await latestSignature(c.env.DB, Number(document.id));
+      return clientJson({
+        success: true,
+        data: {
+          documentId: document.public_id,
+          reference: document.reference_code,
+          title: document.title,
+          version: String(document.version || '1'),
+          signable: true,
+          maxNameChars: MAX_SIGNATURE_NAME_CHARS,
+          maxTitleChars: MAX_SIGNATURE_TITLE_CHARS,
+          current: signed,
+        },
+      });
+    });
+
+  /**
+   * SIGNING. The client types their name, the signature is recorded, and the
+   * signed document becomes the version Code Rx holds in the Vault — with a
+   * signature block anyone reading it can see, and with the history preserved.
+   * Nothing here changes what the client is allowed to open.
+   */
+  app.post('/api/client/project/:projectId/documents/:documentId/signature',
     requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
     async (c: any) => {
       const principal = c.get('client') as ClientPrincipal;
@@ -1293,27 +1220,235 @@ export const registerClientRoutes = (app: ClientApp) => {
       if (!exposure.canView) return clientNotFound();
 
       const db = c.env.DB;
-      const workspace = await clientDocumentWorkspace(db, document);
-      if (!workspace.editable) return clientJson({ success: false, error: workspace.reason, code: 'document_read_only' }, 409);
+      const body = await c.req.json().catch(() => ({}));
+      const signerName = cleanOptionalStr(body.signerName, MAX_SIGNATURE_NAME_CHARS);
+      const signerTitle = cleanOptionalStr(body.signerTitle, MAX_SIGNATURE_TITLE_CHARS) || '';
+      if (!signerName || signerName.length < 2) {
+        return clientJson({ success: false, error: 'Type your full name to sign this document.', code: 'signature_name_required' }, 400);
+      }
 
-      const delivered = await sendClientRevisionToPhantom(db, { principal, project, document, workspace });
+      const signedAt = new Date().toISOString();
+      const result = await db.prepare(
+        `INSERT INTO client_document_signatures
+         (client_document_id, client_id, client_project_id, signer_name, signer_title, document_version)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(
+        Number(document.id), Number(document.client_id), Number(document.client_project_id),
+        signerName, signerTitle, String(document.version || '1'),
+      ).run();
+
+      // The signed copy is saved the same way any client version is: the client
+      // copy and the linked Vault copy both carry the signature, and the Vault
+      // history keeps what was there before.
+      const content = await documentContentBlocks(db, document);
+      let saved: { version: string; savedAt: string; vaultVersion: number | null } | null = null;
+      if (content) {
+        // What the document already holds stays exactly as it is; the signature
+        // is added to the end of it.
+        const blocks = [...content.blocks, ...signatureBlocks({ signerName, signerTitle, signedAt })];
+        const normalized = normalizeDocumentContent({ version: 1, blocks }, '');
+        saved = await saveClientDocumentRevision(db, {
+          document, principal, content: normalized, format: 'blocks',
+          note: `Signed by ${signerName} — ${principal.clientName} (client portal)`,
+          activityAction: 'client.signature',
+        });
+      }
+
+      let recipients = 0;
+      try {
+        const targets = await clientNotificationRecipients(db);
+        if (targets.length) {
+          await createNotification(db, {
+            title: 'Client signed a document',
+            message: `${principal.clientName}: ${signerName} signed ${document.title} (${document.reference_code}) — ${project.name}.`,
+            audience: 'system',
+            audienceLabel: 'Client portal',
+            recipientProfileIds: targets,
+          });
+          recipients = targets.length;
+        }
+      } catch (error) {
+        console.error('[code-rx] client signature notification failed:', error);
+      }
+
+      await audit(db, null, 'client.document.signed', 'client_document', Number(document.id), {
+        clientId: principal.clientPublicId,
+        documentPublicId: document.public_id,
+        projectId: project.public_id,
+        signerName,
+        signerTitle,
+        version: String(document.version || '1'),
+        vaultVersion: saved?.vaultVersion ?? null,
+        phantomNotified: recipients > 0,
+      });
+      await recordClientActivity(db, 'DOCUMENT_SIGNED', {
+        principal,
+        details: {
+          documentId: document.public_id,
+          reference: document.reference_code,
+          version: String(document.version || '1'),
+        },
+      });
+
+      return clientJson({
+        success: true,
+        message: saved?.vaultVersion
+          ? `Signed. Your signed copy is saved and the Code Rx copy carries it too.`
+          : 'Signed. Your signature is saved with this document.',
+        data: {
+          id: Number(result.meta.last_row_id),
+          signerName,
+          signerTitle,
+          signedAt,
+          version: String(document.version || '1'),
+          vaultVersion: saved?.vaultVersion ?? null,
+          recipients,
+        },
+      });
+    });
+
+  /**
+   * SEND TO PHANTOM. The client says they are done with a document — signed or
+   * not — and PHANTOM is told immediately through the existing inbox.
+   */
+  app.post('/api/client/project/:projectId/documents/:documentId/send-to-phantom',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const project = c.get('clientProject') as any;
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      const db = c.env.DB;
+      const signature = await latestSignature(db, Number(document.id));
+      const version = String(document.version || '1');
+      const delivered = await sendClientDocumentToPhantom(db, {
+        principal, project, document, version, signed: Boolean(signature), signerName: signature?.signerName || null,
+      });
 
       await recordClientActivity(db, 'DOCUMENT_SENT', {
         principal,
         details: {
           documentId: document.public_id,
           reference: document.reference_code,
-          version: String(workspace.version || document.version || '1'),
+          version,
+          signed: Boolean(signature),
           recipients: delivered.recipients,
         },
       });
 
       return clientJson({
         success: true,
-        message: delivered.recipients
-          ? 'Sent to Code Rx. PHANTOM has been told this document is ready.'
-          : 'Sent to Code Rx. It is recorded on this document and PHANTOM can see it in the client workspace.',
-        data: { recipients: delivered.recipients, sentAt: delivered.sentAt },
+        message: signature
+          ? 'Sent to PHANTOM. They can see your signature on this document.'
+          : 'Sent to PHANTOM. They have been told this document is ready.',
+        data: { recipients: delivered.recipients, sentAt: delivered.sentAt, signed: Boolean(signature) },
+      });
+    });
+
+  /**
+   * TEXT PHANTOM, READ. The client's own messages on this project, newest first,
+   * so they can see what they sent and when.
+   */
+  app.get('/api/client/project/:projectId/messages',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const project = c.get('clientProject') as any;
+      const messages = await asRows<any>(c.env.DB.prepare(
+        `SELECT m.public_id, m.body, m.created_at, d.public_id AS document_public_id, d.title AS document_title
+         FROM client_messages m
+         LEFT JOIN client_documents d ON d.id = m.client_document_id AND d.client_id = m.client_id
+         WHERE m.client_project_id = ? AND m.client_id = ?
+         ORDER BY m.created_at DESC, m.id DESC LIMIT 50`
+      ).bind(Number(project.id), Number(principal.clientId)));
+
+      return clientJson({
+        success: true,
+        data: {
+          maxChars: MAX_CLIENT_MESSAGE_CHARS,
+          messages: messages.map((message) => ({
+            id: message.public_id,
+            body: String(message.body || ''),
+            at: message.created_at || null,
+            document: message.document_public_id
+              ? { id: message.document_public_id, title: message.document_title || '' }
+              : null,
+          })),
+        },
+      });
+    });
+
+  /**
+   * TEXT PHANTOM. Something the client wants Code Rx to know, written from their
+   * own room. It reaches PHANTOM as a notification straight away, and it stays
+   * in the project's own record rather than in an email nobody can find later.
+   */
+  app.post('/api/client/project/:projectId/messages',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const project = c.get('clientProject') as any;
+      const db = c.env.DB;
+      const body = await c.req.json().catch(() => ({}));
+      const text = cleanOptionalStr(body.body ?? body.message, MAX_CLIENT_MESSAGE_CHARS);
+      if (!text) {
+        return clientJson({ success: false, error: 'Write your message before sending it.', code: 'message_required' }, 400);
+      }
+
+      // A message may name the document it is about, but only a document this
+      // client already has in this project — the id never comes from the URL.
+      let documentRowId: number | null = null;
+      let documentTitle: string | null = null;
+      if (body.documentId) {
+        const document = await one<any>(db.prepare(
+          'SELECT id, title FROM client_documents WHERE public_id = ? AND client_id = ? AND client_project_id = ?'
+        ).bind(String(body.documentId), Number(principal.clientId), Number(project.id)));
+        if (!document) return clientNotFound();
+        documentRowId = Number(document.id);
+        documentTitle = String(document.title || '');
+      }
+
+      const publicId = `msg_${randomToken().slice(0, 24)}`;
+      await db.prepare(
+        `INSERT INTO client_messages (public_id, client_id, client_project_id, client_document_id, body)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(publicId, Number(principal.clientId), Number(project.id), documentRowId, text).run();
+
+      let recipients = 0;
+      try {
+        const targets = await clientNotificationRecipients(db);
+        if (targets.length) {
+          await createNotification(db, {
+            title: 'Client sent PHANTOM a message',
+            message: `${principal.clientName} (${project.name})${documentTitle ? ` — about ${documentTitle}` : ''}: “${text.slice(0, 600)}”`,
+            audience: 'system',
+            audienceLabel: 'Client portal',
+            recipientProfileIds: targets,
+          });
+          recipients = targets.length;
+        }
+      } catch (error) {
+        console.error('[code-rx] client message notification failed:', error);
+      }
+
+      await audit(db, null, 'client.message.sent', 'client_project', Number(project.id), {
+        clientId: principal.clientPublicId,
+        projectId: project.public_id,
+        documentId: body.documentId || null,
+        messageId: publicId,
+        length: text.length,
+        phantomNotified: recipients > 0,
+      });
+      await recordClientActivity(db, 'MESSAGE_SENT', { principal, details: { projectPublicId: project.public_id } });
+
+      return clientJson({
+        success: true,
+        message: recipients
+          ? 'Message sent. PHANTOM has been notified.'
+          : 'Message sent. PHANTOM can see it in your project room.',
+        data: { id: publicId, body: text, at: new Date().toISOString(), recipients },
       });
     });
 
@@ -2345,11 +2480,16 @@ export const registerClientRoutes = (app: ClientApp) => {
     // show what the client said without a second request per row.
     const documents = await asRows<any>(c.env.DB.prepare(
       `SELECT d.*, p.public_id AS project_public_id, p.reference_code AS project_reference,
-              rv.decision AS review_decision, rv.comment AS review_comment, rv.created_at AS review_at
+              rv.decision AS review_decision, rv.comment AS review_comment, rv.created_at AS review_at,
+              sg.signer_name AS signature_name, sg.signed_at AS signature_at, sg.document_version AS signature_version
        FROM client_documents d JOIN client_projects p ON p.id = d.client_project_id
        LEFT JOIN client_document_reviews rv ON rv.id = (
          SELECT id FROM client_document_reviews WHERE client_document_id = d.id
          ORDER BY created_at DESC, id DESC LIMIT 1
+       )
+       LEFT JOIN client_document_signatures sg ON sg.id = (
+         SELECT id FROM client_document_signatures WHERE client_document_id = d.id
+         ORDER BY signed_at DESC, id DESC LIMIT 1
        )
        ${clause} ORDER BY d.updated_at DESC, d.id DESC LIMIT 500`
     ).bind(...params));
@@ -2372,6 +2512,12 @@ export const registerClientRoutes = (app: ClientApp) => {
       vaultDocumentId: document.vault_document_id === null ? null : Number(document.vault_document_id),
       vaultVersion: document.vault_version_number === null ? null : Number(document.vault_version_number),
       hasClientArtifact: Boolean(document.storage_reference),
+      // The client's signature, when they signed it.
+      signature: document.signature_name ? {
+        signerName: document.signature_name,
+        version: document.signature_version || null,
+        at: document.signature_at || null,
+      } : null,
       // The review section's answer, exactly as the client left it.
       review: document.review_decision ? {
         decision: document.review_decision,
@@ -3075,8 +3221,23 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
     const reviews = await asRows<any>(db.prepare(
       'SELECT decision, comment, created_at FROM client_document_reviews WHERE client_document_id = ? ORDER BY created_at ASC, id ASC'
     ).bind(document.id));
-    await moveToRecycleBin(db, actor, 'client_document', document.id, `Client document · ${document.title}`, { document, reviews });
+    // A signature is part of what the document is: it goes into the Recycle Bin
+    // with it, and comes back with it, rather than being silently lost.
+    const signatures = await asRows<any>(db.prepare(
+      'SELECT signer_name, signer_title, document_version, signed_at FROM client_document_signatures WHERE client_document_id = ? ORDER BY signed_at ASC, id ASC'
+    ).bind(document.id));
+    // What the client wrote to PHANTOM about this document is not the
+    // document's property: the message stays, and the bin remembers which
+    // messages it belonged to so a restore puts the link back.
+    const linkedMessages = await asRows<{ id: number }>(db.prepare(
+      'SELECT id FROM client_messages WHERE client_document_id = ? ORDER BY id ASC'
+    ).bind(document.id));
+    await moveToRecycleBin(db, actor, 'client_document', document.id, `Client document · ${document.title}`, {
+      document, reviews, signatures, messages: linkedMessages.map((row) => Number(row.id)),
+    });
+    await db.prepare('UPDATE client_messages SET client_document_id = NULL WHERE client_document_id = ?').bind(document.id).run();
     await db.prepare('DELETE FROM client_document_reviews WHERE client_document_id = ?').bind(document.id).run();
+    await db.prepare('DELETE FROM client_document_signatures WHERE client_document_id = ?').bind(document.id).run();
     await db.prepare('DELETE FROM client_documents WHERE id = ?').bind(document.id).run();
     await audit(db, actor, 'client.document.deleted', 'client_document', document.id, {
       clientId: document.client_id,

@@ -30,12 +30,13 @@ const PASSWORD = process.env.ADMIN_PASSWORD || 'DevPreviewPassword1';
 const require = createRequire(import.meta.url);
 const { JSDOM, VirtualConsole } = require('jsdom');
 
-const api = async (method, endpoint, body, token) => {
+const api = async (method, endpoint, body, token, extraHeaders = {}) => {
   const response = await fetch(`${BASE}${endpoint}`, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...extraHeaders,
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
@@ -59,7 +60,11 @@ await api('PUT', '/api/phantom/client-portal-settings', {
 
 const stamp = Date.now().toString().slice(-6);
 const client = (await api('POST', '/api/phantom/clients', { name: `Panel DOM Client ${stamp}` }, token)).json?.data;
-const project = (await api('POST', `/api/phantom/clients/${client.id}/projects`, { name: `Panel DOM Project ${stamp}` }, token)).json?.data;
+const projectCreated = (await api('POST', `/api/phantom/clients/${client.id}/projects`, { name: `Panel DOM Project ${stamp}` }, token)).json?.data;
+const clientDetail = (await api('GET', `/api/phantom/clients/${client.id}`, null, token)).json?.data;
+const projectFromList = (clientDetail?.projects || []).find((entry) => entry.id === projectCreated?.id);
+const projectName = projectFromList?.name || `Panel DOM Project ${stamp}`;
+const project = { ...projectCreated, ...(projectFromList || {}), name: projectName };
 // The list is the source of truth for the name the panel will render.
 const clientName = (await api('GET', '/api/phantom/clients', null, token)).json?.data
   ?.map?.((entry) => entry).find((entry) => entry.id === client.id)?.name
@@ -209,7 +214,7 @@ check('the deleted letter is in the Recycle Bin', Boolean(binned), JSON.stringif
 // the round: a client opens a sent document in their room, writes in it, presses
 // Save, presses Save & send, and the Code Rx copy changes with it.
 // ---------------------------------------------------------------------------
-console.log('\n--- the client room: work on a document, save it, send it back ---');
+console.log('\n--- the client room: sign the document, text PHANTOM, send it back ---');
 const vaultSection = ((await api('GET', '/api/vault/sections', null, token)).json?.data || [])
   .find((entry) => entry.permissions?.create && Number(entry.is_sensitive) !== 1);
 const vaultDoc = (await api('POST', '/api/vault/documents', {
@@ -223,8 +228,6 @@ await api('POST', `/api/phantom/client-documents/${workLetter.id}/lifecycle`, { 
 const workKey = (await api('POST', `/api/phantom/clients/${client.id}/keys`, { label: `Panel DOM key ${stamp}` }, token)).json?.data;
 const clientLogin = await api('POST', '/api/client/auth/login', { passkey: workKey.passkey });
 const clientToken = clientLogin.json?.data?.session?.token;
-const clientMe = (await api('GET', '/api/client/me', null, null)).json?.data
-  || (await api('GET', '/api/client/me', null, null)).json?.data;
 check('the client signs in and the room has a project to open', Boolean(clientToken), `login ${clientLogin.status}`);
 
 const roomContext = {
@@ -288,15 +291,24 @@ room.ResizeObserver = room.ResizeObserver || class { observe() {} unobserve() {}
 room.IntersectionObserver = room.IntersectionObserver || class { observe() {} unobserve() {} disconnect() {} };
 room.scrollTo = () => {};
 room.alert = () => {};
-room.fetch = (input, init) => nodeFetch(new URL(typeof input === 'string' ? input : input.url, pageUrl), init);
+room.Element.prototype.scrollIntoView = room.Element.prototype.scrollIntoView || function scrollIntoView() {};
+const roomFailures = [];
+room.fetch = async (input, init) => {
+  const target = new URL(typeof input === 'string' ? input : input.url, pageUrl);
+  const response = await nodeFetch(target, init);
+  roomFailures.push(`${String((init && init.method) || 'GET')} ${target.pathname} ${response.status}`);
+  if (response.status >= 400) roomErrors.push(`HTTP ${response.status} ${target.pathname}`);
+  return response;
+};
 room.eval(roomCode);
 
-const roomText = () => room.document.getElementById('room-root').textContent.replace(/\s+/g, ' ').trim();
-const roomButtons = () => [...room.document.getElementById('room-root').querySelectorAll('button')];
+const roomRoot = () => room.document.getElementById('room-root');
+const roomText = () => roomRoot().textContent.replace(/\s+/g, ' ').trim();
+const roomButtons = () => [...roomRoot().querySelectorAll('button')];
+const buttonLabel = (button) => String(button.textContent || '').replace(/\s+/g, ' ').trim();
 const clickRoomByText = (label, exact = true) => {
-  const labelOf = (button) => String(button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-  const target = (exact ? roomButtons().find((button) => labelOf(button) === label.toLowerCase()) : null)
-    || roomButtons().find((button) => labelOf(button).includes(label.toLowerCase()));
+  const target = (exact ? roomButtons().find((button) => buttonLabel(button).toLowerCase() === label.toLowerCase()) : null)
+    || roomButtons().find((button) => buttonLabel(button).toLowerCase().includes(label.toLowerCase()));
   if (!target) return false;
   target.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
   return true;
@@ -308,69 +320,118 @@ const waitForRoom = async (test, attempts = 40) => {
   }
   return false;
 };
+// React tracks the last value it saw on a controlled field; without resetting
+// that tracker a programmatic change is treated as no change at all.
+const typeInto = async (field, value) => {
+  if (!field) return false;
+  const prototype = field.tagName === 'TEXTAREA' ? room.HTMLTextAreaElement.prototype : room.HTMLInputElement.prototype;
+  const setValue = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+  if (field._valueTracker) field._valueTracker.setValue('previous value');
+  setValue.call(field, value);
+  field.dispatchEvent(new room.Event('input', { bubbles: true }));
+  field.dispatchEvent(new room.Event('change', { bubbles: true }));
+  await wait(250);
+  return true;
+};
 
 await waitForRoom(() => roomText().includes(project.name), 60);
 if (!roomText()) console.log('  room errors:', roomErrors.slice(0, 3).join(' | ') || '(none reported)');
 check('the client room opens on the project it was given',
   roomText().includes(project.reference) && roomText().includes(clientName), roomText().slice(0, 200));
+
+// --- the pinned header, the titles and the hamburger ----------------------
+const roomHeader = roomRoot().querySelector('header');
+if (process.env.DOM_DEBUG) {
+  console.log('  debug: room header =', JSON.stringify(String(roomHeader && roomHeader.outerHTML || '').slice(0, 500)));
+  console.log('  debug: sections with the review =',
+    [...roomRoot().querySelectorAll('section')].filter((element) => /Review this document/.test(element.textContent || '')).length);
+  console.log('  debug: header buttons =', [...(roomHeader ? roomHeader.querySelectorAll('button') : [])].map((b) => JSON.stringify(String(b.textContent || ''))).join(' | '));
+  console.log('  debug: project name =', JSON.stringify(project.name), 'room text =', JSON.stringify(roomText().slice(0, 300)));
+}
+check('the room header is pinned while the client scrolls',
+  Boolean(roomHeader) && /sticky/.test(String(roomHeader.className)), String(roomHeader && roomHeader.className).slice(0, 120));
+check('the header carries the project title', Boolean(roomHeader) && roomHeader.textContent.includes(project.name));
+const hamburger = roomRoot().querySelector('button[aria-controls="room-sections"]');
+check('the header carries a hamburger that controls the sections',
+  Boolean(hamburger) && hamburger.getAttribute('aria-expanded') === 'false');
+check('the sections the hamburger controls are in the room', Boolean(roomRoot().querySelector('#room-sections')));
+if (hamburger) hamburger.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+const navOpened = await waitForRoom(() => hamburger && hamburger.getAttribute('aria-expanded') === 'true', 20);
+check('pressing the hamburger opens the sections, and says so', navOpened,
+  String(hamburger && hamburger.getAttribute('aria-expanded')));
+if (hamburger) hamburger.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+await waitForRoom(() => hamburger && hamburger.getAttribute('aria-expanded') === 'false', 20);
+
+// --- open the document ----------------------------------------------------
 clickRoomByText('Documents');
-await waitForRoom(() => roomText().includes(workLetter ? `Panel DOM work letter ${stamp}` : 'not-here'), 40);
+await waitForRoom(() => roomText().includes(`Panel DOM work letter ${stamp}`), 40);
+// The sidebar is folded on small screens; open it the way a client would.
+if (!roomText().includes(`Panel DOM work letter ${stamp}`) && hamburger) {
+  hamburger.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+  await waitForRoom(() => roomText().includes('Documents'), 20);
+  clickRoomByText('Documents');
+  await waitForRoom(() => roomText().includes(`Panel DOM work letter ${stamp}`), 40);
+}
 check('the sent document is listed in the client\'s own room', roomText().includes(`Panel DOM work letter ${stamp}`), roomText().slice(0, 220));
 
-// The row is opened by its own View action, exactly as a client would.
 clickRoomByText('View');
-const editorAppeared = await waitForRoom(() => roomText().includes('Work on this document'), 60);
-if (!editorAppeared) console.log('  room buttons:', roomButtons().map((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim()).slice(0, 10).join(' | '));
-if (!editorAppeared) console.log('  room errors:', roomErrors.slice(0, 3).join(' | ') || '(none reported)');
-check('opening the document offers the client somewhere to work', editorAppeared, roomText().slice(0, 260));
+const documentOpened = await waitForRoom(() => roomText().includes('Sign this document'), 60);
+if (!documentOpened) console.log('  room buttons:', roomButtons().map(buttonLabel).slice(0, 12).join(' | '));
+if (!documentOpened) console.log('  room errors:', roomErrors.slice(0, 3).join(' | ') || '(none reported)');
+check('opening the document offers the client a signature', documentOpened, roomText().slice(-260));
+check('the free-text workspace is gone from the client room', !roomText().includes('Work on this document'));
+check('the document the client opened is the title in the pinned header',
+  Boolean(roomHeader) && roomHeader.textContent.includes(`Panel DOM work letter ${stamp}`));
 
-const textarea = room.document.querySelector('#room-root textarea');
-check('the client gets a real writing area they can type in', Boolean(textarea));
-const revisionText = `The client wrote this on ${stamp}. It is their revision of the letter.`;
-if (textarea) {
-  const setValue = Object.getOwnPropertyDescriptor(room.HTMLTextAreaElement.prototype, 'value').set;
-  // React tracks the last value it saw; without resetting that tracker the
-  // programmatic change is treated as no change and never reaches the state.
-  if (textarea._valueTracker) textarea._valueTracker.setValue('previous value');
-  setValue.call(textarea, revisionText);
-  textarea.dispatchEvent(new room.Event('input', { bubbles: true }));
-  textarea.dispatchEvent(new room.Event('change', { bubbles: true }));
-}
-await wait(300);
-const saveButton = roomButtons().find((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim() === 'Save');
-const sendButton = roomButtons().find((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim().includes('Save & send to Code Rx'));
-check('the room offers both a Save and a send action', Boolean(saveButton && sendButton),
-  roomButtons().map((button) => String(button.textContent || '').trim()).slice(0, 8).join(' | '));
+// --- signing --------------------------------------------------------------
+const signatureCard = roomRoot().querySelector('#sign-this-document');
+check('the signature card is a real section of the document view', Boolean(signatureCard));
+check('the document starts out unsigned', roomText().includes('Not signed yet'));
+const nameField = roomRoot().querySelector('input[aria-label^="Your full name"]');
+const roleField = roomRoot().querySelector('input[aria-label^="Your role"]');
+check('the client gets a name box and a role box to sign with', Boolean(nameField && roleField));
+const signerNameValue = `Ama Mensah ${stamp}`;
+await typeInto(nameField, signerNameValue);
+await typeInto(roleField, 'Managing Director');
+const signButton = roomButtons().find((button) => buttonLabel(button) === 'Save signature');
+check('the client gets a Save action for the signature, and a send action beside it',
+  Boolean(signButton) && roomButtons().some((button) => buttonLabel(button) === 'Send to PHANTOM'),
+  roomButtons().map(buttonLabel).slice(0, 12).join(' | '));
+if (signButton) signButton.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
 
-if (saveButton) saveButton.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
-const savedOnServer = await (async () => {
+const signedOnServer = await (async () => {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const vaultNow = (await api('GET', `/api/vault/documents/${vaultDoc.id}`, null, token)).json?.data;
-    const text = (vaultNow?.contentJson?.blocks || []).map((block) => String(block?.content || '')).join('\n');
-    if (text.includes(`The client wrote this on ${stamp}`)) return true;
+    const read = (await api('GET', `/api/client/project/${project.id}/documents/${workLetter.id}/signature`,
+      null, null, { 'X-Code-Rx-Client-Session': clientToken })).json?.data;
+    if (read?.current?.signerName === signerNameValue) return true;
     await wait(250);
   }
   return false;
 })();
-if (!savedOnServer) {
-  const panelState = room.document.getElementById('room-root').textContent.replace(/\s+/g, ' ');
-  console.log('  debug: textarea value =', JSON.stringify(String(textarea && textarea.value || '').slice(0, 80)));
-  console.log('  debug: room tail =', JSON.stringify(panelState.slice(-320)));
+if (!signedOnServer) {
+  console.log('  debug: room tail =', JSON.stringify(roomText().slice(-280)));
   const copy = ((await api('GET', `/api/phantom/clients/${client.id}/documents`, null, token)).json?.data || [])
     .find((row) => row.id === (workLetter && workLetter.id));
-  console.log('  debug: server copy =', JSON.stringify(copy).slice(0, 220));
-  const debugVault = (await api('GET', `/api/vault/documents/${vaultDoc.id}`, null, token)).json?.data;
-  console.log('  debug: vault content =', JSON.stringify(debugVault?.contentJson).slice(0, 260));
-  console.log('  debug: vault content text =', JSON.stringify(String(debugVault?.content || '').slice(0, 160)));
+  console.log('  debug: server copy =', JSON.stringify(copy?.signature || null));
 }
-check('pressing Save really saves: the Code Rx Vault copy now carries the client\'s words', savedOnServer);
-check('the client is told their revision was kept', /Saved/i.test(roomText()), roomText().slice(-200));
+check('pressing Save signature really signs: the signature is stored on the document', signedOnServer);
+check('the client is told their signature is saved', /Signed/i.test(roomText()), roomText().slice(-200));
+const signedVault = await (async () => {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const vaultNow = (await api('GET', `/api/vault/documents/${vaultDoc.id}`, null, token)).json?.data;
+    const text = (vaultNow?.contentJson?.blocks || []).map((block) => String(block?.content || '')).join('\n');
+    if (text.includes(`Signed: ${signerNameValue}`)) return text;
+    await wait(250);
+  }
+  return '';
+})();
+check('the signed copy reaches the Code Rx Vault copy of the document', signedVault.includes(`Signed: ${signerNameValue}`),
+  signedVault.slice(0, 160));
+check('the signed copy still carries the wording Code Rx sent', signedVault.includes('Original wording from Code Rx.'));
 
-// Re-found at click time: the room re-renders after a save, so the element
-// captured before the save may already have been replaced.
-const sendNow = roomButtons().find((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim().includes('Save & send to Code Rx'));
+const sendNow = roomButtons().find((button) => buttonLabel(button) === 'Send to PHANTOM');
 if (sendNow) sendNow.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
-else console.log('  debug: the send action was not on screen after saving');
+else console.log('  debug: the send-to-PHANTOM action was not on screen after signing');
 const toldPhantom = await (async () => {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const inbox = (await api('GET', '/api/notifications', null, token)).json?.data;
@@ -380,12 +441,85 @@ const toldPhantom = await (async () => {
   }
   return false;
 })();
-check('pressing Save & send tells PHANTOM the document came back', toldPhantom);
+check('pressing Send to PHANTOM tells PHANTOM the document came back', toldPhantom);
+
+// --- Text PHANTOM ---------------------------------------------------------
+const textPhantomButton = roomButtons().find((button) => button.getAttribute('aria-label') === 'Text PHANTOM')
+  || roomButtons().find((button) => buttonLabel(button) === 'Text PHANTOM');
+check('the pinned header carries the Text PHANTOM button', Boolean(textPhantomButton),
+  roomButtons().map(buttonLabel).slice(0, 10).join(' | '));
+if (textPhantomButton) textPhantomButton.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+const dialogAppeared = await waitForRoom(() => Boolean(roomRoot().querySelector('[role="dialog"][aria-label="Text PHANTOM"]')), 30);
+if (!dialogAppeared) console.log('  room errors:', roomErrors.slice(0, 3).join(' | ') || '(none reported)');
+check('pressing it opens a dialog to write to PHANTOM', dialogAppeared, roomText().slice(-220));
+check('the dialog explains who PHANTOM is', /PHANTOM is the Code Rx desk for/.test(roomText()));
+const messageField = roomRoot().querySelector('textarea[aria-label="Your message to PHANTOM"]');
+check('the dialog has a labelled message box', Boolean(messageField));
+const messageBody = `Please confirm the delivery date for ${stamp}.`;
+await typeInto(messageField, messageBody);
+const dialogSend = [...roomRoot().querySelectorAll('[role="dialog"] button')]
+  .find((button) => buttonLabel(button) === 'Send to PHANTOM');
+if (dialogSend) dialogSend.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+else console.log('  debug: the message send action was not on screen');
+const messageReachedPhantom = await (async () => {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const inbox = (await api('GET', '/api/notifications', null, token)).json?.data;
+    const items = Array.isArray(inbox) ? inbox : (inbox?.items || []);
+    if (items.some((row) => String(row.message || '').includes(`delivery date for ${stamp}`))) return true;
+    await wait(250);
+  }
+  return false;
+})();
+check('the message reaches PHANTOM through the notification inbox', messageReachedPhantom);
+const storedMessages = (await api('GET', `/api/client/project/${project.id}/messages`,
+  null, null, { 'X-Code-Rx-Client-Session': clientToken })).json?.data?.messages || [];
+check('the client\'s message is stored on the project, not only announced',
+  storedMessages.some((message) => message.body === messageBody), JSON.stringify(storedMessages).slice(0, 200));
+check('a message sent from the header is about the project, and says so by carrying no document',
+  storedMessages.some((message) => message.body === messageBody && !message.document));
+check('the room shows the client what they sent', roomText().includes('Please confirm the delivery date'));
+
+// The same conversation, opened from an open document, names that document.
+clickRoomByText('Close');
+await waitForRoom(() => !roomRoot().querySelector('[role="dialog"][aria-label="Text PHANTOM"]'), 20);
+clickRoomByText('Text PHANTOM about this');
+const aboutDialog = await waitForRoom(() => Boolean(roomRoot().querySelector('[role="dialog"][aria-label="Text PHANTOM"]')), 30);
+check('an open document can start a conversation about that document', aboutDialog);
+const documentMessage = `About this letter, ${stamp}: please confirm.`;
+await typeInto(roomRoot().querySelector('textarea[aria-label="Your message to PHANTOM"]'), documentMessage);
+const aboutSend = [...roomRoot().querySelectorAll('[role="dialog"] button')].find((button) => buttonLabel(button) === 'Send to PHANTOM');
+if (aboutSend) aboutSend.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+else console.log('  debug: the document message send action was not on screen');
+const aboutStored = await (async () => {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const rows = (await api('GET', `/api/client/project/${project.id}/messages`,
+      null, null, { 'X-Code-Rx-Client-Session': clientToken })).json?.data?.messages || [];
+    if (rows.some((message) => message.body === documentMessage)) return rows;
+    await wait(250);
+  }
+  return [];
+})();
+check('a message about a document names that document to PHANTOM',
+  aboutStored.some((message) => message.body === documentMessage && message.document?.id === workLetter.id),
+  JSON.stringify(aboutStored.slice(0, 2)).slice(0, 200));
 
 const roomBin = (await api('GET', '/api/phantom/recycle-bin', null, token)).json?.data || [];
 check('nothing in this flow deleted anything by accident',
   !roomBin.some((row) => String(row.title || '').includes(`Panel DOM work letter ${stamp}`)),
   JSON.stringify(roomBin.slice(0, 2)).slice(0, 160));
+
+// --- the same document, deleted and restored, keeps its signature ----------
+const binnedSigned = await api('DELETE', `/api/phantom/client-documents/${workLetter.id}`, null, token);
+const binAfterSigned = (await api('GET', '/api/phantom/recycle-bin', null, token)).json?.data || [];
+const signedBinRow = binAfterSigned.find((row) => String(row.title || '').includes(`Panel DOM work letter ${stamp}`));
+check('a signed document deletes from the panel', binnedSigned.status === 200, JSON.stringify(binnedSigned.json).slice(0, 140));
+check('the signed document waits in the Recycle Bin, visible to the operator', Boolean(signedBinRow));
+if (signedBinRow) await api('POST', `/api/phantom/recycle-bin/${signedBinRow.id}/restore`, null, token);
+await api('POST', `/api/phantom/client-documents/${workLetter.id}/lifecycle`, { state: 'published' }, token);
+const signatureAfterRestore = (await api('GET', `/api/client/project/${project.id}/documents/${workLetter.id}/signature`,
+  null, null, { 'X-Code-Rx-Client-Session': clientToken })).json?.data?.current;
+check('the signature comes back with the document, so nothing is asked twice',
+  signatureAfterRestore?.signerName === signerNameValue, JSON.stringify(signatureAfterRestore));
 
 // ---------------------------------------------------------------------------
 // PHASE 20 — one logo, the PHANTOM sign, and the review section, in the DOM the
@@ -424,7 +558,17 @@ if (noteField) {
   noteField.dispatchEvent(new room.Event('change', { bubbles: true }));
   await wait(250);
 }
-const sendReviewButton = roomButtons().find((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim().includes('Send to PHANTOM'));
+// The innermost match: an ancestor section contains the review's text too, and
+// its first button belongs to the signature card above.
+const reviewSection = [...roomRoot().querySelectorAll('section')]
+  .filter((section) => /Review this document/.test(section.textContent || '')).pop();
+const sendReviewButton = (reviewSection || roomRoot()).querySelector ? [...(reviewSection || roomRoot()).querySelectorAll('button')]
+  .find((button) => /Send to PHANTOM/.test(String(button.textContent || ''))) : null;
+if (process.env.DOM_DEBUG) {
+  console.log('  debug: review section found =', Boolean(reviewSection), 'send =', String(sendReviewButton && String(sendReviewButton.textContent || '')));
+  console.log('  debug: room buttons =', roomButtons().map(buttonLabel).slice(0, 16).join(' | '));
+  console.log('  debug: room tail =', JSON.stringify(roomText().slice(-260)));
+}
 if (sendReviewButton) sendReviewButton.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
 else console.log('  debug: the review send action was not on screen');
 
@@ -437,6 +581,13 @@ const answerReachedPhantom = await (async () => {
   }
   return false;
 })();
+if (process.env.DOM_DEBUG && !answerReachedPhantom) {
+  const alert = roomRoot().querySelector('[role="alert"]');
+  console.log('  debug: room alert =', JSON.stringify(String(alert && alert.textContent || '(none)')));
+  console.log('  debug: room requests =', roomFailures.slice(-8).join(' | ') || '(none)');
+  console.log('  debug: review send disabled =', String(sendReviewButton && sendReviewButton.disabled));
+  console.log('  debug: review tail =', JSON.stringify(roomText().slice(-320)));
+}
 check('pressing Send tells PHANTOM, by notification, what the client answered', answerReachedPhantom);
 check('the client is told their answer went to PHANTOM', /sent to PHANTOM|Thank you/i.test(roomText()), roomText().slice(-200));
 check('the answer the client gave is shown back to them', /You answered: Approved/.test(roomText()));
