@@ -38,8 +38,9 @@ import {
 } from './lib/client-notifications';
 import { normalizeDocumentContent, parseStoredDocumentContent, recordVaultActivity } from './lib/vault-document';
 import { createNotification } from './lib/notifications';
+import { recordPhantomInboxItem } from './lib/phantom-inbox';
 import { cleanEmail, cleanOptionalStr, cleanStr } from './lib/validate';
-import { absoluteLinkAddress, requestOrigin } from './lib/link-address';
+import { absoluteLinkAddress, requestOrigin, publicSiteUrl } from './lib/link-address';
 import {
   clientThrottleKeys,
   clientPasskeyCodeScope,
@@ -397,6 +398,19 @@ const sendClientDocumentToPhantom = async (
     console.error('[code-rx] client document notification failed:', error);
   }
 
+  // The send-back is also a PHANTOM Community item, grouped with the client's
+  // messages. Non-fatal: the notification and audit trail below already ran.
+  await recordPhantomInboxItem(db, {
+    channel: 'client_messages',
+    title: signed ? 'Client sent a signed document back' : 'Client sent a document back',
+    summary: `${principal.clientName}: ${document.title} (${document.reference_code}), version ${version}.`,
+    source: 'client_send_to_phantom',
+    sourceId: `${document.public_id}:${sentAt}`,
+    actorLabel: principal.clientName,
+    link: `${publicSiteUrl(undefined)}/#community/client_messages`,
+    body: `Client: ${principal.clientName}\nProject: ${project.name}\nDocument: ${document.title} (${document.reference_code})\nVersion: ${version}${signed ? `${input.signerName ? `\nSigned by: ${input.signerName}` : '\nSigned: yes'}` : ''}`,
+  });
+
   await audit(db, null, 'client.document.sent_to_phantom', 'client_document', Number(document.id), {
     clientId: principal.clientPublicId,
     documentPublicId: document.public_id,
@@ -645,6 +659,13 @@ const sweepExpiredLinks = async (db: D1Database) => {
   }
   return expired;
 };
+
+/** Test seam: re-uses the same "record into the phantom inbox" path the live
+ * client-message route uses, against the D1 database the harness provides. */
+export const recordClientInboxItemForTest = async (
+  db: D1Database,
+  input: { channel: string; title: string; summary: string; source: string; sourceId: string; actorLabel: string; link: string; body: string },
+): Promise<{ id: number }> => recordPhantomInboxItem(db, input);
 
 export const registerClientRoutes = (app: ClientApp) => {
   // =========================================================================
@@ -1135,6 +1156,19 @@ export const registerClientRoutes = (app: ClientApp) => {
       const label = CLIENT_REVIEW_LABELS[decision];
       const recipients = await notifyPhantomOfReview(db, { principal, project, document, decision, comment });
 
+      // The answer also lands in the PHANTOM Community inbox, grouped with the
+      // client's other messages. Non-fatal: the review row is already stored.
+      await recordPhantomInboxItem(db, {
+        channel: 'client_messages',
+        title: `Client ${label.toLowerCase()} ${document.title}`,
+        summary: `${principal.clientName}: ${label} — ${document.reference_code}.` + (comment ? ` “${comment.slice(0, 160)}”` : ''),
+        source: 'client_review',
+        sourceId: `${document.public_id}:${Number(result.meta.last_row_id)}`,
+        actorLabel: principal.clientName,
+        link: `${publicSiteUrl(undefined)}/#community/client_messages`,
+        body: `Client: ${principal.clientName}\nProject: ${project.name}\nDocument: ${document.title} (${document.reference_code})\nAnswer: ${label}${comment ? `\nComment: ${comment}` : ''}`,
+      });
+
       await audit(db, null, 'client.document.reviewed', 'client_document', Number(document.id), {
         clientId: principal.clientPublicId,
         projectId: project.public_id,
@@ -1270,6 +1304,19 @@ export const registerClientRoutes = (app: ClientApp) => {
       } catch (error) {
         console.error('[code-rx] client signature notification failed:', error);
       }
+
+      // The signature is also a PHANTOM Community item, grouped with the
+      // client's messages. Non-fatal: the signature row is already stored.
+      await recordPhantomInboxItem(db, {
+        channel: 'client_messages',
+        title: `Signed — ${document.title}`,
+        summary: `${principal.clientName}: ${signerName} signed ${document.reference_code}.`,
+        source: 'client_signature',
+        sourceId: `${document.public_id}:${Number(result.meta.last_row_id)}`,
+        actorLabel: principal.clientName,
+        link: `${publicSiteUrl(undefined)}/#community/client_messages`,
+        body: `Client: ${principal.clientName}\nProject: ${project.name}\nDocument: ${document.title} (${document.reference_code})\nSigned by: ${signerName}${signerTitle ? `, ${signerTitle}` : ''}`,
+      });
 
       await audit(db, null, 'client.document.signed', 'client_document', Number(document.id), {
         clientId: principal.clientPublicId,
@@ -1432,6 +1479,19 @@ export const registerClientRoutes = (app: ClientApp) => {
       } catch (error) {
         console.error('[code-rx] client message notification failed:', error);
       }
+
+      // Text PHANTOM is also a PHANTOM Community item, grouped with the other
+      // client messages. Non-fatal: the message row is already stored.
+      await recordPhantomInboxItem(db, {
+        channel: 'client_messages',
+        title: `Client message${documentTitle ? ` — ${documentTitle}` : ''}`,
+        summary: `${principal.clientName} (${project.name}): ${text.slice(0, 160)}`,
+        source: 'client_message',
+        sourceId: publicId,
+        actorLabel: principal.clientName,
+        link: `${publicSiteUrl(undefined)}/#community/client_messages`,
+        body: `Client: ${principal.clientName}\nProject: ${project.name}${documentTitle ? `\nAbout: ${documentTitle}` : ''}\n\n${text}`,
+      });
 
       await audit(db, null, 'client.message.sent', 'client_project', Number(project.id), {
         clientId: principal.clientPublicId,

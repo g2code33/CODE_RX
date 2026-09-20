@@ -780,6 +780,52 @@ CREATE TABLE IF NOT EXISTS community_telegram_message_links (
   FOREIGN KEY(message_id) REFERENCES community_messages(id)
 );
 
+-- The unified PHANTOM Community inbox: one additive, channel-grouped view over
+-- every message that reaches PHANTOM from anywhere on the website, without
+-- touching or duplicating the records of record it points at.
+CREATE TABLE IF NOT EXISTS phantom_inbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  actor_profile_id INTEGER,
+  actor_label TEXT NOT NULL DEFAULT '',
+  link TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(source, source_id),
+  FOREIGN KEY(actor_profile_id) REFERENCES member_profiles(id)
+);
+
+-- PHANTOM grants the founding members channel-by-channel message receive
+-- permission here. Every switch starts off, and the recipient list for a
+-- channel is only ever the phantom accounts plus the granted members.
+CREATE TABLE IF NOT EXISTS phantom_inbox_channel_permissions (
+  member_profile_id INTEGER NOT NULL,
+  channel_key TEXT NOT NULL,
+  can_receive INTEGER NOT NULL DEFAULT 0 CHECK (can_receive IN (0, 1)),
+  assigned_by_user_id INTEGER,
+  assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(member_profile_id, channel_key),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id),
+  FOREIGN KEY(assigned_by_user_id) REFERENCES users(id)
+);
+
+-- PHANTOM's and each granted member's own unread cursor into the shared inbox.
+-- One row per channel per reader; the cursor is the newest inbox row id the
+-- reader has seen.
+CREATE TABLE IF NOT EXISTS phantom_inbox_read_state (
+  member_profile_id INTEGER NOT NULL,
+  channel_key TEXT NOT NULL,
+  last_read_item_id INTEGER NOT NULL DEFAULT 0,
+  read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(member_profile_id, channel_key),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
 CREATE TABLE IF NOT EXISTS recycle_bin_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   resource_type TEXT NOT NULL,
@@ -829,6 +875,10 @@ CREATE INDEX IF NOT EXISTS idx_community_join_requests ON community_group_join_r
 CREATE INDEX IF NOT EXISTS idx_community_attachments_message ON community_message_attachments(message_id, status);
 CREATE INDEX IF NOT EXISTS idx_community_attachments_telegram_sync ON community_message_attachments(status, telegram_sync_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_community_telegram_links_message ON community_telegram_message_links(message_id, synced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_phantom_inbox_channel ON phantom_inbox(channel_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_phantom_inbox_source ON phantom_inbox(source, source_id);
+CREATE INDEX IF NOT EXISTS idx_phantom_inbox_permissions_member ON phantom_inbox_channel_permissions(member_profile_id, can_receive);
+CREATE INDEX IF NOT EXISTS idx_phantom_inbox_read_state_member ON phantom_inbox_read_state(member_profile_id, channel_key);
 CREATE INDEX IF NOT EXISTS idx_vault_attachments_document ON vault_attachments(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_activity_created ON vault_activity(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vault_projects_status ON vault_projects(status, is_archived);
@@ -1158,7 +1208,7 @@ const SAFE_MIGRATIONS = [
 // Bumped so the additive client-portal tables, indexes and feature flags above
 // are applied once on an existing live database. The migration path only ever
 // adds objects; it never alters or drops an existing table, column, or row.
-const VAULT_SCHEMA_VERSION = '2026-09-18-code-rx13-client-portal-3';
+const VAULT_SCHEMA_VERSION = '2026-09-20-code-rx14-client-portal-3-phantom-inbox-1';
 
 
 // Role codes stay stable for member history and permissions. Their visible

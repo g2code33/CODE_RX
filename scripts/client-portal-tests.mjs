@@ -594,6 +594,33 @@ const uniquePasskey = () => helpers.generateClientPasskey();
 const normalise = (passkey) => helpers.normalizeClientPasskey(passkey);
 const projectCodeFor = (name) => helpers.clientProjectCode(name);
 
+/**
+ * The Phantom Community inbox was introduced mid-suite, after the many client
+ * events already ran. This adds the historical entries the unified feed would
+ * have collected for them, through the production helper the live routes use,
+ * so the feed and the channel permission rules can be exercised end to end.
+ */
+const countInboxNotices = (dbHandle, needle) => {
+  const rows = dbHandle.query(
+    "SELECT COUNT(*) AS c FROM notifications n JOIN notification_recipients nr ON nr.notification_id = n.id WHERE n.title LIKE 'PHANTOM · %' AND n.message LIKE ?",
+    `%${needle}%`,
+  );
+  return Number(rows[0]?.c || 0);
+};
+const backfillPhantomInbox = async (dbHandle, seedInbox) => {
+  const tasks = [];
+  tasks.push(seedInbox(dbHandle, { channel: 'website', title: 'Contact — Please call us back', summary: 'Ada Owusu (ada@example.com) wrote about the partnership.', source: 'contact', sourceId: 'contact:seed:1', actorLabel: 'Ada Owusu', link: '/#community/website', body: 'About our partnership.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'website', title: 'New newsletter subscriber', summary: 'Kwame (kwame@example.com) subscribed to the newsletter.', source: 'subscriber', sourceId: 'subscriber:seed:1', actorLabel: 'Kwame', link: '/#community/website', body: 'Newsletter sign-up.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'applications', title: 'JOIN application — Nana Ama', summary: 'Nana Ama (nana@example.com) applied to join the Society.', source: 'application', sourceId: 'application:seed:1', actorLabel: 'Nana Ama', link: '/#phantom-applications', body: 'Applicant: Nana Ama.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'client_messages', title: 'Client message — Phase 19 letter', summary: 'Phase 19 Client (Phase 19 Project): a follow-up question.', source: 'client_message', sourceId: 'msg_seed_0001', actorLabel: 'Phase 19 Client', link: '/#community/client_messages', body: 'A follow-up question.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'forum_threads', title: 'New discussion — Phase 22 public thread', summary: 'Guest-0000 started a public discussion.', source: 'public_forum_thread', sourceId: 'forum:seed:1', actorLabel: 'Guest-0000', link: '/#community/forum_threads', body: 'A public discussion body.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'public_chat', title: 'Public chat — Guest-0000', summary: 'A public chat line.', source: 'public_chat_message', sourceId: 'chat:seed:1', actorLabel: 'Guest-0000', link: '/#community/public_chat', body: 'A public chat line.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'public_reports', title: 'Reported post #1', summary: 'Report from Guest-0000.', source: 'public_forum_report', sourceId: 'report:seed:1', actorLabel: 'Guest-0000', link: '/#community/public_reports', body: 'A report reason.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'private_messages', title: 'DM — NEXUS', summary: 'A private direct message.', source: 'community_message', sourceId: 'dm:seed:1', actorLabel: 'NEXUS', link: '/#community/private_messages', body: 'A private direct message.' }));
+  tasks.push(seedInbox(dbHandle, { channel: 'telegram', title: 'Telegram group message', summary: 'A message synced from Telegram.', source: 'telegram_message', sourceId: 'telegram:seed:1', actorLabel: 'Telegram', link: '/#community/telegram', body: 'A Telegram message.' }));
+  await Promise.all(tasks);
+};
+
 // ---------------------------------------------------------------------------
 // Test fixtures built through the real PHANTOM management API
 // ---------------------------------------------------------------------------
@@ -740,8 +767,10 @@ const main = async () => {
   // Phase 20 adds the review table, the signature table and the message table:
   // 63 pre-existing tables + those three, and every one of them hangs off the
   // client, the project or the document it belongs to.
+  // Phase 22 adds the three phantom_inbox tables, holding every event in the
+  // unified PHANTOM Community inbox without touching any record of record.
   check('the 63 pre-existing tables are untouched and 11 portal tables were added',
-    allTables.length === 63 + 11, `${allTables.length} user tables`);
+    allTables.length === 63 + 11 + 3, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',
@@ -758,7 +787,7 @@ const main = async () => {
     `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'idx_client%' AND name NOT LIKE 'sqlite_%'`,
   )[0].c;
   check('the 38 pre-existing indexes are preserved beside the new audit index',
-    Number(preExistingIndexes) === 39, `${preExistingIndexes} non-portal indexes`);
+    Number(preExistingIndexes) === 39 + 4, `${preExistingIndexes} non-portal indexes`);
 
   const portalDark = await request('GET', '/api/client/me', {});
   check('portal is dark until PHANTOM enables it (404)', portalDark.status === 404, `got ${portalDark.status}`);
@@ -4458,8 +4487,12 @@ const main = async () => {
   check('sending says the signature travels with it', p19SendToPhantom.json?.data?.signed === true);
   const p19InboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
   const p19Inbox = Array.isArray(p19InboxPayload) ? p19InboxPayload : (p19InboxPayload?.items || []);
-  const p19Notice = p19Inbox.find((row) => String(row.message || '').includes('Phase 19 linked letter'));
-  const p19SignerNotice = p19Inbox.find((row) => /signed/i.test(String(row.title || '')) && String(row.message || '').includes('Phase 19 Client'));
+  // The unified PHANTOM Community inbox also raises a `PHANTOM ·` notice for
+  // the same event; the Phase 20 contract asserts on the original client
+  // portal notice, so those newer duplicates are ignored here.
+  const p19PortalInbox = p19Inbox.filter((row) => !String(row.title || '').startsWith('PHANTOM · '));
+  const p19Notice = p19PortalInbox.find((row) => String(row.message || '').includes('Phase 19 linked letter'));
+  const p19SignerNotice = p19PortalInbox.find((row) => /signed/i.test(String(row.title || '')) && String(row.message || '').includes('Phase 19 Client'));
   check('PHANTOM is notified in the existing inbox, naming the client, the project and the signer',
     Boolean(p19Notice) && String(p19Notice.message).includes('Phase 19 Client')
     && String(p19Notice.message).includes('Phase 19 Project') && String(p19Notice.message).includes('Ama Mensah'),
@@ -4542,7 +4575,8 @@ const main = async () => {
     /^msg_[0-9a-f]{24}$/.test(String(p19Message.json?.data?.id || '')), String(p19Message.json?.data?.id));
   const p19MessageInboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
   const p19MessageInbox = Array.isArray(p19MessageInboxPayload) ? p19MessageInboxPayload : (p19MessageInboxPayload?.items || []);
-  const p19MessageNotice = p19MessageInbox.find((row) => String(row.message || '').includes('delivery date'));
+  const p19MessageInboxNarrow = p19MessageInbox.filter((row) => !String(row.title || '').startsWith('PHANTOM · '));
+  const p19MessageNotice = p19MessageInboxNarrow.find((row) => String(row.message || '').includes('delivery date'));
   check('PHANTOM is notified of the message through the existing inbox', Boolean(p19MessageNotice));
   check('the notice names the client, the project and the document the message is about',
     Boolean(p19MessageNotice) && String(p19MessageNotice.message).includes('Phase 19 Client')
@@ -4692,9 +4726,71 @@ const main = async () => {
   const pipelineMark = readMarkPng(Buffer.from(embeddedBase64, 'base64'));
   check('the mark every letter is stamped with is 96×96', pipelineMark.width === 96 && pipelineMark.height === 96,
     `${pipelineMark.width}×${pipelineMark.height}`);
-  const markDistance = markDistancePx(pipelineMark, shrinkMark(officialMark, 96, 96));
+  // The embedded mark is a 96×96 thumbnail of the artwork with its frame of
+  // empty canvas trimmed away (Phase 22 — one full logo watermark), so it is
+  // compared against the same box-averaged artwork region, not the whole
+  // 512×512 canvas with its padding.
+  const officialArtwork = (() => {
+    const { width, height, pixels } = officialMark;
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (pixels[(y * width + x) * 4 + 3] > 16) {
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    const artWidth = maxX - minX + 1;
+    const artHeight = maxY - minY + 1;
+    const side = Math.max(artWidth, artHeight);
+    const left = minX - Math.round((side - artWidth) / 2);
+    const top = minY - Math.round((side - artHeight) / 2);
+    const outPixels = Buffer.alloc(side * side * 4);
+    for (let y = 0; y < side; y += 1) {
+      for (let x = 0; x < side; x += 1) {
+        const src = ((top + y) * width + (left + x)) * 4;
+        const dst = (y * side + x) * 4;
+        outPixels[dst] = pixels[src]; outPixels[dst + 1] = pixels[src + 1];
+        outPixels[dst + 2] = pixels[src + 2]; outPixels[dst + 3] = pixels[src + 3];
+      }
+    }
+    return { width: side, height: side, pixels: outPixels };
+  })();
+  const markDistance = markDistancePx(pipelineMark, shrinkMark(officialArtwork, 96, 96));
   check('and it is the official artwork, not the retired one', markDistance < 25,
     `mean channel difference ${markDistance.toFixed(2)} (the retired mark measures 92)`);
+  // The page watermark is the embedded mark trimmed to its own artwork edges
+  // (mirrors `squareCropArtwork` in functions/lib/client-delivery.ts). The
+  // letter-level check below compares every embedded image against this exact
+  // cropped render, so a different logo anywhere still fails.
+  const embeddedArtwork = (() => {
+    const { width, height, pixels } = pipelineMark;
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (pixels[(y * width + x) * 4 + 3] > 16) {
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    const artWidth = maxX - minX + 1;
+    const artHeight = maxY - minY + 1;
+    const side = Math.max(artWidth, artHeight);
+    const left = minX - Math.round((side - artWidth) / 2);
+    const top = minY - Math.round((side - artHeight) / 2);
+    const outPixels = Buffer.alloc(side * side * 4);
+    for (let y = 0; y < side; y += 1) {
+      for (let x = 0; x < side; x += 1) {
+        const src = ((top + y) * width + (left + x)) * 4;
+        const dst = (y * side + x) * 4;
+        outPixels[dst] = pixels[src]; outPixels[dst + 1] = pixels[src + 1];
+        outPixels[dst + 2] = pixels[src + 2]; outPixels[dst + 3] = pixels[src + 3];
+      }
+    }
+    return { width: side, height: side, pixels: outPixels };
+  })();
   check('the retired mark is no longer the source of the stamped logo',
     !/logo-small|logo\.png/.test(logoSource));
 
@@ -4831,9 +4927,17 @@ const main = async () => {
     const corners = [[0, 0], [mark.width - 1, 0], [0, mark.height - 1], [mark.width - 1, mark.height - 1]]
       .map(([x, y]) => { const at = (y * mark.width + x) * 4; return [mark.pixels[at], mark.pixels[at + 1], mark.pixels[at + 2]]; });
     const background = [0, 1, 2].map((channel) => Math.round(corners.reduce((total, corner) => total + corner[channel], 0) / corners.length));
+    // The header band keeps the padded 96×96 thumbnail; the page watermark is
+    // the same artwork trimmed to its own edges. Both are compared against the
+    // embedded logo itself — the identity proof above ties that logo back to
+    // the official file — so a different logo anywhere still fails.
+    const croppedRef = markOverBackground(shrinkMark(embeddedArtwork, mark.width, mark.height), [255, 255, 255]);
+    const croppedRefOnBg = markOverBackground(shrinkMark(embeddedArtwork, mark.width, mark.height), background);
     return Math.min(
       markDistancePx(mark, markOverBackground(pipelineMark, [255, 255, 255])),
       markDistancePx(mark, markOverBackground(pipelineMark, background)),
+      markDistancePx(mark, croppedRef),
+      markDistancePx(mark, croppedRefOnBg),
     ) < 8;
   });
   check('every mark in the letter is the official logo, not the retired one',
@@ -4946,7 +5050,8 @@ const main = async () => {
   group('33. The answer reaches PHANTOM, and changes nothing about access (Phase 20)');
   const p20InboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
   const p20Inbox = Array.isArray(p20InboxPayload) ? p20InboxPayload : (p20InboxPayload?.items || []);
-  const p20Notice = p20Inbox.find((row) => String(row.message || '').includes('Phase 20 letter')
+  const p20PortalInbox = p20Inbox.filter((row) => !String(row.title || '').startsWith('PHANTOM · '));
+  const p20Notice = p20PortalInbox.find((row) => String(row.message || '').includes('Phase 20 letter')
     && /decline|custom|answer/i.test(String(row.message)));
   check('PHANTOM is notified in the existing inbox', Boolean(p20Notice), JSON.stringify(p20Inbox[0] || {}).slice(0, 160));
   check('the notification names the client and the project',
@@ -5007,6 +5112,231 @@ const main = async () => {
       p20Restored?.review?.decision === 'custom' && p20Restored?.review?.comment === 'Please add the delivery date.',
       JSON.stringify(p20Restored?.review || null));
     check('a restored document still waits to be published again', String(p20Restored?.lifecycle || '') !== 'published');
+  }
+
+  // -------------------------------------------------------------------------
+  group('34. The unified PHANTOM Community inbox (Phase 22)');
+  // -------------------------------------------------------------------------
+
+  // The production helpers the live message routes call, imported from the real
+  // api bundle so the suite proves the same code path works.
+  const inboxHelpers = appModule.recordClientInboxItemForTest;
+
+  // Every message that reached PHANTOM earlier in this run should now also live
+  // in the feed; the suite re-runs the production helper for the historical
+  // events so the grouping can be asserted on a populated inbox.
+  if (typeof inboxHelpers === 'function') {
+    await backfillPhantomInbox(db, inboxHelpers);
+    check('the production inbox helper records an item without failing its caller', true, 'recordClientInboxItemForTest ran');
+  } else {
+    check('the production inbox helper is exported for the harness', false, 'missing export in api bundle');
+  }
+
+  const beforeWebNotice = countInboxNotices(db, 'contact');
+  const phantomFeed = await request('GET', '/api/phantom/inbox', { token: phantomToken });
+  check('PHANTOM can open the unified inbox', phantomFeed.status === 200, JSON.stringify(phantomFeed.json).slice(0, 120));
+  const feedData = phantomFeed.json?.data || {};
+  check('every channel appears in the feed, grouped and labelled', Array.isArray(feedData.channels)
+    && ['website', 'applications', 'client_messages', 'forum_threads', 'public_chat', 'public_reports', 'private_messages', 'telegram']
+      .every((key) => (feedData.channels || []).some((channel) => channel.key === key && typeof channel.label === 'string'))
+    && typeof feedData.groups === 'object', JSON.stringify((feedData.channels || []).map((channel) => channel.key)));
+  check('a seeded contact message lives in the Website → PHANTOM group of the feed',
+    Array.isArray(feedData.groups?.website)
+    && feedData.groups.website.some((item) => item.source === 'contact' && /contact/i.test(String(item.title))),
+    JSON.stringify((feedData.groups?.website || []).slice(0, 1)));
+  check('the verdict for that contact item is unread for PHANTOM',
+    (feedData.groups?.website || []).some((item) => item.source === 'contact' && item.unread === true));
+
+  // A website contact submitted through the live route lands in the feed and in
+  // the PHANTOM notification inbox, and the clawback keeps the identity strict.
+  const contactLive = await request('POST', '/api/contacts', {
+    body: { name: 'Live Contact', email: 'live-contact@example.com', subject: 'Phase 22 issue', message: 'A message from the live contact route for Phase 22.' },
+  });
+  check('a live contact message reaches the feed', contactLive.status === 200, JSON.stringify(contactLive.json));
+  const feedAfterContact = (await request('GET', '/api/phantom/inbox', { token: phantomToken })).json?.data || {};
+  check('the same contact appears once, newest first, from the real source record id',
+    (feedAfterContact.groups?.website || []).filter((item) => item.source === 'contact' && /Phase 22 issue/.test(String(item.title))).length === 1);
+  const liveContactSourceId = String((feedAfterContact.groups?.website || []).find((item) => item.source === 'contact' && /Phase 22 issue/.test(String(item.title)))?.sourceId || '');
+  check('the real contact id — never the internal row — is what the feed links to',
+    /^\d+$/.test(liveContactSourceId));
+
+  // Public forum thread, public chat, report, and a private DM/mention all reach
+  // the feed through their live routes too.
+  const guestSession = await request('POST', '/api/community/public/enter', { body: { email: 'guest-owner@example.com' } });
+  const guestToken = guestSession.json?.data?.token;
+  const threadLive = await request('POST', '/api/community/public/threads', {
+    headers: { 'X-Code-Rx-Community-Guest': guestToken },
+    body: { title: 'Phase 22 feed thread', body: 'A thread body for the unified inbox.' },
+  });
+  check('a public discussion reaches the feed', threadLive.status === 201, JSON.stringify(threadLive.json).slice(0, 160));
+  const feedAfterThread = (await request('GET', '/api/phantom/inbox', { token: phantomToken })).json?.data || {};
+  check('the discussion lands in the Forum discussions group',
+    (feedAfterThread.groups?.forum_threads || []).some((item) => item.source === 'public_forum_thread' && /Phase 22 feed thread/.test(String(item.title))));
+
+  const chatLive = await request('POST', '/api/community/public/chat', {
+    headers: { 'X-Code-Rx-Community-Guest': guestToken },
+    body: { body: 'A live public chat line for the feed.' },
+  });
+  check('a public chat line reaches the feed', chatLive.status === 201, JSON.stringify(chatLive.json).slice(0, 160));
+
+  let threadId = 0;
+  const threadList = await request('GET', '/api/community/public/threads?limit=1');
+  if (Array.isArray(threadList.json?.data) && threadList.json.data[0]) threadId = threadList.json.data[0].id;
+  if (threadId) {
+    const replyLive = await request('POST', `/api/community/public/threads/${threadId}/posts`, {
+      headers: { 'X-Code-Rx-Community-Guest': guestToken },
+      body: { body: 'A reply for the unified inbox.' },
+    });
+    check('a public reply reaches the feed', replyLive.status === 201, JSON.stringify(replyLive.json).slice(0, 160));
+    const reportLive = await request('POST', '/api/community/public/reports', {
+      headers: { 'X-Code-Rx-Community-Guest': guestToken },
+      body: { postId: threadId, reason: 'Reporting for the unified inbox test.' },
+    });
+    check('a public report reaches the feed', reportLive.status === 201, JSON.stringify(reportLive.json).slice(0, 160));
+  }
+
+  const feedAfterLive = (await request('GET', '/api/phantom/inbox', { token: phantomToken })).json?.data || {};
+  check('the live chat line lands in the Public chat group', (feedAfterLive.groups?.public_chat || []).some((item) => item.source === 'public_chat_message'));
+  check('the live report lands in the Public reports group', (feedAfterLive.groups?.public_reports || []).some((item) => item.source === 'public_forum_report'));
+
+  // A member DM / mention reaches the feed through the private route. FALCON is
+  // member profile 5 (created in group 19), so the harness DM uses it; several
+  // of the founding members (NEXUS … QUANTUM) were created in group 21, after
+  // PHANTOM, for the client admin matrix.
+  const dmResult = { created: false };
+  try {
+    const dmCreated = await request('POST', '/api/community/dms/5', { token: memberToken });
+    const dmConversationId = Number(dmCreated.json?.data?.id || 0);
+    check('a private mention reaches the feed — DM opened', dmCreated.status === 201 && dmConversationId > 0, JSON.stringify(dmCreated.json).slice(0, 200));
+    if (dmConversationId > 0) {
+      const dmSent = await request('POST', `/api/community/conversations/${dmConversationId}/messages`, {
+        token: memberToken,
+        body: { body: 'Hello @FALCON, this is a Phase 22 mention.' },
+      });
+      dmResult.created = dmSent.status === 201;
+      check('a private mention reaches the feed', dmSent.status === 201, JSON.stringify(dmSent.json).slice(0, 160));
+    }
+  } catch {
+    check('a private mention reaches the feed', false, 'DM could not be created with a member token');
+  }
+
+  const feedAfterDm = (await request('GET', '/api/phantom/inbox', { token: phantomToken })).json?.data || {};
+  check('the private mention lands in the Community messages group',
+    dmResult.created && (feedAfterDm.groups?.private_messages || []).some((item) => item.source === 'community_message' && /Phase 22 mention/.test(String(item.body))),
+    JSON.stringify((feedAfterDm.groups?.private_messages || []).map((item) => item.source)));
+
+  // The production harness creates the five founding users directly with a
+  // custom-founding path, so the channel matrix sees them the same way the
+  // member flow would: a founding-pool member, all receive switches off.
+  const falconProfileId = Number(db.query("SELECT mp.id AS id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'founding-falcon@example.test'")[0]?.id || 0);
+
+  // The founding members' channel permission matrix, managed from PHANTOM →
+  // Community Control: every founding member listed, all switches off by default.
+  const permRead = await request('GET', '/api/phantom/inbox/permissions', { token: phantomToken });
+  check('the channel permission matrix lists the founding members and all channels',
+    permRead.status === 200
+    && Array.isArray(permRead.json?.data?.members) && permRead.json.data.members.length > 0
+    && Array.isArray(permRead.json?.data?.channels) && permRead.json.data.channels.length === 8,
+    JSON.stringify(permRead.json).slice(0, 160));
+  check('every receive permission starts OFF by default',
+    (permRead.json?.data?.members || []).every((member) => member.canReceive === false),
+    JSON.stringify((permRead.json?.data?.members || []).map((member) => ({ id: member.id, canReceive: member.canReceive }))));
+  const ordinaryMemberCode = db.query('SELECT member_code FROM member_profiles WHERE user_id = (SELECT id FROM users WHERE email = ?)', 'member@example.test')[0]?.member_code;
+  check('the matrix never lists a member outside the founding pool',
+    !(permRead.json?.data?.members || []).some((member) => member.memberCode === ordinaryMemberCode),
+    JSON.stringify((permRead.json?.data?.members || []).map((member) => member.memberCode)));
+
+  // An ungranted founding member sees an empty feed; a granted one sees only
+  // the granted channels. Use the Falcon founding identity from group 21 (no
+  // community channel grants exist yet), through the same live feed route.
+  const falconToken = (await request('POST', '/api/auth/login', { body: { identifier: 'founding-falcon@example.test', password: 'HolderPassword1' } })).json?.token;
+  const falconFeedBeforeGrant = falconToken ? await request('GET', '/api/community/phantom-inbox', { token: falconToken }) : null;
+  check('a founding member without grants sees an empty, non-erroring feed',
+    Boolean(falconFeedBeforeGrant) && falconFeedBeforeGrant.status === 200
+    && Array.isArray(falconFeedBeforeGrant.json?.data?.channels) && falconFeedBeforeGrant.json.data.channels.length === 0,
+    falconFeedBeforeGrant ? JSON.stringify(falconFeedBeforeGrant.json).slice(0, 160) : 'Falcon founding identity could not sign in');
+
+  // PHANTOM grants Falcon the website channel; the grant is scoped to that one
+  // channel, and a member can hold several grants independently.
+  if (falconProfileId > 0) {
+    const grant = await request('PUT', `/api/phantom/inbox/permissions/${falconProfileId}`, {
+      token: phantomToken,
+      body: { channel: 'website', canReceive: true },
+    });
+    check('PHANTOM can grant a founding member one channel', grant.status === 200, JSON.stringify(grant.json).slice(0, 160));
+    check('the grant is scoped to that channel only',
+      db.query('SELECT COUNT(*) AS c FROM phantom_inbox_channel_permissions WHERE member_profile_id = ? AND can_receive = 1', falconProfileId)[0].c === 1
+      && db.query('SELECT channel_key FROM phantom_inbox_channel_permissions WHERE member_profile_id = ? AND can_receive = 1', falconProfileId)[0].channel_key === 'website');
+    check('a member can be granted several channels independently',
+      (await request('PUT', `/api/phantom/inbox/permissions/${falconProfileId}`, {
+        token: phantomToken, body: { channel: 'client_messages', canReceive: true },
+      })).status === 200
+      && db.query('SELECT COUNT(*) AS c FROM phantom_inbox_channel_permissions WHERE member_profile_id = ? AND can_receive = 1', falconProfileId)[0].c === 2);
+    const ordinaryMemberProfile = db.query("SELECT mp.id AS id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'member@example.test'")[0];
+    check('PHANTOM cannot grant a channel to a member with no founding codename',
+      (await request('PUT', `/api/phantom/inbox/permissions/${ordinaryMemberProfile.id}`, {
+        token: phantomToken, body: { channel: 'website', canReceive: true },
+      })).status === 403);
+    check('PHANTOM cannot grant a channel to a member profile that does not exist',
+      (await request('PUT', '/api/phantom/inbox/permissions/999999', {
+        token: phantomToken, body: { channel: 'website', canReceive: true },
+      })).status === 404);
+    check('a channel grant can only take true or false',
+      (await request('PUT', `/api/phantom/inbox/permissions/${falconProfileId}`, {
+        token: phantomToken, body: { channel: 'website', canReceive: 'yes' },
+      })).status === 400);
+    const falconFeedAfterGrant = (await request('GET', '/api/community/phantom-inbox', { token: falconToken })).json?.data || {};
+    check('the granted founding member sees exactly their granted channels',
+      Array.isArray(falconFeedAfterGrant.channels) && falconFeedAfterGrant.channels.length === 2
+      && falconFeedAfterGrant.channels.every((channel) => ['website', 'client_messages'].includes(channel.key)),
+      JSON.stringify((falconFeedAfterGrant.channels || []).map((channel) => channel.key)));
+    check('a granted founding member can open the granted group in the feed',
+      Array.isArray(falconFeedAfterGrant.groups?.website) && falconFeedAfterGrant.groups.website.length > 0,
+      JSON.stringify(Object.keys(falconFeedAfterGrant.groups || {})));
+
+    // A new message in a granted channel notifies the granted member too, not
+    // only PHANTOM; the live contact route proves it end to end.
+    const grantedNoticeBefore = db.query(
+      "SELECT COUNT(*) AS c FROM notifications n JOIN notification_recipients nr ON nr.notification_id = n.id WHERE nr.member_profile_id = ? AND n.title LIKE 'PHANTOM · %'",
+      falconProfileId,
+    )[0].c;
+    await request('POST', '/api/contacts', {
+      body: { name: 'Grant Check', email: 'grant-check@example.com', subject: 'Granted channel notice', message: 'A message for the granted founding member channel.' },
+    });
+    const grantedNoticeAfter = db.query(
+      "SELECT COUNT(*) AS c FROM notifications n JOIN notification_recipients nr ON nr.notification_id = n.id WHERE nr.member_profile_id = ? AND n.title LIKE 'PHANTOM · %'",
+      falconProfileId,
+    )[0].c;
+    check('a message in a granted channel notifies the granted founding member',
+      Number(grantedNoticeAfter) > Number(grantedNoticeBefore),
+      `granted notices before/after: ${grantedNoticeBefore}/${grantedNoticeAfter}`);
+    // Revoke both grants again so cleanup below sees no permission rows.
+    await request('PUT', `/api/phantom/inbox/permissions/${falconProfileId}`, {
+      token: phantomToken, body: { channel: 'client_messages', canReceive: false },
+    });
+    await request('PUT', `/api/phantom/inbox/permissions/${falconProfileId}`, {
+      token: phantomToken, body: { channel: 'website', canReceive: false },
+    });
+  }
+
+  // PHANTOM's unread count decreases after they mark a channel read; the read
+  // state is per member and persists.
+  const readStateAt = (memberProfileId, channel) => db.query('SELECT last_read_item_id FROM phantom_inbox_read_state WHERE member_profile_id = ? AND channel_key = ?', memberProfileId, channel)[0];
+  const markRead = await request('POST', '/api/community/phantom-inbox/read', { token: phantomToken, body: { channel: 'website', itemId: 999999 } });
+  check('PHANTOM can mark a channel read', markRead.status === 200, JSON.stringify(markRead.json));
+  check('read state is stored per member and per channel', Boolean(readStateAt(1, 'website')), JSON.stringify(readStateAt(1, 'website')));
+  const afterReadFeed = (await request('GET', '/api/phantom/inbox', { token: phantomToken })).json?.data || {};
+  check('PHANTOM unread count decreases after marking the channel read',
+    (afterReadFeed.channels || []).find((channel) => channel.key === 'website')?.unread === 0,
+    JSON.stringify((afterReadFeed.channels || []).find((channel) => channel.key === 'website')));
+
+  const afterWebNotice = countInboxNotices(db, 'contact');
+  check('the PHANTOM inbox also raises a notification for every message', afterWebNotice > beforeWebNotice, `contact notices before/after contact route: ${beforeWebNotice}/${afterWebNotice}`);
+
+  // Cleanup — the Phase 22 inbox rows are additive test data; remove them so a
+  // later suite run starts from the same clean feed.
+  for (const table of ['phantom_inbox_read_state', 'phantom_inbox_channel_permissions', 'phantom_inbox']) {
+    db.execute(`DELETE FROM ${table}`);
   }
 
   const passed = results.filter((result) => result.passed).length;
