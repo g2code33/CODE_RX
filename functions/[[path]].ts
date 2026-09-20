@@ -4640,6 +4640,29 @@ const restoreRecycleBinItem = async (db: D1Database, item: any) => {
         String(review.decision || ''), String(review.comment || ''), review.created_at ?? null,
       ).run();
     }
+    // Messages the client sent about this document stay on the project, and the
+    // link between them and the document comes back with it.
+    const messageIds = Array.isArray(payload?.messages)
+      ? payload.messages.map((id: unknown) => Number(id)).filter((id: number) => Number.isInteger(id) && id > 0)
+      : [];
+    for (const messageId of messageIds) {
+      await db.prepare('UPDATE client_messages SET client_document_id = ? WHERE id = ? AND client_id = ?')
+        .bind(row.id, messageId, row.client_id).run();
+    }
+    // A signature that came back with the document is a signature PHANTOM does
+    // not have to ask the client for again.
+    const signatures = Array.isArray(payload?.signatures) ? payload.signatures : [];
+    for (const signature of signatures) {
+      await db.prepare(
+        `INSERT INTO client_document_signatures
+         (client_document_id, client_id, client_project_id, signer_name, signer_title, document_version, signed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        row.id, row.client_id, row.client_project_id,
+        String(signature.signer_name || ''), String(signature.signer_title || ''),
+        String(signature.document_version || ''), signature.signed_at ?? null,
+      ).run();
+    }
     return;
   }
   if (item.resource_type === 'vault_document') {

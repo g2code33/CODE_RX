@@ -62,6 +62,8 @@ export const CLIENT_ACTIVITY_EVENTS = [
   'DOCUMENT_SAVED',
   'DOCUMENT_SENT',
   'DOCUMENT_REVIEWED',
+  'DOCUMENT_SIGNED',
+  'MESSAGE_SENT',
   'LINK_CREATED',
   'LINK_USED',
   'LINK_EXPIRED',
@@ -869,6 +871,11 @@ export const publicDocument = (row: any, exposure: { canView: boolean; canDownlo
   // 'new' / 'updated' / null, from the timestamps above (Phase 9).
   freshness: documentFreshness(row),
   permissions: { view: exposure.canView, download: exposure.canDownload },
+  // Whether the client has signed it, and when. Present only when the query
+  // carried the signature; a list without it simply says nothing.
+  signature: row.signature_name
+    ? { signerName: String(row.signature_name), title: String(row.signature_title || ''), at: row.signature_at || null }
+    : null,
   ...(options.includeContent ? { content: safeContentSnapshot(row.content_snapshot, row.content_snapshot_format) } : {}),
 });
 

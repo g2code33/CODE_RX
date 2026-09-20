@@ -2357,24 +2357,61 @@ const main = async () => {
     /export const moveToRecycleBin/.test(p19BinSource)
     && !fs.existsSync(path.join(ROOT, 'functions/lib/recycle-bin.ts')));
 
-  group('29. The client works on a sent document, saves it and sends it back (Phase 19)');
+  group('29. The client signs a sent document and sends it back to PHANTOM (Phase 20)');
   const p19RoomSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientProjectRoom.tsx'), 'utf8');
-  check('the client room offers a place to work on the document',
-    /Work on this document/.test(p19RoomSource));
-  check('the client gets a Save action and a send action, named in their words',
-    /\} Save\b/.test(p19RoomSource) && /Save &amp; send to Code Rx/.test(p19RoomSource));
-  check('the client is told their revision is kept with the Code Rx copy',
-    /keeps your revision with the Code Rx copy/.test(p19RoomSource));
-  check('saving goes through the room\'s existing transport, not a second one',
-    /transport\.saveWorkspace!/.test(p19RoomSource) && /transport\.sendWorkspace!/.test(p19RoomSource));
-  check('the working copy is only offered when the server says it is editable',
-    /if \(!data\.editable\) return;/.test(p19RoomSource));
-  check('a document that cannot be edited simply shows no editor, and the reader still works',
-    /setWorkspace\(null\);\n  \};/.test(p19RoomSource) || /catch \{[\s\S]{0,160}setWorkspace\(null\)/.test(p19RoomSource));
-  check('the room never prints a database identifier in the editor heading',
+  check('the free-text workspace is gone from the client room',
+    !/Work on this document/.test(p19RoomSource) && !/workspace/.test(p19RoomSource));
+  check('the client room offers a signature on the document instead',
+    /Sign this document/.test(p19RoomSource) && /id="sign-this-document"/.test(p19RoomSource));
+  check('the client gets a Save action for the signature and a send action, in their words',
+    /Save signature/.test(p19RoomSource) && /Send to PHANTOM/.test(p19RoomSource));
+  check('the client is told the signature is kept with the Code Rx copy',
+    /keeps your\s+signature on this document in your project room and with the Code Rx copy/.test(p19RoomSource));
+  check('signing goes through the room\'s existing transport, not a second one',
+    /transport\.sign\(projectId/.test(p19RoomSource) && /transport\.sendToPhantom\(projectId/.test(p19RoomSource));
+  check('the signature card reads the signature from the server before offering it',
+    /transport\.signature!\(projectId, documentId\)/.test(p19RoomSource));
+  check('a signature with no name never leaves the room',
+    /signerName\.trim\(\)\.length < 2/.test(p19RoomSource));
+  check('a document whose signature cannot be read still opens for reading',
+    /catch \{[\s\S]{0,220}setSignature\(null\)/.test(p19RoomSource));
+  check('the room never prints a database identifier for the document',
     !/vault_document_id|client_id/.test(p19RoomSource));
-  check('the browser layer carries the two new calls on the client session, in its own header',
-    /saveWorkspace: \(projectId: string, documentId: string, payload: \{ blocks\?: unknown\[\]; text\?: string \}\)/.test(p19ApiSource19));
+  check('the browser layer carries the signing calls on the client session, in its own header',
+    /sign: \(projectId: string, documentId: string, payload: \{ signerName: string; signerTitle\?: string \}\)/.test(p19ApiSource19)
+    && /sendToPhantom: \(projectId: string, documentId: string\)/.test(p19ApiSource19));
+
+  group('29b. Text PHANTOM — the button, the panel and the message (Phase 20)');
+  check('the room header carries a Text PHANTOM button',
+    /Text PHANTOM/.test(p19RoomSource) && /onClick=\{\(\) => void openMessages\(null\)\}/.test(p19RoomSource));
+  check('an open document offers the same conversation about that document',
+    /Text PHANTOM about this/.test(p19RoomSource)
+    && /openMessages\(\{ id: String\(openDocument\.id\), title: String\(openDocument\.title \|\| ''\) \}\)/.test(p19RoomSource));
+  check('the panel is a real dialog, named for a screen reader',
+    /role="dialog"/.test(p19RoomSource) && /aria-modal="true"/.test(p19RoomSource) && /aria-label="Text PHANTOM"/.test(p19RoomSource));
+  check('the panel explains who PHANTOM is rather than leaving the client guessing',
+    /PHANTOM is the Code Rx desk for/.test(p19RoomSource));
+  check('the client writes in a labelled box and can see what they sent before',
+    /aria-label="Your message to PHANTOM"/.test(p19RoomSource) && /What you have sent PHANTOM/.test(p19RoomSource));
+  check('an empty message can never be sent',
+    /disabled=\{preview \|\| busy \|\| !text\.trim\(\)\}/.test(p19RoomSource));
+  check('the browser layer carries the messages on the client session, in its own header',
+    /messages: \(projectId: string\) =>\s*clientCall<\{ data: any \}>\(`\/api\/client\/project\/\$\{encodeURIComponent\(projectId\)\}\/messages`\)/.test(p19ApiSource19)
+    && /sendMessage: \(projectId: string, payload: \{ body: string; documentId\?: string \}\)/.test(p19ApiSource19));
+
+  group('29c. The room is pinned while the client reads (Phase 20)');
+  check('the header is sticky, so the sign, the title and the menu travel with the client',
+    /sticky top-0/.test(p19RoomSource));
+  check('the hamburger opens the sections and says so to a screen reader',
+    /aria-expanded=\{sectionsOpen\}/.test(p19RoomSource) && /aria-controls="room-sections"/.test(p19RoomSource)
+    && /aria-label=\{sectionsOpen \? 'Hide project sections' : 'Show project sections'\}/.test(p19RoomSource));
+  check('the same hamburger folds the sidebar on a wide screen and opens it on a narrow one',
+    /const sectionsOpen = wideScreen \? !navFolded : navOpen;/.test(p19RoomSource)
+    && /window\.matchMedia\('\(min-width: 1024px\)'\)/.test(p19RoomSource));
+  check('the sections it controls are the ones the room shows',
+    /id="room-sections"/.test(p19RoomSource));
+  check('the open document\'s title is the title in the pinned header',
+    /\{openDocument \? openDocument\.title : context\.project\.name\}/.test(p19RoomSource));
 
   group('30. The Vault groups documents by client and by that client\'s project (Phase 19)');
   const p19Grouped = groupDocumentsByClient([

@@ -152,7 +152,7 @@ check('a restored document comes back unpublished, so no client sees it by accid
 await call('POST', `/api/phantom/client-documents/${documentId}/lifecycle`, { state: 'published' }, token);
 
 // ---------------------------------------------------------------------------
-section('Ask 2 — the client signs in, works on the document, saves and sends it back');
+section('Ask 2 — the client signs in, signs the document, and sends it back');
 const issued = await call('POST', `/api/phantom/clients/${client.id}/keys`, { label: `Phase 19 key ${stamp}` }, token);
 const passkey = issued.json?.data?.passkey;
 check('an access key can be issued for the client', issued.status === 201 && Boolean(passkey));
@@ -162,21 +162,24 @@ const sessionToken = session.json?.data?.session?.token;
 check('the client signs in with that key', session.status === 200 && Boolean(sessionToken));
 
 if (sessionToken) {
-  const workspace = await clientCall('GET', `/api/client/project/${project.id}/documents/${documentId}/workspace`, null, sessionToken);
-  check('the document opens for work in the client room', workspace.status === 200 && workspace.json?.data?.editable === true,
-    workspace.text.slice(0, 140));
-  check('the room says the document is kept in the Code Rx Vault', workspace.json?.data?.vaultLinked === true);
-  check('the document is read-only when it is a delivered file, and says why',
-    typeof workspace.json?.data?.reason !== 'undefined' || workspace.json?.data?.editable === true);
+  const signatureRead = await clientCall('GET', `/api/client/project/${project.id}/documents/${documentId}/signature`, null, sessionToken);
+  check('the document offers the client a signature in their room',
+    signatureRead.status === 200 && signatureRead.json?.data?.signable === true, signatureRead.text.slice(0, 140));
+  check('the room says how long a signature may be', Number(signatureRead.json?.data?.maxNameChars) === 120);
 
-  const revision = 'The client rewrote the wording.\nA second line from the client.';
-  const saved = await clientCall('POST', `/api/client/project/${project.id}/documents/${documentId}/workspace`, { text: revision }, sessionToken);
-  check('the client can save their revision', saved.status === 200, saved.text.slice(0, 140));
-  check('the save explains that the Vault copy carries it too',
-    /Vault/i.test(String(saved.json?.message || '')), String(saved.json?.message || ''));
+  const signed = await clientCall('POST', `/api/client/project/${project.id}/documents/${documentId}/signature`,
+    { signerName: `Ama Mensah ${stamp}`, signerTitle: 'Managing Director' }, sessionToken);
+  check('the client can sign the document', signed.status === 200, signed.text.slice(0, 140));
+  check('the save explains that the Code Rx copy carries the signature',
+    /Code Rx copy|saved/i.test(String(signed.json?.message || '')), String(signed.json?.message || ''));
 
-  const sent = await clientCall('POST', `/api/client/project/${project.id}/documents/${documentId}/workspace/send`, {}, sessionToken);
-  check('the client can send it back to Code Rx', sent.status === 200, sent.text.slice(0, 140));
+  const signatureAfter = await clientCall('GET', `/api/client/project/${project.id}/documents/${documentId}/signature`, null, sessionToken);
+  check('the signature is stored and read back',
+    signatureAfter.json?.data?.current?.signerName === `Ama Mensah ${stamp}`);
+
+  const sent = await clientCall('POST', `/api/client/project/${project.id}/documents/${documentId}/send-to-phantom`, {}, sessionToken);
+  check('the client can send it back to PHANTOM', sent.status === 200, sent.text.slice(0, 140));
+  check('the send says the signature travels with it', sent.json?.data?.signed === true);
 
   const inbox = rows((await call('GET', '/api/notifications', null, token)).json?.data);
   const notice = inbox.find((row) => String(row.message || '').includes(`Phase 19 letter ${stamp}`));
@@ -185,20 +188,23 @@ if (sessionToken) {
     Boolean(notice) && String(notice.message).includes(`Phase 19 client ${stamp}`) && String(notice.message).includes('Phase 19 project'));
 
   // -------------------------------------------------------------------------
-  section('Ask 3 — the client\'s change is in the Vault copy, attributed to the client');
+  section('Ask 3 — the signed copy is in the Vault, attributed to the client');
   const vaultNow = await call('GET', `/api/vault/documents/${vaultId}`, null, token);
   const blocks = vaultNow.json?.data?.contentJson?.blocks || [];
   const vaultText = blocks.map((block) => String(block?.content || '')).join('\n');
-  check('the Vault document contains the client\'s wording', vaultText.includes('The client rewrote the wording'),
-    vaultText.slice(0, 120));
-  check('no member is credited with writing the client\'s revision',
-    vaultText.includes('The client rewrote the wording') && Number(vaultNow.json?.data?.updated_by_member_id ?? -1) === 0
-      || vaultNow.json?.data?.updated_by_name == null,
+  check('the Vault document carries the client\'s signature', vaultText.includes(`Signed: Ama Mensah ${stamp}`),
+    vaultText.slice(0, 160));
+  check('the signed copy says where and when it was signed',
+    blocks.some((block) => /client portal/i.test(String(block?.content || ''))));
+  check('the signed copy still carries the wording Code Rx sent',
+    vaultText.includes('The original Code Rx wording.'), vaultText.slice(0, 160));
+  check('no member is credited with the client\'s signature',
+    vaultNow.json?.data?.updated_by_name == null,
     `updated_by_name=${vaultNow.json?.data?.updated_by_name}`);
 
   const history = rows((await call('GET', `/api/vault/documents/${vaultId}/versions`, null, token)).json?.data);
   const clientVersion = history.find((entry) => /client/i.test(String(entry.change_note || '')));
-  check('the client\'s revision is a version of its own in the Vault history', Boolean(clientVersion));
+  check('the signed copy is a version of its own in the Vault history', Boolean(clientVersion));
   check('that version names the client portal as its source',
     Boolean(clientVersion) && /client portal/i.test(String(clientVersion.change_note)));
   check('it is not attributed to a member', Number(clientVersion?.changed_by_member_profile_id ?? 0) === 0);
@@ -207,10 +213,12 @@ if (sessionToken) {
     .find((row) => row.id === documentId);
   check('the client copy records which Vault version it carries', Number(panel?.vaultVersion || 0) >= 1,
     `vaultVersion=${panel?.vaultVersion}`);
+  check('the operator\'s own list shows the client\'s signature', panel?.signature?.signerName === `Ama Mensah ${stamp}`,
+    JSON.stringify(panel?.signature || null));
 
   const activity = rows((await call('GET', `/api/phantom/clients/${client.id}/activity`, null, token)).json?.data);
   const activityText = JSON.stringify(activity);
-  check('the client\'s activity history records the save', /Saved a revision|DOCUMENT_SAVED/i.test(activityText));
+  check('the client\'s activity history records the signature', /Signed a document|DOCUMENT_SIGNED/i.test(activityText));
   check('the client\'s activity history records the send', /Sent a document to Code Rx|DOCUMENT_SENT/i.test(activityText));
 }
 

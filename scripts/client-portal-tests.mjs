@@ -717,7 +717,7 @@ const main = async () => {
   const clientIndexes = db.query(
     "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_client%' ORDER BY name",
   ).map((row) => row.name);
-  check('all 13 client-portal authorization indexes exist', clientIndexes.length === 13, clientIndexes.join(','));
+  check('all 15 client-portal authorization indexes exist', clientIndexes.length === 15, clientIndexes.join(','));
   check('temporary-link expiry is indexed for the sweep', clientIndexes.includes('idx_client_links_expiry'));
   check('the audit feed is indexed by action',
     db.query("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name='idx_audit_logs_action'")[0].c === 1);
@@ -737,8 +737,17 @@ const main = async () => {
     db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('client-portal'));
   // Phase 20 adds the review section's own table: one row per answer, so a
   // client who changes their mind leaves a trail instead of overwriting.
-  check('the 63 pre-existing tables are untouched and 9 portal tables were added',
-    allTables.length === 63 + 9, `${allTables.length} user tables`);
+  // Phase 20 adds the review table, the signature table and the message table:
+  // 63 pre-existing tables + those three, and every one of them hangs off the
+  // client, the project or the document it belongs to.
+  check('the 63 pre-existing tables are untouched and 11 portal tables were added',
+    allTables.length === 63 + 11, `${allTables.length} user tables`);
+  check('the signature table hangs off the document, the client and the project',
+    db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
+  check('the message table hangs off the client, the project and (optionally) the document',
+    db.query('PRAGMA foreign_key_list(client_messages)').length === 3);
+  check('a message is identified by its own public id, never by a row number',
+    /public_id TEXT NOT NULL UNIQUE/.test(db.query("SELECT sql FROM sqlite_master WHERE name = 'client_messages'")[0].sql));
   check('the review table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_reviews)').length === 3);
   check('the review table refuses an answer that is not one of the four',
@@ -4420,90 +4429,225 @@ const main = async () => {
   check('a restored document is not published to the client until an operator says so',
     restored.lifecycle !== 'published', String(restored.lifecycle));
 
-  group('28. The client works on a document, saves it, and sends it back (Phase 19)');
+  group('28. The client signs a document and sends it back to PHANTOM (Phase 20)');
   await publish(phantomToken, p19BinLinked.id);
-  const p19WorkspacePath = `/api/client/project/${p19BinProject.id}/documents/${p19BinLinked.id}/workspace`;
-  const p19ReadWorkspace = await request('GET', p19WorkspacePath, { clientSession: p19BinSession });
-  check('the document opens for work in the client room',
-    p19ReadWorkspace.status === 200 && p19ReadWorkspace.json?.data?.editable === true,
-    JSON.stringify(p19ReadWorkspace.json).slice(0, 160));
-  check('the room says the document is kept in the Code Rx Vault',
-    p19ReadWorkspace.json.data.vaultLinked === true);
-  check('the working copy arrives as readable text, not as an internal structure',
-    typeof p19ReadWorkspace.json.data.plainText === 'string' && p19ReadWorkspace.json.data.plainText.length > 0);
-  check('the working copy never carries a database identifier',
-    !/\b(client_id|project_id|vault_document_id)\b/.test(JSON.stringify(p19ReadWorkspace.json.data))
-    && !/\b\d+\b/.test(String(p19ReadWorkspace.json.data.documentId || '')));
+  const p19DocPath = `/api/client/project/${p19BinProject.id}/documents/${p19BinLinked.id}`;
+  const p19SignatureRead = await request('GET', `${p19DocPath}/signature`, { clientSession: p19BinSession });
+  check('the document offers the client a signature', p19SignatureRead.status === 200 && p19SignatureRead.json?.data?.signable === true,
+    JSON.stringify(p19SignatureRead.json).slice(0, 160));
+  check('an unsigned document says it is unsigned', p19SignatureRead.json?.data?.current === null);
+  check('the client is told how long their name may be', Number(p19SignatureRead.json?.data?.maxNameChars) === 120);
+  check('signing needs a client session', (await request('POST', `${p19DocPath}/signature`, { body: { signerName: 'Nobody' } })).status === 401);
+  check('a signature without a name is refused',
+    (await request('POST', `${p19DocPath}/signature`, { clientSession: p19BinSession, body: { signerName: '  ' } })).status === 400);
 
-  const revision = 'The client rewrote this letter.\nSecond line of the client revision.';
-  const p19SaveResponse = await request('POST', p19WorkspacePath, { clientSession: p19BinSession, body: { text: revision } });
-  check('the client can save their revision', p19SaveResponse.status === 200, JSON.stringify(p19SaveResponse.json).slice(0, 160));
-  check('saving says the Vault copy carries the revision as well',
-    /Vault/i.test(String(p19SaveResponse.json?.message || '')), String(p19SaveResponse.json?.message || ''));
-  const p19SendResponse = await request('POST', `${p19WorkspacePath}/send`, { clientSession: p19BinSession });
-  check('the client can send the finished document back to Code Rx',
-    p19SendResponse.status === 200, JSON.stringify(p19SendResponse.json).slice(0, 160));
+  const p19Signature = await request('POST', `${p19DocPath}/signature`, {
+    clientSession: p19BinSession, body: { signerName: 'Ama Mensah', signerTitle: 'Managing Director' },
+  });
+  check('the client can sign the document', p19Signature.status === 200, JSON.stringify(p19Signature.json).slice(0, 160));
+  check('the client is told their signature is saved', /Signed/i.test(String(p19Signature.json?.message || '')), String(p19Signature.json?.message || ''));
+  const p19SignedRead = await request('GET', `${p19DocPath}/signature`, { clientSession: p19BinSession });
+  check('the signature is stored and read back',
+    p19SignedRead.json?.data?.current?.signerName === 'Ama Mensah'
+    && p19SignedRead.json?.data?.current?.signerTitle === 'Managing Director');
+  check('the signature records when it was given', Boolean(p19SignedRead.json?.data?.current?.signedAt));
+
+  const p19SendToPhantom = await request('POST', `${p19DocPath}/send-to-phantom`, { clientSession: p19BinSession });
+  check('the client can send the document to PHANTOM', p19SendToPhantom.status === 200, JSON.stringify(p19SendToPhantom.json).slice(0, 160));
+  check('the client is told PHANTOM has it', /PHANTOM/i.test(String(p19SendToPhantom.json?.message || '')));
+  check('sending says the signature travels with it', p19SendToPhantom.json?.data?.signed === true);
   const p19InboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
   const p19Inbox = Array.isArray(p19InboxPayload) ? p19InboxPayload : (p19InboxPayload?.items || []);
   const p19Notice = p19Inbox.find((row) => String(row.message || '').includes('Phase 19 linked letter'));
-  check('PHANTOM is notified in the existing p19Inbox, naming the client and the project',
-    Boolean(p19Notice) && String(p19Notice.message).includes('Phase 19 Client') && String(p19Notice.message).includes('Phase 19 Project'),
+  const p19SignerNotice = p19Inbox.find((row) => /signed/i.test(String(row.title || '')) && String(row.message || '').includes('Phase 19 Client'));
+  check('PHANTOM is notified in the existing inbox, naming the client, the project and the signer',
+    Boolean(p19Notice) && String(p19Notice.message).includes('Phase 19 Client')
+    && String(p19Notice.message).includes('Phase 19 Project') && String(p19Notice.message).includes('Ama Mensah'),
     String(p19Notice?.message || '').slice(0, 160));
-  check('sending refuses without a client session',
-    (await request('POST', `${p19WorkspacePath}/send`)).status === 401);
-  check('saving refuses without a client session',
-    (await request('POST', p19WorkspacePath, { body: { text: 'x' } })).status === 401);
-  check('an empty revision is refused rather than saved as blank',
-    (await request('POST', p19WorkspacePath, { clientSession: p19BinSession, body: { text: '   ' } })).status === 400);
-  check('a document that cannot be worked on answers with a reason, not an error page',
-    typeof p19ReadWorkspace.json?.data?.reason === 'undefined'
-    || typeof p19ReadWorkspace.json.data.reason === 'string');
+  check('the signature itself raises a notice of its own', Boolean(p19SignerNotice),
+    String(p19SignerNotice?.message || '').slice(0, 160));
+  check('the notification says a signature is on the document',
+    Boolean(p19Notice) && /signed/i.test(String(p19Notice.title || '') + String(p19Notice.message || '')));
+  check('sending refuses without a client session', (await request('POST', `${p19DocPath}/send-to-phantom`)).status === 401);
+  check('signing refuses without a client session', (await request('POST', `${p19DocPath}/signature`, { body: { signerName: 'X Y' } })).status === 401);
+  const p19DraftDocument = (await request('POST', `/api/phantom/clients/${p19BinClient.id}/documents`, {
+    token: phantomToken,
+    body: { projectId: p19BinProject.id, category: 'report', title: 'Phase 20 unsigned draft', contentText: 'Not published.' },
+  })).json.data;
+  check('signing a document that is not published is refused like any other read',
+    (await request('POST', `/api/client/project/${p19BinProject.id}/documents/${p19DraftDocument.id}/signature`,
+      { clientSession: p19BinSession, body: { signerName: 'Ama Mensah' } })).status === 404);
 
-  group('29. The client\'s change reaches the Vault copy and is attributed to the client (Phase 19)');
+  group('29. The signed copy reaches the Vault, attributed to the client (Phase 20)');
   const p19VaultAfterSave = await request('GET', `/api/vault/documents/${p19BinVaultId}`, { token: phantomToken });
   const p19VaultBlocks = p19VaultAfterSave.json?.data?.contentJson?.blocks || [];
-  check('the Vault document now carries the client\'s wording',
-    p19VaultBlocks.map((block) => String(block?.content || '')).join('\n').includes('The client rewrote this letter'));
-  check('no member is credited with the client\'s work',
-    p19VaultAfterSave.json?.data?.updated_by_name == null
-    && p19VaultAfterSave.json?.data?.updated_by_member_id !== undefined
-      ? p19VaultAfterSave.json.data.updated_by_member_id === null || p19VaultAfterSave.json.data.updated_by_member_id === 0
-      : true);
+  const p19VaultText = p19VaultBlocks.map((block) => String(block?.content || '')).join('\n');
+  check('the Code Rx Vault copy now carries the client\'s signature',
+    p19VaultText.includes('Signed: Ama Mensah'), p19VaultText.slice(0, 240));
+  check('the signature block sits in the document where a reader expects it',
+    p19VaultBlocks.some((block) => block?.type === 'heading' && String(block?.content || '') === 'Signature')
+    && p19VaultBlocks.some((block) => block?.type === 'quote' && /Signed: Ama Mensah/.test(String(block?.content || ''))));
+  check('the signed copy says where and when the signature was given',
+    p19VaultBlocks.some((block) => /client portal/i.test(String(block?.content || '')) && /20\d\d-\d\d-\d\d/.test(String(block?.content || ''))));
+  check('no member is credited with the client\'s signature',
+    p19VaultAfterSave.json?.data?.updated_by_name == null);
   const p19VersionHistory = (await request('GET', `/api/vault/documents/${p19BinVaultId}/versions`, { token: phantomToken })).json.data || [];
-  const p19ClientRevision = p19VersionHistory.find((entry) => /client portal/i.test(String(entry.change_note || '')));
-  check('the client\'s revision is a version in the Vault history, not a silent overwrite',
+  const p19ClientRevision = p19VersionHistory.find((entry) => /Signed by Ama Mensah/i.test(String(entry.change_note || '')));
+  check('the signed copy is a version in the Vault history, not a silent overwrite',
     Boolean(p19ClientRevision), JSON.stringify(p19VersionHistory.map((entry) => entry.change_note)).slice(0, 200));
   check('that version is attributed to the client portal rather than to a member',
     Boolean(p19ClientRevision) && Number(p19ClientRevision.changed_by_member_profile_id || 0) === 0);
-  check('the wording that was there before the client\'s revision is still recoverable',
-    p19VersionHistory.length >= 2);
+  check('the wording that was there before the signature is still recoverable', p19VersionHistory.length >= 2);
   const p19ClientCopy = (await request('GET', `/api/phantom/clients/${p19BinClient.id}/documents`, { token: phantomToken })).json.data
     .find((row) => row.id === p19BinLinked.id);
+  check('the operator\'s own list shows the client\'s signature',
+    p19ClientCopy?.signature?.signerName === 'Ama Mensah', JSON.stringify(p19ClientCopy?.signature || null));
   check('the client copy records which Vault version it now carries',
     Number(p19ClientCopy?.vaultVersion || 0) >= 1, `vaultVersion=${p19ClientCopy?.vaultVersion}`);
-  check('the client copy version moved on as well', String(p19ClientCopy?.version) !== '1.0', String(p19ClientCopy?.version));
+  const p19RoomSection = await request('GET', `/api/client/project/${p19BinProject.id}/sections/documents`, { clientSession: p19BinSession });
+  const p19RoomList = p19RoomSection.json?.data?.documents || [];
+  if (process.env.CLIENT_TEST_DEBUG) {
+    console.log('  debug: room section', p19RoomSection.status, JSON.stringify(p19RoomSection.json?.data?.documents?.map((row) => ({ id: row.id, cat: row.category, sig: row.signature }))).slice(0, 300));
+    console.log('  debug: target', p19BinLinked.id, 'category', p19BinLinked.category);
+  }
+  const p19RoomRow = p19RoomList.find((row) => row.id === p19BinLinked.id);
+  check('the client\'s own list says which documents they have signed',
+    p19RoomRow?.signature?.signerName === 'Ama Mensah', JSON.stringify(p19RoomRow?.signature || null));
+  check('a document the client has not signed says nothing about a signature',
+    p19RoomList.every((row) => row.id === p19BinLinked.id || row.signature === null));
+  check('the room\'s list never carries a database identifier for the signature',
+    !JSON.stringify(p19RoomRow?.signature || {}).includes('client_document_id'));
   const p19ClientActivity = (await request('GET', `/api/phantom/clients/${p19BinClient.id}/activity`, { token: phantomToken })).json.data || [];
-  check('the client\'s activity history records the save in plain words',
-    JSON.stringify(p19ClientActivity).includes('Saved a revision'), JSON.stringify(p19ClientActivity).slice(0, 200));
+  check('the client\'s activity history records the signature in plain words',
+    JSON.stringify(p19ClientActivity).includes('Signed a document'), JSON.stringify(p19ClientActivity).slice(0, 200));
   check('the client\'s activity history records the send in plain words',
     JSON.stringify(p19ClientActivity).includes('Sent a document to Code Rx'));
-  check('the save and the send are in the audit trail',
-    JSON.stringify(p19ClientActivity).toLowerCase().includes('document_saved')
-    && JSON.stringify(p19ClientActivity).toLowerCase().includes('document_sent'));
+
+  group('29b. Text PHANTOM — a message from the client\'s own room (Phase 20)');
+  check('messages cannot be read without a client session',
+    (await request('GET', `/api/client/project/${p19BinProject.id}/messages`)).status === 401);
+  const p19Messages = await request('GET', `/api/client/project/${p19BinProject.id}/messages`, { clientSession: p19BinSession });
+  check('the client can open their messages to PHANTOM', p19Messages.status === 200, JSON.stringify(p19Messages.json).slice(0, 140));
+  check('a project with no messages answers with an empty list, not an error',
+    Array.isArray(p19Messages.json?.data?.messages) && p19Messages.json.data.messages.length === 0);
+  check('an empty message is refused',
+    (await request('POST', `/api/client/project/${p19BinProject.id}/messages`, { clientSession: p19BinSession, body: { body: '   ' } })).status === 400);
+  const p19Message = await request('POST', `/api/client/project/${p19BinProject.id}/messages`, {
+    clientSession: p19BinSession,
+    body: { body: 'Please confirm the delivery date for the second batch.', documentId: p19BinLinked.id },
+  });
+  check('the client can send PHANTOM a message', p19Message.status === 200, JSON.stringify(p19Message.json).slice(0, 160));
+  check('the client is told PHANTOM was notified', /notified|PHANTOM/i.test(String(p19Message.json?.message || '')));
+  check('the message is identified by a public id, never a database row id',
+    /^msg_[0-9a-f]{24}$/.test(String(p19Message.json?.data?.id || '')), String(p19Message.json?.data?.id));
+  const p19MessageInboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
+  const p19MessageInbox = Array.isArray(p19MessageInboxPayload) ? p19MessageInboxPayload : (p19MessageInboxPayload?.items || []);
+  const p19MessageNotice = p19MessageInbox.find((row) => String(row.message || '').includes('delivery date'));
+  check('PHANTOM is notified of the message through the existing inbox', Boolean(p19MessageNotice));
+  check('the notice names the client, the project and the document the message is about',
+    Boolean(p19MessageNotice) && String(p19MessageNotice.message).includes('Phase 19 Client')
+    && String(p19MessageNotice.message).includes('Phase 19 Project')
+    && String(p19MessageNotice.message).includes('Phase 19 linked letter'));
+  const p19MessagesAfter = await request('GET', `/api/client/project/${p19BinProject.id}/messages`, { clientSession: p19BinSession });
+  check('the client reads back what they sent',
+    p19MessagesAfter.json?.data?.messages?.[0]?.body === 'Please confirm the delivery date for the second batch.');
+  check('the message names the document it is about',
+    p19MessagesAfter.json?.data?.messages?.[0]?.document?.id === p19BinLinked.id);
+  const p19Stranger = await createClient(phantomToken, 'Phase 20 Stranger Client');
+  const p19StrangerProject = await createProject(phantomToken, p19Stranger.id, 'Phase 20 Stranger Project');
+  const p19StrangerDocument = (await request('POST', `/api/phantom/clients/${p19Stranger.id}/documents`, {
+    token: phantomToken,
+    body: { projectId: p19StrangerProject.id, category: 'letter', title: 'Phase 20 stranger letter', contentText: 'Not mine.' },
+  })).json.data;
+  await publish(phantomToken, p19StrangerDocument.id);
+  check('a message about another client\'s document is refused',
+    (await request('POST', `/api/client/project/${p19BinProject.id}/messages`, {
+      clientSession: p19BinSession, body: { body: 'not mine', documentId: p19StrangerDocument.id },
+    })).status === 404);
+  const p19MessageActivity = (await request('GET', `/api/phantom/clients/${p19BinClient.id}/activity`, { token: phantomToken })).json.data || [];
+  check('the client\'s activity history records the message',
+    JSON.stringify(p19MessageActivity).includes('Sent a message to PHANTOM'));
+
+  group('29c. A signed document deletes, waits in the Recycle Bin, and comes back signed (Phase 20)');
+  const p19BinSignedClient = await createClient(phantomToken, 'Phase 20 Bin Client');
+  const p19BinSignedProject = await createProject(phantomToken, p19BinSignedClient.id, 'Phase 20 Bin Project');
+  const p19BinSignedDocument = await createDocument(phantomToken, p19BinSignedClient.id, p19BinSignedProject.id, {
+    title: 'Phase 20 bin letter',
+  });
+  await publish(phantomToken, p19BinSignedDocument.id);
+  const p19BinSignedKey = (await createKey(phantomToken, p19BinSignedClient.id)).passkey;
+  const p19BinSignedSession = (await request('POST', '/api/client/auth/login', { body: { passkey: p19BinSignedKey } })).json.data.session.token;
+  check('the client can sign in to the project the signed document lives in', /^[0-9a-f]{64}$/.test(String(p19BinSignedSession)));
+  const p19BinSignedPath = `/api/client/project/${p19BinSignedProject.id}/documents/${p19BinSignedDocument.id}`;
+  check('the operator can delete the document',
+    (await request('DELETE', `/api/phantom/client-documents/${p19BinSignedDocument.id}`, { token: phantomToken })).status === 200);
+  const p19BinSignedRow = (await p19RecycleBin())
+    .find((row) => row.resource_type === 'client_document' && String(row.title || '').includes('Phase 20 bin letter'));
+  check('the deleted document is waiting in the Recycle Bin where an operator can see it',
+    Boolean(p19BinSignedRow), JSON.stringify((await p19RecycleBin()).map((row) => row.title)).slice(0, 200));
+  check('the Recycle Bin entry is a client document, whatever its state',
+    p19BinSignedRow?.resource_type === 'client_document');
+  check('the deleted document is gone from the client\'s room',
+    (await request('GET', p19BinSignedPath, { clientSession: p19BinSignedSession })).status === 404);
+  const p19BinSignedRestore = await request('POST', `/api/phantom/recycle-bin/${p19BinSignedRow.id}/restore`, { token: phantomToken });
+  check('the operator can restore it', p19BinSignedRestore.status === 200, JSON.stringify(p19BinSignedRestore.json).slice(0, 140));
+  check('the Recycle Bin entry is consumed by the restore', !(await p19BinRowFor('client_document', p19BinSignedDocument.id)));
+  const p19BinSignedDocs = (await request('GET', `/api/phantom/clients/${p19BinSignedClient.id}/documents`, { token: phantomToken })).json.data || [];
+  const p19BinSignedBack = p19BinSignedDocs.find((row) => row.id === p19BinSignedDocument.id);
+  check('it comes back to the operator\'s own list', Boolean(p19BinSignedBack));
+
+  // Now the same round trip with a document that carries a client signature.
+  const p19BinSignatureTarget = await createDocument(phantomToken, p19BinSignedClient.id, p19BinSignedProject.id, {
+    title: 'Phase 20 signed letter',
+  });
+  await publish(phantomToken, p19BinSignatureTarget.id);
+  const p19BinSignaturePath = `/api/client/project/${p19BinSignedProject.id}/documents/${p19BinSignatureTarget.id}`;
+  await request('POST', `${p19BinSignaturePath}/signature`, {
+    clientSession: p19BinSignedSession, body: { signerName: 'Kojo Owusu', signerTitle: 'Director' },
+  });
+  check('the signature is on the document before the delete',
+    (await request('GET', `${p19BinSignaturePath}/signature`, { clientSession: p19BinSignedSession })).json?.data?.current?.signerName === 'Kojo Owusu');
+  const p19BinAboutMessage = await request('POST', `/api/client/project/${p19BinSignedProject.id}/messages`, {
+    clientSession: p19BinSignedSession,
+    body: { body: 'One question about the signed letter.', documentId: p19BinSignatureTarget.id },
+  });
+  check('the client can ask PHANTOM about the signed document', p19BinAboutMessage.status === 200);
+  const p19BinSignatureDelete = await request('DELETE', `/api/phantom/client-documents/${p19BinSignatureTarget.id}`, { token: phantomToken });
+  check('a signed document the client has texted about still deletes without an error',
+    p19BinSignatureDelete.status === 200, JSON.stringify(p19BinSignatureDelete.json).slice(0, 160));
+  const p19BinSignatureRow = (await p19RecycleBin())
+    .find((row) => row.resource_type === 'client_document' && String(row.title || '').includes('Phase 20 signed letter'));
+  check('a signed document deletes into the Recycle Bin like any other', Boolean(p19BinSignatureRow));
+  const p19MessagesWhileDeleted = (await request('GET', `/api/client/project/${p19BinSignedProject.id}/messages`, { clientSession: p19BinSignedSession })).json?.data?.messages || [];
+  check('the message the client sent PHANTOM is not lost with the document',
+    p19MessagesWhileDeleted.some((message) => message.body === 'One question about the signed letter.'));
+  check('and it no longer claims to be about a document that is gone',
+    p19MessagesWhileDeleted.every((message) => message.body !== 'One question about the signed letter.' || message.document === null));
+  await request('POST', `/api/phantom/recycle-bin/${p19BinSignatureRow.id}/restore`, { token: phantomToken });
+  await publish(phantomToken, p19BinSignatureTarget.id);
+  const p19BinSignatureBack = (await request('GET', `${p19BinSignaturePath}/signature`, { clientSession: p19BinSignedSession })).json?.data?.current;
+  check('the signature comes back with the document, so nothing is asked twice',
+    p19BinSignatureBack?.signerName === 'Kojo Owusu' && p19BinSignatureBack?.signerTitle === 'Director',
+    JSON.stringify(p19BinSignatureBack));
+  const p19MessagesAfterRestore = (await request('GET', `/api/client/project/${p19BinSignedProject.id}/messages`, { clientSession: p19BinSignedSession })).json?.data?.messages || [];
+  check('the message is linked to the document again once it is restored',
+    p19MessagesAfterRestore.some((message) => message.body === 'One question about the signed letter.'
+      && message.document?.id === p19BinSignatureTarget.id),
+    JSON.stringify(p19MessagesAfterRestore.slice(0, 2)).slice(0, 200));
 
   group('30. Client isolation and the Vault shelf grouping (Phase 19)');
   const p19OtherClient = await createClient(phantomToken, 'Phase 19 Other Client');
   const p19OtherProject = await createProject(phantomToken, p19OtherClient.id, 'Phase 19 Other Project');
   const p19OtherKey = await createKey(phantomToken, p19OtherClient.id, p19OtherProject.id, { label: 'Phase 19 other key' });
   const p19OtherSession = await clientSession(p19OtherKey.passkey, 'phase 19 other');
-  check('another client cannot read this client\'s working copy',
-    (await request('GET', p19WorkspacePath, { clientSession: p19OtherSession })).status === 404);
-  check('another client cannot save into it',
-    (await request('POST', p19WorkspacePath, { clientSession: p19OtherSession, body: { text: 'not mine' } })).status === 404);
-  check('another client cannot send it back to Code Rx',
-    (await request('POST', `${p19WorkspacePath}/send`, { clientSession: p19OtherSession })).status === 404);
-  check('a client who is not signed in cannot read a working copy at all',
-    (await request('GET', p19WorkspacePath)).status === 401);
+  check('another client cannot read this client\'s signature',
+    (await request('GET', `${p19DocPath}/signature`, { clientSession: p19OtherSession })).status === 404);
+  check('another client cannot sign in this client\'s name',
+    (await request('POST', `${p19DocPath}/signature`, { clientSession: p19OtherSession, body: { signerName: 'Not Them' } })).status === 404);
+  check('another client cannot send it to PHANTOM',
+    (await request('POST', `${p19DocPath}/send-to-phantom`, { clientSession: p19OtherSession })).status === 404);
+  check('a client who is not signed in cannot read a signature at all',
+    (await request('GET', `${p19DocPath}/signature`)).status === 401);
 
   const p19ShelfRows = await p19VaultShelf();
   const p19LinkedShelfRow = (await request('GET', `/api/vault/documents?section=${p19BinSection.slug}`, { token: phantomToken }))
@@ -4841,8 +4985,10 @@ const main = async () => {
   check('answering does not republish or archive the document', String(p20PanelRow?.lifecycle) === 'published');
   check('answering does not move the document\'s version',
     String(p20PanelRow?.version) === '1.0', `${p20PanelRow?.version}`);
-  check('the client can still work on the document after answering',
-    (await request('GET', `/api/client/project/${p20Project.id}/documents/${p20Document.id}/workspace`, { clientSession: p20Session })).status === 200);
+  check('the client can still open the document after answering',
+    (await request('GET', `/api/client/project/${p20Project.id}/documents/${p20Document.id}/signature`, { clientSession: p20Session })).status === 200);
+  check('and can still sign it after answering',
+    (await request('GET', `/api/client/project/${p20Project.id}/documents/${p20Document.id}/signature`, { clientSession: p20Session })).json?.data?.signable === true);
 
   const p20Removed = await request('DELETE', `/api/phantom/client-documents/${p20Document.id}`, { token: phantomToken });
   check('the document can still be deleted to the Recycle Bin', p20Removed.status === 200, JSON.stringify(p20Removed.json).slice(0, 140));

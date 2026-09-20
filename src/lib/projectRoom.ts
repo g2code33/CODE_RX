@@ -31,6 +31,12 @@ export interface RoomDocument {
    */
   freshness?: 'new' | 'updated' | null;
   permissions?: { view?: boolean; download?: boolean };
+  /**
+   * The client's own signature, when they have signed this document. The room
+   * shows it as a badge; a payload without it simply says nothing rather than
+   * guessing that a document is unsigned.
+   */
+  signature?: { signerName: string; title?: string; at?: string | null } | null;
 }
 
 /** The NEW / UPDATED badge for a document, or null when it has neither. */

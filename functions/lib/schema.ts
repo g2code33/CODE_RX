@@ -1042,6 +1042,47 @@ CREATE TABLE IF NOT EXISTS client_document_reviews (
   FOREIGN KEY(client_project_id) REFERENCES client_projects(id)
 );
 
+-- The client's signature on a document Code Rx sent them.
+--
+-- One row per signature: a client who signs again (or after a revision) adds to
+-- the record instead of overwriting the earlier signature, and what travels into
+-- the Code Rx Vault copy is the document plus a signature block anyone can read.
+CREATE TABLE IF NOT EXISTS client_document_signatures (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_document_id INTEGER NOT NULL,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER NOT NULL,
+  signer_name TEXT NOT NULL,
+  signer_title TEXT NOT NULL DEFAULT '',
+  document_version TEXT NOT NULL DEFAULT '',
+  signed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_document_id) REFERENCES client_documents(id),
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_document_signatures_document ON client_document_signatures(client_document_id, signed_at DESC, id DESC);
+
+-- A client's message to PHANTOM, written in their own room.
+--
+-- The notification inbox carries it to PHANTOM the moment it is sent; this table
+-- is what lets the client read back what they said, and what keeps the words
+-- themselves rather than only the fact that a message was sent.
+CREATE TABLE IF NOT EXISTS client_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT NOT NULL UNIQUE,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER NOT NULL,
+  client_document_id INTEGER,
+  body TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id),
+  FOREIGN KEY(client_document_id) REFERENCES client_documents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_messages_project ON client_messages(client_project_id, created_at DESC, id DESC);
+
 CREATE INDEX IF NOT EXISTS idx_client_document_reviews_document ON client_document_reviews(client_document_id, created_at DESC, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_client_documents_project ON client_documents(client_project_id, is_archived, lifecycle_status, client_visible);

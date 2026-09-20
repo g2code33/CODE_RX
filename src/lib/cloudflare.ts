@@ -690,20 +690,31 @@ export const clientPortal = {
     ),
 
   /**
-   * The client's working copy of a document: what they may edit, saving it, and
-   * sending it back to Code Rx. Saving writes the same content into the linked
-   * Vault document, so the room and the Vault never disagree.
+   * SIGNING. What the document's signature is now, and the act of signing it.
+   * Saving writes the signed copy into the linked Vault document, so the room
+   * and the Vault never disagree, and PHANTOM is notified either way.
    */
-  workspace: (projectId: string, documentId: string) =>
+  signature: (projectId: string, documentId: string) =>
     clientCall<{ data: any }>(
-      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace`,
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
     ),
-  saveWorkspace: (projectId: string, documentId: string, payload: { blocks?: unknown[]; text?: string }) =>
+  sign: (projectId: string, documentId: string, payload: { signerName: string; signerTitle?: string }) =>
     clientCall<{ message: string; data: any }>(
-      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace`,
-      // `clientCall` serialises the body itself, exactly as it does for every
-      // other client request: passing a string here would send a JSON string
-      // instead of the object the route reads.
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
+      { method: 'POST', body: payload },
+    ),
+  /** Send a document back to PHANTOM, signed or not. */
+  sendToPhantom: (projectId: string, documentId: string) =>
+    clientCall<{ message: string; data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/send-to-phantom`,
+      { method: 'POST' },
+    ),
+  /** TEXT PHANTOM: the client's messages on this project. */
+  messages: (projectId: string) =>
+    clientCall<{ data: any }>(`/api/client/project/${encodeURIComponent(projectId)}/messages`),
+  sendMessage: (projectId: string, payload: { body: string; documentId?: string }) =>
+    clientCall<{ message: string; data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/messages`,
       { method: 'POST', body: payload },
     ),
   /**
@@ -718,11 +729,6 @@ export const clientPortal = {
     clientCall<{ message: string; data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/review`,
       { method: 'POST', body: { decision, comment } },
-    ),
-  sendWorkspace: (projectId: string, documentId: string) =>
-    clientCall<{ message: string; data: any }>(
-      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace/send`,
-      { method: 'POST' },
     ),
 
   document: (projectId: string, documentId: string) =>

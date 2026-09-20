@@ -126,8 +126,10 @@ export const buildPreviewTransport = (
     ({ data: await api.previewSection(clientId, projectId, target) }),
   document: async (_projectId: string, documentId: string) =>
     ({ data: await api.previewDocument(clientId, projectId, documentId) }),
-  // Deliberately no `download`: the operator sees the client's own permission
-  // state, but a file is never served outside a client session.
+  // Deliberately no `download`, and no `sign`, `sendToPhantom`, `messages` or
+  // `sendMessage`: the operator sees the client's own permission state and the
+  // new signing and messaging surfaces, but nothing is signed, sent to PHANTOM
+  // or downloaded outside the client's own session.
 });
 
 /** The client context the real room renders inside while previewing. */

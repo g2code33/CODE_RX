@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   CalendarDays,
+  CheckCircle2,
   Download,
   Eye,
   FileText,
@@ -10,9 +11,13 @@ import {
   Loader2,
   LockKeyhole,
   LogOut,
+  Menu,
+  MessageSquareText,
+  PenLine,
   Save,
   Send,
   ShieldCheck,
+  X,
 } from 'lucide-react';
 import { clientPortal, ClientPortalError } from '../lib/cloudflare';
 import { messageForFailure } from '../lib/accessKey';
@@ -23,21 +28,6 @@ import {
 } from '../lib/linkAccess';
 import { ClientSiteSign } from './ClientSiteSign';
 import { ClientReviewSection } from './ClientReviewSection';
-/**
- * The editable text of a document. Blocks carry rich content, so headings and
- * lists keep their line structure rather than collapsing into one paragraph —
- * editing a letter should read like the letter.
- */
-const blocksToPlainText = (blocks: unknown): string => {
-  if (!Array.isArray(blocks)) return '';
-  return blocks.map((block: any) => {
-    if (!block) return '';
-    if (Array.isArray(block.items)) return block.items.map((item: any) => `• ${String(item?.text ?? item ?? '')}`).join('\n');
-    if (Array.isArray(block.rows)) return block.rows.map((row: any[]) => row.map((cell: any) => String(cell?.text ?? cell ?? '')).join(' | ')).join('\n');
-    return String(block.content ?? block.caption ?? '');
-  }).filter((line) => line.trim().length > 0).join('\n\n');
-};
-
 import {
   CATEGORY_LABELS,
   canDownload,
@@ -93,14 +83,20 @@ export interface RoomTransport {
   download?: (projectId: string, documentId: string, fileName: string) => Promise<void>;
   /** Fetches the stamped client copy as a local object URL. Absent in preview. */
   stampedCopy?: (projectId: string, documentId: string, action: 'preview' | 'print') => Promise<{ url: string; filename: string }>;
-  /** The client's own copy of a document they may work on, and the two actions
-   *  that save it and send it back to Code Rx. */
-  workspace?: (projectId: string, documentId: string) => Promise<{ data: any }>;
-  saveWorkspace?: (projectId: string, documentId: string, payload: { text?: string; blocks?: unknown[] }) => Promise<{ message: string; data: any }>;
-  sendWorkspace?: (projectId: string, documentId: string) => Promise<{ message: string; data: any }>;
+  /**
+   * Signing. A client reads what Code Rx sent them, signs it, saves the signed
+   * copy and sends it back — this is what replaces the old free-text editor.
+   */
+  signature?: (projectId: string, documentId: string) => Promise<{ data: any }>;
+  sign?: (projectId: string, documentId: string, payload: { signerName: string; signerTitle?: string }) => Promise<{ message: string; data: any }>;
+  /** Send the document back to PHANTOM, signed or not. */
+  sendToPhantom?: (projectId: string, documentId: string) => Promise<{ message: string; data: any }>;
   /** The review section: what the client was asked, and their answer. */
   review?: (projectId: string, documentId: string) => Promise<{ data: any }>;
   saveReview?: (projectId: string, documentId: string, decision: string, comment: string) => Promise<{ message: string; data: any }>;
+  /** Text PHANTOM: the client's own messages on this project. */
+  messages?: (projectId: string) => Promise<{ data: any }>;
+  sendMessage?: (projectId: string, payload: { body: string; documentId?: string }) => Promise<{ message: string; data: any }>;
 }
 
 interface ClientProjectRoomProps {
@@ -218,6 +214,266 @@ export const StampedCopyPanel = ({
   );
 };
 
+/**
+ * SIGN THIS DOCUMENT.
+ *
+ * This is what the client does with a document Code Rx sends them: they read
+ * it, type their name, save the signature, and send the signed copy back to
+ * PHANTOM. Nothing here edits the wording — the wording belongs to Code Rx.
+ */
+const SignaturePanel = ({
+  documentTitle, signature, name, title, busy, notice, sendBusy, sendNotice, preview,
+  onNameChange, onTitleChange, onSign, onSend, onTextPhantom,
+}: {
+  documentTitle: string;
+  signature: any | null;
+  name: string;
+  title: string;
+  busy: boolean;
+  notice: string | null;
+  sendBusy: boolean;
+  sendNotice: string | null;
+  preview: boolean;
+  onNameChange: (value: string) => void;
+  onTitleChange: (value: string) => void;
+  onSign: () => void;
+  onSend: () => void;
+  onTextPhantom: () => void;
+}) => {
+  const current = signature?.current || null;
+  const maxNameChars = Number(signature?.maxNameChars || 120);
+  const maxTitleChars = Number(signature?.maxTitleChars || 80);
+  const inputClass = 'mt-1.5 w-full rounded-xl border border-emerald-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 disabled:bg-slate-50 disabled:text-slate-500';
+
+  return (
+    <section
+      id="sign-this-document"
+      aria-labelledby="sign-this-document-title"
+      className="mt-8 scroll-mt-40 rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 sm:p-6"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 id="sign-this-document-title" className="flex items-center gap-2 text-sm font-black uppercase tracking-[0.16em] text-emerald-900">
+            <PenLine className="h-4 w-4" aria-hidden="true" /> Sign this document
+          </h3>
+          <p className="mt-1.5 max-w-2xl text-xs font-medium leading-5 text-emerald-900">
+            Type your name to sign <strong className="font-black">{documentTitle}</strong>. Saving keeps your
+            signature on this document in your project room and with the Code Rx copy of it.
+          </p>
+        </div>
+        {current ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-emerald-700 ring-1 ring-emerald-200">
+            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" /> Signed
+          </span>
+        ) : (
+          <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-slate-600 ring-1 ring-slate-200">
+            Not signed yet
+          </span>
+        )}
+      </div>
+
+      {current ? (
+        <div className="mt-4 rounded-xl border border-emerald-200 bg-white px-4 py-3">
+          <p className="text-sm font-bold text-slate-900">
+            {current.signerName}{current.signerTitle ? `, ${current.signerTitle}` : ''}
+          </p>
+          <p className="mt-1 text-[11px] font-semibold text-slate-500">
+            Signed {String(current.signedAt || '').slice(0, 16).replace('T', ' ')}
+            {current.version ? ` · version ${current.version}` : ''}
+          </p>
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-800">Your full name</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(event) => onNameChange(event.target.value)}
+            maxLength={maxNameChars}
+            disabled={preview}
+            autoComplete="name"
+            placeholder="Your full name"
+            aria-label={`Your full name, to sign ${documentTitle}`}
+            className={inputClass}
+          />
+        </label>
+        <label className="block">
+          <span className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-800">
+            Your role <span className="font-bold normal-case tracking-normal text-emerald-700">(optional)</span>
+          </span>
+          <input
+            type="text"
+            value={title}
+            onChange={(event) => onTitleChange(event.target.value)}
+            maxLength={maxTitleChars}
+            disabled={preview}
+            placeholder="e.g. Managing Director"
+            aria-label={`Your role, for the signature on ${documentTitle}`}
+            className={inputClass}
+          />
+        </label>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={onSign}
+          disabled={preview || busy || name.trim().length < 2}
+          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-60"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" aria-hidden="true" />} Save signature
+        </button>
+        <button
+          type="button"
+          onClick={onSend}
+          disabled={preview || sendBusy}
+          className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-800 transition hover:bg-emerald-50 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-60"
+        >
+          {sendBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" aria-hidden="true" />} Send to PHANTOM
+        </button>
+        <button
+          type="button"
+          onClick={onTextPhantom}
+          className="inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-800 underline decoration-emerald-300 underline-offset-4 transition hover:decoration-emerald-600"
+        >
+          <MessageSquareText className="h-3.5 w-3.5" aria-hidden="true" /> Ask PHANTOM about this
+        </button>
+      </div>
+
+      {notice ? (
+        <p role="status" className="mt-3 rounded-xl bg-white px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{notice}</p>
+      ) : null}
+      {sendNotice ? (
+        <p role="status" className="mt-3 rounded-xl bg-white px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{sendNotice}</p>
+      ) : null}
+      {preview ? (
+        <p className="mt-3 text-[11px] font-semibold text-emerald-900">
+          Preview — the client signs this in their own session. Nothing here is saved or sent.
+        </p>
+      ) : null}
+    </section>
+  );
+};
+
+/**
+ * TEXT PHANTOM.
+ *
+ * One place for a client to reach their Code Rx desk without leaving the room.
+ * The message reaches PHANTOM through the notification inbox the platform
+ * already uses, and it stays in the project so the client can read it back.
+ */
+const TextPhantomPanel = ({
+  open, projectName, documentTitle, text, busy, notice, messages, preview, onTextChange, onSend, onClose,
+}: {
+  open: boolean;
+  projectName: string;
+  documentTitle: string | null;
+  text: string;
+  busy: boolean;
+  notice: string | null;
+  messages: any[] | null;
+  preview: boolean;
+  onTextChange: (value: string) => void;
+  onSend: () => void;
+  onClose: () => void;
+}) => {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/45 p-4 sm:items-center"
+      role="presentation"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Text PHANTOM"
+        onClick={(event) => event.stopPropagation()}
+        className="my-auto w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-7"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-lg font-black tracking-tight text-slate-900">
+              <MessageSquareText className="h-5 w-5 text-emerald-700" aria-hidden="true" /> Text PHANTOM
+            </h2>
+            <p className="mt-1 text-xs font-semibold text-slate-500">
+              PHANTOM is the Code Rx desk for {projectName}. Write anything you want them to know —
+              they are notified the moment you send it.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 transition hover:bg-slate-50"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <label className="mt-5 block">
+          <span className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
+            Your message {documentTitle ? `about ${documentTitle}` : `about ${projectName}`}
+          </span>
+          <textarea
+            value={text}
+            onChange={(event) => onTextChange(event.target.value)}
+            rows={5}
+            disabled={preview}
+            aria-label="Your message to PHANTOM"
+            placeholder="Write your message to PHANTOM…"
+            className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 disabled:bg-slate-50"
+          />
+        </label>
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={onSend}
+            disabled={preview || busy || !text.trim()}
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-60"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" aria-hidden="true" />} Send to PHANTOM
+          </button>
+          <span className="text-[11px] font-semibold text-slate-500">Your message is recorded on this project.</span>
+        </div>
+
+        {notice ? (
+          <p role="status" className="mt-3 rounded-xl bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100">{notice}</p>
+        ) : null}
+        {preview ? (
+          <p className="mt-3 text-[11px] font-semibold text-slate-500">
+            Preview — sending works from the client&apos;s own session, never from the operator&apos;s.
+          </p>
+        ) : null}
+
+        <div className="mt-5 border-t border-slate-100 pt-4">
+          <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">What you have sent PHANTOM</p>
+          {messages && messages.length ? (
+            <ul className="mt-3 space-y-2">
+              {messages.slice(0, 5).map((message) => (
+                <li key={message.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3.5 py-3">
+                  <p className="text-sm font-medium leading-6 text-slate-700">{message.body}</p>
+                  <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.1em] text-slate-500">
+                    {String(message.at || '').slice(0, 16).replace('T', ' ')}
+                    {message.document?.title ? ` · ${message.document.title}` : ''}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-xs font-medium text-slate-500">
+              Nothing yet. Anything you send here stays in this project, so you can always check back.
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const DocumentAction = ({
   document, busy, onView, onDownload,
 }: {
@@ -285,6 +541,11 @@ const DocumentRow = ({
           ) : null}
           {document.reference ? <span className="font-mono uppercase tracking-wider">{document.reference}</span> : null}
           {document.version ? <span>Version {document.version}</span> : null}
+          {document.signature ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.12em] text-emerald-700 ring-1 ring-emerald-100">
+              <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> Signed
+            </span>
+          ) : null}
         </div>
         <p className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] font-medium text-slate-500">
           <span className="inline-flex items-center gap-1"><CalendarDays className="h-3 w-3" /> {info.primary}</span>
@@ -380,6 +641,31 @@ export const ClientProjectRoom = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  /**
+   * The sections are behind the hamburger in the header. On a narrow screen
+   * they start folded; on a wide one the sidebar is open and the same button
+   * folds it away, so the header behaves the same way at every width.
+   */
+  const [navOpen, setNavOpen] = useState(false);
+  const [navFolded, setNavFolded] = useState(false);
+  const [wideScreen, setWideScreen] = useState(() => (
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width: 1024px)').matches
+      : false
+  ));
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(min-width: 1024px)');
+    const update = () => setWideScreen(query.matches);
+    update();
+    if (query.addEventListener) query.addEventListener('change', update);
+    return () => { if (query.removeEventListener) query.removeEventListener('change', update); };
+  }, []);
+  const sectionsOpen = wideScreen ? !navFolded : navOpen;
+  const toggleSections = () => {
+    if (wideScreen) setNavFolded((folded) => !folded);
+    else setNavOpen((open) => !open);
+  };
 
   const projectId = context.project.id;
   // Where the link (or key) was allowed to land. Everything below is derived
@@ -459,29 +745,130 @@ export const ClientProjectRoom = ({
   };
 
   /**
-   * The client's working copy. Loaded when a document is opened, it is what the
-   * client may edit and send back; saving it also updates the Code Rx Vault copy
-   * of the same document, so the two never drift apart.
+   * SIGNING.
+   *
+   * Every document the client can open can be signed. What the room keeps here
+   * is only what the client is doing right now: their name as they type it, the
+   * signature the server holds, and the two answers the server sends back when
+   * they save or send the document on.
    */
-  const [workspace, setWorkspace] = useState<any | null>(null);
-  const [workspaceText, setWorkspaceText] = useState('');
-  const [workspaceBusy, setWorkspaceBusy] = useState(false);
-  const [workspaceNotice, setWorkspaceNotice] = useState<string | null>(null);
+  const [signature, setSignature] = useState<any | null>(null);
+  const [signerName, setSignerName] = useState('');
+  const [signerTitle, setSignerTitle] = useState('');
+  const [signBusy, setSignBusy] = useState(false);
+  const [signNotice, setSignNotice] = useState<string | null>(null);
+  const [sendBusy, setSendBusy] = useState(false);
+  const [sendNotice, setSendNotice] = useState<string | null>(null);
 
-  const loadWorkspace = async (documentId: string) => {
-    setWorkspace(null);
-    setWorkspaceNotice(null);
-    if (!transport.workspace) return;
+  const loadSignature = async (documentId: string) => {
+    setSignature(null);
+    setSignNotice(null);
+    setSendNotice(null);
+    setSignerName('');
+    setSignerTitle('');
+    if (!transport.signature && !transport.sign) return;
     try {
-      const response = await transport.workspace(projectId, documentId);
-      const data = response.data || {};
-      if (!data.editable) return;
-      setWorkspace(data);
-      setWorkspaceText(blocksToPlainText(data.blocks));
+      const response = await transport.signature!(projectId, documentId);
+      const data = response?.data || {};
+      setSignature(data);
+      // The client's own name is the one thing worth pre-filling: they are the
+      // person signing, and they can still change it.
+      setSignerName(context.client.contactName || '');
     } catch {
-      // A document that cannot be worked on is simply not offered; the reader
-      // below never fails because of it.
-      setWorkspace(null);
+      // A document whose signature cannot be read is still readable: the card
+      // simply opens empty rather than breaking the page.
+      setSignature(null);
+    }
+  };
+
+  const signDocument = async () => {
+    if (!openDocument || !transport.sign) return;
+    if (signerName.trim().length < 2) {
+      setSignNotice('Type your full name to sign this document.');
+      return;
+    }
+    setSignBusy(true);
+    setSignNotice(null);
+    try {
+      const saved = await transport.sign(projectId, String(openDocument.id), { signerName: signerName.trim(), signerTitle: signerTitle.trim() });
+      setSignNotice(saved.message || 'Signed. Your signature is saved with this document.');
+      const current = saved.data || {};
+      setSignature((existing: any) => ({ ...(existing || {}), current: {
+        signerName: current.signerName || signerName.trim(),
+        signerTitle: current.signerTitle || signerTitle.trim(),
+        signedAt: current.signedAt || new Date().toISOString(),
+        version: current.version || openDocument.version || '1',
+      } }));
+      // The version the client sees is the version they just signed.
+      setOpenDocument((document: any) => (document ? { ...document, version: current.version || document.version } : document));
+    } catch (failure) {
+      handleFailure(failure);
+    } finally {
+      setSignBusy(false);
+    }
+  };
+
+  const sendDocumentToPhantom = async () => {
+    if (!openDocument || !transport.sendToPhantom) return;
+    setSendBusy(true);
+    setSendNotice(null);
+    try {
+      const sent = await transport.sendToPhantom(projectId, String(openDocument.id));
+      setSendNotice(sent.message || 'Sent to PHANTOM.');
+    } catch (failure) {
+      handleFailure(failure);
+    } finally {
+      setSendBusy(false);
+    }
+  };
+
+  /**
+   * TEXT PHANTOM.
+   *
+   * The button lives in the room's own header, so a client can reach their desk
+   * from anywhere in the room. The panel opens with whatever they wrote before,
+   * and every message is stored server-side rather than only announced.
+   */
+  const [messagesOpen, setMessagesOpen] = useState(false);
+  const [messages, setMessages] = useState<any[] | null>(null);
+  const [messageText, setMessageText] = useState('');
+  const [messageBusy, setMessageBusy] = useState(false);
+  const [messageNotice, setMessageNotice] = useState<string | null>(null);
+  /** The document a message is about, when the panel was opened on one. */
+  const [messageDocument, setMessageDocument] = useState<{ id: string; title: string } | null>(null);
+
+  const openMessages = async (document?: { id: string; title: string } | null) => {
+    setMessagesOpen(true);
+    setMessageNotice(null);
+    setMessageDocument(document || null);
+    if (!transport.messages) return;
+    try {
+      const response = await transport.messages(projectId);
+      setMessages(response?.data?.messages || []);
+    } catch {
+      setMessages([]);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!transport.sendMessage || !messageText.trim()) return;
+    setMessageBusy(true);
+    setMessageNotice(null);
+    try {
+      const sent = await transport.sendMessage(projectId, {
+        body: messageText.trim(),
+        ...(messageDocument ? { documentId: messageDocument.id } : {}),
+      });
+      setMessageNotice(sent.message || 'Message sent to PHANTOM.');
+      setMessageText('');
+      if (transport.messages) {
+        const response = await transport.messages(projectId);
+        setMessages(response?.data?.messages || []);
+      }
+    } catch (failure) {
+      handleFailure(failure);
+    } finally {
+      setMessageBusy(false);
     }
   };
 
@@ -527,28 +914,6 @@ export const ClientProjectRoom = ({
     }
   };
 
-  const saveWorkspace = async (send: boolean) => {
-    if (!openDocument || !workspace) return;
-    setWorkspaceBusy(true);
-    setWorkspaceNotice(null);
-    try {
-      const saved = await transport.saveWorkspace!(projectId, String(openDocument.id), { text: workspaceText });
-      setWorkspaceNotice(saved.message || 'Saved.');
-      setWorkspace((current: any) => ({ ...current, version: saved.data?.version || current.version }));
-      if (send) {
-        const sent = await transport.sendWorkspace!(projectId, String(openDocument.id));
-        setWorkspaceNotice(sent.message || 'Sent to Code Rx.');
-      }
-      // The room's own copy of the document is refreshed so the version the
-      // client sees is the version they just saved.
-      await openDocumentById(String(openDocument.id));
-    } catch (failure) {
-      handleFailure(failure);
-    } finally {
-      setWorkspaceBusy(false);
-    }
-  };
-
   const openDocumentById = async (documentId: string) => {
     setBusy(true);
     setError(null);
@@ -556,7 +921,7 @@ export const ClientProjectRoom = ({
     try {
       const response = await transport.document(projectId, documentId);
       setOpenDocument(response.data.document);
-      void loadWorkspace(documentId);
+      void loadSignature(documentId);
       void loadReview(documentId);
       const delivery = parseDelivery(response.data.delivery);
       setOpenDelivery(delivery);
@@ -678,35 +1043,72 @@ export const ClientProjectRoom = ({
   const anythingPublished = hasAnyPublishedContent(sections) || recent.length > 0;
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-5 sm:py-4">
-          <ClientSiteSign subtitle="Client Project Room" />
-          {/* PHANTOM is the desk that handles this project; a client should see
-              who they are dealing with without having to ask. */}
-          <span
-            className="order-last inline-flex w-full items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-emerald-800 sm:order-none sm:w-auto"
-            title="PHANTOM is the Code Rx desk that handles this project"
-          >
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
-            PHANTOM
-            <span className="font-bold normal-case tracking-normal text-emerald-700">your Code Rx desk</span>
-          </span>
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100">
+      {/* The header is pinned: the sign, the project title and the menu stay in
+          front of the client while the room scrolls underneath them. */}
+      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 shadow-[0_10px_30px_-24px_rgba(15,23,42,0.55)] backdrop-blur">
+        <div className="mx-auto max-w-6xl px-4 py-3 sm:px-5">
           <div className="flex items-center gap-3">
-            <div className="hidden text-right sm:block">
-              <p className="max-w-[220px] truncate text-sm font-bold text-slate-900">{context.client.name}</p>
-              <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-slate-500">{context.project.reference}</p>
-            </div>
+            {/* The menu belongs to the small screens; from lg up the sections are
+                always beside the room. */}
             <button
               type="button"
-              onClick={signOut}
-              disabled={signingOut}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60 sm:px-3.5"
+              onClick={toggleSections}
+              aria-expanded={sectionsOpen}
+              aria-controls="room-sections"
+              aria-label={sectionsOpen ? 'Hide project sections' : 'Show project sections'}
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
             >
-              {signingOut ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
-              <span className="hidden sm:inline">{exitLabel}</span>
+              {sectionsOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </button>
+            <ClientSiteSign subtitle="Client Project Room" />
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void openMessages(null)}
+                aria-label="Text PHANTOM"
+                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-3.5 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 sm:px-4"
+              >
+                <MessageSquareText className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Text PHANTOM</span>
+                <span className="sm:hidden">Text</span>
+              </button>
+              <button
+                type="button"
+                onClick={signOut}
+                disabled={signingOut}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60 sm:px-3.5"
+              >
+                {signingOut ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
+                <span className="hidden sm:inline">{exitLabel}</span>
+              </button>
+            </div>
           </div>
+
+          {!landing.fileOnly ? (
+            <div className="mt-3 flex flex-wrap items-end justify-between gap-3 border-t border-slate-100 pt-3">
+              <div className="min-w-0">
+                <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-black uppercase tracking-[0.18em] text-emerald-700">
+                  <span>{context.client.name}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono text-slate-500">{context.project.reference}</span>
+                </p>
+                <h1 className="mt-1 truncate text-base font-black tracking-tight text-slate-900 sm:text-xl">
+                  {openDocument ? openDocument.title : context.project.name}
+                </h1>
+              </div>
+              {/* PHANTOM is the desk that handles this project; a client should
+                  see who they are dealing with without having to ask. */}
+              <span
+                className="inline-flex items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-emerald-800"
+                title="PHANTOM is the Code Rx desk that handles this project"
+              >
+                <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                PHANTOM
+                <span className="font-bold normal-case tracking-normal text-emerald-700">your Code Rx desk</span>
+              </span>
+            </div>
+          ) : null}
         </div>
       </header>
 
@@ -773,13 +1175,17 @@ export const ClientProjectRoom = ({
         ) : (
         <div className="grid gap-6 lg:grid-cols-[230px_1fr] lg:gap-8">
           {/* Sections: a horizontal strip on small screens, a sidebar from lg up. */}
-          <nav aria-label="Project sections" className="lg:sticky lg:top-6 lg:self-start">
+          <nav
+            id="room-sections"
+            aria-label="Project sections"
+            className={`${navOpen ? 'block' : 'hidden'} ${navFolded ? 'lg:hidden' : 'lg:block'} lg:sticky lg:top-[124px] lg:self-start`}
+          >
             <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0 lg:flex-col lg:gap-1 lg:overflow-visible lg:pb-0">
               {shownSections.map((section) => (
                 <button
                   key={section.id}
                   type="button"
-                  onClick={() => void openSection(section.id)}
+                  onClick={() => { setNavOpen(false); void openSection(section.id); }}
                   aria-current={activeSection === section.id ? 'page' : undefined}
                   className={`flex shrink-0 items-center justify-between gap-3 rounded-lg px-3.5 py-2.5 text-sm font-bold transition lg:w-full ${
                     activeSection === section.id
@@ -833,63 +1239,63 @@ export const ClientProjectRoom = ({
                 <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-semibold text-slate-500">
                   {openDocument.reference ? <span className="font-mono uppercase tracking-wider">{openDocument.reference}</span> : null}
                   {openDocument.version ? <span>Version {openDocument.version}</span> : null}
+                  {openDocument.signature ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.12em] text-emerald-700 ring-1 ring-emerald-100">
+                      <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> Signed
+                    </span>
+                  ) : null}
                   <span>{publicationInfo(openDocument as RoomDocument).primary}</span>
                   {publicationInfo(openDocument as RoomDocument).secondary ? <span>{publicationInfo(openDocument as RoomDocument).secondary}</span> : null}
                 </div>
                 {openDocument.summary ? (
                   <p className="mt-5 rounded-xl bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">{openDocument.summary}</p>
                 ) : null}
-                {workspace ? (
-                  <section className="mt-6 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4 sm:p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h3 className="text-sm font-black uppercase tracking-[0.14em] text-emerald-800">Work on this document</h3>
-                        <p className="mt-1 max-w-2xl text-xs font-medium leading-5 text-emerald-900">
-                          Write your changes here, save them, and send them to Code Rx when you are ready.
-                          {workspace.vaultLinked
-                            ? ' Saving keeps your revision with the Code Rx copy of this document — there is nothing to email separately.'
-                            : ''}
-                        </p>
-                      </div>
-                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-emerald-700 ring-1 ring-emerald-100">
-                        Version {workspace.version}
-                      </span>
-                    </div>
-                    <label className="mt-4 block">
-                      <span className="sr-only">Your revision of {openDocument.title}</span>
-                      <textarea
-                        value={workspaceText}
-                        onChange={(event) => setWorkspaceText(event.target.value)}
-                        rows={12}
-                        spellCheck
-                        aria-label={`Your revision of ${openDocument.title}`}
-                        className="w-full rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm leading-7 text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
-                      />
-                    </label>
-                    <div className="mt-3 flex flex-wrap items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => void saveWorkspace(false)}
-                        disabled={workspaceBusy || !workspaceText.trim()}
-                        className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 disabled:opacity-60"
-                      >
-                        {workspaceBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void saveWorkspace(true)}
-                        disabled={workspaceBusy || !workspaceText.trim()}
-                        className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-800 transition hover:bg-emerald-50 disabled:opacity-60"
-                      >
-                        <Send className="h-3.5 w-3.5" /> Save &amp; send to Code Rx
-                      </button>
-                      {workspace.savedAt ? <span className="text-[11px] font-semibold text-emerald-900">Last saved {String(workspace.savedAt).slice(0, 16).replace('T', ' ')}</span> : null}
-                    </div>
-                    {workspaceNotice ? (
-                      <p role="status" className="mt-3 rounded-xl bg-white px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100">{workspaceNotice}</p>
-                    ) : null}
-                  </section>
-                ) : null}
+
+                {/* The two things a client does with something Code Rx sends
+                    them, in reach before they start reading. */}
+                <div className="mt-5 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => document.getElementById('sign-this-document')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-50 px-3.5 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-800 ring-1 ring-emerald-100 transition hover:bg-emerald-100"
+                  >
+                    <PenLine className="h-3.5 w-3.5" aria-hidden="true" /> Sign this document
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void openMessages({ id: String(openDocument.id), title: String(openDocument.title || '') })}
+                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-slate-700 transition hover:bg-slate-50"
+                  >
+                    <MessageSquareText className="h-3.5 w-3.5" aria-hidden="true" /> Text PHANTOM about this
+                  </button>
+                </div>
+                <StampedCopyPanel
+                  delivery={openDelivery}
+                  copy={copy}
+                  busy={copyBusy}
+                  preview={!!preview}
+                  printable={canPrint(openDocument as RoomDocument, openDelivery)}
+                  onLoadCopy={() => void openStampedCopy()}
+                  onPrint={() => void printStampedCopy()}
+                />
+
+                <SignaturePanel
+                  documentTitle={String(openDocument.title || '')}
+                  signature={signature}
+                  name={signerName}
+                  title={signerTitle}
+                  busy={signBusy}
+                  notice={signNotice}
+                  sendBusy={sendBusy}
+                  sendNotice={sendNotice}
+                  preview={preview}
+                  onNameChange={setSignerName}
+                  onTitleChange={setSignerTitle}
+                  onSign={() => void signDocument()}
+                  onSend={() => void sendDocumentToPhantom()}
+                  onTextPhantom={() => void openMessages({ id: String(openDocument.id), title: String(openDocument.title || '') })}
+                />
+
                 {review ? (
                   <ClientReviewSection
                     review={review}
@@ -903,15 +1309,6 @@ export const ClientProjectRoom = ({
                     onClear={() => { setReviewChoice(''); setReviewComment(''); }}
                   />
                 ) : null}
-                <StampedCopyPanel
-                  delivery={openDelivery}
-                  copy={copy}
-                  busy={copyBusy}
-                  preview={!!preview}
-                  printable={canPrint(openDocument as RoomDocument, openDelivery)}
-                  onLoadCopy={() => void openStampedCopy()}
-                  onPrint={() => void printStampedCopy()}
-                />
                 {canDownload(openDocument as RoomDocument) ? (
                   <div className="mt-8 flex flex-col gap-3 border-t border-slate-100 pt-6 sm:flex-row sm:items-center">
                     <button
@@ -1034,6 +1431,22 @@ export const ClientProjectRoom = ({
         </div>
         )}
       </main>
+
+      {/* Reachable from the header on every screen, and from an open document
+          when the message is about that document. */}
+      <TextPhantomPanel
+        open={messagesOpen}
+        projectName={context.project.name}
+        documentTitle={messageDocument?.title || null}
+        text={messageText}
+        busy={messageBusy}
+        notice={messageNotice}
+        messages={messages}
+        preview={preview || !transport.sendMessage}
+        onTextChange={setMessageText}
+        onSend={() => void sendMessage()}
+        onClose={() => { setMessagesOpen(false); setMessageNotice(null); }}
+      />
     </div>
   );
 };
