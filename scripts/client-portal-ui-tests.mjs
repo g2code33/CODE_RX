@@ -63,6 +63,8 @@ const bundle = async () => {
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
         export { ClientReviewSection } from './src/components/ClientReviewSection';
+        export { Navbar } from './src/components/Navbar';
+        export { getMedia, resolveBrandMark, isRetiredBrandMark, isLogoMediaKey, OFFICIAL_BRAND_MARK, DEFAULT_MEDIA } from './src/data/editorSchema';
         export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext, KeyRevealDialog } from './src/components/ClientAccessCenter';
         export { ClientPortalEntry } from './src/components/ClientPortalEntry';
         export { ClientSupportContact } from './src/components/ClientSupportContact';
@@ -115,6 +117,7 @@ const main = async () => {
     formatAccessKey, validateAccessKey, accessKeyHint, messageForFailure, failureMessage,
     FAILURE_MESSAGES, ACCESS_KEY_PLACEHOLDER, clientPortalSession,
     ClientAccessScreen, ClientProjectRoom, ClientReviewSection, StampedCopyPanel, ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext,
+    Navbar, getMedia, resolveBrandMark, isRetiredBrandMark, isLogoMediaKey, OFFICIAL_BRAND_MARK,
     visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
     permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
     documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
@@ -1852,7 +1855,7 @@ const main = async () => {
 
   // --- a release invalidates the cached shell ------------------------------
   check('the service worker cache name is versioned and current',
-    /const CACHE = 'code-rx-v5'/.test(readSrc('public/sw.js')));
+    /const CACHE = 'code-rx-v6'/.test(readSrc('public/sw.js')));
   check('the service worker still refuses to cache API responses',
     /if \(url\.pathname\.startsWith\('\/api\/'\)\) return;/.test(readSrc('public/sw.js')));
 
@@ -2415,8 +2418,17 @@ const main = async () => {
   check('the Home page Hero defaults to the official mark',
     /src: '\/CODE%20RX11\.png'/.test(fs.readFileSync(path.join(ROOT, 'src/components/Hero.tsx'), 'utf8')));
   const p20EditorSchema = fs.readFileSync(path.join(ROOT, 'src/data/editorSchema.ts'), 'utf8');
+  // The defaults themselves are what a fresh site renders before anything is
+  // saved, so every one of them must be the official mark. (The file also names
+  // the retired files on purpose — that is the check that catches them.)
+  const p20DefaultBlock = p20EditorSchema.slice(
+    p20EditorSchema.indexOf('export const DEFAULT_MEDIA'),
+    p20EditorSchema.indexOf('export const OFFICIAL_BRAND_MARK'),
+  );
+  const p20DefaultSrcs = [...p20DefaultBlock.matchAll(/src: '([^']*)'/g)].map((match) => match[1]);
   check('the content editor ships the official mark in every logo slot',
-    (p20EditorSchema.match(/\/CODE%20RX11\.png/g) || []).length >= 4 && !p20Retired.test(p20EditorSchema));
+    p20DefaultSrcs.length === 5 && p20DefaultSrcs.every((value) => value === '/CODE%20RX11.png'),
+    p20DefaultSrcs.join(', '));
   const p20Page = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   check('the page icon and the home-screen icon are the official mark',
     /rel="icon" href="\/CODE%20RX11\.png"/.test(p20Page) && /apple-touch-icon" href="\/CODE%20RX11\.png"/.test(p20Page)
@@ -2436,10 +2448,79 @@ const main = async () => {
     && /CrxHeaderLogo/.test(p20PdfSource) && /CrxWatermarkLogo/.test(p20PdfSource));
   check('published branding is healed for every logo slot, the Hero included',
     /PUBLISHED_LOGO_KEYS = \[[^\]]*'hero\.logo'/.test(fs.readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8')));
+  // A logo can only break if some layer still allows a retired address through.
+  // These are the three layers a browser can reach, proved one by one.
+  const p20SchemaSource = fs.readFileSync(path.join(ROOT, 'src/data/editorSchema.ts'), 'utf8');
+  check('a stored logo address is resolved wherever a logo is read',
+    /isLogoMediaKey\(key\) \? \{ \.\.\.asset, src: resolveBrandMark\(asset\?\.src, key\) \} : asset/.test(p20SchemaSource));
+  check('a retired mark is recognised however it was written, cache-busting included',
+    /icon-512-maskable\|apple-touch-icon\)/.test(p20SchemaSource)
+    && /\(\[\?#\]\|\$\)/i.test(p20SchemaSource));
+  check('a logo that cannot be fetched falls back to the official mark, not a broken icon',
+    /failed \? OFFICIAL_BRAND_MARK : src/.test(fs.readFileSync(path.join(ROOT, 'src/components/VisualEditorContext.tsx'), 'utf8')));
+  check('the fallback is a logo rule only, so a project photo is never replaced by a logo',
+    /if \(!isLogo\) return;/.test(fs.readFileSync(path.join(ROOT, 'src/components/VisualEditorContext.tsx'), 'utf8')));
+  check('a payload the browser cached on its own is healed too',
+    /isLogoMediaKey\(key\) && asset && typeof asset === 'object'/.test(fs.readFileSync(path.join(ROOT, 'src/data/siteState.ts'), 'utf8')));
+  check('nothing may store a retired logo address again',
+    /normalizeBrandLogosInContent\(body\)/.test(fs.readFileSync(path.join(ROOT, 'functions/[[path]].ts'), 'utf8')));
+  check('the cached app shell is replaced, so the old addresses stop being served',
+    /const CACHE = 'code-rx-v6'/.test(fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8')));
   check('no client-facing source still names a retired logo',
     !p20Retired.test(fs.readFileSync(path.join(ROOT, 'src/components/ClientSiteSign.tsx'), 'utf8')
       + fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessScreen.tsx'), 'utf8')
       + fs.readFileSync(path.join(ROOT, 'src/components/ClientProjectRoom.tsx'), 'utf8')));
+
+  // The rule itself, exercised rather than pattern-matched: these are the calls
+  // the Navbar, the Hero, the About card and the Footer make at render time.
+  check('a logo slot holding a retired file resolves to the official mark',
+    getMedia({ 'brand.logoSmall': { src: '/logo-small.png', alt: 'Code Rx Society' } }, 'brand.logoSmall', { src: '', alt: '' }).src === OFFICIAL_BRAND_MARK);
+  check('a logo slot holding an absolute address to a retired file is caught too',
+    getMedia({ 'brand.logoSmall': { src: 'https://coderxsociety.pages.dev/logo.png?v=2', alt: '' } }, 'brand.logoSmall', { src: '', alt: '' }).src === OFFICIAL_BRAND_MARK);
+  check('a logo slot left empty is filled rather than left to break the header',
+    getMedia({ 'footer.logo': { src: '   ', alt: '' } }, 'footer.logo', { src: '', alt: '' }).src === OFFICIAL_BRAND_MARK);
+  check('the Hero is healed by the same call as every other logo slot',
+    getMedia({ 'hero.logo': { src: 'logo.png', alt: '' } }, 'hero.logo', { src: '', alt: '' }).src === OFFICIAL_BRAND_MARK);
+  check('a mark an operator uploaded on purpose is left alone',
+    getMedia({ 'brand.logo': { src: '/api/files/media/own-mark.png', alt: '' } }, 'brand.logo', { src: '', alt: '' }).src === '/api/files/media/own-mark.png');
+  check('a non-logo image is never rewritten, even when it is called logo.png',
+    getMedia({ 'projects.1.image': { src: '/logo.png', alt: '' } }, 'projects.1.image', { src: '', alt: '' }).src === '/logo.png');
+  check('the retired-name check understands every form the address can take',
+    ['/logo.png', 'logo.png', 'https://host/logo-small.png', '/icon-512.png?v=3', '/assets/apple-touch-icon.png#x']
+      .every((value) => isRetiredBrandMark(value)));
+  check('and it does not accuse a healthy address',
+    !['/CODE%20RX11.png', 'https://host/media/our-emblem.png', '/api/files/media/photo.jpg']
+      .some((value) => isRetiredBrandMark(value)));
+  check('only the five published logo slots are treated as logos',
+    isLogoMediaKey('brand.logoSmall') && isLogoMediaKey('hero.logo') && !isLogoMediaKey('projects.1.image'));
+
+  // The real component, with the payload a stale database or a stale browser
+  // copy would hand it: the header must ask for the official mark.
+  const p20StaleNavbar = render(React.createElement(Navbar, {
+    onDashboardToggle: () => {}, isDashboard: false, activeTab: 'home', setActiveTab: () => {},
+    copy: {}, media: { 'brand.logoSmall': { src: '/logo-small.png', alt: 'Code Rx Society' } },
+  }));
+  check('the header renders the official mark even from a payload naming the retired one',
+    p20StaleNavbar.includes('/CODE%20RX11.png') && !p20StaleNavbar.includes('/logo-small.png'));
+  check('the header keeps a real alt text for the mark', /alt="Code Rx Society"/.test(p20StaleNavbar));
+  const p20StaleContent = normalizeSiteContent({
+    media: {
+      'brand.logoSmall': { src: '/logo.png', alt: 'Code Rx Society' },
+      'hero.logo': { src: '/logo.png', alt: 'Hero' },
+      'projects.9.image': { src: '/logo.png', alt: 'A project' },
+    },
+  });
+  check('a payload the browser cached on its own is healed on the way in',
+    p20StaleContent.media['brand.logoSmall'].src === OFFICIAL_BRAND_MARK
+    && p20StaleContent.media['hero.logo'].src === OFFICIAL_BRAND_MARK);
+  check('and the healing leaves everything that is not a logo exactly as it was',
+    p20StaleContent.media['projects.9.image'].src === '/logo.png');
+  const p20CleanContent = normalizeSiteContent({
+    media: { 'brand.logoSmall': { src: OFFICIAL_BRAND_MARK, alt: 'Code Rx Society' } },
+  });
+  check('content that is already correct passes through untouched',
+    p20CleanContent.media['brand.logoSmall'].src === OFFICIAL_BRAND_MARK
+    && p20CleanContent.media['brand.logoSmall'].alt === 'Code Rx Society');
 
   group('32. The client project room carries the text PHANTOM (Phase 20)');
   const p20RoomSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientProjectRoom.tsx'), 'utf8');

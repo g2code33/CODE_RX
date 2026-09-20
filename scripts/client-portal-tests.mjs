@@ -4561,9 +4561,25 @@ const main = async () => {
     path.join(ROOT, 'public/sw.js'),
     path.join(ROOT, 'public/manifest.webmanifest'),
   ];
-  const offenders = sourceFiles.filter((file) => retiredAddresses.test(fs.readFileSync(file, 'utf8')));
-  check('nothing under src/, the page, the worker or the manifest asks for a retired logo',
-    offenders.length === 0, offenders.map((file) => path.relative(ROOT, file)).join(', '));
+  // Only real addresses count. The policy that *catches* a retired address names
+  // the retired files on purpose, and its comments explain them, so comments are
+  // stripped and the remaining quoted strings and attributes are examined.
+  const addressesIn = (source) => {
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const values = [
+      ...[...code.matchAll(/<img[^>]*?src="([^"]+)"/g)].map((match) => match[1]),
+      ...[...code.matchAll(/(?:src|href|content)="([^"]+)"/g)].map((match) => match[1]),
+      ...[...code.matchAll(/(?:src|href)\s*[:=]\s*'([^']+)'/g)].map((match) => match[1]),
+      ...[...code.matchAll(/url\((['"]?)([^'")]+)\1\)/g)].map((match) => match[2]),
+    ];
+    return values.filter((value) => retiredAddresses.test(value));
+  };
+  const offenders = sourceFiles
+    .map((file) => ({ file, addresses: addressesIn(fs.readFileSync(file, 'utf8')) }))
+    .filter((entry) => entry.addresses.length);
+  check('nothing under src/, the page, the worker or the manifest loads a retired logo',
+    offenders.length === 0,
+    offenders.map((entry) => `${path.relative(ROOT, entry.file)}: ${entry.addresses.join(', ')}`).join(' | '));
 
   const editorSchema = fs.readFileSync(path.join(ROOT, 'src/data/editorSchema.ts'), 'utf8');
   check('the Home page Hero uses the official mark as its default',
@@ -4596,11 +4612,14 @@ const main = async () => {
   };
   const savedLegacy = await request('PUT', '/api/site-content', { token: phantomToken, body: legacyContent });
   check('a payload saved with the old logo address is accepted', savedLegacy.status === 200, JSON.stringify(savedLegacy.json).slice(0, 140));
+  check('the stored copy was healed as well, not only the response',
+    !JSON.stringify(db.query('SELECT data FROM site_content WHERE id = 1')).includes('/logo-small.png'));
+
   const readBack = await request('GET', '/api/site-content');
   const publishedSlots = ['brand.logo', 'brand.logoSmall', 'hero.logo', 'about.logo', 'footer.logo'];
   check('no published logo slot ever answers with a retired address',
     readBack.status === 200 && publishedSlots.every((key) => !readBack.json.data.media[key]
-      || readBack.json.data.media[key].src === '/CODE%20RX11.png'),
+      || !retiredAddresses.test(String(readBack.json.data.media[key].src))),
     JSON.stringify(readBack.json.data).slice(0, 160));
   check('every published logo slot now carries the official mark',
     readBack.json.data.media['brand.logo'].src === '/CODE%20RX11.png'
@@ -4609,8 +4628,36 @@ const main = async () => {
     readBack.json.data.media['about.logo'].alt === 'Kept as it is');
   check('a key that is not a published logo slot is not touched',
     readBack.json.data.media['footer.logoSmall'].src === '/logo.png');
-  check('the stored copy was healed as well, not only the response',
-    !JSON.stringify(db.query('SELECT data FROM site_content WHERE id = 1')).includes('/logo-small.png'));
+
+  check('the save says plainly that every logo was corrected',
+    /official Code Rx mark/i.test(String(savedLegacy.json?.message || '')), String(savedLegacy.json?.message || ''));
+  check('the stored copy is corrected at the moment of saving, not only when read',
+    !JSON.stringify(db.query('SELECT data FROM site_content WHERE id = 1')).includes('/logo-small.png')
+    && JSON.stringify(db.query('SELECT data FROM site_content WHERE id = 1')).includes('CODE%20RX11.png'));
+  // Each form an old address can take, through the real save and the real read:
+  // relative, bare, absolute, and cache-busted.
+  for (const legacyAddress of ['/logo.png', 'logo-small.png', 'https://host/icon-512.png?v=3', '/assets/apple-touch-icon.png#x']) {
+    await request('PUT', '/api/site-content', {
+      token: phantomToken, body: { version: 2, media: { 'brand.logo': { src: legacyAddress, alt: 'Old' } } },
+    });
+    const healedRead = (await request('GET', '/api/site-content')).json.data.media['brand.logo'];
+    check(`the retired address ${legacyAddress} is corrected`, healedRead.src === '/CODE%20RX11.png', String(healedRead.src));
+  }
+  const absoluteLegacy = await request('PUT', '/api/site-content', {
+    token: phantomToken,
+    body: { version: 2, media: { 'footer.logo': { src: 'https://coderxsociety.pages.dev/logo-small.png?cache=1', alt: 'Old' } } },
+  });
+  check('an absolute address to a retired file is corrected on save', absoluteLegacy.status === 200);
+  const absoluteRead = await request('GET', '/api/site-content');
+  check('and the public read answers with the official mark',
+    absoluteRead.json.data.media['footer.logo'].src === '/CODE%20RX11.png', String(absoluteRead.json.data.media['footer.logo'].src));
+  check('the operator\'s own alt text survives the correction',
+    absoluteRead.json.data.media['footer.logo'].alt === 'Old');
+  const cleanSave = await request('PUT', '/api/site-content', {
+    token: phantomToken, body: { version: 3, media: { 'about.logo': { src: '/api/files/media/own.png', alt: 'Own' } } },
+  });
+  check('content that is already correct is saved without a correction notice',
+    cleanSave.status === 200 && !/official Code Rx mark/i.test(String(cleanSave.json?.message || '')));
 
   // The proof that matters most: the file a client actually receives.
   const p20LogoClient = await createClient(phantomToken, 'Phase 20 Logo Client');

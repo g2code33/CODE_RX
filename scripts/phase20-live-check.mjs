@@ -242,6 +242,26 @@ if (!token) {
   process.exit(1);
 }
 
+// Client access is a switch PHANTOM owns. Against the local preview the check
+// turns it on (a fresh preview database starts with it off); against any other
+// host it is never touched — the check reports what it found instead.
+const portalSettings = await call('GET', '/api/phantom/client-portal-settings', null, token);
+const portalEnabled = rows(portalSettings.json?.data).find((row) => row.key === 'client_portal_enabled')?.value === true
+  || portalSettings.json?.data?.client_portal_enabled === true;
+if (!portalEnabled && !process.env.CODEX_BASE) {
+  await call('PUT', '/api/phantom/client-portal-settings', {
+    settings: [{ key: 'client_portal_enabled', value: true }, { key: 'client_downloads_enabled', value: true }],
+  }, token);
+}
+const portalNowOn = !process.env.CODEX_BASE
+  || rows((await call('GET', '/api/phantom/client-portal-settings', null, token)).json?.data)
+    .find((row) => row.key === 'client_portal_enabled')?.value === true;
+if (!portalNowOn) {
+  console.log('\nClient access is switched off on this host, so the client-side checks cannot run.');
+  console.log('Turn it on in PHANTOM → Client Access → Permissions, then run this check again.');
+  process.exit(1);
+}
+
 const stamp = Date.now();
 const client = (await call('POST', '/api/phantom/clients', { name: `Phase 20 client ${stamp}` }, token)).json?.data;
 const project = (await call('POST', `/api/phantom/clients/${client.id}/projects`, { name: 'Phase 20 project' }, token)).json?.data;
@@ -285,10 +305,35 @@ const spaced = await call('GET', '/CODE RX11.png');
 check('the address with a plain space serves the same mark',
   spaced.status === 200 && Boolean(spaced.bytes) && spaced.bytes.equals(officialBytes));
 
-const retired = await Promise.all(['/logo.png', '/logo-small.png', '/icon-192.png'].map((address) => call('GET', address)));
+const retired = await Promise.all(['/logo.png', '/logo-small.png', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']
+  .map((address) => call('GET', address)));
 check('no retired logo is served as an image any more',
   retired.every((response) => !String(response.headers.get('content-type') || '').includes('image')),
   retired.map((response) => String(response.headers.get('content-type'))).join(' | '));
+check('and the addresses those files used to live at are not left to 404 silently in an <img>',
+  retired.every((response) => response.status === 200 || response.status === 404));
+
+// The layers that stop a retired address from ever reaching a browser.
+const savedLegacy = await call('PUT', '/api/site-content', {
+  version: 2,
+  media: {
+    'brand.logoSmall': { src: '/logo-small.png', alt: 'Navigation logo' },
+    'hero.logo': { src: 'https://coderxsociety.pages.dev/logo.png?v=3', alt: 'Hero logo' },
+    'projects.1.image': { src: '/logo.png', alt: 'A project photo that happens to be named logo' },
+  },
+}, token);
+check('a payload naming a retired logo can still be saved', savedLegacy.status === 200, savedLegacy.text.slice(0, 140));
+check('the save says the logos were corrected',
+  /official Code Rx mark/i.test(String(savedLegacy.json?.message || '')), String(savedLegacy.json?.message || ''));
+const healed = await call('GET', '/api/site-content');
+check('the public read hands the browser the official mark, however the retired one was written',
+  healed.json?.data?.media?.['brand.logoSmall']?.src === '/CODE%20RX11.png'
+  && healed.json?.data?.media?.['hero.logo']?.src === '/CODE%20RX11.png',
+  JSON.stringify(healed.json?.data?.media || {}).slice(0, 200));
+check('an image that is not a logo slot is left alone',
+  healed.json?.data?.media?.['projects.1.image']?.src === '/logo.png');
+check('the operator\'s alt text is kept',
+  healed.json?.data?.media?.['brand.logoSmall']?.alt === 'Navigation logo');
 
 const shell = await call('GET', '/');
 const shellText = String(shell.bytes || shell.text || '');

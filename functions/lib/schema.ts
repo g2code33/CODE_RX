@@ -1207,11 +1207,14 @@ const backfillApprovedApplicationActivations = async (db: D1Database) => {
 /** The society's one logo, as the browser asks for it. */
 export const OFFICIAL_BRAND_MARK = '/CODE%20RX11.png';
 
-/** Addresses that used to point at a different Code Rx logo. */
-const RETIRED_BRAND_MARKS = new Set([
-  '/logo.png', '/logo-small.png', 'logo.png', 'logo-small.png',
-  '/icon-192.png', '/icon-512.png', '/icon-512-maskable.png', '/apple-touch-icon.png',
-]);
+/**
+ * A retired mark is recognised by its file name, so it is caught however it was
+ * written: `/logo-small.png`, `logo.png`, an absolute URL, or a cache-busted
+ * `…/icon-512.png?v=3`.
+ */
+const RETIRED_BRAND_MARK = /(^|[\/\\])(logo|logo-small|icon-192|icon-512|icon-512-maskable|apple-touch-icon)\.(png|jpe?g|webp|svg)([?#]|$)/i;
+
+const isRetiredBrandMark = (src: unknown): boolean => RETIRED_BRAND_MARK.test(String(src ?? ''));
 
 /** Every published logo slot — the Home page Hero included: one mark, everywhere. */
 const PUBLISHED_LOGO_KEYS = ['brand.logo', 'brand.logoSmall', 'hero.logo', 'about.logo', 'footer.logo'];
@@ -1224,10 +1227,12 @@ const PUBLISHED_LOGO_KEYS = ['brand.logo', 'brand.logoSmall', 'hero.logo', 'abou
  */
 export const normalizeBrandLogosInContent = (content: any): boolean => {
   if (!content || typeof content !== 'object' || !content.media || typeof content.media !== 'object') return false;
+  // The official address is what every published logo slot must answer with, and
+  // a slot left empty is filled rather than left to break a header.
   let changed = false;
   for (const key of PUBLISHED_LOGO_KEYS) {
     const asset = content.media[key];
-    if (asset && typeof asset === 'object' && RETIRED_BRAND_MARKS.has(String(asset.src || ''))) {
+    if (asset && typeof asset === 'object' && isRetiredBrandMark(asset.src)) {
       content.media[key] = { ...asset, src: OFFICIAL_BRAND_MARK };
       changed = true;
     }

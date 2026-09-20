@@ -2,6 +2,8 @@ import { WHAT_WE_DO, Project } from './mockData';
 import {
   CoreValueContent,
   DEFAULT_MEDIA,
+  isLogoMediaKey,
+  resolveBrandMark,
   DEFAULT_SITE_COPY,
   DEFAULT_SITE_DESIGN,
   DEFAULT_SITE_LINKS,
@@ -737,7 +739,17 @@ export const normalizeSiteContent = (raw: unknown): SiteContent => {
     customBlocks: asArr(r.customBlocks, d.customBlocks),
     copy: { ...d.copy, ...asObj(r.copy) },
     links: { ...d.links, ...asObj(r.links) },
-    media: { ...d.media, ...asObj(r.media) },
+    // ONE logo everywhere: whatever a payload names for a logo slot — a saved
+    // value, a browser-cached copy, a retired file that no longer exists — the
+    // media map is healed here, so no view can put a broken image on screen.
+    media: Object.fromEntries(
+      Object.entries({ ...d.media, ...asObj(r.media) }).map(([key, asset]) => [
+        key,
+        isLogoMediaKey(key) && asset && typeof asset === 'object'
+          ? { ...(asset as Record<string, unknown>), src: resolveBrandMark((asset as any).src, key) }
+          : asset,
+      ]),
+    ),
     design: {
       theme: { ...d.design.theme, ...designTheme },
       elements: { ...d.design.elements, ...designElements },

@@ -284,6 +284,43 @@ export const DEFAULT_MEDIA: Record<string, MediaAsset> = {
   'footer.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
 };
 
+/**
+ * ONE logo everywhere.
+ *
+ * `public/CODE RX11.png` is the society's only mark, served as `/CODE%20RX11.png`.
+ * A payload saved by an older build — or a copy the browser cached before the
+ * retired files were removed — may still name `/logo.png` or `/logo-small.png`,
+ * which no longer exists. Nothing that reads a logo may then point the browser
+ * at it, so the resolution happens here, once, for every logo slot.
+ */
+export const OFFICIAL_BRAND_MARK = '/CODE%20RX11.png';
+
+/** The published slots that hold a logo. Only these are rewritten. */
+export const LOGO_MEDIA_KEYS = ['brand.logo', 'brand.logoSmall', 'hero.logo', 'about.logo', 'footer.logo'];
+
+/**
+ * A retired mark is recognised by its file name, so it is caught however it was
+ * written: `/logo-small.png`, `logo.png`, an absolute URL, or a cache-busted
+ * `…/icon-512.png?v=3`.
+ */
+const RETIRED_BRAND_MARK = /(^|[\/\\])(logo|logo-small|icon-192|icon-512|icon-512-maskable|apple-touch-icon)\.(png|jpe?g|webp|svg)([?#]|$)/i;
+
+export const isRetiredBrandMark = (src: unknown): boolean => RETIRED_BRAND_MARK.test(String(src ?? ''));
+
+export const isLogoMediaKey = (key: string): boolean => LOGO_MEDIA_KEYS.includes(String(key));
+
+/**
+ * The address a logo slot should really use: the official mark whenever the
+ * stored one is a retired file or nothing at all, and the stored value otherwise
+ * (an operator who uploaded their own asset keeps it in any other slot).
+ */
+export const resolveBrandMark = (src: unknown, key?: string): string => {
+  const value = String(src ?? '').trim();
+  if (key && !isLogoMediaKey(key)) return value;
+  if (!value || isRetiredBrandMark(value)) return OFFICIAL_BRAND_MARK;
+  return value;
+};
+
 export const DEFAULT_SITE_DESIGN: SiteDesign = {
   theme: {
     ink: '#ffffff',
@@ -309,8 +346,12 @@ export const getCopy = (copy: Record<string, string> | undefined, key: string, f
 export const getLink = (links: Record<string, string> | undefined, key: string, fallback = ''): string =>
   links?.[key] ?? DEFAULT_SITE_LINKS[key] ?? fallback;
 
-export const getMedia = (media: Record<string, MediaAsset> | undefined, key: string, fallback: MediaAsset): MediaAsset =>
-  media?.[key] ?? DEFAULT_MEDIA[key] ?? fallback;
+export const getMedia = (media: Record<string, MediaAsset> | undefined, key: string, fallback: MediaAsset): MediaAsset => {
+  const asset = media?.[key] ?? DEFAULT_MEDIA[key] ?? fallback;
+  // Every logo is resolved through the one function above, so a stored or cached
+  // payload can never send the browser looking for a retired file.
+  return isLogoMediaKey(key) ? { ...asset, src: resolveBrandMark(asset?.src, key) } : asset;
+};
 
 export const friendlyEditorLabel = (key: string) =>
   key

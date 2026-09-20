@@ -1790,6 +1790,10 @@ app.put('/api/site-content', requireAuth, requireWebsitePermission('content.mana
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return c.json({ success: false, error: 'Invalid content payload' }, 400);
     }
+    // ONE logo everywhere: a payload that names a retired logo file is corrected
+    // before it is stored, so the database never carries an address that no
+    // longer exists — and the response says plainly what was changed.
+    const healedLogos = normalizeBrandLogosInContent(body);
     const raw = JSON.stringify(body);
     if (raw.length > 500_000) return c.json({ success: false, error: 'Content too large' }, 413);
 
@@ -1798,7 +1802,12 @@ app.put('/api/site-content', requireAuth, requireWebsitePermission('content.mana
       .bind(raw)
       .run();
 
-    return c.json({ success: true, message: 'Site content saved' });
+    return c.json({
+      success: true,
+      message: healedLogos
+        ? 'Site content saved. Every logo now points at the official Code Rx mark.'
+        : 'Site content saved',
+    });
   } catch (e) {
     console.error('[code-rx] save site content error:', e);
     return c.json({ success: false, error: 'Failed to save site content' }, 500);

@@ -51,10 +51,11 @@ new dependency, no parallel system, no unrelated rewrite.
 | UI harness | `npm run test:client-portal-ui` | **657 / 657** |
 | Phase 20 live check | `node scripts/phase20-live-check.mjs` | **56 / 56** |
 | Phase 18 live check (re-run) | `node scripts/phase18-live-check.mjs` | **34 / 34** |
-| Panel + room, driven in a real DOM | `node scripts/client-panel-dom-check.mjs` | **31 / 31** |
+| Panel + room + logo, driven in a real DOM | `node scripts/client-panel-dom-check.mjs` | **38 / 38** |
 | Public addresses + client door | `node scripts/browser-dom-check.mjs` | green |
 
-**Total: 2283 / 2283 checks = 100.0 %.** TypeScript is clean for `src/` and for
+**Total: 2300 / 2300 checks = 100.0 %.** (Phase 20 follow-up: backend 1515, UI 678,
+Phase 20 live 62, Phase 18 live 34, DOM 38, plus the browser address check.) TypeScript is clean for `src/` and for
 `functions/` (the pre-existing duplicate-JSX-attribute and Context-variance
 diagnostics in the older routes are unchanged and out of scope).
 
@@ -71,6 +72,30 @@ logo" is a measurement, not a filename:
 | Image assets shipped in `public/` | **1** (`CODE RX11.png`) |
 | Retired addresses still referenced anywhere in `src/`, the page, the worker or the manifest | **0** |
 | A saved payload naming `/logo.png` and `/logo-small.png`, read back | all five published logo slots answer `/CODE%20RX11.png`, and the stored row is healed |
+| Four forms of a retired address (`/logo.png`, `logo-small.png`, `https://host/icon-512.png?v=3`, `/assets/apple-touch-icon.png#x`) | every one is corrected on save and on read, and an operator's own uploaded mark is left alone |
+
+---
+
+## Follow-up — "make the logo fix perfectly done"
+
+A screenshot showed the header still rendering a **broken image** where the mark
+belongs, even though the official file was served correctly. The cause was found
+and closed, layer by layer:
+
+| Layer | Why it could break | What it does now |
+|-------|--------------------|------------------|
+| The payload the browser renders (`localStorage` copy, an operator's saved draft, a database row from before this phase) | `normalizeSiteContent` passed `media` straight through, so a stored `/logo-small.png` was handed to the browser even though that file had been retired — the server-side heal never reaches a browser's own cached copy. | Every logo slot is resolved on the way in, in `siteState.ts`, through one shared rule. |
+| Every component that reads a logo (`Navbar`, `Hero`, `About`, `Footer`) | Each one took `getMedia(...).src` as written. | `getMedia` resolves logo slots through the same rule, so a component cannot be handed a retired address at all. |
+| The retired name itself | Only exact paths (`/logo.png`) were recognised; an absolute URL or a cache-busted `…/icon-512.png?v=3` slipped through. | A retired mark is recognised by its file name, in any form — relative, bare, absolute, with a query or a fragment. |
+| The `<img>` in the browser | If anything the app did not foresee still pointed at a missing file, the reader saw the browser's broken-image icon. | A **logo slot** that fails to load falls back to the official mark, once. Any other image keeps the browser's normal behaviour — a project photo is never silently replaced by a logo. |
+| The saved content | A stale address could be written back to the database. | Saving content corrects retired logo addresses before they are stored, and the save says so. |
+| The cached app shell | The service worker served `code-rx-v5`, which precached the retired files. | The cache is bumped to `code-rx-v6`, so returning visitors get the new shell. |
+
+Proved in a real DOM, not by inference: the header is rendered with a payload
+naming the retired files and every `src` it hands the browser is
+`/CODE%20RX11.png`; a logo slot given a retired address that then fails to load
+becomes the official mark instead of a broken icon; and an ordinary image in the
+same document is left exactly as it was.
 
 ---
 

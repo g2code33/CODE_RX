@@ -76,6 +76,10 @@ console.log(`  fixture: client ${client.id} · project ${project.id} · letter $
 // --- 2. the real panel, in a real DOM ---------------------------------------
 const pageUrl = `${BASE}/`;
 const html = await (await fetch(pageUrl)).text();
+const servedMark = await fetch(`${BASE}/CODE%20RX11.png`);
+check('the official mark is really served, as an image',
+  servedMark.status === 200 && String(servedMark.headers.get('content-type')).includes('image/png'),
+  `${servedMark.status} ${servedMark.headers.get('content-type')}`);
 const bundle = await build({
   stdin: {
     contents: `
@@ -446,6 +450,98 @@ check('the operator\'s own panel receives the answer with the document',
 check('answering changed nothing about access: the document is still published and viewable',
   reviewed?.clientVisible === true && reviewed?.allowView === true && String(reviewed?.lifecycle) === 'published');
 check('nothing in the review flow deleted anything', !roomBin.some((row) => String(row.title || '').includes(`Panel DOM work letter ${stamp}`)));
+
+// ---------------------------------------------------------------------------
+// PHASE 20 follow-up — a logo must never render as a broken image.
+//
+// Two layers are proved here in a real DOM: the header resolves a retired
+// address to the official mark before the browser ever sees it, and if the mark
+// itself cannot be fetched the element falls back to the official mark instead
+// of showing the browser's broken-image icon.
+// ---------------------------------------------------------------------------
+console.log('\n--- the logo a browser is actually handed ---');
+const logoBundle = await build({
+  stdin: {
+    contents: `
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { Navbar } from './src/components/Navbar';
+      import { EditableImage } from './src/components/VisualEditorContext';
+      // A payload exactly like one saved before the retired files were removed.
+      const media = {
+        'brand.logoSmall': { src: '/logo-small.png', alt: 'Code Rx Society' },
+        'hero.logo': { src: 'https://coderxsociety.pages.dev/logo.png?v=3', alt: 'Hero' },
+      };
+      createRoot(document.getElementById('logo-root')).render(React.createElement(React.Fragment, null,
+        React.createElement('div', { id: 'navbar-probe' },
+          React.createElement(Navbar, {
+            onDashboardToggle: () => {}, isDashboard: false, activeTab: 'home', setActiveTab: () => {}, copy: {}, media,
+          }),
+        ),
+        // The last line of defence, on its own: a logo slot handed a retired
+        // address by anything at all, plus an ordinary image that must be left
+        // to the browser's own behaviour.
+        React.createElement('div', { id: 'fallback-probe' },
+          React.createElement(EditableImage, {
+            elementKey: 'nav.logo', mediaKey: 'brand.logoSmall', label: 'Navigation logo',
+            src: '/logo-small.png', alt: 'Code Rx Society',
+          }),
+          React.createElement(EditableImage, {
+            elementKey: 'projects.1.image', mediaKey: 'projects.1.image', label: 'A project photo',
+            src: '/logo.png', alt: 'A project photo',
+          }),
+        ),
+      ));
+    `,
+    resolveDir: ROOT,
+    loader: 'tsx',
+  },
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2020',
+  define: {
+    'process.env.NODE_ENV': '"development"',
+    'import.meta.env.VITE_API_URL': 'undefined',
+    'import.meta.env.VITE_R2_BUCKET_URL': 'undefined',
+  },
+  write: false,
+  logLevel: 'error',
+});
+const logoDom = new JSDOM(html.replace('<div id="root"></div>', '<div id="root"></div><div id="logo-root"></div>'), {
+  url: pageUrl, runScripts: 'outside-only', pretendToBeVisual: true,
+});
+const logoWindow = logoDom.window;
+logoWindow.matchMedia = logoWindow.matchMedia || (() => ({ matches: false, media: '', onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }));
+logoWindow.fetch = (input, init) => nodeFetch(new URL(typeof input === 'string' ? input : input.url, pageUrl), init);
+logoWindow.eval(logoBundle.outputFiles[0].text);
+await wait(400);
+const navbarRoot = logoWindow.document.getElementById('navbar-probe');
+const headerImages = [...navbarRoot.querySelectorAll('img')];
+const headerSrcs = headerImages.map((image) => image.getAttribute('src'));
+check('the header never asks the browser for a retired logo file',
+  headerSrcs.length > 0 && headerSrcs.every((src) => !/logo(-small)?\.png|icon-192\.png|apple-touch-icon\.png/.test(String(src))),
+  headerSrcs.join(', '));
+check('the header asks for the society\'s one official mark',
+  headerSrcs.every((src) => String(src).includes('CODE%20RX11.png')), headerSrcs.join(', '));
+
+// Even if that file could not be fetched, the element must not show the
+// browser's broken-image icon: the fallback is the official mark.
+const probeRoot = logoWindow.document.getElementById('fallback-probe');
+const [staleLogo, ordinaryImage] = [...probeRoot.querySelectorAll('img')];
+check('a logo slot handed a retired address starts on that address', 
+  String(staleLogo && staleLogo.getAttribute('src')) === '/logo-small.png',
+  String(staleLogo && staleLogo.getAttribute('src')));
+staleLogo.dispatchEvent(new logoWindow.Event('error'));
+await wait(250);
+check('a logo that cannot be fetched falls back to the official mark, not a broken icon',
+  String(staleLogo.getAttribute('src')).includes('CODE%20RX11.png'), String(staleLogo.getAttribute('src')));
+check('the fallback keeps the alt text, so the mark is still described',
+  String(staleLogo.getAttribute('alt') || '').length > 0);
+ordinaryImage.dispatchEvent(new logoWindow.Event('error'));
+await wait(250);
+check('an ordinary image is left to the browser\'s own behaviour, never replaced by a logo',
+  String(ordinaryImage.getAttribute('src')) === '/logo.png', String(ordinaryImage.getAttribute('src')));
 
 console.log(`\nPANEL DOM TOTAL: ${ok.length + bad.length}   PASSED: ${ok.length}   FAILED: ${bad.length}`);
 for (const failure of bad) console.log(`  - ${failure}`);

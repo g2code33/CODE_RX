@@ -5,8 +5,9 @@ import {
   MouseEvent,
   ReactNode,
   useContext,
+  useState,
 } from 'react';
-import { ElementStyle, MediaAsset, SiteDesign } from '../data/editorSchema';
+import { ElementStyle, MediaAsset, SiteDesign, isLogoMediaKey, OFFICIAL_BRAND_MARK } from '../data/editorSchema';
 
 export type EditorInteractionMode = 'edit' | 'preview';
 export type EditorSelectionKind = 'text' | 'image' | 'region' | 'collection';
@@ -251,6 +252,19 @@ export const EditableRegion = ({
 };
 
 /** An image that can be selected for URL/upload/alt-text editing. */
+/**
+ * A logo that cannot be fetched still shows the society's mark.
+ *
+ * The retired logo files are gone, so a page holding an old address — a cached
+ * payload, a service-worker shell, an operator's saved draft — would otherwise
+ * put the browser's broken-image icon in the header. A logo slot falls back to
+ * the official mark once, and only once, so a genuinely missing mark cannot
+ * loop. Any other image keeps the browser's normal behaviour, because a project
+ * photo is not a logo and must not be silently replaced by one.
+ *
+ * Whether a slot is a logo is decided by the slot, never by the file name: a
+ * project photo that happens to be called logo.png is still a project photo.
+ */
 export const EditableImage = ({
   elementKey,
   mediaKey,
@@ -267,6 +281,13 @@ export const EditableImage = ({
   className?: string;
 }) => {
   const context = useVisualEditor();
+  const isLogo = isLogoMediaKey(mediaKey);
+  const [failed, setFailed] = useState(false);
+  const onError = () => {
+    if (failed) return;
+    if (!isLogo) return;
+    setFailed(true);
+  };
   const selection: EditorSelection = { kind: 'image', elementKey, mediaKey, label };
   const { isEditing, onClick, onKeyDown } = editorHandlers(selection, context);
   const isSelected = context.selected?.elementKey === elementKey;
@@ -282,7 +303,7 @@ export const EditableImage = ({
   // Empty assets are intentional: project/card placeholders remain visible,
   // while the transparent selectable slot opens the upload inspector.
   if (!src) return <span {...props} aria-label={`${label} — upload an image`} />;
-  return <img {...props} src={src} alt={alt} loading="lazy" decoding="async" />;
+  return <img {...props} src={failed ? OFFICIAL_BRAND_MARK : src} alt={alt} loading="lazy" decoding="async" onError={onError} />;
 };
 
 export const selectedDesign = (design: SiteDesign, elementKey: string, breakpoint: 'desktop' | 'tablet' | 'mobile') =>
