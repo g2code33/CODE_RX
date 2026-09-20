@@ -277,8 +277,9 @@ export const DEFAULT_SITE_LINKS: Record<string, string> = {
 export const DEFAULT_MEDIA: Record<string, MediaAsset> = {
   'brand.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
   'brand.logoSmall': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
-  // Preserve logo.png for the Home page Hero exactly as requested.
-  'hero.logo': { src: '/logo.png', alt: 'CODE Rx Society — Coding the Future of Pharmacy' },
+  // ONE logo everywhere: the society's official mark, on the Home page Hero as
+  // much as anywhere else.
+  'hero.logo': { src: '/CODE%20RX11.png', alt: 'CODE Rx Society — Coding the Future of Pharmacy' },
   'about.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society emblem' },
   'footer.logo': { src: '/CODE%20RX11.png', alt: 'Code Rx Society' },
 };

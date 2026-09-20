@@ -8,14 +8,9 @@ const CACHE = 'code-rx-v5';
 const CORE = [
   '/',
   '/index.html',
-  '/logo.png', // Home page Hero logo — intentionally preserved
+  // ONE logo everywhere: the official mark, and nothing else.
   '/CODE%20RX11.png',
-  '/logo-small.png',
   '/manifest.webmanifest',
-  '/icon-192.png',
-  '/icon-512.png',
-  '/icon-512-maskable.png',
-  '/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (event) => {

@@ -383,6 +383,70 @@ check('nothing in this flow deleted anything by accident',
   !roomBin.some((row) => String(row.title || '').includes(`Panel DOM work letter ${stamp}`)),
   JSON.stringify(roomBin.slice(0, 2)).slice(0, 160));
 
+// ---------------------------------------------------------------------------
+// PHASE 20 — one logo, the PHANTOM sign, and the review section, in the DOM the
+// client actually gets.
+// ---------------------------------------------------------------------------
+console.log('\n--- one logo, PHANTOM in the room, and the review section ---');
+const roomMarkup = room.document.getElementById('room-root').innerHTML;
+check('the room carries the society\'s one official logo',
+  roomMarkup.includes('/CODE%20RX11.png') && !/logo(-small)?\.png|icon-192\.png|apple-touch-icon\.png/.test(roomMarkup));
+check('the room says PHANTOM, in the client\'s own view', roomText().includes('PHANTOM'));
+check('PHANTOM is explained as the desk handling the project', roomText().includes('your Code Rx desk'));
+
+const reviewShown = await waitForRoom(() => roomText().includes('Review this document'), 40);
+check('every document the client opens carries the review section', reviewShown, roomText().slice(-260));
+check('all four answers are on screen',
+  ['Approved', 'Declined', 'Pending', 'Custom answer'].every((label) =>
+    roomButtons().some((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim() === label)),
+  roomButtons().map((button) => String(button.textContent || '').trim()).slice(0, 14).join(' | '));
+
+const approvedClicked = clickRoomByText('Approved');
+const noteField = await (async () => {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const field = room.document.querySelector('#room-root textarea[aria-label="Your feedback to PHANTOM"]');
+    if (field) return field;
+    await wait(150);
+  }
+  return null;
+})();
+check('choosing an answer opens the note and the send', approvedClicked && Boolean(noteField));
+const reviewNote = `Approved from the DOM at ${stamp}.`;
+if (noteField) {
+  const setNote = Object.getOwnPropertyDescriptor(room.HTMLTextAreaElement.prototype, 'value').set;
+  if (noteField._valueTracker) noteField._valueTracker.setValue('previous value');
+  setNote.call(noteField, reviewNote);
+  noteField.dispatchEvent(new room.Event('input', { bubbles: true }));
+  noteField.dispatchEvent(new room.Event('change', { bubbles: true }));
+  await wait(250);
+}
+const sendReviewButton = roomButtons().find((button) => String(button.textContent || '').replace(/\s+/g, ' ').trim().includes('Send to PHANTOM'));
+if (sendReviewButton) sendReviewButton.dispatchEvent(new room.MouseEvent('click', { bubbles: true, cancelable: true }));
+else console.log('  debug: the review send action was not on screen');
+
+const answerReachedPhantom = await (async () => {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const inbox = (await api('GET', '/api/notifications', null, token)).json?.data;
+    const items = Array.isArray(inbox) ? inbox : (inbox?.items || []);
+    if (items.some((row) => String(row.message || '').includes(clientName) && /Approved/i.test(String(row.message || '')))) return true;
+    await wait(250);
+  }
+  return false;
+})();
+check('pressing Send tells PHANTOM, by notification, what the client answered', answerReachedPhantom);
+check('the client is told their answer went to PHANTOM', /sent to PHANTOM|Thank you/i.test(roomText()), roomText().slice(-200));
+check('the answer the client gave is shown back to them', /You answered: Approved/.test(roomText()));
+check('the client\'s own words travel with it', roomText().includes(reviewNote));
+
+const reviewed = ((await api('GET', `/api/phantom/clients/${client.id}/documents`, null, token)).json?.data || [])
+  .find((row) => row.id === (workLetter && workLetter.id));
+check('the operator\'s own panel receives the answer with the document',
+  reviewed?.review?.decision === 'approve' && String(reviewed?.review?.comment || '').includes(String(stamp)),
+  JSON.stringify(reviewed?.review || null));
+check('answering changed nothing about access: the document is still published and viewable',
+  reviewed?.clientVisible === true && reviewed?.allowView === true && String(reviewed?.lifecycle) === 'published');
+check('nothing in the review flow deleted anything', !roomBin.some((row) => String(row.title || '').includes(`Panel DOM work letter ${stamp}`)));
+
 console.log(`\nPANEL DOM TOTAL: ${ok.length + bad.length}   PASSED: ${ok.length}   FAILED: ${bad.length}`);
 for (const failure of bad) console.log(`  - ${failure}`);
 process.exit(bad.length ? 1 : 0);

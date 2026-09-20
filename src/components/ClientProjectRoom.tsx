@@ -22,6 +22,7 @@ import {
   type LinkLanding,
 } from '../lib/linkAccess';
 import { ClientSiteSign } from './ClientSiteSign';
+import { ClientReviewSection } from './ClientReviewSection';
 /**
  * The editable text of a document. Blocks carry rich content, so headings and
  * lists keep their line structure rather than collapsing into one paragraph —
@@ -97,6 +98,9 @@ export interface RoomTransport {
   workspace?: (projectId: string, documentId: string) => Promise<{ data: any }>;
   saveWorkspace?: (projectId: string, documentId: string, payload: { text?: string; blocks?: unknown[] }) => Promise<{ message: string; data: any }>;
   sendWorkspace?: (projectId: string, documentId: string) => Promise<{ message: string; data: any }>;
+  /** The review section: what the client was asked, and their answer. */
+  review?: (projectId: string, documentId: string) => Promise<{ data: any }>;
+  saveReview?: (projectId: string, documentId: string, decision: string, comment: string) => Promise<{ message: string; data: any }>;
 }
 
 interface ClientProjectRoomProps {
@@ -481,6 +485,48 @@ export const ClientProjectRoom = ({
     }
   };
 
+  /**
+   * The review section. Loaded with the document, because every document sent to
+   * a client carries it — not only the ones the client can edit.
+   */
+  const [review, setReview] = useState<any | null>(null);
+  const [reviewChoice, setReviewChoice] = useState<string>('');
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+
+  const loadReview = async (documentId: string) => {
+    setReview(null);
+    setReviewChoice('');
+    setReviewComment('');
+    setReviewNotice(null);
+    if (!transport.review) return;
+    try {
+      const response = await transport.review(projectId, documentId);
+      if (response?.data) setReview(response.data);
+    } catch {
+      // A review section that cannot load never blocks the document itself.
+      setReview(null);
+    }
+  };
+
+  const sendReview = async () => {
+    if (!openDocument || !review || !reviewChoice) return;
+    setReviewBusy(true);
+    setReviewNotice(null);
+    try {
+      const saved = await transport.saveReview!(projectId, String(openDocument.id), reviewChoice, reviewComment);
+      setReview((current: any) => ({ ...current, current: saved.data?.current || current.current }));
+      setReviewNotice(saved.message || 'Sent to PHANTOM.');
+      setReviewChoice('');
+      setReviewComment('');
+    } catch (failure) {
+      handleFailure(failure);
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   const saveWorkspace = async (send: boolean) => {
     if (!openDocument || !workspace) return;
     setWorkspaceBusy(true);
@@ -511,6 +557,7 @@ export const ClientProjectRoom = ({
       const response = await transport.document(projectId, documentId);
       setOpenDocument(response.data.document);
       void loadWorkspace(documentId);
+      void loadReview(documentId);
       const delivery = parseDelivery(response.data.delivery);
       setOpenDelivery(delivery);
       // The stamped copy is fetched eagerly only when the viewer can show it.
@@ -635,6 +682,16 @@ export const ClientProjectRoom = ({
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-5 sm:py-4">
           <ClientSiteSign subtitle="Client Project Room" />
+          {/* PHANTOM is the desk that handles this project; a client should see
+              who they are dealing with without having to ask. */}
+          <span
+            className="order-last inline-flex w-full items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-[11px] font-black uppercase tracking-[0.16em] text-emerald-800 sm:order-none sm:w-auto"
+            title="PHANTOM is the Code Rx desk that handles this project"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+            PHANTOM
+            <span className="font-bold normal-case tracking-normal text-emerald-700">your Code Rx desk</span>
+          </span>
           <div className="flex items-center gap-3">
             <div className="hidden text-right sm:block">
               <p className="max-w-[220px] truncate text-sm font-bold text-slate-900">{context.client.name}</p>
@@ -832,6 +889,19 @@ export const ClientProjectRoom = ({
                       <p role="status" className="mt-3 rounded-xl bg-white px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100">{workspaceNotice}</p>
                     ) : null}
                   </section>
+                ) : null}
+                {review ? (
+                  <ClientReviewSection
+                    review={review}
+                    choice={reviewChoice}
+                    comment={reviewComment}
+                    busy={reviewBusy}
+                    notice={reviewNotice}
+                    onChoose={setReviewChoice}
+                    onComment={setReviewComment}
+                    onSend={() => void sendReview()}
+                    onClear={() => { setReviewChoice(''); setReviewComment(''); }}
+                  />
                 ) : null}
                 <StampedCopyPanel
                   delivery={openDelivery}

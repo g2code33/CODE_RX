@@ -129,6 +129,151 @@ const buildPng = (width, height, colour = [200, 30, 40]) => {
   ]);
 };
 
+/**
+ * PHASE 20 — reading a PNG well enough to compare two renders of one artwork.
+ * The letter's header band and watermark are drawn with the society's official
+ * mark, so the test has to be able to say "this image IS that artwork" rather
+ * than trusting a filename.
+ */
+const readMarkPng = (bytes) => {
+  const buffer = Buffer.from(bytes);
+  let at = 8;
+  let width = 0;
+  let height = 0;
+  let depth = 0;
+  let colour = 0;
+  let palette = null;
+  const idat = [];
+  while (at < buffer.length) {
+    const length = buffer.readUInt32BE(at);
+    const type = buffer.slice(at + 4, at + 8).toString('latin1');
+    const data = buffer.slice(at + 8, at + 8 + length);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      depth = data[8]; colour = data[9];
+    } else if (type === 'PLTE') palette = data;
+    else if (type === 'IDAT') idat.push(data);
+    else if (type === 'IEND') break;
+    at += 12 + length;
+  }
+  if (depth !== 8) throw new Error(`unsupported PNG bit depth ${depth}`);
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colour];
+  if (!channels) throw new Error(`unsupported PNG colour type ${colour}`);
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(width * height * 4, 255);
+  const prior = Buffer.alloc(stride);
+  const row = Buffer.alloc(stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.slice(y * (stride + 1) + 1, y * (stride + 1) + 1 + stride);
+    for (let i = 0; i < stride; i += 1) {
+      const a = i >= channels ? row[i - channels] : 0;
+      const b = prior[i];
+      const c = i >= channels ? prior[i - channels] : 0;
+      let value = line[i];
+      if (filter === 1) value += a;
+      else if (filter === 2) value += b;
+      else if (filter === 3) value += (a + b) >> 1;
+      else if (filter === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        value += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+      }
+      row[i] = value & 0xff;
+    }
+    row.copy(prior);
+    for (let x = 0; x < width; x += 1) {
+      const src = x * channels;
+      const dst = (y * width + x) * 4;
+      if (colour === 6) { pixels[dst] = row[src]; pixels[dst + 1] = row[src + 1]; pixels[dst + 2] = row[src + 2]; pixels[dst + 3] = row[src + 3]; }
+      else if (colour === 2) { pixels[dst] = row[src]; pixels[dst + 1] = row[src + 1]; pixels[dst + 2] = row[src + 2]; }
+      else if (colour === 0) { pixels[dst] = pixels[dst + 1] = pixels[dst + 2] = row[src]; }
+      else if (colour === 4) { pixels[dst] = pixels[dst + 1] = pixels[dst + 2] = row[src]; pixels[dst + 3] = row[src + 1]; }
+      else if (colour === 3 && palette) { const p = row[src] * 3; pixels[dst] = palette[p]; pixels[dst + 1] = palette[p + 1]; pixels[dst + 2] = palette[p + 2]; }
+    }
+  }
+  return { width, height, pixels };
+};
+
+/** Mean absolute per-channel difference between two same-sized images. */
+const markDistancePx = (a, b) => {
+  if (a.width !== b.width || a.height !== b.height) return Infinity;
+  let total = 0;
+  for (let i = 0; i < a.pixels.length; i += 1) {
+    if (i % 4 === 3) continue;
+    total += Math.abs(a.pixels[i] - b.pixels[i]);
+  }
+  return total / (a.pixels.length * 0.75);
+};
+
+/** Box-average downscale — enough to compare two renders of one artwork. */
+const shrinkMark = (image, width, height) => {
+  const pixels = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.floor((x * image.width) / width);
+      const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * image.width) / width));
+      const y0 = Math.floor((y * image.height) / height);
+      const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * image.height) / height));
+      let r = 0; let g = 0; let b = 0; let a = 0; let n = 0;
+      for (let sy = y0; sy < y1; sy += 1) {
+        for (let sx = x0; sx < x1; sx += 1) {
+          const at = (sy * image.width + sx) * 4;
+          r += image.pixels[at]; g += image.pixels[at + 1]; b += image.pixels[at + 2]; a += image.pixels[at + 3];
+          n += 1;
+        }
+      }
+      const dst = (y * width + x) * 4;
+      pixels[dst] = Math.round(r / n); pixels[dst + 1] = Math.round(g / n);
+      pixels[dst + 2] = Math.round(b / n); pixels[dst + 3] = Math.round(a / n);
+    }
+  }
+  return { width, height, pixels };
+};
+
+/** The mark's artwork laid over a flat background, exactly as a PDF stores it. */
+const markOverBackground = (image, colour) => {
+  const pixels = Buffer.alloc(image.width * image.height * 4, 255);
+  for (let i = 0; i < image.width * image.height; i += 1) {
+    const alpha = image.pixels[i * 4 + 3] / 255;
+    for (let channel = 0; channel < 3; channel += 1) {
+      pixels[i * 4 + channel] = Math.round(image.pixels[i * 4 + channel] * alpha + colour[channel] * (1 - alpha));
+    }
+  }
+  return { width: image.width, height: image.height, pixels };
+};
+
+/** Every 96×96 DeviceRGB image a stamped letter embeds, as raw pixels. */
+const letterMarks = (bytes) => {
+  const latin = Buffer.from(bytes || []).toString('latin1');
+  const found = [];
+  const pattern = /\/Subtype \/Image[\s\S]{0,400}?stream\r?\n/g;
+  let match;
+  while ((match = pattern.exec(latin)) !== null) {
+    const width = Number(/\/Width (\d+)/.exec(match[0])?.[1] || 0);
+    const height = Number(/\/Height (\d+)/.exec(match[0])?.[1] || 0);
+    const colours = Number(/\/Colors (\d+)/.exec(match[0])?.[1] || 3);
+    const start = match.index + match[0].length;
+    const end = latin.indexOf('endstream', start);
+    let raw = null;
+    try { raw = zlib.inflateSync(Buffer.from(latin.slice(start, end), 'latin1')); } catch { raw = null; }
+    if (!raw || !width || !height || colours !== 3) continue;
+    const stride = width * colours;
+    if (raw.length < stride * height) continue;
+    const pixels = Buffer.alloc(width * height * 4, 255);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const src = y * stride + x * 3;
+        const dst = (y * width + x) * 4;
+        pixels[dst] = raw[src]; pixels[dst + 1] = raw[src + 1]; pixels[dst + 2] = raw[src + 2];
+      }
+    }
+    found.push({ width, height, pixels });
+  }
+  return found;
+};
+
 /** A stored (uncompressed) ZIP — exactly what a .docx is. */
 const buildZip = (entries) => {
   const locals = [];
@@ -572,7 +717,7 @@ const main = async () => {
   const clientIndexes = db.query(
     "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_client%' ORDER BY name",
   ).map((row) => row.name);
-  check('all 12 client-portal authorization indexes exist', clientIndexes.length === 12, clientIndexes.join(','));
+  check('all 13 client-portal authorization indexes exist', clientIndexes.length === 13, clientIndexes.join(','));
   check('temporary-link expiry is indexed for the sweep', clientIndexes.includes('idx_client_links_expiry'));
   check('the audit feed is indexed by action',
     db.query("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name='idx_audit_logs_action'")[0].c === 1);
@@ -590,8 +735,15 @@ const main = async () => {
     lifecycleSql.includes('published') && lifecycleSql.includes('in_review') && lifecycleSql.includes('unpublished'));
   check('schema version marker was advanced',
     db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('client-portal'));
-  check('the 63 pre-existing tables are untouched and 8 portal tables were added',
-    allTables.length === 63 + 8, `${allTables.length} user tables`);
+  // Phase 20 adds the review section's own table: one row per answer, so a
+  // client who changes their mind leaves a trail instead of overwriting.
+  check('the 63 pre-existing tables are untouched and 9 portal tables were added',
+    allTables.length === 63 + 9, `${allTables.length} user tables`);
+  check('the review table hangs off the document, the client and the project',
+    db.query('PRAGMA foreign_key_list(client_document_reviews)').length === 3);
+  check('the review table refuses an answer that is not one of the four',
+    /CHECK \(decision IN \('approve','decline','pending','custom'\)\)/.test(
+      db.query("SELECT sql FROM sqlite_master WHERE name = 'client_document_reviews'")[0].sql));
 
   const preExistingIndexes = db.query(
     `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'idx_client%' AND name NOT LIKE 'sqlite_%'`,
@@ -4379,6 +4531,290 @@ const main = async () => {
     !JSON.stringify(db.query('SELECT * FROM client_links WHERE public_id IN (?, ?)', directLink.json.data.id, addressPasskeyLink.json.data.id))
       .includes('#client-portal')
     && Number(db.query('SELECT COUNT(*) AS c FROM client_links WHERE public_id = ?', directLink.json.data.id)[0].c) === 1);
+
+  // -------------------------------------------------------------------------
+  group('31. ONE logo everywhere — the official mark, and nothing else (Phase 20)');
+  const officialMarkBytes = fs.readFileSync(path.join(ROOT, 'public/CODE RX11.png'));
+  const officialMark = readMarkPng(officialMarkBytes);
+  check('the society ships exactly one logo file', (() => {
+    const images = fs.readdirSync(path.join(ROOT, 'public')).filter((name) => /\.png$/i.test(name));
+    return images.length === 1 && images[0] === 'CODE RX11.png';
+  })(), fs.readdirSync(path.join(ROOT, 'public')).join(', '));
+  check('the official mark is a square 512×512 file', officialMark.width === 512 && officialMark.height === 512);
+
+  const logoSource = fs.readFileSync(path.join(ROOT, 'functions/lib/client-delivery-logo.ts'), 'utf8');
+  const embeddedBase64 = /const BRAND_MARK_PNG_BASE64 =([\s\S]*?);\n/.exec(logoSource)?.[1]
+    ?.replace(/'/g, '').replace(/\+\s*\n/g, '').replace(/\s/g, '') || '';
+  const pipelineMark = readMarkPng(Buffer.from(embeddedBase64, 'base64'));
+  check('the mark every letter is stamped with is 96×96', pipelineMark.width === 96 && pipelineMark.height === 96,
+    `${pipelineMark.width}×${pipelineMark.height}`);
+  const markDistance = markDistancePx(pipelineMark, shrinkMark(officialMark, 96, 96));
+  check('and it is the official artwork, not the retired one', markDistance < 25,
+    `mean channel difference ${markDistance.toFixed(2)} (the retired mark measures 92)`);
+  check('the retired mark is no longer the source of the stamped logo',
+    !/logo-small|logo\.png/.test(logoSource));
+
+  const retiredAddresses = /\/logo\.png|\/logo-small\.png|\/icon-192\.png|\/icon-512(-maskable)?\.png|\/apple-touch-icon\.png/;
+  const sourceFiles = [
+    ...fs.readdirSync(path.join(ROOT, 'src'), { recursive: true }).filter((name) => /\.(ts|tsx|css)$/.test(String(name))).map((name) => path.join(ROOT, 'src', String(name))),
+    path.join(ROOT, 'index.html'),
+    path.join(ROOT, 'public/sw.js'),
+    path.join(ROOT, 'public/manifest.webmanifest'),
+  ];
+  const offenders = sourceFiles.filter((file) => retiredAddresses.test(fs.readFileSync(file, 'utf8')));
+  check('nothing under src/, the page, the worker or the manifest asks for a retired logo',
+    offenders.length === 0, offenders.map((file) => path.relative(ROOT, file)).join(', '));
+
+  const editorSchema = fs.readFileSync(path.join(ROOT, 'src/data/editorSchema.ts'), 'utf8');
+  check('the Home page Hero uses the official mark as its default',
+    /'hero\.logo':\s*\{ src: '\/CODE%20RX11\.png'/.test(editorSchema));
+  check('the editor no longer reserves logo.png for the Hero', !/'hero\.logo'[^\n]*logo\.png/.test(editorSchema));
+
+  const schemaSource = fs.readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
+  check('published branding is normalised across every logo slot, the Hero included',
+    /PUBLISHED_LOGO_KEYS = \[[^\]]*'hero\.logo'/.test(schemaSource));
+  check('the one policy is exported, so a reader and the migration share it',
+    /export const normalizeBrandLogosInContent/.test(schemaSource));
+
+  const workerSource = fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8');
+  check('the offline cache holds the official mark and no retired logo',
+    workerSource.includes('/CODE%20RX11.png') && !retiredAddresses.test(workerSource));
+  const manifestSource = fs.readFileSync(path.join(ROOT, 'public/manifest.webmanifest'), 'utf8');
+  check('the install manifest offers only the official mark',
+    manifestSource.includes('/CODE%20RX11.png') && !retiredAddresses.test(manifestSource));
+
+  // A database saved before the change still names the retired logo. The read
+  // that would have shown it heals it, and the stored copy is corrected.
+  const legacyContent = {
+    version: 1,
+    media: {
+      'brand.logo': { src: '/logo-small.png', alt: 'Code Rx Society' },
+      'hero.logo': { src: '/logo.png', alt: 'CODE Rx Society' },
+      'about.logo': { src: '/CODE%20RX11.png', alt: 'Kept as it is' },
+      'footer.logoSmall': { src: '/logo.png', alt: 'Not a published logo slot' },
+    },
+  };
+  const savedLegacy = await request('PUT', '/api/site-content', { token: phantomToken, body: legacyContent });
+  check('a payload saved with the old logo address is accepted', savedLegacy.status === 200, JSON.stringify(savedLegacy.json).slice(0, 140));
+  const readBack = await request('GET', '/api/site-content');
+  const publishedSlots = ['brand.logo', 'brand.logoSmall', 'hero.logo', 'about.logo', 'footer.logo'];
+  check('no published logo slot ever answers with a retired address',
+    readBack.status === 200 && publishedSlots.every((key) => !readBack.json.data.media[key]
+      || readBack.json.data.media[key].src === '/CODE%20RX11.png'),
+    JSON.stringify(readBack.json.data).slice(0, 160));
+  check('every published logo slot now carries the official mark',
+    readBack.json.data.media['brand.logo'].src === '/CODE%20RX11.png'
+    && readBack.json.data.media['hero.logo'].src === '/CODE%20RX11.png');
+  check('an address that was already correct is left exactly as it was',
+    readBack.json.data.media['about.logo'].alt === 'Kept as it is');
+  check('a key that is not a published logo slot is not touched',
+    readBack.json.data.media['footer.logoSmall'].src === '/logo.png');
+  check('the stored copy was healed as well, not only the response',
+    !JSON.stringify(db.query('SELECT data FROM site_content WHERE id = 1')).includes('/logo-small.png'));
+
+  // The proof that matters most: the file a client actually receives.
+  const p20LogoClient = await createClient(phantomToken, 'Phase 20 Logo Client');
+  const p20LogoProject = await createProject(phantomToken, p20LogoClient.id, 'Phase 20 Logo Project');
+  const p20LogoKey = await createKey(phantomToken, p20LogoClient.id, p20LogoProject.id, { label: 'Phase 20 logo key' });
+  const p20LogoSession = await clientSession(p20LogoKey.passkey, 'phase 20 logo');
+  const p20LogoVault = await request('POST', '/api/vault/documents', {
+    token: phantomToken,
+    body: { section: p19BinSection.slug, title: 'Phase 20 logo Vault document', content: 'Letter body for the mark proof.' },
+  });
+  const p20LogoDocument = (await request('POST', `/api/phantom/clients/${p20LogoClient.id}/documents`, {
+    token: phantomToken,
+    body: {
+      projectId: p20LogoProject.id, category: 'letter', title: 'Phase 20 logo letter',
+      contentText: 'Letter body for the mark proof.', vaultDocumentId: p20LogoVault.json.data.id,
+    },
+  })).json.data;
+  await publish(phantomToken, p20LogoDocument.id);
+  const p20StampedLetter = await request('GET', `/api/client/project/${p20LogoProject.id}/documents/${p20LogoDocument.id}/preview`, {
+    clientSession: p20LogoSession,
+  });
+  check('the client can open the stamped letter', p20StampedLetter.status === 200 && p20StampedLetter.bytes.length > 0);
+  const letterMarkImages = letterMarks(p20StampedLetter.bytes);
+  check('the letter embeds the mark more than once — the header band and the watermark',
+    letterMarkImages.length >= 2, `${letterMarkImages.length} images`);
+  const letterMarkMatches = letterMarkImages.filter((mark) => {
+    const corners = [[0, 0], [mark.width - 1, 0], [0, mark.height - 1], [mark.width - 1, mark.height - 1]]
+      .map(([x, y]) => { const at = (y * mark.width + x) * 4; return [mark.pixels[at], mark.pixels[at + 1], mark.pixels[at + 2]]; });
+    const background = [0, 1, 2].map((channel) => Math.round(corners.reduce((total, corner) => total + corner[channel], 0) / corners.length));
+    return Math.min(
+      markDistancePx(mark, markOverBackground(pipelineMark, [255, 255, 255])),
+      markDistancePx(mark, markOverBackground(pipelineMark, background)),
+    ) < 8;
+  });
+  check('every mark in the letter is the official logo, not the retired one',
+    letterMarkImages.length >= 2 && letterMarkMatches.length === letterMarkImages.length,
+    `${letterMarkMatches.length}/${letterMarkImages.length} match`);
+  check('the letter is the pipeline\'s own output, never a forwarded original',
+    /^(stamped|generated)_/.test(String(p20StampedLetter.headers.get('x-code-rx-delivery') || '')),
+    String(p20StampedLetter.headers.get('x-code-rx-delivery') || 'no header'));
+
+  // -------------------------------------------------------------------------
+  group('32. The review section on everything sent to a client (Phase 20)');
+  const p20Client = await createClient(phantomToken, 'Phase 20 Client');
+  const p20Project = await createProject(phantomToken, p20Client.id, 'Phase 20 Project');
+  const p20Key = await createKey(phantomToken, p20Client.id, p20Project.id, { label: 'Phase 20 key' });
+  const p20Session = await clientSession(p20Key.passkey, 'phase 20');
+  const p20Document = (await request('POST', `/api/phantom/clients/${p20Client.id}/documents`, {
+    token: phantomToken,
+    body: {
+      projectId: p20Project.id, category: 'letter', title: 'Phase 20 letter',
+      contentText: 'The wording Code Rx sent to the client.',
+    },
+  })).json.data;
+  const p20Draft = (await request('POST', `/api/phantom/clients/${p20Client.id}/documents`, {
+    token: phantomToken,
+    body: { projectId: p20Project.id, category: 'report', title: 'Phase 20 draft', contentText: 'Not published.' },
+  })).json.data;
+  await publish(phantomToken, p20Document.id);
+  const p20ReviewPath = `/api/client/project/${p20Project.id}/documents/${p20Document.id}/review`;
+
+  check('the review section cannot be read without a client session', (await request('GET', p20ReviewPath)).status === 401);
+  check('the review section cannot be answered without a client session',
+    (await request('POST', p20ReviewPath, { body: { decision: 'approve' } })).status === 401);
+
+  const p20Read = await request('GET', p20ReviewPath, { clientSession: p20Session });
+  check('the client can read the review section on a sent document',
+    p20Read.status === 200, JSON.stringify(p20Read.json).slice(0, 160));
+  check('the four answers are exactly approve, decline, pending and the client\'s own words',
+    (p20Read.json.data.choices || []).map((choice) => choice.decision).join(',') === 'approve,decline,pending,custom');
+  check('the answers are worded for the client, not for an operator',
+    (p20Read.json.data.choices || []).map((choice) => choice.label).join(',') === 'Approved,Declined,Pending,Custom answer');
+  check('only the client\'s own answer takes free text',
+    (p20Read.json.data.choices || []).filter((choice) => choice.freeText).map((choice) => choice.decision).join(',') === 'custom');
+  check('the four answers are decided by the server, so a fifth cannot be offered',
+    (p20Read.json.data.choices || []).length === 4);
+  check('the client is told how much they may write', Number(p20Read.json.data.maxChars) === 2000);
+  check('an unanswered document shows no answer', p20Read.json.data.current === null);
+  check('the review section names the document it belongs to',
+    p20Read.json.data.documentId === p20Document.id && String(p20Read.json.data.title) === 'Phase 20 letter');
+  check('the review section never carries a database identifier',
+    !/\b(client_id|client_project_id|client_document_id)\b/.test(JSON.stringify(p20Read.json.data)));
+
+  const p20Approve = await request('POST', p20ReviewPath, {
+    clientSession: p20Session, body: { decision: 'approve', comment: 'Exactly right — go ahead.' },
+  });
+  check('the client can approve', p20Approve.status === 200, JSON.stringify(p20Approve.json).slice(0, 160));
+  check('the client is told their answer went to PHANTOM', /PHANTOM/.test(String(p20Approve.json?.message || '')));
+  const p20AfterApprove = await request('GET', p20ReviewPath, { clientSession: p20Session });
+  check('the answer is stored and read back',
+    p20AfterApprove.json.data.current.decision === 'approve'
+    && p20AfterApprove.json.data.current.comment === 'Exactly right — go ahead.');
+  check('the answer carries the time it was given', Boolean(p20AfterApprove.json.data.current.at));
+  check('an unanswered document still has no history',
+    (p20Read.json.data.history || []).length === 0);
+
+  check('an invented answer is refused',
+    (await request('POST', p20ReviewPath, { clientSession: p20Session, body: { decision: 'looks-good' } })).status === 400);
+  check('the client\'s own answer must actually say something',
+    (await request('POST', p20ReviewPath, { clientSession: p20Session, body: { decision: 'custom', comment: '   ' } })).status === 400);
+  const p20TooLong = await request('POST', p20ReviewPath, {
+    clientSession: p20Session, body: { decision: 'custom', comment: 'x'.repeat(2401) },
+  });
+  check('an answer that is too long is refused rather than silently cut',
+    p20TooLong.status === 400 && /2000/.test(String(p20TooLong.json?.error || '')), String(p20TooLong.json?.error || ''));
+  check('a client who is not signed in cannot answer at all',
+    (await request('POST', p20ReviewPath, { body: { decision: 'approve' } })).status === 401);
+
+  const p20Change = await request('POST', p20ReviewPath, {
+    clientSession: p20Session, body: { decision: 'decline', comment: 'Second thoughts about the pricing.' },
+  });
+  check('the client can change their answer', p20Change.status === 200);
+  const p20Changed = await request('GET', p20ReviewPath, { clientSession: p20Session });
+  check('the newest answer is the one in force', p20Changed.json.data.current.decision === 'decline');
+  check('the earlier answer is kept as history rather than overwritten',
+    (p20Changed.json.data.history || []).length === 2
+    && p20Changed.json.data.history[0].decision === 'decline'
+    && p20Changed.json.data.history[1].decision === 'approve');
+  check('the history never exposes another client\'s answers',
+    new Set((p20Changed.json.data.history || []).map((row) => row.comment)).size === 2);
+  const p20OwnWords = await request('POST', p20ReviewPath, {
+    clientSession: p20Session, body: { decision: 'custom', comment: 'Please add the delivery date.' },
+  });
+  check('the client\'s own words are accepted as an answer', p20OwnWords.status === 200);
+  check('the client\'s own words are kept exactly as typed',
+    (await request('GET', p20ReviewPath, { clientSession: p20Session })).json.data.current.comment === 'Please add the delivery date.');
+  check('a document that does not exist answers 404, not a stack trace',
+    (await request('GET', `/api/client/project/${p20Project.id}/documents/doc_000000000000000000000000/review`, { clientSession: p20Session })).status === 404);
+  check('an unpublished document cannot be reached through the review section',
+    (await request('GET', `/api/client/project/${p20Project.id}/documents/${p20Draft.id}/review`, { clientSession: p20Session })).status === 404);
+
+  const p20Other = await createClient(phantomToken, 'Phase 20 Other Client');
+  const p20OtherProject = await createProject(phantomToken, p20Other.id, 'Phase 20 Other Project');
+  const p20OtherKey = await createKey(phantomToken, p20Other.id, p20OtherProject.id, { label: 'Phase 20 other key' });
+  const p20OtherSession = await clientSession(p20OtherKey.passkey, 'phase 20 other');
+  check('another client cannot read someone else\'s review',
+    (await request('GET', p20ReviewPath, { clientSession: p20OtherSession })).status === 404);
+  check('another client cannot answer someone else\'s review',
+    (await request('POST', p20ReviewPath, { clientSession: p20OtherSession, body: { decision: 'approve' } })).status === 404);
+
+  // -------------------------------------------------------------------------
+  group('33. The answer reaches PHANTOM, and changes nothing about access (Phase 20)');
+  const p20InboxPayload = (await request('GET', '/api/notifications', { token: phantomToken })).json.data;
+  const p20Inbox = Array.isArray(p20InboxPayload) ? p20InboxPayload : (p20InboxPayload?.items || []);
+  const p20Notice = p20Inbox.find((row) => String(row.message || '').includes('Phase 20 letter')
+    && /decline|custom|answer/i.test(String(row.message)));
+  check('PHANTOM is notified in the existing inbox', Boolean(p20Notice), JSON.stringify(p20Inbox[0] || {}).slice(0, 160));
+  check('the notification names the client and the project',
+    Boolean(p20Notice) && String(p20Notice.message).includes('Phase 20 Client') && String(p20Notice.message).includes('Phase 20 Project'));
+  check('the notification says what the client answered',
+    Boolean(p20Notice) && /Custom answer|Declined/i.test(String(p20Notice.message)), String(p20Notice?.message || '').slice(0, 160));
+  check('the notification carries the client\'s own words',
+    Boolean(p20Notice) && String(p20Notice.message).includes('Please add the delivery date'));
+
+  const p20Activity = (await request('GET', `/api/phantom/clients/${p20Client.id}/activity`, { token: phantomToken })).json.data || [];
+  check('the client\'s activity history records the answer in plain words',
+    JSON.stringify(p20Activity).includes('Answered the review'), JSON.stringify(p20Activity).slice(0, 200));
+  check('the activity history records each answer, not only the last',
+    JSON.stringify(p20Activity).split('Answered the review').length - 1 >= 3,
+    String(JSON.stringify(p20Activity).split('Answered the review').length - 1));
+  const p20Audit = (await request('GET', '/api/phantom/audit-logs?limit=200', { token: phantomToken })).json.data || [];
+  const p20AuditEntry = p20Audit.find((row) => row.action === 'client.document.reviewed'
+    && JSON.stringify(row).includes(p20Document.id));
+  check('the answer is in the audit trail', Boolean(p20AuditEntry));
+  check('the audit entry records which answer was given',
+    Boolean(p20AuditEntry) && /custom|decline|approve/.test(JSON.stringify(p20AuditEntry)));
+  check('the audit entry records that PHANTOM was notified',
+    Boolean(p20AuditEntry) && /phantomNotified/.test(JSON.stringify(p20AuditEntry)));
+
+  const p20PanelRow = (await request('GET', `/api/phantom/clients/${p20Client.id}/documents`, { token: phantomToken })).json.data
+    .find((row) => row.id === p20Document.id);
+  check('the operator\'s own document list shows the client\'s answer',
+    p20PanelRow?.review?.decision === 'custom' && p20PanelRow?.review?.comment === 'Please add the delivery date.',
+    JSON.stringify(p20PanelRow?.review || null));
+  check('a document nobody has answered carries no review at all',
+    (await request('GET', `/api/phantom/clients/${p20Client.id}/documents`, { token: phantomToken })).json.data
+      .find((row) => row.id === p20Draft.id)?.review === null);
+
+  check('answering does not change whether the client may see the document',
+    p20PanelRow?.clientVisible === true && p20PanelRow?.allowView === true);
+  check('answering does not republish or archive the document', String(p20PanelRow?.lifecycle) === 'published');
+  check('answering does not move the document\'s version',
+    String(p20PanelRow?.version) === '1.0', `${p20PanelRow?.version}`);
+  check('the client can still work on the document after answering',
+    (await request('GET', `/api/client/project/${p20Project.id}/documents/${p20Document.id}/workspace`, { clientSession: p20Session })).status === 200);
+
+  const p20Removed = await request('DELETE', `/api/phantom/client-documents/${p20Document.id}`, { token: phantomToken });
+  check('the document can still be deleted to the Recycle Bin', p20Removed.status === 200, JSON.stringify(p20Removed.json).slice(0, 140));
+  const p20BinEntry = ((await request('GET', '/api/phantom/recycle-bin', { token: phantomToken })).json.data || [])
+    .find((row) => row.resource_type === 'client_document' && String(row.title || '').includes('Phase 20 letter'));
+  check('the deleted document is in the Recycle Bin', Boolean(p20BinEntry));
+  const p20ReviewsInBin = db.query('SELECT COUNT(*) AS c FROM client_document_reviews WHERE client_document_id = ?', p20Document.id);
+  check('the client\'s answers are not left behind by the delete',
+    Number(p20ReviewsInBin[0]?.c || 0) === 0);
+  if (p20BinEntry) {
+    const p20Restore = await request('POST', `/api/phantom/recycle-bin/${p20BinEntry.id}/restore`, { token: phantomToken });
+    check('the document restores from the Recycle Bin', p20Restore.status === 200, JSON.stringify(p20Restore.json).slice(0, 140));
+    const p20Restored = (await request('GET', `/api/phantom/clients/${p20Client.id}/documents`, { token: phantomToken })).json.data
+      .find((row) => row.id === p20Document.id);
+    check('the client\'s answers come back with it',
+      p20Restored?.review?.decision === 'custom' && p20Restored?.review?.comment === 'Please add the delivery date.',
+      JSON.stringify(p20Restored?.review || null));
+    check('a restored document still waits to be published again', String(p20Restored?.lifecycle || '') !== 'published');
+  }
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

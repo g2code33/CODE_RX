@@ -706,6 +706,19 @@ export const clientPortal = {
       // instead of the object the route reads.
       { method: 'POST', body: payload },
     ),
+  /**
+   * The review section: the four answers a client may give, and their own words.
+   * The answer goes to PHANTOM; it never changes access to the document.
+   */
+  review: (projectId: string, documentId: string) =>
+    clientCall<{ data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/review`,
+    ),
+  saveReview: (projectId: string, documentId: string, decision: string, comment: string) =>
+    clientCall<{ message: string; data: any }>(
+      `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/review`,
+      { method: 'POST', body: { decision, comment } },
+    ),
   sendWorkspace: (projectId: string, documentId: string) =>
     clientCall<{ message: string; data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/workspace/send`,

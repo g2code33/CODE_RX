@@ -1023,6 +1023,27 @@ CREATE TABLE IF NOT EXISTS client_reference_sequences (
 
 CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status);
 CREATE INDEX IF NOT EXISTS idx_client_projects_client ON client_projects(client_id, status, is_archived);
+-- The review section a client sees on every document sent to them.
+--
+-- One row per answer, so a client who changes their mind leaves a trail rather
+-- than overwriting what they said before; the newest row is the answer in force.
+-- The decision vocabulary is fixed at four answers — approve, decline, pending,
+-- and the client's own words — and the database refuses anything else.
+CREATE TABLE IF NOT EXISTS client_document_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_document_id INTEGER NOT NULL,
+  client_id INTEGER NOT NULL,
+  client_project_id INTEGER NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('approve','decline','pending','custom')),
+  comment TEXT NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(client_document_id) REFERENCES client_documents(id),
+  FOREIGN KEY(client_id) REFERENCES clients(id),
+  FOREIGN KEY(client_project_id) REFERENCES client_projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_document_reviews_document ON client_document_reviews(client_document_id, created_at DESC, id DESC);
+
 CREATE INDEX IF NOT EXISTS idx_client_documents_project ON client_documents(client_project_id, is_archived, lifecycle_status, client_visible);
 CREATE INDEX IF NOT EXISTS idx_client_documents_client ON client_documents(client_id, is_archived, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_client_documents_vault ON client_documents(vault_document_id);
@@ -1174,27 +1195,54 @@ const backfillApprovedApplicationActivations = async (db: D1Database) => {
   ).run();
 };
 
-/** Use the new supplied Code Rx Society asset throughout published branding,
- * while deliberately preserving the Home page Hero's /logo.png source. */
+/**
+ * ONE logo everywhere.
+ *
+ * Published branding must use the society's official mark
+ * (`public/CODE RX11.png`, served as `/CODE%20RX11.png`). Any site content that
+ * still carries an older logo path — including the Home page Hero, which used to
+ * keep `/logo.png` on purpose — is moved to the official mark, so a database that
+ * predates this change cannot keep showing a different logo.
+ */
+/** The society's one logo, as the browser asks for it. */
+export const OFFICIAL_BRAND_MARK = '/CODE%20RX11.png';
+
+/** Addresses that used to point at a different Code Rx logo. */
+const RETIRED_BRAND_MARKS = new Set([
+  '/logo.png', '/logo-small.png', 'logo.png', 'logo-small.png',
+  '/icon-192.png', '/icon-512.png', '/icon-512-maskable.png', '/apple-touch-icon.png',
+]);
+
+/** Every published logo slot — the Home page Hero included: one mark, everywhere. */
+const PUBLISHED_LOGO_KEYS = ['brand.logo', 'brand.logoSmall', 'hero.logo', 'about.logo', 'footer.logo'];
+
+/**
+ * The policy itself, so it can be applied wherever published branding is read
+ * or written — the boot migration and the content read path both use this one
+ * function, and no reader can be shown a retired logo address. Returns true when
+ * something was rewritten, so a caller can persist the healed content.
+ */
+export const normalizeBrandLogosInContent = (content: any): boolean => {
+  if (!content || typeof content !== 'object' || !content.media || typeof content.media !== 'object') return false;
+  let changed = false;
+  for (const key of PUBLISHED_LOGO_KEYS) {
+    const asset = content.media[key];
+    if (asset && typeof asset === 'object' && RETIRED_BRAND_MARKS.has(String(asset.src || ''))) {
+      content.media[key] = { ...asset, src: OFFICIAL_BRAND_MARK };
+      changed = true;
+    }
+  }
+  return changed;
+};
+
 const normalizePublishedBrandLogos = async (db: D1Database) => {
   const rows = await asRows<{ data: string }>(db.prepare('SELECT data FROM site_content WHERE id = 1'));
   const raw = rows[0]?.data;
   if (!raw) return;
   let content: any;
   try { content = JSON.parse(raw); } catch { return; }
-  if (!content || typeof content !== 'object' || !content.media || typeof content.media !== 'object') return;
-  const legacy = new Set(['/logo.png', '/logo-small.png', 'logo.png', 'logo-small.png']);
-  const targets = ['brand.logo', 'brand.logoSmall', 'about.logo', 'footer.logo'];
-  let changed = false;
-  for (const key of targets) {
-    const asset = content.media[key];
-    if (asset && typeof asset === 'object' && legacy.has(String(asset.src || ''))) {
-      content.media[key] = { ...asset, src: '/CODE%20RX11.png' };
-      changed = true;
-    }
-  }
-  // hero.logo is intentionally not included: logo.png stays on the Home page.
-  if (changed) await db.prepare('UPDATE site_content SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').bind(JSON.stringify(content)).run();
+  if (!normalizeBrandLogosInContent(content)) return;
+  await db.prepare('UPDATE site_content SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').bind(JSON.stringify(content)).run();
 };
 
 const runSafeMigrations = async (db: D1Database) => {

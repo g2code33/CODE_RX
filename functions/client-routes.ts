@@ -376,6 +376,78 @@ const saveClientDocumentRevision = async (
   return { version: nextVersion, savedAt: now, vaultVersion };
 };
 
+// ---------------------------------------------------------------------------
+// THE REVIEW SECTION
+//
+// Every document sent to a client carries four answers: approve, decline,
+// pending, or the client's own words. An answer is feedback to PHANTOM and
+// nothing more: it never changes access, never publishes or unpublishes
+// anything, and never touches the document itself. It is stored as one row per
+// answer (history, not overwrite), it reaches PHANTOM through the notification
+// inbox the platform already uses, and it is recorded in the client's activity
+// and in the audit trail.
+// ---------------------------------------------------------------------------
+
+const CLIENT_REVIEW_DECISIONS = ['approve', 'decline', 'pending', 'custom'] as const;
+type ClientReviewDecision = typeof CLIENT_REVIEW_DECISIONS[number];
+
+const CLIENT_REVIEW_LABELS: Record<ClientReviewDecision, string> = {
+  approve: 'Approved',
+  decline: 'Declined',
+  pending: 'Pending',
+  custom: 'Custom answer',
+};
+
+/** How long a client's own answer may be. */
+const MAX_CLIENT_REVIEW_CHARS = 2000;
+
+/** The newest answer on a document, or null when the client has not answered. */
+const latestClientReview = async (db: D1Database, documentId: number) => {
+  const row = await one<any>(db.prepare(
+    `SELECT decision, comment, created_at FROM client_document_reviews
+     WHERE client_document_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`
+  ).bind(documentId));
+  if (!row) return null;
+  const decision = String(row.decision || '') as ClientReviewDecision;
+  return {
+    decision,
+    label: CLIENT_REVIEW_LABELS[decision] || 'Answered',
+    comment: String(row.comment || ''),
+    at: row.created_at || null,
+  };
+};
+
+/**
+ * Tells PHANTOM a client answered. Exact same plumbing as every other client
+ * notice: the existing recipient list and the existing inbox. A failure here
+ * never loses the answer — it is already stored.
+ */
+const notifyPhantomOfReview = async (
+  db: D1Database,
+  input: { principal: ClientPrincipal; project: any; document: any; decision: ClientReviewDecision; comment: string },
+) => {
+  const { principal, project, document, decision, comment } = input;
+  const label = CLIENT_REVIEW_LABELS[decision] || 'Answered';
+  let recipients = 0;
+  try {
+    const targets = await clientNotificationRecipients(db);
+    if (targets.length) {
+      await createNotification(db, {
+        title: `Client ${label.toLowerCase()} a document`,
+        message: `${principal.clientName}: ${label} — ${document.title} (${document.reference_code}), ${project.name}.`
+          + (comment ? ` “${comment.slice(0, 300)}”` : ''),
+        audience: 'system',
+        audienceLabel: 'Client portal',
+        recipientProfileIds: targets,
+      });
+      recipients = targets.length;
+    }
+  } catch (error) {
+    console.error('[code-rx] client review notification failed:', error);
+  }
+  return recipients;
+};
+
 /**
  * Tells PHANTOM a document is ready, through the notification inbox the platform
  * already uses for client events. A failure here never loses the revision: it is
@@ -1073,6 +1145,133 @@ export const registerClientRoutes = (app: ClientApp) => {
           savedAt: saved.savedAt,
           vaultVersion: saved.vaultVersion,
           vaultLinked: Boolean(document.vault_document_id),
+        },
+      });
+    });
+
+  /**
+   * THE REVIEW SECTION, READ. Available on every document the client may see —
+   * not only on the ones they can edit — because the answer is about the
+   * document they were sent, not about working on it.
+   */
+  app.get('/api/client/project/:projectId/documents/:documentId/review',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      // The client's own answers are theirs to read back: the newest one is the
+      // answer in force, and the earlier ones show when they changed their mind.
+      const history = await asRows<any>(c.env.DB.prepare(
+        `SELECT decision, comment, created_at FROM client_document_reviews
+         WHERE client_document_id = ? ORDER BY created_at DESC, id DESC LIMIT 20`
+      ).bind(Number(document.id)));
+
+      return clientJson({
+        success: true,
+        data: {
+          documentId: document.public_id,
+          reference: document.reference_code,
+          title: document.title,
+          // The four answers are decided by the server, so the room never
+          // invents one and cannot offer a fifth.
+          choices: CLIENT_REVIEW_DECISIONS.map((decision) => ({
+            decision,
+            label: CLIENT_REVIEW_LABELS[decision],
+            freeText: decision === 'custom',
+          })),
+          maxChars: MAX_CLIENT_REVIEW_CHARS,
+          current: await latestClientReview(c.env.DB, Number(document.id)),
+          history: history.map((row) => ({
+            decision: row.decision,
+            label: CLIENT_REVIEW_LABELS[row.decision as ClientReviewDecision] || 'Answered',
+            comment: String(row.comment || ''),
+            at: row.created_at || null,
+          })),
+        },
+      });
+    });
+
+  /**
+   * THE REVIEW SECTION, ANSWERED. The client approves, declines, marks it
+   * pending, or writes their own answer. It is feedback to PHANTOM: PHANTOM is
+   * notified immediately, and the answer joins the client's activity history and
+   * the audit trail. Nothing about the document's access changes here, and a
+   * client can answer again when they change their mind.
+   */
+  app.post('/api/client/project/:projectId/documents/:documentId/review',
+    requireClientPortalEnabled, requireClientSession, requireClientProjectAccess, requireClientDocumentAccess,
+    async (c: any) => {
+      const principal = c.get('client') as ClientPrincipal;
+      const project = c.get('clientProject') as any;
+      const document = c.get('clientDocument') as any;
+      const exposure = c.get('clientDocumentExposure') as { canView: boolean; canDownload: boolean };
+      if (!exposure.canView) return clientNotFound();
+
+      const db = c.env.DB;
+      const body = await c.req.json().catch(() => ({}));
+      const decision = String(body.decision || '').trim().toLowerCase() as ClientReviewDecision;
+      if (!CLIENT_REVIEW_DECISIONS.includes(decision)) {
+        return clientJson({ success: false, error: 'Choose one of the four answers.', code: 'review_decision_invalid' }, 400);
+      }
+
+      // A comment longer than the limit is refused outright rather than quietly
+      // trimmed to nothing: the client's words must not disappear.
+      const rawComment = typeof body.comment === 'string' ? body.comment.trim() : '';
+      if (rawComment.length > MAX_CLIENT_REVIEW_CHARS) {
+        return clientJson({
+          success: false,
+          error: `Your answer is longer than ${MAX_CLIENT_REVIEW_CHARS} characters. Please shorten it.`,
+          code: 'review_comment_too_long',
+        }, 400);
+      }
+      const comment = rawComment;
+      // A custom answer is the client's own words: without them there is nothing
+      // to send, and an empty answer would only be noise in PHANTOM's inbox.
+      if (decision === 'custom' && !comment) {
+        return clientJson({ success: false, error: 'Type your answer before sending it.', code: 'review_comment_required' }, 400);
+      }
+
+      const result = await db.prepare(
+        `INSERT INTO client_document_reviews (client_document_id, client_id, client_project_id, decision, comment)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(Number(document.id), Number(document.client_id), Number(document.client_project_id), decision, comment).run();
+
+      const label = CLIENT_REVIEW_LABELS[decision];
+      const recipients = await notifyPhantomOfReview(db, { principal, project, document, decision, comment });
+
+      await audit(db, null, 'client.document.reviewed', 'client_document', Number(document.id), {
+        clientId: principal.clientPublicId,
+        projectId: project.public_id,
+        documentPublicId: document.public_id,
+        reference: document.reference_code,
+        decision,
+        comment,
+        phantomNotified: recipients > 0,
+      });
+      await recordClientActivity(db, 'DOCUMENT_REVIEWED', {
+        principal,
+        details: {
+          note: decision,
+          documentId: document.public_id,
+          reference: document.reference_code,
+          projectPublicId: project.public_id,
+        },
+      });
+
+      return clientJson({
+        success: true,
+        message: decision === 'custom'
+          ? 'Your answer was sent to PHANTOM.'
+          : `${label} — sent to PHANTOM. Thank you.`,
+        data: {
+          id: Number(result.meta.last_row_id),
+          decision,
+          label,
+          comment,
+          at: new Date().toISOString(),
+          current: await latestClientReview(db, Number(document.id)),
         },
       });
     });
@@ -2142,9 +2341,16 @@ export const registerClientRoutes = (app: ClientApp) => {
       clause += ' AND d.client_project_id = ?';
       params.push(project.id);
     }
+    // The client's latest answer travels with the document, so the panel can
+    // show what the client said without a second request per row.
     const documents = await asRows<any>(c.env.DB.prepare(
-      `SELECT d.*, p.public_id AS project_public_id, p.reference_code AS project_reference
+      `SELECT d.*, p.public_id AS project_public_id, p.reference_code AS project_reference,
+              rv.decision AS review_decision, rv.comment AS review_comment, rv.created_at AS review_at
        FROM client_documents d JOIN client_projects p ON p.id = d.client_project_id
+       LEFT JOIN client_document_reviews rv ON rv.id = (
+         SELECT id FROM client_document_reviews WHERE client_document_id = d.id
+         ORDER BY created_at DESC, id DESC LIMIT 1
+       )
        ${clause} ORDER BY d.updated_at DESC, d.id DESC LIMIT 500`
     ).bind(...params));
 
@@ -2166,6 +2372,12 @@ export const registerClientRoutes = (app: ClientApp) => {
       vaultDocumentId: document.vault_document_id === null ? null : Number(document.vault_document_id),
       vaultVersion: document.vault_version_number === null ? null : Number(document.vault_version_number),
       hasClientArtifact: Boolean(document.storage_reference),
+      // The review section's answer, exactly as the client left it.
+      review: document.review_decision ? {
+        decision: document.review_decision,
+        comment: document.review_comment || '',
+        at: document.review_at || null,
+      } : null,
       publishedAt: document.published_at || null,
       updatedAt: document.updated_at,
       project: { id: document.project_public_id, reference: document.project_reference },
@@ -2858,7 +3070,13 @@ const registerClientAccessCenterRoutes = (app: ClientApp) => {
     const document = await findDocumentByPublicId(db, documentPublicId);
     if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
 
-    await moveToRecycleBin(db, actor, 'client_document', document.id, `Client document · ${document.title}`, { document });
+    // The client's answers travel with the document into the Recycle Bin, so a
+    // restore brings back what the client said as well as the document itself.
+    const reviews = await asRows<any>(db.prepare(
+      'SELECT decision, comment, created_at FROM client_document_reviews WHERE client_document_id = ? ORDER BY created_at ASC, id ASC'
+    ).bind(document.id));
+    await moveToRecycleBin(db, actor, 'client_document', document.id, `Client document · ${document.title}`, { document, reviews });
+    await db.prepare('DELETE FROM client_document_reviews WHERE client_document_id = ?').bind(document.id).run();
     await db.prepare('DELETE FROM client_documents WHERE id = ?').bind(document.id).run();
     await audit(db, actor, 'client.document.deleted', 'client_document', document.id, {
       clientId: document.client_id,

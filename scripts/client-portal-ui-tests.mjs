@@ -62,6 +62,7 @@ const bundle = async () => {
         export { clientPortalSession } from './src/lib/cloudflare';
         export { ClientAccessScreen } from './src/components/ClientAccessScreen';
         export { ClientProjectRoom, StampedCopyPanel } from './src/components/ClientProjectRoom';
+        export { ClientReviewSection } from './src/components/ClientReviewSection';
         export { ClientAccessCenter, ActivityPanel, buildPreviewTransport, buildPreviewRoomContext, KeyRevealDialog } from './src/components/ClientAccessCenter';
         export { ClientPortalEntry } from './src/components/ClientPortalEntry';
         export { ClientSupportContact } from './src/components/ClientSupportContact';
@@ -113,7 +114,7 @@ const main = async () => {
   const {
     formatAccessKey, validateAccessKey, accessKeyHint, messageForFailure, failureMessage,
     FAILURE_MESSAGES, ACCESS_KEY_PLACEHOLDER, clientPortalSession,
-    ClientAccessScreen, ClientProjectRoom, StampedCopyPanel, ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext,
+    ClientAccessScreen, ClientProjectRoom, ClientReviewSection, StampedCopyPanel, ClientAccessCenter, buildPreviewTransport, buildPreviewRoomContext,
     visibleSections, emptyMessageFor, hasAnyPublishedContent, canDownload, canView,
     permissionLabel, publicationInfo, formatDate, overviewFacts, downloadFileName,
     documentFlags, ROOM_SECTIONS, CATEGORY_LABELS, PROJECT_STATUS_LABELS,
@@ -1831,19 +1832,13 @@ const main = async () => {
   }
   check('every image in the application defers its load', imagesWithoutLazy.length === 0, imagesWithoutLazy.join(' | '));
 
+  // ONE logo everywhere (Phase 20): the society ships a single image asset, so
+  // the weight budget and the resolution checks have exactly one subject.
+  const shippedImages = fs.readdirSync(path.join(ROOT, 'public')).filter((name) => /\.png$/i.test(name));
   const assetBytes = (file) => fs.statSync(path.join(ROOT, 'public', file)).size;
-  const budget = {
-    'CODE RX11.png': 140 * 1024,
-    'icon-512.png': 140 * 1024,
-    'icon-512-maskable.png': 100 * 1024,
-    'logo.png': 60 * 1024,
-    'logo-small.png': 40 * 1024,
-    'icon-192.png': 30 * 1024,
-    'apple-touch-icon.png': 30 * 1024,
-  };
-  const heavy = Object.entries(budget).filter(([file, limit]) => assetBytes(file) > limit);
-  check('the shipped images are inside a sane weight budget', heavy.length === 0,
-    heavy.map(([file, limit]) => `${file} ${(assetBytes(file) / 1024).toFixed(0)}KB > ${limit / 1024}KB`).join(', '));
+  check('the shipped images are inside a sane weight budget',
+    shippedImages.every((file) => assetBytes(file) <= 140 * 1024),
+    shippedImages.map((file) => `${file} ${(assetBytes(file) / 1024).toFixed(0)}KB`).join(', '));
   check('the emblem is not shipped at a resolution it is never drawn at',
     (() => {
       const size = childProcess.execSync(`identify -format "%w" "${path.join(ROOT, 'public/CODE RX11.png')}"`, { encoding: 'utf8' }).trim();
@@ -1851,8 +1846,8 @@ const main = async () => {
     })());
   check('no image was degraded into a thumbnail in the process',
     (() => {
-      const out = childProcess.execSync(`identify -format "%w %h|" "${path.join(ROOT, 'public/logo.png')}" "${path.join(ROOT, 'public/icon-512.png')}"`, { encoding: 'utf8' }).trim().split('|');
-      return /^240 240$/.test(out[0].trim()) && /^512 512$/.test(out[1].trim());
+      const out = childProcess.execSync(`identify -format "%w %h|" "${path.join(ROOT, 'public/CODE RX11.png')}"`, { encoding: 'utf8' }).trim();
+      return /^512 512$/.test(out.replace(/\|$/, '').trim());
     })());
 
   // --- a release invalidates the cached shell ------------------------------
@@ -2409,6 +2404,148 @@ const main = async () => {
     && /c\.public_id AS client_id/.test(fs.readFileSync(path.join(ROOT, 'functions/[[path]].ts'), 'utf8')));
   check('grouping uses the link the platform already has, with no new table',
     !/CREATE TABLE[^;]*client_document_groups/i.test(fs.readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8')));
+
+  group('31. ONE logo everywhere — the official mark (Phase 20)');
+  const p20PublicImages = fs.readdirSync(path.join(ROOT, 'public')).filter((name) => /\.png$/i.test(name));
+  check('the site ships exactly one logo file', p20PublicImages.length === 1 && p20PublicImages[0] === 'CODE RX11.png',
+    p20PublicImages.join(', '));
+  const p20Retired = /\/logo\.png|\/logo-small\.png|\/icon-192\.png|\/icon-512(-maskable)?\.png|\/apple-touch-icon\.png/;
+  check('the client screens use the official mark',
+    /<img src="\/CODE%20RX11\.png" alt="Code Rx Society"/.test(fs.readFileSync(path.join(ROOT, 'src/components/ClientSiteSign.tsx'), 'utf8')));
+  check('the Home page Hero defaults to the official mark',
+    /src: '\/CODE%20RX11\.png'/.test(fs.readFileSync(path.join(ROOT, 'src/components/Hero.tsx'), 'utf8')));
+  const p20EditorSchema = fs.readFileSync(path.join(ROOT, 'src/data/editorSchema.ts'), 'utf8');
+  check('the content editor ships the official mark in every logo slot',
+    (p20EditorSchema.match(/\/CODE%20RX11\.png/g) || []).length >= 4 && !p20Retired.test(p20EditorSchema));
+  const p20Page = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  check('the page icon and the home-screen icon are the official mark',
+    /rel="icon" href="\/CODE%20RX11\.png"/.test(p20Page) && /apple-touch-icon" href="\/CODE%20RX11\.png"/.test(p20Page)
+    && !p20Retired.test(p20Page));
+  const p20Worker = fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8');
+  check('the offline cache holds the official mark and no retired logo',
+    !p20Retired.test(p20Worker) && p20Worker.includes('/CODE%20RX11.png'));
+  check('the install manifest offers only the official mark',
+    !p20Retired.test(fs.readFileSync(path.join(ROOT, 'public/manifest.webmanifest'), 'utf8'))
+    && fs.readFileSync(path.join(ROOT, 'public/manifest.webmanifest'), 'utf8').includes('/CODE%20RX11.png'));
+  const p20MarkSource = fs.readFileSync(path.join(ROOT, 'functions/lib/client-delivery-logo.ts'), 'utf8');
+  check('the mark every letter is stamped with comes from the official file',
+    /public\/CODE RX11\.png/.test(p20MarkSource) && !/logo-small|logo\.png/.test(p20MarkSource));
+  const p20PdfSource = fs.readFileSync(path.join(ROOT, 'functions/lib/client-delivery-pdf.ts'), 'utf8');
+  check('the letter header and the watermark are both drawn with that one mark',
+    (fs.readFileSync(path.join(ROOT, 'functions/lib/client-document-delivery.ts'), 'utf8').match(/getBrandMark\(\)/g) || []).length >= 1
+    && /CrxHeaderLogo/.test(p20PdfSource) && /CrxWatermarkLogo/.test(p20PdfSource));
+  check('published branding is healed for every logo slot, the Hero included',
+    /PUBLISHED_LOGO_KEYS = \[[^\]]*'hero\.logo'/.test(fs.readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8')));
+  check('no client-facing source still names a retired logo',
+    !p20Retired.test(fs.readFileSync(path.join(ROOT, 'src/components/ClientSiteSign.tsx'), 'utf8')
+      + fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessScreen.tsx'), 'utf8')
+      + fs.readFileSync(path.join(ROOT, 'src/components/ClientProjectRoom.tsx'), 'utf8')));
+
+  group('32. The client project room carries the text PHANTOM (Phase 20)');
+  const p20RoomSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientProjectRoom.tsx'), 'utf8');
+  check('the room names PHANTOM where the client can see it', /PHANTOM/.test(p20RoomSource));
+  check('PHANTOM is explained in the client\'s terms, not as an internal role',
+    /your Code Rx desk/.test(p20RoomSource));
+  check('the PHANTOM sign sits at the top of the room',
+    /ClientSiteSign subtitle="Client Project Room" \/>[\s\S]{0,900}PHANTOM/.test(p20RoomSource));
+  check('the room still never prints a database identifier',
+    !/\bvault_document_id\b|\bclient_id\b/.test(p20RoomSource));
+  const p20RoomPreview = render(React.createElement(ClientProjectRoom, {
+    context: {
+      client: { id: 'cli_0123456789abcdef01234567', name: 'Ashanti Pharmacy Ltd' },
+      project: { id: 'prj_89abcdef0123456789abcdef', reference: 'CRX-PROJ-2026-001', name: 'Pharmacy Digital Platform' },
+      permissions: { view: true, download: false },
+    },
+    preview: true, notice: null, onNotice: () => {}, onSignedOut: () => {}, onSessionEnded: () => {},
+  }));
+  check('the room a PHANTOM previews says PHANTOM too', /PHANTOM/.test(p20RoomPreview));
+  check('and the preview still says nothing on screen can change the client\'s access',
+    /nothing on screen can change their access/.test(p20RoomPreview));
+
+  group('33. The review section — four answers, and the answer goes to PHANTOM (Phase 20)');
+  const p20Choices = [
+    { decision: 'approve', label: 'Approved' },
+    { decision: 'decline', label: 'Declined' },
+    { decision: 'pending', label: 'Pending' },
+    { decision: 'custom', label: 'Custom answer', freeText: true },
+  ];
+  const p20BaseProps = {
+    review: { choices: p20Choices, maxChars: 2000, current: null },
+    choice: '', comment: '', busy: false, notice: null,
+    onChoose: () => {}, onComment: () => {}, onSend: () => {}, onClear: () => {},
+  };
+  const p20Idle = render(React.createElement(ClientReviewSection, p20BaseProps));
+  check('the client is offered a review on the document they were sent',
+    /Review this document/.test(p20Idle));
+  check('all four answers are offered: approve, decline, pending, and their own words',
+    ['Approved', 'Declined', 'Pending', 'Custom answer'].every((label) => p20Idle.includes(`>${label}</button>`)));
+  check('the client is told the answer goes to PHANTOM', /goes to PHANTOM straight away/.test(p20Idle));
+  check('the four answers are explained as feedback, not as an access change',
+    /does not change what you can open/.test(p20Idle));
+  check('nothing is asked for until an answer is chosen',
+    /Choose one of the four answers above/.test(p20Idle) && !/Add a note for PHANTOM/.test(p20Idle));
+  check('there is no send control before an answer is chosen', !/Send to PHANTOM/.test(p20Idle));
+
+  const p20Chosen = render(React.createElement(ClientReviewSection, { ...p20BaseProps, choice: 'approve' }));
+  check('choosing an answer offers a note and a send', /Add a note for PHANTOM \(optional\)/.test(p20Chosen)
+    && /Send to PHANTOM/.test(p20Chosen));
+  check('an optional note never blocks sending', !/disabled=""/.test(p20Chosen));
+  check('the client can clear their choice', /Clear/.test(p20Chosen));
+  const p20CustomEmpty = render(React.createElement(ClientReviewSection, { ...p20BaseProps, choice: 'custom', comment: '   ' }));
+  check('the client\'s own answer cannot be sent empty',
+    /Your own answer \(required\)/.test(p20CustomEmpty) && /disabled=""/.test(p20CustomEmpty));
+  const p20CustomFilled = render(React.createElement(ClientReviewSection, { ...p20BaseProps, choice: 'custom', comment: 'Please add the date.' }));
+  check('once the client has written their answer it can be sent',
+    /Please add the date\./.test(p20CustomFilled) && !/disabled=""/.test(p20CustomFilled));
+  check('the client\'s writing has the limit the server set', /maxLength="2000"/.test(p20CustomFilled));
+  const p20Answered = render(React.createElement(ClientReviewSection, {
+    ...p20BaseProps,
+    review: { choices: p20Choices, maxChars: 2000, current: { decision: 'approve', label: 'Approved', comment: 'Exactly right.' } },
+  }));
+  check('an answer already given is shown back to the client', /You answered: Approved/.test(p20Answered));
+  check('the client\'s own note is shown back too', /Your note: Exactly right\./.test(p20Answered));
+  const p20Sent = render(React.createElement(ClientReviewSection, { ...p20BaseProps, notice: 'Approved — sent to PHANTOM. Thank you.' }));
+  check('after sending, the client is told PHANTOM has it', /sent to PHANTOM\. Thank you\./.test(p20Sent));
+  const p20Busy = render(React.createElement(ClientReviewSection, { ...p20BaseProps, choice: 'approve', busy: true }));
+  check('while an answer is on its way, it cannot be sent twice', /disabled=""/.test(p20Busy));
+  check('the review section never offers to publish, download or change access',
+    !/publish|unpublish|archive|download/i.test(p20Idle));
+
+  check('the room loads the review for the document it opens',
+    /void loadReview\(documentId\)/.test(p20RoomSource));
+  check('the room sends the answer through the client session transport',
+    /transport\.saveReview!\(projectId, String\(openDocument\.id\), reviewChoice, reviewComment\)/.test(p20RoomSource));
+  check('the room reads the review through the same transport',
+    /transport\.review\(projectId, documentId\)/.test(p20RoomSource));
+  check('a review that cannot load never blocks the document',
+    /A review section that cannot load never blocks the document itself/.test(p20RoomSource));
+  check('the section is only shown when the server offered one',
+    /\{review \? \(\n\s+<ClientReviewSection/.test(p20RoomSource));
+  const p20ApiSource = fs.readFileSync(path.join(ROOT, 'src/lib/cloudflare.ts'), 'utf8');
+  check('the browser layer calls the review route on the client session',
+    /review: \(projectId: string, documentId: string\) =>\s*clientCall<\{ data: any \}>/.test(p20ApiSource)
+    && /documents\/\$\{encodeURIComponent\(documentId\)\}\/review`/.test(p20ApiSource));
+  check('answering is a POST carrying the decision and the client\'s own words',
+    /saveReview: \(projectId: string, documentId: string, decision: string, comment: string\)/.test(p20ApiSource)
+    && /body: \{ decision, comment \}/.test(p20ApiSource));
+
+  const p20PanelSource = fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessCenter.tsx'), 'utf8');
+  check('the operator\'s panel shows what the client answered, beside the document',
+    /Client review/.test(p20PanelSource) && /REVIEW_LABELS/.test(p20PanelSource));
+  check('the panel words the answers the same way the client saw them',
+    /approve: 'Approved'/.test(p20PanelSource) && /decline: 'Declined'/.test(p20PanelSource)
+    && /pending: 'Pending'/.test(p20PanelSource) && /custom: 'Custom answer'/.test(p20PanelSource));
+  check('the panel shows the client\'s words, not only their verdict',
+    /whitespace-pre-wrap[^>]*>\{document\.review\.comment\}/.test(p20PanelSource));
+  check('the panel offers no control that answers on the client\'s behalf',
+    !/saveReview|\/review`/.test(p20PanelSource)
+    && !/clientCall<[^>]*>\s*\(\s*`\/api\/client\/project\/\$\{encodeURIComponent\([^)]*\)\}\/documents/.test(p20PanelSource));
+  const p20RoomAnswer = render(React.createElement(ClientReviewSection, {
+    ...p20BaseProps,
+    review: { choices: p20Choices, maxChars: 2000, current: { decision: 'custom', label: 'Custom answer', comment: 'Can we add the delivery date?' } },
+  }));
+  check('the client\'s own words are shown back under the four answers',
+    /Can we add the delivery date\?/.test(p20RoomAnswer) && /You answered: Custom answer/.test(p20RoomAnswer));
 
   const passed = results.filter((result) => result.passed).length;
   const failed = results.length - passed;

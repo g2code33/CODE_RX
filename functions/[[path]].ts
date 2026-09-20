@@ -5,7 +5,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Env } from './env';
-import { ensureSchema } from './lib/schema';
+import { ensureSchema, normalizeBrandLogosInContent } from './lib/schema';
 import { bearerToken, hashPassword, verifyPassword, verifyToken, signToken, requireAuth, JwtPayload } from './lib/auth';
 import {
   actorFromContext, allocateDocumentCode, allocateMemberCode, audit, getActor, hasVaultPermission,
@@ -1767,7 +1767,17 @@ app.get('/api/site-content', async (c) => {
     if (results.length === 0 || !results[0]?.data) {
       return c.json({ success: true, data: null });
     }
-    return c.json({ success: true, data: JSON.parse(results[0].data) });
+    const content = JSON.parse(results[0].data);
+    // ONE logo everywhere: a saved payload that still points at a retired logo
+    // address is healed here, on the read that would have shown it, and the
+    // stored copy is corrected in the same breath.
+    if (normalizeBrandLogosInContent(content)) {
+      await c.env.DB
+        .prepare('UPDATE site_content SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1')
+        .bind(JSON.stringify(content))
+        .run();
+    }
+    return c.json({ success: true, data: content });
   } catch (e) {
     console.error('[code-rx] get site content error:', e);
     return c.json({ success: false, error: 'Failed to fetch site content' }, 500);
@@ -4609,6 +4619,18 @@ const restoreRecycleBinItem = async (db: D1Database, item: any) => {
       row.content_snapshot_format || 'blocks', null, null, null, null,
       row.created_by_user_id ?? null, row.created_at ?? null, row.updated_at ?? null,
     ).run();
+    // What the client said about it comes back too: feedback that survived a
+    // deletion is feedback nobody has to ask for again.
+    const reviews = Array.isArray(payload?.reviews) ? payload.reviews : [];
+    for (const review of reviews) {
+      await db.prepare(
+        `INSERT INTO client_document_reviews (client_document_id, client_id, client_project_id, decision, comment, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(
+        row.id, row.client_id, row.client_project_id,
+        String(review.decision || ''), String(review.comment || ''), review.created_at ?? null,
+      ).run();
+    }
     return;
   }
   if (item.resource_type === 'vault_document') {

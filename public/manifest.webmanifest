@@ -12,19 +12,13 @@
   "categories": ["education", "health", "technology"],
   "icons": [
     {
-      "src": "/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-512.png",
+      "src": "/CODE%20RX11.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icon-512-maskable.png",
+      "src": "/CODE%20RX11.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

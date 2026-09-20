@@ -19,7 +19,7 @@ export const Hero = ({
   const explore = () => {
     document.getElementById('values')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
-  const heroLogo = getMedia(media, 'hero.logo', { src: '/logo.png', alt: 'CODE Rx Society — Coding the Future of Pharmacy' });
+  const heroLogo = getMedia(media, 'hero.logo', { src: '/CODE%20RX11.png', alt: 'CODE Rx Society — Coding the Future of Pharmacy' });
 
   return (
     <EditableRegion elementKey="hero.section" label="Hero section">

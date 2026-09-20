@@ -909,6 +909,22 @@ const DocumentsPanel = ({
                 View {document.allowView ? 'allowed' : 'denied'} · Download {document.allowDownload ? 'allowed' : 'denied'}
                 {document.publishedAt ? ` · published ${formatWhen(document.publishedAt)}` : ''}
               </p>
+              {/* What the client answered in the review section. It is their
+                  feedback to PHANTOM, shown where the document lives. */}
+              {document.review ? (
+                <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-2">
+                  <p className="flex flex-wrap items-center gap-2 text-[11px] font-black uppercase tracking-[0.12em] text-emerald-800">
+                    <Pill tone={reviewTone(document.review.decision)}>
+                      {REVIEW_LABELS[document.review.decision] || document.review.decision}
+                    </Pill>
+                    Client review
+                    {document.review.at ? <span className="font-bold normal-case tracking-normal text-emerald-700">{formatWhen(document.review.at)}</span> : null}
+                  </p>
+                  {document.review.comment ? (
+                    <p className="mt-1.5 whitespace-pre-wrap text-xs font-medium leading-5 text-slate-700">{document.review.comment}</p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {can('clients.links.create') ? (
@@ -2591,6 +2607,18 @@ const prepareStampedCopy = async (
     setError(failure?.message || 'A stamped client copy cannot be prepared for this source.');
   }
 };
+
+/** The client's four review answers, as the panel shows them. */
+const REVIEW_LABELS: Record<string, string> = {
+  approve: 'Approved',
+  decline: 'Declined',
+  pending: 'Pending',
+  custom: 'Custom answer',
+};
+
+const reviewTone = (decision: string) => (
+  decision === 'approve' ? 'published' : decision === 'decline' ? 'archived' : 'draft'
+);
 
 const deleteDocument = async (
   document: any,
