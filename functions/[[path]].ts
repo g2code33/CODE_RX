@@ -2444,6 +2444,78 @@ app.post('/api/community/phantom-inbox/read', requireAuth, async (c) => {
   return c.json({ success: true, message: 'Marked as read.' });
 });
 
+
+app.post('/api/community/phantom-inbox/reply', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const body = await c.req.json().catch(() => ({}));
+  const itemId = Number(body.itemId);
+  const replyText = cleanStr(body.replyText, 1, 5000);
+  if (!Number.isInteger(itemId) || itemId < 1 || !replyText) {
+    return c.json({ success: false, error: 'Valid message and reply text are required.' }, 400);
+  }
+
+  const items = await dbRows<any>(c.env.DB.prepare('SELECT * FROM phantom_inbox WHERE id = ?').bind(itemId));
+  if (!items[0]) return c.json({ success: false, error: 'Message not found.' }, 404);
+  const item = items[0];
+
+  if (!actor.isPhantom) {
+    const grants = await dbRows<any>(c.env.DB.prepare(
+      'SELECT channel_key FROM phantom_inbox_channel_permissions WHERE member_profile_id = ? AND can_receive = 1'
+    ).bind(actor.profileId));
+    if (!grants.some((grant) => grant.channel_key === item.channel_key)) {
+      return c.json({ success: false, error: 'You are not granted this channel.' }, 403);
+    }
+  }
+
+  let emailSent = false;
+  if (item.channel_key === 'website') {
+    const contactId = Number(item.source_id);
+    if (Number.isInteger(contactId) && contactId > 0) {
+      const contacts = await dbRows<any>(c.env.DB.prepare('SELECT email, name, subject FROM contacts WHERE id = ?').bind(contactId));
+      if (contacts[0]?.email) {
+        try {
+          emailSent = await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_GENERAL), {
+            to_email: contacts[0].email,
+            recipient_name: contacts[0].name || 'there',
+            subject: `Re: ${contacts[0].subject || 'Your message to Code Rx'}`,
+            message: replyText,
+            sender_name: actor.name || 'PHANTOM',
+          });
+        } catch (e) {
+          console.warn('[code-rx] failed to send email reply:', e);
+        }
+      }
+    }
+  } else if (item.channel_key === 'client_messages') {
+    let clientId = 0;
+    let clientProjectId = 0;
+    let documentId: number | null = null;
+    if (item.source === 'client_message') {
+      const msgs = await dbRows<any>(c.env.DB.prepare('SELECT client_id, client_project_id, client_document_id FROM client_messages WHERE public_id = ?').bind(item.source_id));
+      if (msgs[0]) {
+        clientId = Number(msgs[0].client_id);
+        clientProjectId = Number(msgs[0].client_project_id);
+        documentId = msgs[0].client_document_id ? Number(msgs[0].client_document_id) : null;
+      }
+    }
+    if (clientId && clientProjectId) {
+      const replyPublicId = `msg_${randomToken().slice(0, 24)}`;
+      await c.env.DB.prepare(
+        'INSERT INTO client_messages (public_id, client_id, client_project_id, client_document_id, body) VALUES (?, ?, ?, ?, ?)'
+      ).bind(replyPublicId, clientId, clientProjectId, documentId, `[PHANTOM]: ${replyText}`).run();
+    }
+  }
+
+  await audit(c.env.DB, actor, 'phantom.inbox.reply', 'phantom_inbox', itemId, {
+    channel: item.channel_key,
+    actorProfileId: actor.profileId,
+  });
+
+  return c.json({ success: true, message: 'Reply sent successfully.', emailSent });
+});
+
 // Who sees what, from the PHANTOM → Community Control matrix: every founding
 // member with a claimed founding codename, and their current per-channel grant
 // (all off until PHANTOM turns one on).
