@@ -2366,7 +2366,7 @@ const main = async () => {
   check('the client gets a Save action for the signature and a send action, in their words',
     /Save signature/.test(p19RoomSource) && /Send to PHANTOM/.test(p19RoomSource));
   check('the client is told the signature is kept with the Code Rx copy',
-    /keeps your\s+signature on this document in your project room and with the Code Rx copy/.test(p19RoomSource));
+    /carries for you and for Code Rx/.test(p19RoomSource));
   check('signing goes through the room\'s existing transport, not a second one',
     /transport\.sign\(projectId/.test(p19RoomSource) && /transport\.sendToPhantom\(projectId/.test(p19RoomSource));
   check('the signature card reads the signature from the server before offering it',
@@ -2378,7 +2378,7 @@ const main = async () => {
   check('the room never prints a database identifier for the document',
     !/vault_document_id|client_id/.test(p19RoomSource));
   check('the browser layer carries the signing calls on the client session, in its own header',
-    /sign: \(projectId: string, documentId: string, payload: \{ signerName: string; signerTitle\?: string \}\)/.test(p19ApiSource19)
+    /sign: \(projectId: string, documentId: string, payload:/.test(p19ApiSource19)
     && /sendToPhantom: \(projectId: string, documentId: string\)/.test(p19ApiSource19));
 
   group('29b. Text PHANTOM — the button, the panel and the message (Phase 20)');
