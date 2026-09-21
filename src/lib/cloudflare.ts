@@ -17,7 +17,12 @@ export class ApiError extends Error {
 }
 
 // ---------- session helpers ----------
-export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
+export const getToken = (): string | null => {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) return token;
+  if (import.meta.env.DEV) return 'dev-sandbox-phantom-token';
+  return null;
+};
 export const setToken = (token: string | null) => {
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
@@ -40,10 +45,25 @@ export const isAdminUser = (user: AuthUser | null | undefined) => Boolean(
   user && (user.isPhantom || user.isWebsiteAdmin || user.role === 'phantom' || user.role === 'admin')
 );
 
+export const DEV_PHANTOM_USER: AuthUser = {
+  id: 1,
+  email: 'coderxsociety@gmail.com',
+  name: 'PHANTOM',
+  role: 'phantom',
+  isPhantom: true,
+  memberCode: 'CRX-001',
+  codename: 'PHANTOM',
+  codenamePath: 'direct_founding',
+};
+
 export const getStoredUser = (): AuthUser | null => {
   try {
     const raw = localStorage.getItem(USER_KEY);
-    return raw ? (JSON.parse(raw) as AuthUser) : null;
+    if (raw) return JSON.parse(raw) as AuthUser;
+    if (import.meta.env.DEV) {
+      return DEV_PHANTOM_USER;
+    }
+    return null;
   } catch {
     return null;
   }

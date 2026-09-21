@@ -28,13 +28,19 @@ const communityOriginFor = (currentUser: AuthUser | null): CommunityOrigin => {
 };
 
 function App() {
+  const initialUser = auth.getUser();
   const [isDashboard, setIsDashboard] = useState(false);
   const [isMemberVault, setIsMemberVault] = useState(false);
   const [isCodenameBallotView, setIsCodenameBallotView] = useState(() => window.location.hash.startsWith('#codename-ballot'));
   const [ballotRequired, setBallotRequired] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault' | 'phantom'>('controller');
-  const [user, setUser] = useState<AuthUser | null>(auth.getUser());
+  const [isAdmin, setIsAdmin] = useState(() => isAdminUser(initialUser));
+  const [adminWorkspace, setAdminWorkspace] = useState<'controller' | 'builder' | 'vault' | 'phantom'>(() => {
+    if (isAdminUser(initialUser)) {
+      return (window.location.hash.startsWith('#phantom') || window.location.hash.startsWith('#phantom-applications')) ? 'phantom' : 'phantom';
+    }
+    return 'controller';
+  });
+  const [user, setUser] = useState<AuthUser | null>(initialUser);
   const [activeTab, setActiveTab] = useState('home');
   const [isCommunityWorkspace, setIsCommunityWorkspace] = useState(() => window.location.hash.startsWith('#community'));
   const [communityOrigin, setCommunityOrigin] = useState<CommunityOrigin>(() => communityOriginFor(auth.getUser()));
@@ -123,11 +129,10 @@ function App() {
       setUser(authenticatedUser);
       if (isCommunityWorkspace) setCommunityOrigin(communityOriginFor(authenticatedUser));
       if (isAdminUser(authenticatedUser)) {
-        const openPhantom = (window.location.hash.startsWith('#phantom') || window.location.hash.startsWith('#phantom-applications')) && (authenticatedUser.isPhantom || authenticatedUser.role === 'phantom');
         setIsAdmin(true);
         setIsDashboard(false);
         setIsMemberVault(false);
-        setAdminWorkspace(openPhantom ? 'phantom' : 'controller');
+        setAdminWorkspace('phantom');
       } else {
         setIsDashboard(true);
         setIsMemberVault(window.location.hash.startsWith('#member-vault'));
