@@ -412,6 +412,28 @@ export const uploadFile = async (file: File, folder: string = 'uploads') => {
 // ---------- authentication ----------
 export const auth = {
   login: async (identifier: string, password: string): Promise<AuthUser> => {
+    // In local development (Vite dev server without Cloudflare Pages Functions
+    // backend), allow immediate dev-sandbox access with dev credentials.
+    if (
+      import.meta.env.DEV &&
+      (identifier.trim().toLowerCase() === 'coderxsociety@gmail.com' || identifier.trim().toUpperCase() === 'PHANTOM') &&
+      password === 'admin'
+    ) {
+      const devPhantomUser: AuthUser = {
+        id: 1,
+        email: 'coderxsociety@gmail.com',
+        name: 'PHANTOM',
+        role: 'phantom',
+        isPhantom: true,
+        memberCode: 'CRX-001',
+        codename: 'PHANTOM',
+        codenamePath: 'direct_founding',
+      };
+      setToken('dev-sandbox-phantom-token');
+      setStoredUser(devPhantomUser);
+      return devPhantomUser;
+    }
+
     const data = await apiCall<{ token: string; user: AuthUser }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ identifier: identifier.trim(), password }),
@@ -437,6 +459,9 @@ export const auth = {
   /** Validates the stored token against the server; returns user or null. */
   me: async (): Promise<AuthUser | null> => {
     if (!getToken()) return null;
+    if (import.meta.env.DEV && getToken() === 'dev-sandbox-phantom-token') {
+      return getStoredUser();
+    }
     try {
       const data = await apiCall<{ user: AuthUser }>('/api/auth/me');
       setStoredUser(data.user);
