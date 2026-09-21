@@ -89,6 +89,13 @@ import {
   isDeliveryArtifactKey,
 } from './lib/client-document-delivery';
 import {
+  Canvas,
+  decodePng,
+  encodePng,
+  isPng,
+  type DecodedImage,
+} from './lib/client-delivery';
+import {
   allocateClientReference,
   clampLinkTtlMinutes,
   clientAllLinksEnabled,
@@ -452,10 +459,248 @@ const signatureBlocks = (input: { signerName: string; signerTitle: string; signe
   },
 ];
 
+// ---------------------------------------------------------------------------
+// DRAWN (PENCIL) SIGNATURES
+//
+// The client draws their mark with the pencil tool. The strokes travel as
+// normalized unit-space polylines, and the server paints them into a
+// transparent PNG with the same pixel engine that stamps the brand mark. The
+// PNG is then added to the signed document as an ordinary image block, so the
+// stored copy, the Vault copy, and the rendered PDF all carry the real mark
+// without any new rendering dependency.
+// ---------------------------------------------------------------------------
+
+const SIGNATURE_IMAGE_WIDTH = 1200;
+const SIGNATURE_IMAGE_HEIGHT = 400;
+/** One polyline may hold at most this many points (a pixel grid cap). */
+const SIGNATURE_MAX_STROKE_POINTS = 6000;
+/** The whole drawing may hold at most this many trailing polylines. */
+const SIGNATURE_MAX_STROKES = 200;
+/** A 1200x400 PNG's base64 is ~64 KB roughly; cap the accepted data URL/payload. */
+const SIGNATURE_MAX_INK_CHARS = 240_000;
+
+interface SignatureStroke {
+  points: Array<{ x: number; y: number }>;
+}
+
+/** Decodes a base64 payload (bare or data URL) into bytes, throwing on garbage. */
+const base64ToBytes = (value: string): Uint8Array => {
+  let encoded = value.trim();
+  if (encoded.startsWith('data:')) {
+    const comma = encoded.indexOf(',');
+    if (comma < 0) throw new Error('signature data url has no payload');
+    encoded = encoded.slice(comma + 1);
+  }
+  if (encoded.length % 4 === 1) encoded = encoded.slice(0, -1); // never valid base64
+  const padded = encoded.replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+};
+
+/** Clamps client stroke data to sane bounds; points outside the unit square are pinned. */
+const boundedSignatureStrokes = (raw: unknown[]): SignatureStroke[] => {
+  const parsePoint = (value: unknown): { x: number; y: number } | null => {
+    if (!value || typeof value !== 'object') return null;
+    const record = value as Record<string, unknown>;
+    const x = Number(record.x);
+    const y = Number(record.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return {
+      x: Math.min(1, Math.max(0, x)),
+      y: Math.min(1, Math.max(0, y)),
+    };
+  };
+  const strokes: SignatureStroke[] = [];
+  for (const entry of raw.slice(-SIGNATURE_MAX_STROKES)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const points = Array.isArray((entry as Record<string, unknown>).points)
+      ? ((entry as Record<string, unknown>).points as unknown[]).slice(-SIGNATURE_MAX_STROKE_POINTS)
+      : [];
+    const parsed = points.map(parsePoint).filter((point): point is { x: number; y: number } => point !== null);
+    if (parsed.length) strokes.push({ points: parsed });
+  }
+  return strokes;
+};
+
+/**
+ * Builds the transparent PNG that holds the client's drawn mark: a thin guide
+ * line (canvas only, dim on white) and the ink strokes. Returning `null` means
+ * the input cannot be a signature at all, so the text block still stands.
+ */
+const renderSignaturePng = async (ink: Uint8Array, strokes: SignatureStroke[]): Promise<Uint8Array | null> => {
+  if (!isPng(ink)) return null;
+  let decoded: DecodedImage | null = null;
+  try {
+    decoded = await decodePng(ink);
+  } catch (error) {
+    console.error('[code-rx] signature ink decode failed:', error);
+    return null;
+  }
+  const inkCanvas = Canvas.from(decoded);
+
+  // A signature without a single stroke is a typed signature, not a drawn one:
+  // the room never sends the pad's canvas without the strokes it recorded.
+  if (inkCanvas.width < 1 || inkCanvas.height < 1 || strokes.length === 0) return null;
+
+  const canvas = new Canvas(SIGNATURE_IMAGE_WIDTH, SIGNATURE_IMAGE_HEIGHT);
+  // A faint baseline the client saw around their drawing; on the document it
+  // reads as the signature line under the ink. Drawn first so ink sits on top.
+  canvas.fillRect(40, Math.round(SIGNATURE_IMAGE_HEIGHT * 0.66), SIGNATURE_IMAGE_WIDTH - 80, 2, [176, 190, 186], 0.85);
+  const scale = Math.min(SIGNATURE_IMAGE_WIDTH / inkCanvas.width, SIGNATURE_IMAGE_HEIGHT / inkCanvas.height);
+  const drawWidth = Math.round(inkCanvas.width * scale);
+  const drawHeight = Math.round(inkCanvas.height * scale);
+  const offsetX = Math.round((SIGNATURE_IMAGE_WIDTH - drawWidth) / 2);
+  const offsetY = Math.round((SIGNATURE_IMAGE_HEIGHT - drawHeight) / 2);
+
+  // Re-paint the strokes as smooth line segments (a stroke with a single point
+  // becomes a dot). The mark stays opaque ink regardless of the canvas alpha,
+  // so a client who signed on a thin-stroked pad still leaves a dark mark.
+  for (const stroke of strokes) {
+    const points = Array.isArray(stroke?.points) ? stroke.points : [];
+    if (!points.length) continue;
+    const inkColour: [number, number, number] = [15, 23, 42];
+    if (points.length === 1) {
+      const point = points[0];
+      canvas.fillRect(offsetX + Number(point.x) * drawWidth - 1, offsetY + Number(point.y) * drawHeight - 1, 3, 3, inkColour, 1);
+      continue;
+    }
+    for (let index = 1; index < points.length; index += 1) {
+      const from = points[index - 1];
+      const to = points[index];
+      canvas.line(
+        offsetX + Math.min(1, Math.max(0, Number(from.x))) * drawWidth,
+        offsetY + Math.min(1, Math.max(0, Number(from.y))) * drawHeight,
+        offsetX + Math.min(1, Math.max(0, Number(to.x))) * drawWidth,
+        offsetY + Math.min(1, Math.max(0, Number(to.y))) * drawHeight,
+        inkColour, 3, 1,
+      );
+    }
+  }
+
+  return await encodePng(canvas);
+};
+
+/**
+ * Persists the drawn signature PNG and returns the R2 key (and, when the
+ * document has a linked Vault copy, the attachment row that carries it). The
+ * key is a durable object the render pipeline can read back — never a source
+ * file and never a raw upload.
+ */
+const storeSignatureImage = async (
+  c: any,
+  inkPng: Uint8Array,
+  input: {
+    document: any;
+    client: ClientPrincipal;
+    existing: Array<{ fileKey: string; attachmentId: number | null }>;
+  },
+): Promise<{ fileKey: string; attachmentId: number | null; appliedAt: string }> => {
+  const { document, client, existing } = input;
+  const appliedAt = new Date().toISOString();
+  const contentType = 'image/png';
+
+  // The first editable slot is free on a document the client has not drawn on
+  // yet; reuse the existing image block's object after that. The key lives
+  // under vault/ so the delivery pipeline reads it back for the `image` block
+  // exactly as it does every other embedded image — the stamped copy therefore
+  // carries the ink whether or not the document has a linked Vault original.
+  const slot = Math.min(existing.length + 1, 4);
+  const docSlug = String(document.public_id).replace(/[^\w-]/g, '_');
+  const requestedKey = `vault/client-signature/${docSlug}/${slot}.png`;
+  const key = await uniqueVaultAttachmentKey(c, requestedKey);
+  await c.env.BUCKET.put(key, inkPng, { httpMetadata: { contentType } });
+
+  // Only a Vault-linked document keeps the mark as an attachment its editor
+  // can show; a client copy needs no attachment row because the renderer
+  // reads the embedded image by fileKey, never by attachment id.
+  if (document.vault_document_id) {
+    const attachment = await c.env.DB.prepare(
+      `INSERT INTO vault_attachments (document_id, section_id, name, file_key, mime_type, size_bytes)
+       SELECT vault_document_id, (SELECT section_id FROM vault_documents WHERE id = ?), ?, ?, ?, ?
+       FROM client_documents WHERE id = ?`
+    ).bind(
+      document.vault_document_id,
+      `Signature by ${client.clientName}`.slice(0, 120),
+      key, contentType, inkPng.byteLength, Number(document.id),
+    ).run();
+    const inserted = (Number(attachment.meta.last_row_id) || 0) || (Number(attachment.meta.last_insert_rowid) || 0);
+    return { fileKey: key, attachmentId: inserted || null, appliedAt };
+  }
+
+  return { fileKey: key, attachmentId: null, appliedAt };
+};
+
+/** A fileKey for a new Vault attachment that does not collide with an existing one. */
+const uniqueVaultAttachmentKey = async (c: any, requestedKey: string): Promise<string> => {
+  const db = c.env.DB;
+  const findFirst = async (key: string) => one<any>(db.prepare('SELECT id FROM vault_attachments WHERE file_key = ?').bind(key));
+  // A collision would be a disagreement inside a freshly stamped object; hop a
+  // counter up to a handful of times instead of ever overwriting one.
+  let candidate = requestedKey;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (!(await findFirst(candidate))) return candidate;
+    candidate = requestedKey.replace(/\.png$/, `-${attempt + 2}.png`);
+  }
+  return `${requestedKey.replace(/\.png$/, '')}-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`;
+};
+
+/**
+ * The signature image blocks a Vault copy already holds, in the order it holds
+ * them, so the next signature appends a new image (or overwrites one) without
+ * ever duplicating the signature heading.
+ */
+const listSignatureImages = (blocks: unknown[]): Array<{ fileKey: string; attachmentId: number | null }> => {
+  const result: Array<{ fileKey: string; attachmentId: number | null }> = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+    const record = block as Record<string, unknown>;
+    if (String(record.type) !== 'image') continue;
+    const fileKey = typeof record.fileKey === 'string' ? record.fileKey : '';
+    if (!fileKey.startsWith('vault/client-signature/')) continue;
+    result.push({ fileKey, attachmentId: Number(record.attachmentId) || null });
+  }
+  return result;
+};
+
+/**
+ * The image block the drawn signature becomes inside the document. It keeps the
+ * same IDs the typed signature used (heading / note), so the Vault editor sees
+ * one coherent signature block whose picture is the client's own mark.
+ */
+const signatureImageBlocks = (input: {
+  signerName: string;
+  signerTitle: string;
+  signedAt: string;
+  fileKey: string;
+  attachmentId: number | null;
+}) => [
+  { id: 'client-signature-heading', type: 'heading', level: 3, content: 'Signature' },
+  {
+    id: 'client-signature-line',
+    type: 'quote',
+    content: `Signed: ${input.signerName}${input.signerTitle ? `, ${input.signerTitle}` : ''}`,
+  },
+  {
+    id: 'client-signature-image',
+    type: 'image',
+    fileKey: input.fileKey,
+    attachmentId: input.attachmentId ?? undefined,
+    caption: `Signed by ${input.signerName} on ${input.signedAt.slice(0, 10)}.`,
+  },
+  {
+    id: 'client-signature-note',
+    type: 'paragraph',
+    content: `Signed electronically in the Code Rx client portal on ${input.signedAt.slice(0, 10)}.`,
+  },
+];
+
 /** The newest signature on a document, or null when it has not been signed. */
 const latestSignature = async (db: D1Database, documentId: number) => {
   const row = await one<any>(db.prepare(
-    `SELECT signer_name, signer_title, document_version, signed_at FROM client_document_signatures
+    `SELECT signer_name, signer_title, document_version, signed_at, signature_image_r2_key, received_at
+     FROM client_document_signatures
      WHERE client_document_id = ? ORDER BY signed_at DESC, id DESC LIMIT 1`
   ).bind(documentId));
   if (!row) return null;
@@ -463,8 +708,18 @@ const latestSignature = async (db: D1Database, documentId: number) => {
     signerName: String(row.signer_name || ''),
     signerTitle: String(row.signer_title || ''),
     version: String(row.document_version || ''),
+    drawn: Boolean(row.signature_image_r2_key),
     signedAt: row.signed_at || null,
+    receivedAt: row.received_at || null,
   };
+};
+
+/** Records that the client has handed the signed document back to PHANTOM. */
+const markSignatureReceived = async (db: D1Database, documentId: number): Promise<void> => {
+  await db.prepare(
+    `UPDATE client_document_signatures SET received_at = COALESCE(received_at, CURRENT_TIMESTAMP)
+     WHERE client_document_id = ?`
+  ).bind(documentId).run();
 };
 
 /** The blocks a document currently holds, read from the Vault copy or the client copy. */
@@ -1261,25 +1516,69 @@ export const registerClientRoutes = (app: ClientApp) => {
         return clientJson({ success: false, error: 'Type your full name to sign this document.', code: 'signature_name_required' }, 400);
       }
 
+      // The drawn signature (optional). It travels as the PNG the pencil pad
+      // produced plus the normalized strokes the pad recorded; the server
+      // repaints the strokes so the stored mark is exactly what the client saw,
+      // and refuses anything that is not a genuine PNG.
+      const rawInk = typeof body.inkPng === 'string' ? body.inkPng : null;
+      const rawStrokes = Array.isArray(body.strokes) ? body.strokes : [];
+      let inkPng: Uint8Array | null = null;
+      let strokes: SignatureStroke[] = [];
+      if (typeof rawInk === 'string') {
+        const normalized = rawInk.slice(0, SIGNATURE_MAX_INK_CHARS);
+        if (normalized) {
+          try {
+            inkPng = base64ToBytes(normalized);
+          } catch {
+            return clientJson({ success: false, error: 'The signature image could not be read.', code: 'signature_image_invalid' }, 400);
+          }
+          strokes = boundedSignatureStrokes(rawStrokes);
+        }
+      }
+
+      // A drawn signature becomes an image block: stored (in the linked Vault
+      // copy's attachments or under client-exports), and appended to the
+      // document so the saved copy carries the real mark, not only the name.
+      const content = await documentContentBlocks(db, document);
+      let drawn: { fileKey: string; attachmentId: number | null } | null = null;
+      if (inkPng) {
+        const rendered = await renderSignaturePng(inkPng, strokes);
+        if (rendered) {
+          drawn = await storeSignatureImage(c, rendered, {
+            document,
+            client: principal,
+            existing: content ? listSignatureImages(content.blocks) : [],
+          });
+        }
+      }
+
       const signedAt = new Date().toISOString();
       const result = await db.prepare(
         `INSERT INTO client_document_signatures
-         (client_document_id, client_id, client_project_id, signer_name, signer_title, document_version)
-         VALUES (?, ?, ?, ?, ?, ?)`
+         (client_document_id, client_id, client_project_id, signer_name, signer_title, document_version, signature_image_r2_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         Number(document.id), Number(document.client_id), Number(document.client_project_id),
         signerName, signerTitle, String(document.version || '1'),
+        drawn ? drawn.fileKey : null,
       ).run();
 
       // The signed copy is saved the same way any client version is: the client
       // copy and the linked Vault copy both carry the signature, and the Vault
       // history keeps what was there before.
-      const content = await documentContentBlocks(db, document);
       let saved: { version: string; savedAt: string; vaultVersion: number | null } | null = null;
       if (content) {
         // What the document already holds stays exactly as it is; the signature
-        // is added to the end of it.
-        const blocks = [...content.blocks, ...signatureBlocks({ signerName, signerTitle, signedAt })];
+        // is added to the end of it. A drawn mark replaces the text line with
+        // the picture of the mark, so existing signatures are never re-stamped
+        // on top of each other.
+        const addedBlocks = drawn
+          ? signatureImageBlocks({ signerName, signerTitle, signedAt, fileKey: drawn.fileKey, attachmentId: drawn.attachmentId })
+          : signatureBlocks({ signerName, signerTitle, signedAt });
+        const kept = content.blocks.filter((block: any) =>
+          !(block && typeof block === 'object' && block.id && String(block.id).startsWith('client-signature-'))
+        );
+        const blocks = [...kept, ...addedBlocks];
         const normalized = normalizeDocumentContent({ version: 1, blocks }, '');
         saved = await saveClientDocumentRevision(db, {
           document, principal, content: normalized, format: 'blocks',
@@ -1349,6 +1648,7 @@ export const registerClientRoutes = (app: ClientApp) => {
           signedAt,
           version: String(document.version || '1'),
           vaultVersion: saved?.vaultVersion ?? null,
+          drawn: Boolean(drawn),
           recipients,
         },
       });
@@ -1370,6 +1670,10 @@ export const registerClientRoutes = (app: ClientApp) => {
       const db = c.env.DB;
       const signature = await latestSignature(db, Number(document.id));
       const version = String(document.version || '1');
+      // Once the document comes back, the signed copy is what PHANTOM groups as
+      // a received document — the row knows it was handed over, so the panel
+      // can show "Received documents" without a second table of its own.
+      if (signature) await markSignatureReceived(db, Number(document.id));
       const delivered = await sendClientDocumentToPhantom(db, {
         principal, project, document, version, signed: Boolean(signature), signerName: signature?.signerName || null,
       });
@@ -2541,7 +2845,9 @@ export const registerClientRoutes = (app: ClientApp) => {
     const documents = await asRows<any>(c.env.DB.prepare(
       `SELECT d.*, p.public_id AS project_public_id, p.reference_code AS project_reference,
               rv.decision AS review_decision, rv.comment AS review_comment, rv.created_at AS review_at,
-              sg.signer_name AS signature_name, sg.signed_at AS signature_at, sg.document_version AS signature_version
+              sg.signer_name AS signature_name, sg.signer_title AS signature_title,
+              sg.signed_at AS signature_at, sg.document_version AS signature_version,
+              sg.signature_image_r2_key AS signature_image_key, sg.received_at AS signature_received_at
        FROM client_documents d JOIN client_projects p ON p.id = d.client_project_id
        LEFT JOIN client_document_reviews rv ON rv.id = (
          SELECT id FROM client_document_reviews WHERE client_document_id = d.id
@@ -2575,9 +2881,15 @@ export const registerClientRoutes = (app: ClientApp) => {
       // The client's signature, when they signed it.
       signature: document.signature_name ? {
         signerName: document.signature_name,
+        signerTitle: document.signature_title || '',
         version: document.signature_version || null,
+        drawn: Boolean(document.signature_image_key),
         at: document.signature_at || null,
+        receivedAt: document.signature_received_at || null,
       } : null,
+      // The signed document came back from the client — the operator groups it
+      // under "Received documents" and can open the signed copy.
+      sentBack: Boolean(document.signature_received_at),
       // The review section's answer, exactly as the client left it.
       review: document.review_decision ? {
         decision: document.review_decision,
@@ -2759,6 +3071,76 @@ export const registerClientRoutes = (app: ClientApp) => {
         sizeBytes: delivery.artifact.size,
         sha256: delivery.artifact.sha256,
         cached: delivery.artifact.cached,
+      },
+    });
+  });
+
+  /**
+   * PHANTOM: open the signed document the client handed back.
+   *
+   * The delivered artifact is rebuilt from the document's current snapshot,
+   * which already carries the client's signature blocks (text and, when the
+   * client drew it, the pencil mark as an image block) — so the file PHANTOM
+   * opens is the signed copy, produced by the same pipeline, never the source.
+   */
+  app.get('/api/phantom/client-documents/:documentId/received-copy', requireAuth, documentView, async (c: any) => {
+    const db = c.env.DB;
+    const documentPublicId = String(c.req.param('documentId') || '').trim();
+    const document = await findDocumentByPublicId(db, documentPublicId);
+    if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
+
+    const signature = await latestSignature(db, Number(document.id));
+    if (!signature) {
+      return c.json({ success: false, error: 'This document has not been signed yet.', code: 'not_signed' }, 409);
+    }
+    if (!signature.receivedAt) {
+      return c.json({
+        success: false,
+        error: 'The client has not sent this document back yet.',
+        code: 'not_received',
+        data: { signerName: signature.signerName, at: signature.signedAt },
+      }, 409);
+    }
+
+    const context = await loadClientDeliveryContext(db, {
+      documentRowId: Number(document.id),
+      clientId: Number(document.client_id),
+      projectId: Number(document.client_project_id),
+    });
+    if (!context) return c.json({ success: false, error: 'Client document not found.' }, 404);
+
+    // Refresh forces the artifact to be stamped from the snapshot that now
+    // carries the signature, so PHANTOM never reads a stale pre-signing copy.
+    const delivery = await resolveClientDelivery({ db, bucket: c.env.BUCKET, context, refresh: true });
+    if (!delivery.artifact) {
+      return c.json({
+        success: false,
+        error: delivery.message || 'A signed Code Rx copy cannot be prepared for this source.',
+        code: 'delivery_unavailable',
+        data: { reason: delivery.reason || 'delivery_unavailable' },
+      }, 409);
+    }
+    await recordArtifactReference(db, context, delivery.artifact.key);
+
+    const object = await c.env.BUCKET.get(delivery.artifact.key);
+    if (!object) {
+      return c.json({ success: false, error: 'The signed copy could not be read.' }, 503);
+    }
+    await audit(db, await actorFromContext(c), 'client.document.received_copy.opened', 'client_document', Number(document.id), {
+      publicId: documentPublicId,
+      signerName: signature.signerName,
+      artifact: delivery.artifact.key,
+    });
+
+    const disposition = /[;&]/.test(delivery.artifact.filename) ? '' : `inline; filename="${delivery.artifact.filename}"`;
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': object.httpMetadata?.contentType || delivery.artifact.contentType || 'application/pdf',
+        'Content-Disposition': disposition,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'X-Code-Rx-Delivery': 'signed',
       },
     });
   });

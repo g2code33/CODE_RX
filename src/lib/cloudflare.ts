@@ -698,7 +698,18 @@ export const clientPortal = {
     clientCall<{ data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
     ),
-  sign: (projectId: string, documentId: string, payload: { signerName: string; signerTitle?: string }) =>
+  /**
+   * `payload.inkPng` is the pencil pad's canvas as a base64 PNG data URL, and
+   * `payload.strokes` the normalized polylines drawn on it. Both are optional:
+   * a signature may be typed only, drawn only (with the typed name required),
+   * or both — the server still requires at least the name.
+   */
+  sign: (projectId: string, documentId: string, payload: {
+    signerName: string;
+    signerTitle?: string;
+    inkPng?: string;
+    strokes?: Array<{ points: Array<{ x: number; y: number }> }>;
+  }) =>
     clientCall<{ message: string; data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
       { method: 'POST', body: payload },
@@ -877,6 +888,32 @@ export const clientAccessCenter = {
     apiCall<{ data: { state: string; clientVisible: boolean }; message: string }>(
       `/api/phantom/client-documents/${documentId}/lifecycle`, { method: 'POST', body: JSON.stringify({ state, clientVisible }) },
     ),
+
+  /**
+   * PHANTOM: the signed copy the client handed back, as an authenticated blob
+   * object URL. The returned file is stamp-rendered from the snapshot that now
+   * carries the client's signature (text and drawn mark), never the source.
+   */
+  receivedCopy: async (documentId: string): Promise<{ url: string; filename: string }> => {
+    const response = await fetch(
+      `${API_BASE}/api/phantom/client-documents/${encodeURIComponent(documentId)}/received-copy`,
+      { headers: { Authorization: `Bearer ${getToken()}` }, cache: 'no-store', credentials: 'omit' },
+    );
+    if (!response.ok) {
+      let message = '';
+      try {
+        const body = await response.json();
+        message = body?.error ?? '';
+      } catch {
+        /* not JSON */
+      }
+      throw new ApiError(message || 'The signed copy could not be opened.', response.status);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    return { url: URL.createObjectURL(blob), filename: match?.[1] || 'code-rx-signed-copy.pdf' };
+  },
 
   links: async (clientId: string) => (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/links`)).data || [],
   createLink: (clientId: string, data: any) =>

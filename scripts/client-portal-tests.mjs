@@ -5115,6 +5115,111 @@ const main = async () => {
   }
 
   // -------------------------------------------------------------------------
+  group('33b. The client signs by drawing, and PHANTOM receives the signed copy (Phase 22 signing)');
+  // -------------------------------------------------------------------------
+
+  // A fresh client/project/document so the drawing here is its only signature.
+  const p22SignClient = await createClient(phantomToken, 'Phase 22 Sign Client');
+  const p22SignProject = await createProject(phantomToken, p22SignClient.id, 'Phase 22 Sign Project');
+  const p22SignDocument = await createDocument(phantomToken, p22SignClient.id, p22SignProject.id, {
+    title: 'Phase 22 drawn signature letter',
+    category: 'letter',
+    contentText: 'Please sign and return this letter.',
+  });
+  await publish(phantomToken, p22SignDocument.id);
+  const p22SignKey = await createKey(phantomToken, p22SignClient.id, p22SignProject.id, { label: 'Phase 22 sign key' });
+  const p22SignSession = await clientSession(p22SignKey.passkey, 'phase 22 signing');
+  const p22SignPath = `/api/client/project/${p22SignProject.id}/documents/${p22SignDocument.id}`;
+
+  check('the client offers a signature on the new document',
+    (await request('GET', `${p22SignPath}/signature`, { clientSession: p22SignSession })).status === 200);
+  check('the signature read reports the document can be signed',
+    (await request('GET', `${p22SignPath}/signature`, { clientSession: p22SignSession })).json?.data?.signable === true);
+
+  // A garbage base64 payload is refused before anything is stored.
+  const p22BadInk = await request('POST', `${p22SignPath}/signature`, {
+    clientSession: p22SignSession,
+    body: { signerName: 'Kofi Amoah', signerTitle: 'Director', inkPng: 'not-a-real-png!!', strokes: [] },
+  });
+  check('a non-PNG ink payload is refused rather than stored',
+    p22BadInk.status === 400 && /signature_image_invalid|image/i.test(String(p22BadInk.json?.code || '') + String(p22BadInk.json?.error || '')),
+    JSON.stringify(p22BadInk.json).slice(0, 160));
+
+  // A real RGBA PNG (the pad's canvas) with two strokes, as the room sends it.
+  const p22InkDataUrl = `data:image/png;base64,${buildPng(600, 200).toString('base64')}`;
+  const p22Strokes = [
+    { points: [{ x: 0.2, y: 0.8 }, { x: 0.4, y: 0.3 }, { x: 0.6, y: 0.6 }] },
+    { points: [{ x: 0.6, y: 0.5 }, { x: 0.8, y: 0.4 }] },
+  ];
+  const p22Signature = await request('POST', `${p22SignPath}/signature`, {
+    clientSession: p22SignSession,
+    body: { signerName: 'Kofi Amoah', signerTitle: 'Director', inkPng: p22InkDataUrl, strokes: p22Strokes },
+  });
+  check('the client draws and saves the signature', p22Signature.status === 200, JSON.stringify(p22Signature.json).slice(0, 200));
+  check('the client is told their signature is saved', /Signed/i.test(String(p22Signature.json?.message || '')), String(p22Signature.json?.message || ''));
+  check('the response says the mark was drawn', p22Signature.json?.data?.drawn === true, JSON.stringify(p22Signature.json?.data || {}));
+
+  const p22SignedRead = await request('GET', `${p22SignPath}/signature`, { clientSession: p22SignSession });
+  check('the signature reads back with the client\u2019s name and title',
+    p22SignedRead.json?.data?.current?.signerName === 'Kofi Amoah'
+    && p22SignedRead.json?.data?.current?.signerTitle === 'Director');
+  check('the signature read keeps the personal drawn mark private (no image data served)',
+    !JSON.stringify(p22SignedRead.json?.data || {}).includes('base64') && !JSON.stringify(p22SignedRead.json?.data || {}).includes('r2_key'),
+    JSON.stringify(p22SignedRead.json?.data).slice(0, 120));
+
+  // The signature rows now know the mark exists and, before the send, that it
+  // has not come back yet.
+  const p22MarginInk = db.query('SELECT COUNT(*) AS total FROM client_document_signatures WHERE signature_image_r2_key IS NOT NULL')[0].total;
+  check('the drawn mark is stored in the signature row, not only echoed back', p22MarginInk >= 1, `drawn rows: ${p22MarginInk}`);
+
+  // Before sending, PHANTOM is told the document has not arrived back yet.
+  const p22Before = await request('GET', `/api/phantom/client-documents/${p22SignDocument.id}/received-copy`, { token: phantomToken });
+  check('opening the signed copy before the client sends it is refused with a clear reason',
+    p22Before.status === 409 && p22Before.json?.code === 'not_received',
+    JSON.stringify(p22Before.json).slice(0, 160));
+
+  const p22Send = await request('POST', `${p22SignPath}/send-to-phantom`, { clientSession: p22SignSession });
+  check('the client sends the drawn-signed document to PHANTOM', p22Send.status === 200, JSON.stringify(p22Send.json).slice(0, 160));
+
+  const p22After = await request('GET', `/api/phantom/client-documents/${p22SignDocument.id}/received-copy`, { token: phantomToken });
+  check('PHANTOM can open the signed copy once it is received',
+    p22After.status === 200, `status=${p22After.status}`);
+  const p22ReceivedPdf = p22After.bytes;
+  const p22ReceivedText = artifactText(p22ReceivedPdf);
+  check('the received copy is a real PDF', isPdf(p22ReceivedPdf), `bytes=${p22ReceivedPdf.byteLength}`);
+  check('the received copy carries the signature name',
+    /Kofi Amoah/.test(p22ReceivedText), p22ReceivedText.slice(0, 240));
+  check('the received copy is the stamped client copy (watermark present)',
+    p22ReceivedText.includes('CrxWatermarkLogo') || p22ReceivedText.includes('/Subtype /Image'),
+    'watermark/header missing');
+  // The drawn mark is embedded as the body image: the precise proof the signed
+  // PDF carries the ink, not merely the typed name.
+  check('the received copy embeds the drawn signature image', /CrxBody\d/.test(p22ReceivedText), 'no body image');
+
+  // PHANTOM's document list surfaces the received document for the group.
+  const p22PhantomList = await request('GET', `/api/phantom/clients/${p22SignClient.id}/documents`, { token: phantomToken });
+  const p22ListRow = (p22PhantomList.json?.data || []).find((row) => row.id === p22SignDocument.id);
+  check('the operator\u2019s list marks the document as sent back', p22ListRow?.sentBack === true, JSON.stringify(p22ListRow || null));
+  check('the operator\u2019s list records when the signed copy was received', Boolean(p22ListRow?.signature?.receivedAt), JSON.stringify(p22ListRow?.signature || null));
+  check('the operator\u2019s list says the mark was drawn', p22ListRow?.signature?.drawn === true, JSON.stringify(p22ListRow?.signature || null));
+
+  // The signed Vault copy (this source is a client copy, so the client_snapshot
+  // is what carries the mark); the mark has to exist as a pipeline PNG key
+  // under vault/ so the render pipeline reads it back for the stamped copy.
+  const p22MarginPipeline = db.query("SELECT COUNT(*) AS total FROM client_document_signatures WHERE signature_image_r2_key LIKE 'vault/client-signature/%'")[0].total;
+  check('the drawn mark is stored as a pipeline-embedded signature image',
+    p22MarginPipeline >= 1, `pipeline marks: ${p22MarginPipeline}`);
+
+  check('a spectator without a client session cannot draw a signature',
+    (await request('POST', `${p22SignPath}/signature`, {
+      body: { signerName: 'Intruder', inkPng: p22InkDataUrl, strokes: p22Strokes },
+    })).status === 401);
+  check('a drawn signature still needs a name',
+    (await request('POST', `${p22SignPath}/signature`, {
+      clientSession: p22SignSession, body: { signerName: '  ', inkPng: p22InkDataUrl, strokes: p22Strokes },
+    })).status === 400);
+
+  // -------------------------------------------------------------------------
   group('34. The unified PHANTOM Community inbox (Phase 22)');
   // -------------------------------------------------------------------------
 

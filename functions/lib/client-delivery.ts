@@ -415,6 +415,19 @@ export class Canvas {
     this.fillRect(x + width - thickness, y, thickness, height, color, alpha);
   }
 
+  /** A segment between two points, used to stroke the client's drawn signature. */
+  line(x0: number, y0: number, x1: number, y1: number, color: [number, number, number], thickness = 1, alpha = 1): void {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy)));
+    for (let step = 0; step <= steps; step += 1) {
+      const t = steps === 0 ? 0 : step / steps;
+      const x = Math.round(x0 + dx * t);
+      const y = Math.round(y0 + dy * t);
+      this.fillRect(x - thickness / 2, y - thickness / 2, thickness, thickness, color, alpha);
+    }
+  }
+
   /** Draws another canvas over this one at (x, y), optionally scaled. */
   drawImage(source: Canvas, x: number, y: number, scale = 1, alpha = 1): void {
     const width = Math.max(1, Math.round(source.width * scale));

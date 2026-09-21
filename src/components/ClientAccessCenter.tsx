@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useModalBehaviour } from './AppDialog';
 import {
-  Activity, AlertTriangle, Archive, CheckCircle2, Clock, Copy, Eye, FileText, FileUp, KeyRound,
+  Activity, AlertTriangle, Archive, CheckCircle2, Clock, Copy, Eye, FileCheck2, FileText, FileUp, KeyRound,
   Link2, Loader2, Pencil, Plus, RefreshCw, ShieldAlert, ShieldCheck, Users, X,
 } from 'lucide-react';
 import { clientAccessCenter, db } from '../lib/cloudflare';
@@ -181,6 +181,24 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [publishFlow, setPublishFlow] = useState<null | { clientId: string; projectId?: string; document?: any; upload?: boolean }>(null);
   const [linkDialog, setLinkDialog] = useState<null | { clientId: string }>(null);
   const [previewClient, setPreviewClient] = useState<null | { client: any; projectId: string; room: any; projects: any[] }>(null);
+  /** The received document whose signed copy is loading right now, if any. */
+  const [openingReceivedId, setOpeningReceivedId] = useState<string | null>(null);
+
+  /** Opens the signed copy PHANTOM received from a client, as an object URL. */
+  const openReceivedCopy = async (document: any) => {
+    setOpeningReceivedId(document.id);
+    setError(null);
+    try {
+      const result = await clientAccessCenter.receivedCopy(document.id);
+      window.open(result.url, '_blank', 'noopener');
+      // The object URL must outlive the navigation (the new tab reads lazily).
+      setTimeout(() => URL.revokeObjectURL(result.url), 60_000);
+    } catch (failure: any) {
+      setError(failure?.message || 'The signed copy could not be opened.');
+    } finally {
+      setOpeningReceivedId(null);
+    }
+  };
 
   const loadClients = useCallback(async (archived = includeArchived) => {
     setLoading(true);
@@ -564,6 +582,8 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                   onLifecycle={(document: any, state: string) => void changeLifecycle(document, state, refresh, setError)}
                   onEdit={(document: any) => setPublishFlow({ clientId: detail.id, projectId: document.project?.id, document })}
                   onDelete={(document: any) => void deleteDocument(document, refresh, setError)}
+                  onOpenReceived={(document: any) => void openReceivedCopy(document)}
+                  openingReceivedId={openingReceivedId}
                   busy={busy}
                 />
               )}
@@ -836,6 +856,7 @@ const ProjectsPanel = ({
 
 const DocumentsPanel = ({
   can, client, documents, projects, onPublish, onUpload, onLifecycle, onEdit, onDelete, onPrepare, onDirectLink, busy,
+  openingReceivedId, onOpenReceived,
 }: {
   can: (capability: string) => boolean;
   client: any; documents: any[]; projects: any[]; onPublish: () => void;
@@ -847,9 +868,21 @@ const DocumentsPanel = ({
   onPrepare: (document: any) => void;
   /** Generates a link that opens this document straight away, with no key. */
   onDirectLink: (document: any) => void;
+  /** Opens the signed copy the client handed back (PHANTOM, received documents). */
+  onOpenReceived: (document: any) => void;
+  /** The received document whose signed copy is loading right now, if any. */
+  openingReceivedId: string | null;
   busy: boolean;
 }) => {
   const projectName = (document: any) => projects.find((project) => project.id === document.project?.id)?.name || '';
+
+  /** The documents the client sent back, newest first, as the panel groups them. */
+  const received = documents
+    .filter((document) => Boolean(document.signature?.receivedAt))
+    .sort((a: any, b: any) => String(b.signature.receivedAt).localeCompare(String(a.signature.receivedAt)));
+  const otherDocuments = documents.filter((document) => !Boolean(document.signature?.receivedAt));
+  const withdrawn = received.filter((document) => document.lifecycle !== 'published' || document.isArchived);
+  const liveReceived = received.length - withdrawn.length;
   return (
   <div>
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -890,8 +923,69 @@ const DocumentsPanel = ({
         <span className="text-[11px] font-black uppercase tracking-wider text-emerald-700">Upload &amp; stamp</span>
       </button>
     ) : null}
-    <div className="mt-4 space-y-3">
-      {documents.length ? documents.map((document) => (
+
+    {/* RECEIVED DOCUMENTS — the signed copies the client handed back. They stay
+        grouped here even after the document leaves the client's room, because
+        what PHANTOM received is a record, not a live publish. */}
+    {received.length ? (
+      <div className="mt-6">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.14em] text-emerald-800">
+            <FileCheck2 className="h-4 w-4" aria-hidden="true" /> Received documents
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] tracking-normal text-emerald-800">
+              {liveReceived}
+            </span>
+          </p>
+          {withdrawn.length ? (
+            <p className="text-[10px] font-semibold text-slate-500">
+              {withdrawn.length} held for reference — no longer published to the client.
+            </p>
+          ) : null}
+        </div>
+        <div className="mt-3 space-y-3">
+          {received.map((document) => (
+            <article key={document.id} className="rounded-2xl border border-emerald-200 bg-emerald-50/40 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-black text-slate-900">{document.title}</p>
+                    <Pill tone={document.lifecycle}>{LIFECYCLE_LABELS[document.lifecycle] || document.lifecycle}</Pill>
+                  </div>
+                  <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
+                    <span className="font-mono uppercase tracking-wider">{document.reference}</span>
+                    <span>{projectName(document)}</span>
+                    <span>v{document.signature?.version || document.version}</span>
+                  </p>
+                  <p className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] font-semibold text-emerald-800">
+                    <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    Signed by {document.signature?.signerName}
+                    {document.signature?.signerTitle ? `, ${document.signature.signerTitle}` : ''}
+                    {document.signature?.receivedAt ? (
+                      <span className="text-slate-500">· received {formatWhen(document.signature.receivedAt)}</span>
+                    ) : null}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => onOpenReceived(document)}
+                    disabled={busy || openingReceivedId !== null}
+                    className="mini-button mini-button--primary"
+                    title={`Open the signed copy of ${document.title} the client handed back`}
+                  >
+                    {openingReceivedId === document.id
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <FileText className="h-4 w-4" />} Open signed copy
+                  </button>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    ) : null}
+
+    <div className="mt-6 space-y-3">
+      {otherDocuments.length ? otherDocuments.map((document) => (
         <article key={document.id} className="rounded-2xl border border-slate-100 bg-white p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -965,7 +1059,11 @@ const DocumentsPanel = ({
             </div>
           </div>
         </article>
-      )) : <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">Nothing has been published to {client.name} yet.</p>}
+      )) : (
+        <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">
+          {documents.length ? 'All of this client\u2019s documents are in Received documents.' : `Nothing has been published to ${client.name} yet.`}
+        </p>
+      )}
     </div>
   </div>
   );

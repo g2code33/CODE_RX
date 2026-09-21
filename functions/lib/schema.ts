@@ -1106,6 +1106,13 @@ CREATE TABLE IF NOT EXISTS client_document_signatures (
   signer_title TEXT NOT NULL DEFAULT '',
   document_version TEXT NOT NULL DEFAULT '',
   signed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  -- The drawn signature, when the client signed with the pencil rather than
+  -- typing only. It is a pipeline-produced PNG (transparent ink) stored under
+  -- client-exports/ or vault/, never a source file.
+  signature_image_r2_key TEXT,
+  -- Set once the client sends the signed document back to PHANTOM, so the
+  -- operator's "Received documents" grouping reads one timestamp per signature.
+  received_at DATETIME,
   FOREIGN KEY(client_document_id) REFERENCES client_documents(id),
   FOREIGN KEY(client_id) REFERENCES clients(id),
   FOREIGN KEY(client_project_id) REFERENCES client_projects(id)
@@ -1203,12 +1210,17 @@ const SAFE_MIGRATIONS = [
   // the document" from "deliver the client file"; existing links keep the
   // 'view' default, so no stored link changes meaning.
   { table: 'client_links', column: 'destination_intent', sql: "ALTER TABLE client_links ADD COLUMN destination_intent TEXT NOT NULL DEFAULT 'view' CHECK (destination_intent IN ('view','file'))" },
+  // Phase 22 — the client's drawn (pencil) signature, plus the moment the
+  // signed document came back to PHANTOM. Both are additive; a typed-only
+  // legacy signature simply keeps its NULLs and still renders as before.
+  { table: 'client_document_signatures', column: 'signature_image_r2_key', sql: 'ALTER TABLE client_document_signatures ADD COLUMN signature_image_r2_key TEXT' },
+  { table: 'client_document_signatures', column: 'received_at', sql: 'ALTER TABLE client_document_signatures ADD COLUMN received_at DATETIME' },
 ] as const;
 
 // Bumped so the additive client-portal tables, indexes and feature flags above
 // are applied once on an existing live database. The migration path only ever
 // adds objects; it never alters or drops an existing table, column, or row.
-const VAULT_SCHEMA_VERSION = '2026-09-20-code-rx14-client-portal-3-phantom-inbox-1';
+const VAULT_SCHEMA_VERSION = '2026-09-20-code-rx14-client-portal-3-phantom-inbox-2-signing';
 
 
 // Role codes stay stable for member history and permissions. Their visible
