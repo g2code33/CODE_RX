@@ -13,6 +13,7 @@ const CORE = [
   '/manifest.webmanifest',
 ];
 
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
