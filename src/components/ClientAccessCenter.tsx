@@ -2697,7 +2697,7 @@ const prepareStampedCopy = async (
   setError: (message: string | null) => void,
 ) => {
   try {
-    const result = await clientAccessCenter.prepareDelivery(document.id);
+    const result = await clientAccessCenter.prepareDelivery(document.id, true);
     const kilobytes = Math.max(1, Math.round(Number(result.data?.sizeBytes || 0) / 1024));
     const message = `Stamped client copy ready — ${result.data?.label || 'client copy'} (${kilobytes} KB, `
       + `${result.data?.cached ? 'already cached' : 'newly rendered'}).`;
