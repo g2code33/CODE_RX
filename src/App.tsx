@@ -123,11 +123,11 @@ function App() {
       setUser(authenticatedUser);
       if (isCommunityWorkspace) setCommunityOrigin(communityOriginFor(authenticatedUser));
       if (isAdminUser(authenticatedUser)) {
-        const openPhantomApplications = window.location.hash.startsWith('#phantom-applications') && (authenticatedUser.isPhantom || authenticatedUser.role === 'phantom');
+        const openPhantom = (window.location.hash.startsWith('#phantom') || window.location.hash.startsWith('#phantom-applications')) && (authenticatedUser.isPhantom || authenticatedUser.role === 'phantom');
         setIsAdmin(true);
         setIsDashboard(false);
         setIsMemberVault(false);
-        setAdminWorkspace(openPhantomApplications ? 'phantom' : 'controller');
+        setAdminWorkspace(openPhantom ? 'phantom' : 'controller');
       } else {
         setIsDashboard(true);
         setIsMemberVault(window.location.hash.startsWith('#member-vault'));
@@ -145,7 +145,7 @@ function App() {
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
-      if (window.location.hash.startsWith('#phantom-applications')) {
+      if (window.location.hash.startsWith('#phantom') || window.location.hash.startsWith('#phantom-applications')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(false);
         setIsSharedVaultView(false);
