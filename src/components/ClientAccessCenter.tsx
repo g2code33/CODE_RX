@@ -2087,6 +2087,19 @@ const PublishDialog = ({
       .catch(() => setVaultSections([]));
   }, []);
 
+  useEffect(() => {
+    if (existing?.vaultDocumentId && !contentText) {
+      db.vault.document(Number(existing.vaultDocumentId))
+        .then((doc: any) => {
+          if (doc) {
+            const docText = doc.content || extractSnapshotText(doc.content_json, 'blocks');
+            if (docText) setContentText(docText);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [existing?.vaultDocumentId]);
+
   const submit = async (publishNow: boolean) => {
     setError(null);
     if (!projectId) { setError('Choose the client and project this document belongs to.'); return; }
@@ -2167,7 +2180,7 @@ const PublishDialog = ({
           version: version.trim() || '1.0',
           allowView,
           allowDownload,
-          ...(source === 'vault' ? { vaultDocumentId: vaultDocumentId || null } : { contentText: contentText.trim(), vaultDocumentId: null }),
+          ...(source === 'vault' ? { vaultDocumentId: vaultDocumentId || null } : { contentText: contentText.trim(), vaultDocumentId: vaultDocumentId ? vaultDocumentId : null }),
         });
         documentId = existing.id;
 
@@ -2211,25 +2224,38 @@ const PublishDialog = ({
       wide
     >
       <div className="space-y-5">
-        {existing && (existing.vaultDocumentId || existing.hasClientArtifact) ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <div>
-              <p className="text-xs font-bold text-slate-800">
-                {existing.vaultDocumentId ? `Currently linked to Vault document #${existing.vaultDocumentId}` : 'Document currently has an uploaded file/snapshot'}
-              </p>
-              <p className="text-[11px] text-slate-500">
-                You can upload a new replacement file, edit its writings, or switch to direct client text.
-              </p>
+        {existing ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold text-slate-800">
+                  {vaultDocumentId ? `Attached Vault Document #${vaultDocumentId}` : 'No Vault file attached (direct text document)'}
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  {vaultDocumentId
+                    ? 'Editing writings updates both this client copy and the Vault original, automatically keeping old records in Vault revision history.'
+                    : 'This document uses direct client-facing writings.'}
+                </p>
+              </div>
+              {vaultDocumentId ? (
+                <button
+                  type="button"
+                  onClick={() => { setVaultDocumentId(''); }}
+                  className="rounded-lg border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-black text-rose-600 hover:bg-rose-50"
+                  title="Remove the uploaded Vault file attachment and keep only the written text"
+                >
+                  Delete / detach uploaded file
+                </button>
+              ) : existing.vaultDocumentId ? (
+                <button
+                  type="button"
+                  onClick={() => { setVaultDocumentId(String(existing.vaultDocumentId)); }}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Re-link Vault document #{existing.vaultDocumentId}
+                </button>
+              ) : null}
             </div>
-            {source !== 'text' ? (
-              <button
-                type="button"
-                onClick={() => { setSource('text'); setVaultDocumentId(''); }}
-                className="rounded-lg border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-black text-rose-600 hover:bg-rose-50"
-              >
-                Detach file / write text instead
-              </button>
-            ) : null}
           </div>
         ) : null}
 
