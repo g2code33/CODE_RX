@@ -2167,7 +2167,7 @@ const PublishDialog = ({
           version: version.trim() || '1.0',
           allowView,
           allowDownload,
-          ...(source === 'vault' ? { vaultDocumentId: vaultDocumentId || null } : { contentText: contentText.trim() }),
+          ...(source === 'vault' ? { vaultDocumentId: vaultDocumentId || null } : { contentText: contentText.trim(), vaultDocumentId: null }),
         });
         documentId = existing.id;
 
@@ -2211,6 +2211,28 @@ const PublishDialog = ({
       wide
     >
       <div className="space-y-5">
+        {existing && (existing.vaultDocumentId || existing.hasClientArtifact) ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div>
+              <p className="text-xs font-bold text-slate-800">
+                {existing.vaultDocumentId ? `Currently linked to Vault document #${existing.vaultDocumentId}` : 'Document currently has an uploaded file/snapshot'}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                You can upload a new replacement file, edit its writings, or switch to direct client text.
+              </p>
+            </div>
+            {source !== 'text' ? (
+              <button
+                type="button"
+                onClick={() => { setSource('text'); setVaultDocumentId(''); }}
+                className="rounded-lg border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-black text-rose-600 hover:bg-rose-50"
+              >
+                Detach file / write text instead
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap gap-2">
           <button onClick={() => setSource('text')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'text' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
             {existing ? 'Edit document text' : '1 · Write the client copy'}
