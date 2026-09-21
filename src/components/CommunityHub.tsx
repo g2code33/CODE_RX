@@ -98,7 +98,7 @@ export const CommunityHub = ({
     }
   };
 
-  loadPrivate = async () => {
+  const loadPrivate = async () => {
     if (!user) return;
     try {
       const [inbox, groupRows, memberRows, telegram, profile] = await Promise.all([db.community.conversations(), db.community.groups(), db.community.members(memberSearch), db.community.telegramStatus(), db.member.me()]);
