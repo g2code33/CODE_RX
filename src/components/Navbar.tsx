@@ -105,7 +105,24 @@ export const Navbar = ({
       {isOpen && (
         <div className="brand-nav-dropdown px-5 pb-5 pt-3 shadow-2xl backdrop-blur-xl lg:hidden">
           <div className="mx-auto max-w-[1440px] space-y-1">
-            {!isDashboard && <div className="grid grid-cols-2 gap-2 pb-2"><button type="button" onClick={goBack} className="flex items-center justify-center gap-2 rounded-xl border border-[#06110a]/10 px-4 py-3 text-xs font-black text-[#244f31] hover:bg-[#0f2a17]/5"><ArrowLeft className="h-4 w-4" />Back</button><button type="button" onClick={goHome} className="flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-black text-emerald-800 hover:bg-emerald-100"><Home className="h-4 w-4" />Home</button></div>}
+            {!isDashboard && <div className="grid grid-cols-2 gap-2 pb-2">
+              <button
+                type="button"
+                onClick={goBack}
+                className="flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 py-3 text-xs font-black text-white hover:bg-white/15 transition-colors"
+              >
+                <ArrowLeft className="h-4 w-4 text-white" />
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={goHome}
+                className="flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 py-3 text-xs font-black text-white hover:bg-white/15 transition-colors"
+              >
+                <Home className="h-4 w-4 text-white" />
+                Home
+              </button>
+            </div>}
             {!isDashboard && NAV_LINKS.map((link) => (
               <a
                 key={link.id}

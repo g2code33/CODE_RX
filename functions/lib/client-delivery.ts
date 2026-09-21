@@ -251,6 +251,61 @@ export const decodePng = async (bytes: Uint8Array): Promise<DecodedImage> => {
 };
 
 /** Encodes RGBA pixels back to a PNG (colour type 6, 8-bit, filter type 0). */
+/**
+ * Trims the empty margin around a decoded logo so the artwork itself fills the
+ * frame. The official mark ships on a 512×512 canvas with a band of opaque
+ * padding around it; served whole, that padding makes the logo look small (or,
+ * paired with the rotated wordmark, sit far off centre). A `thumbnail` value is
+ * the length of the final square's edge; when omitted the crop stays at the
+ * source scale and is only as large as the artwork. Both delivery engines use
+ * this one trim, so the header band, the stamping pipeline and the generated
+ * page watermark always draw the same full logo.
+ */
+export const squareCropArtwork = (image: DecodedImage, thumbnail?: number): DecodedImage => {
+  const { width, height, rgba } = image;
+  const at = (x: number, y: number): number => rgba[(y * width + x) * 4 + 3];
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (at(x, y) > 16) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX || maxY < minY) return image;
+  const artWidth = maxX - minX + 1;
+  const artHeight = maxY - minY + 1;
+  const side = Math.max(artWidth, artHeight);
+  // Keep the artwork centred on the oversized axis so it reads as one mark and
+  // not as a floating fragment weighted to one edge.
+  const left = minX - Math.round((side - artWidth) / 2);
+  const top = minY - Math.round((side - artHeight) / 2);
+  const size = thumbnail && Number.isInteger(thumbnail) && thumbnail > 0 ? thumbnail : side;
+  const out = new Uint8Array(size * size * 4);
+  const remap = (px: number, py: number): number => {
+    const sx = Math.min(width - 1, Math.max(0, Math.floor(left + (px / size) * side)));
+    const sy = Math.min(height - 1, Math.max(0, Math.floor(top + (py / size) * side)));
+    return (sy * width + sx) * 4;
+  };
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const src = remap(x, y);
+      const dst = (y * size + x) * 4;
+      out[dst] = rgba[src];
+      out[dst + 1] = rgba[src + 1];
+      out[dst + 2] = rgba[src + 2];
+      out[dst + 3] = rgba[src + 3];
+    }
+  }
+  return { width: size, height: size, rgba: out };
+};
+
 export const encodePng = async (image: DecodedImage): Promise<Uint8Array> => {
   const { width, height, rgba } = image;
   const stride = width * 4;
@@ -358,6 +413,19 @@ export class Canvas {
     this.fillRect(x, y + height - thickness, width, thickness, color, alpha);
     this.fillRect(x, y, thickness, height, color, alpha);
     this.fillRect(x + width - thickness, y, thickness, height, color, alpha);
+  }
+
+  /** A segment between two points, used to stroke the client's drawn signature. */
+  line(x0: number, y0: number, x1: number, y1: number, color: [number, number, number], thickness = 1, alpha = 1): void {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy)));
+    for (let step = 0; step <= steps; step += 1) {
+      const t = steps === 0 ? 0 : step / steps;
+      const x = Math.round(x0 + dx * t);
+      const y = Math.round(y0 + dy * t);
+      this.fillRect(x - thickness / 2, y - thickness / 2, thickness, thickness, color, alpha);
+    }
   }
 
   /** Draws another canvas over this one at (x, y), optionally scaled. */

@@ -22,6 +22,7 @@ import {
   DeliveryError,
   deflate,
   inflate,
+  squareCropArtwork,
   type DecodedImage,
 } from './client-delivery';
 
@@ -386,8 +387,33 @@ const footerOperators = (meta: StampMeta, page: number, total: number, names: St
   return lines.join('\n');
 };
 
-/** The subtle page watermark: a big, faint wordmark and the Code Rx mark. */
-const watermarkOperators = (logos: { watermark: number | null }, names: StampNames = GENERATED_NAMES): string => {
+/**
+ * Where the single centred logo watermark sits on a page. A page may span both
+ * an optional stamped source page and the generated A4 sheet, but the logo is
+ * always centred on the delivered page and sized to roughly a third of the
+ * smaller edge, so it never dwarfs a small source page. `leanRight` also slides
+ * it slightly toward the lower right; the rotated `CODE Rx SOCIETY` wordmark is
+ * always drawn along the opposite diagonal, so the two never collide.
+ */
+const markPosition = (pageWidth: number, pageHeight: number, leanRight: boolean) => {
+  const markSize = Math.max(96, Math.min(260, Math.round(Math.min(pageWidth, pageHeight) * 0.46)));
+  const angle = Math.atan2(1, 2.6);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const centerX = pageWidth / 2 + markSize * 0.2;
+  const centerY = pageHeight / 2 - markSize * 0.26;
+  const anchorX = centerX - (markSize / 2) * cos + (markSize / 2) * sin - (leanRight ? markSize * 0.08 : 0);
+  const anchorY = centerY - (markSize / 2) * sin - (markSize / 2) * cos;
+  return { markSize, angle, cos, sin, anchorX, anchorY };
+};
+
+/** The subtle page watermark: a single centred Code Rx mark, with the wordmark
+ * on its own offset diagonal so it never overlaps the logo. */
+const watermarkOperators = (
+  logos: { watermark: number | null },
+  names: StampNames = GENERATED_NAMES,
+  options: { leanRight?: boolean } = {},
+): string => {
   const lines: string[] = [];
   const word = 'CODE Rx SOCIETY';
   const size = 58;
@@ -399,21 +425,22 @@ const watermarkOperators = (logos: { watermark: number | null }, names: StampNam
   const centerY = PAGE_HEIGHT / 2;
 
   if (logos.watermark !== null) {
-    const markSize = 260;
+    const logo = markPosition(PAGE_WIDTH, PAGE_HEIGHT, options.leanRight === true);
     lines.push('q');
     lines.push(`/${names.gs} gs`);
-    lines.push(`${pdfNumber(cos)} ${pdfNumber(sin)} ${pdfNumber(-sin)} ${pdfNumber(cos)} `
-      + `${pdfNumber(centerX - (markSize / 2) * cos + (markSize / 2) * sin)} `
-      + `${pdfNumber(centerY - (markSize / 2) * sin - (markSize / 2) * cos - markSize * 0.35)} cm`);
-    lines.push(`${pdfNumber(markSize)} 0 0 ${pdfNumber(markSize)} 0 0 cm`);
+    lines.push(`${pdfNumber(logo.cos)} ${pdfNumber(logo.sin)} ${pdfNumber(-logo.sin)} ${pdfNumber(logo.cos)} `
+      + `${pdfNumber(logo.anchorX)} ${pdfNumber(logo.anchorY)} cm`);
+    lines.push(`${pdfNumber(logo.markSize)} 0 0 ${pdfNumber(logo.markSize)} 0 0 cm`);
     lines.push(`/${names.watermarkLogo} Do`);
     lines.push('Q');
   }
 
+  // The wordmark stays below and to the left of centre, on the same diagonal as
+  // the logo but offset far enough that the two never share a pixel.
   lines.push('q');
   lines.push(`/${names.gs} gs`);
   lines.push(`${pdfNumber(cos)} ${pdfNumber(sin)} ${pdfNumber(-sin)} ${pdfNumber(cos)} `
-    + `${pdfNumber(centerX - (width / 2) * cos)} ${pdfNumber(centerY - 4 - (width / 2) * sin)} cm`);
+    + `${pdfNumber(centerX - (width / 2) * cos - 120)} ${pdfNumber(centerY - 4 - (width / 2) * sin - 110)} cm`);
   lines.push('BT');
   lines.push(`/${names.bold} ${size} Tf`);
   lines.push('0 0 0 rg');
@@ -426,7 +453,7 @@ const watermarkOperators = (logos: { watermark: number | null }, names: StampNam
   lines.push('q');
   lines.push(`/${names.gs} gs`);
   lines.push(`${pdfNumber(cos)} ${pdfNumber(sin)} ${pdfNumber(-sin)} ${pdfNumber(cos)} `
-    + `${pdfNumber(centerX - (measure(small, 'regular', 20) / 2) * cos)} ${pdfNumber(centerY - 52 - (measure(small, 'regular', 20) / 2) * sin)} cm`);
+    + `${pdfNumber(centerX - (measure(small, 'regular', 20) / 2) * cos - 120)} ${pdfNumber(centerY - 52 - (measure(small, 'regular', 20) / 2) * sin - 110)} cm`);
   lines.push('BT');
   lines.push(`/${names.regular} 20 Tf`);
   lines.push('0 0 0 rg');
@@ -530,9 +557,9 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
   const fontRegular = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
   const fontBold = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
   const fontMono = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>');
-  const gstate = file.add('<< /Type /ExtGState /ca 0.05 /CA 0.05 /BM /Multiply >>');
+  const gstate = file.add('<< /Type /ExtGState /ca 0.10 /CA 0.10 /BM /Multiply >>');
   const headerLogo = options.logo ? await addImageObject(file, options.logo, BRAND.greenDark) : null;
-  const watermarkLogo = options.logo ? await addImageObject(file, options.logo, [255, 255, 255]) : null;
+  const watermarkLogo = options.logo ? await addImageObject(file, squareCropArtwork(options.logo), [255, 255, 255]) : null;
 
   const pages: string[][] = [];
   let pageLines: string[] = [];
@@ -823,9 +850,9 @@ const buildStampFurniture = async (
 ): Promise<{ fontRegular: number; fontBold: number; gstate: number; headerLogo: number | null; watermarkLogo: number | null }> => {
   const fontRegular = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
   const fontBold = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
-  const gstate = file.add('<< /Type /ExtGState /ca 0.05 /CA 0.05 /BM /Multiply >>');
+  const gstate = file.add('<< /Type /ExtGState /ca 0.10 /CA 0.10 /BM /Multiply >>');
   const headerLogo = logo ? await addImageObject(file, logo, BRAND.greenDark) : null;
-  const watermarkLogo = logo ? await addImageObject(file, logo, [255, 255, 255]) : null;
+  const watermarkLogo = logo ? await addImageObject(file, squareCropArtwork(logo), [255, 255, 255]) : null;
   return { fontRegular, fontBold, gstate, headerLogo, watermarkLogo };
 };
 
@@ -936,7 +963,11 @@ const stampPdfInternal = async (
     const stampStream = [
       'q',
       transform,
-      watermarkOperators({ watermark: watermarkLogo === null ? null : furnitureNumber(watermarkLogo) }, SOURCE_NAMES),
+      // The stamped source's own artwork is opaque and can sit on top of the
+      // transparent watermark group; the rotated wordmark is kept on the
+      // opposite diagonal from the centred logo so neither clashes with the
+      // client's content.
+      watermarkOperators({ watermark: watermarkLogo === null ? null : furnitureNumber(watermarkLogo) }, SOURCE_NAMES, { leanRight: true }),
       'Q',
       'q',
       parts.join('\n'),

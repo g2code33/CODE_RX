@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
   CalendarDays,
   CheckCircle2,
   Download,
+  Eraser,
   Eye,
   FileText,
   KeyRound,
@@ -13,10 +14,12 @@ import {
   LogOut,
   Menu,
   MessageSquareText,
+  Paintbrush,
   PenLine,
   Save,
   Send,
   ShieldCheck,
+  Undo2,
   X,
 } from 'lucide-react';
 import { clientPortal, ClientPortalError } from '../lib/cloudflare';
@@ -88,8 +91,15 @@ export interface RoomTransport {
    * copy and sends it back — this is what replaces the old free-text editor.
    */
   signature?: (projectId: string, documentId: string) => Promise<{ data: any }>;
-  sign?: (projectId: string, documentId: string, payload: { signerName: string; signerTitle?: string }) => Promise<{ message: string; data: any }>;
-  /** Send the document back to PHANTOM, signed or not. */
+  /** `inkPng` is the pencil pad's canvas (base64 PNG) and `strokes` the drawn lines. */
+  /** The drawn mark is required: `inkPng` + `strokes` always accompany the name. */
+  sign?: (projectId: string, documentId: string, payload: {
+    signerName: string;
+    signerTitle?: string;
+    inkPng: string;
+    strokes: Array<{ points: Array<{ x: number; y: number }> }>;
+  }) => Promise<{ message: string; data: any }>;
+  /** Send the document back to PHANTOM — the drawn-signed copy only. */
   sendToPhantom?: (projectId: string, documentId: string) => Promise<{ message: string; data: any }>;
   /** The review section: what the client was asked, and their answer. */
   review?: (projectId: string, documentId: string) => Promise<{ data: any }>;
@@ -215,15 +225,258 @@ export const StampedCopyPanel = ({
 };
 
 /**
+ * THE PENCIL SIGNATURE PAD.
+ *
+ * A freehand drawing surface the client signs with, instead of typing only.
+ * Pointer coordinates are written onto a VRAM (in-memory) canvas so the mark
+ * is drawn even if the browser renders offscreen canvases lazily; the display
+ * canvas copies the VRAM pixels on every refresh. The finished mark travels to
+ * the server as a PNG data URL plus its normalized strokes, and the server is
+ * the authority that persists the drawn mark (no PDF logic lives here).
+ */
+const SignaturePad = ({
+  label, width, height, disabled, channels,
+}: {
+  label: string;
+  width: number;
+  height: number;
+  disabled: boolean;
+  channels: {
+    hasInk: boolean;
+    setInkPng: (dataUrl: string | null) => void;
+    setStrokes: (strokes: Array<{ points: Array<{ x: number; y: number }> }>) => void;
+    setHasInk: (hasInk: boolean) => void;
+  };
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const vramRef = useRef<HTMLCanvasElement | null>(null);
+  const pointerIdRef = useRef<number | null>(null);
+  const strokesRef = useRef<Array<{ points: Array<{ x: number; y: number }> }>>([]);
+  const currentRef = useRef<Array<{ x: number; y: number }> | null>(null);
+
+  // A brand-codex emerald ink; the slice() keeps it as an opaque stamp colour.
+  const INK: [number, number, number] = [15, 23, 42];
+  const INK_WIDTH = 3.5;
+
+  /** Mirrors VRAM onto the visible canvas. */
+  const composite = useCallback(() => {
+    const canvas = canvasRef.current;
+    const vram = vramRef.current;
+    if (!canvas || !vram) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // The faint guide line the client signs above, matching the server's copy.
+    ctx.strokeStyle = 'rgba(176, 190, 186, 0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([2, 6]);
+    ctx.beginPath();
+    ctx.moveTo(24, Math.round(canvas.height * 0.66));
+    ctx.lineTo(canvas.width - 24, Math.round(canvas.height * 0.66));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.drawImage(vram, 0, 0);
+  }, []);
+
+  const ensureCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const vram = vramRef.current;
+    if (!canvas) return [];
+    // The VRAM is where the mark is actually painted; if the browser never
+    // rendered the offscreen copy, composite() still has its pixels.
+    if (!vram) {
+      vramRef.current = document.createElement('canvas');
+    }
+    const target = vramRef.current as HTMLCanvasElement;
+    target.width = canvas.width;
+    target.height = canvas.height;
+    return [canvas, target] as const;
+  }, []);
+
+  const paint = useCallback(() => {
+    composite();
+  }, [composite]);
+
+  const drawSegment = useCallback((from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const vram = vramRef.current;
+    const ctx = vram?.getContext('2d');
+    if (!ctx) return;
+    ctx.strokeStyle = `rgb(${INK[0]},${INK[1]},${INK[2]})`;
+    ctx.lineWidth = INK_WIDTH;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+  }, []);
+
+  const position = useCallback((event: PointerEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+    return { x, y };
+  }, []);
+
+  const padPoint = useCallback((point: { x: number; y: number }) => {
+    const canvas = canvasRef.current;
+    const vram = vramRef.current;
+    if (!canvas || !vram) return { x: 0, y: 0 };
+    return { x: point.x * vram.width, y: point.y * vram.height };
+  }, []);
+
+  const onPointerDown = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (disabled || pointerIdRef.current !== null) return;
+    ensureCanvas();
+    const point = position(event.nativeEvent);
+    const px = padPoint(point);
+    pointerIdRef.current = event.pointerId;
+    currentRef.current = [{ x: point.x, y: point.y }];
+    (event.target as HTMLCanvasElement).setPointerCapture?.(event.pointerId);
+    // A tap still leaves a dot the server records.
+    drawSegment(px, { x: px.x + 0.01, y: px.y + 0.01 });
+    paint();
+  }, [disabled, ensureCanvas, position, padPoint, drawSegment, paint]);
+
+  const onPointerMove = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (pointerIdRef.current !== event.pointerId || !currentRef.current) return;
+    ensureCanvas();
+    const point = position(event.nativeEvent);
+    const from = currentRef.current[currentRef.current.length - 1];
+    currentRef.current.push(point);
+    const pxFrom = padPoint(from);
+    const pxTo = padPoint(point);
+    drawSegment(pxFrom, pxTo);
+    paint();
+  }, [ensureCanvas, position, padPoint, drawSegment, paint]);
+
+  const onPointerUp = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (pointerIdRef.current !== event.pointerId) return;
+    pointerIdRef.current = null;
+    const stroke = currentRef.current;
+    currentRef.current = null;
+    if (!stroke) return;
+    if (stroke.length < 2) {
+      // Record a tap as a one-point stroke (a dot).
+      strokesRef.current = [...strokesRef.current.slice(-199), { points: [stroke[0]] }];
+    } else {
+      // Thin the points so a long flourish stays well under the server cap.
+      const keep = stroke.filter((_, index) => index % 4 === 0 || index === stroke.length - 1);
+      strokesRef.current = [...strokesRef.current.slice(-199), { points: keep }];
+    }
+    channels.setStrokes(strokesRef.current);
+    // The PNG travels immediately, so "Save" sends what "the pad" last showed.
+    const canvas = canvasRef.current;
+    const vram = vramRef.current;
+    if (canvas && vram) {
+      const canvasHasInk = strokesRef.current.length > 0;
+      if (canvasHasInk) {
+        channels.setInkPng(canvas.toDataURL('image/png'));
+      } else {
+        channels.setInkPng(null);
+      }
+      channels.setHasInk(canvasHasInk);
+    }
+  }, [channels]);
+
+  const clear = useCallback(() => {
+    ensureCanvas();
+    const vram = vramRef.current;
+    const ctx = vram?.getContext('2d');
+    if (ctx && vram) ctx.clearRect(0, 0, vram.width, vram.height);
+    strokesRef.current = [];
+    currentRef.current = null;
+    pointerIdRef.current = null;
+    channels.setStrokes([]);
+    channels.setInkPng(null);
+    channels.setHasInk(false);
+    paint();
+  }, [channels, ensureCanvas, paint]);
+
+  const undo = useCallback(() => {
+    ensureCanvas();
+    const strokes = strokesRef.current.slice(0, -1);
+    strokesRef.current = strokes;
+    channels.setStrokes(strokes);
+    // Repaint VRAM from scratch so the visible canvas matches the strokes.
+    const vram = vramRef.current;
+    const ctx = vram?.getContext('2d');
+    if (ctx && vram) {
+      ctx.clearRect(0, 0, vram.width, vram.height);
+      for (const stroke of strokes) {
+        const points = stroke.points.map((point) => ({ x: point.x * vram.width, y: point.y * vram.height }));
+        if (points.length === 1) {
+          drawSegment(points[0], { x: points[0].x + 0.01, y: points[0].y + 0.01 });
+          continue;
+        }
+        for (let index = 1; index < points.length; index += 1) drawSegment(points[index - 1], points[index]);
+      }
+    }
+    const canvas = canvasRef.current;
+    if (canvas && strokes.length) channels.setInkPng(canvas.toDataURL('image/png'));
+    else channels.setInkPng(null);
+    channels.setHasInk(strokes.length > 0);
+    paint();
+  }, [channels, drawSegment, ensureCanvas, paint]);
+
+  return (
+    <div className="rounded-xl border border-emerald-200 bg-white p-3">
+      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-800">{label}</p>
+      <div className="mt-2 overflow-hidden rounded-lg ring-1 ring-emerald-100">
+        <canvas
+          ref={canvasRef}
+          width={width}
+          height={height}
+          aria-label={`Draw your signature for ${label}`}
+          role="img"
+          className="block h-40 w-full touch-none cursor-crosshair select-none sm:h-48"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+        />
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={undo}
+          disabled={disabled || !channels.hasInk}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+        >
+          <Undo2 className="h-3.5 w-3.5" aria-hidden="true" /> Undo
+        </button>
+        <button
+          type="button"
+          onClick={clear}
+          disabled={disabled || !channels.hasInk}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+        >
+          <Eraser className="h-3.5 w-3.5" aria-hidden="true" /> Clear
+        </button>
+        <span className="ml-auto text-[10px] font-semibold text-slate-500">
+          {channels.hasInk ? 'Your mark is ready to save.' : 'Draw with your finger, mouse or pen.'}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+/**
  * SIGN THIS DOCUMENT.
  *
  * This is what the client does with a document Code Rx sends them: they read
- * it, type their name, save the signature, and send the signed copy back to
- * PHANTOM. Nothing here edits the wording — the wording belongs to Code Rx.
+ * it, type their name, draw their mark with the pencil, save the signature,
+ * and send the signed copy back to PHANTOM. Nothing here edits the wording —
+ * the wording belongs to Code Rx.
  */
 const SignaturePanel = ({
   documentTitle, signature, name, title, busy, notice, sendBusy, sendNotice, preview,
   onNameChange, onTitleChange, onSign, onSend, onTextPhantom,
+  hasInk, onInkPngChange, onStrokesChange, onHasInkChange,
 }: {
   documentTitle: string;
   signature: any | null;
@@ -239,8 +492,13 @@ const SignaturePanel = ({
   onSign: () => void;
   onSend: () => void;
   onTextPhantom: () => void;
+  hasInk: boolean;
+  onInkPngChange: (value: string | null) => void;
+  onStrokesChange: (strokes: Array<{ points: Array<{ x: number; y: number }> }>) => void;
+  onHasInkChange: (value: boolean) => void;
 }) => {
   const current = signature?.current || null;
+  const existingDrawn = Boolean(current?.drawn);
   const maxNameChars = Number(signature?.maxNameChars || 120);
   const maxTitleChars = Number(signature?.maxTitleChars || 80);
   const inputClass = 'mt-1.5 w-full rounded-xl border border-emerald-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 disabled:bg-slate-50 disabled:text-slate-500';
@@ -257,8 +515,10 @@ const SignaturePanel = ({
             <PenLine className="h-4 w-4" aria-hidden="true" /> Sign this document
           </h3>
           <p className="mt-1.5 max-w-2xl text-xs font-medium leading-5 text-emerald-900">
-            Type your name to sign <strong className="font-black">{documentTitle}</strong>. Saving keeps your
-            signature on this document in your project room and with the Code Rx copy of it.
+            Type your full name <strong className="font-black">and</strong> draw your mark with the pencil, then{' '}
+            <strong className="font-black">save</strong>. Your drawn mark is written into the signed copy that{' '}
+            <strong className="font-black">{documentTitle}</strong> carries for you and for Code Rx — a name
+            alone is not a signature.
           </p>
         </div>
         {current ? (
@@ -274,8 +534,13 @@ const SignaturePanel = ({
 
       {current ? (
         <div className="mt-4 rounded-xl border border-emerald-200 bg-white px-4 py-3">
-          <p className="text-sm font-bold text-slate-900">
+          <p className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900">
             {current.signerName}{current.signerTitle ? `, ${current.signerTitle}` : ''}
+            {existingDrawn ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.12em] text-emerald-700 ring-1 ring-emerald-100">
+                <Paintbrush className="h-3 w-3" aria-hidden="true" /> Drawn mark
+              </span>
+            ) : null}
           </p>
           <p className="mt-1 text-[11px] font-semibold text-slate-500">
             Signed {String(current.signedAt || '').slice(0, 16).replace('T', ' ')}
@@ -283,6 +548,31 @@ const SignaturePanel = ({
           </p>
         </div>
       ) : null}
+
+      {/* The pencil pad. The server stores the mark that appears here and shows
+          it on the signed copy; the pad never replaces the typed name, which
+          the server still requires. */}
+      {!existingDrawn ? (
+        <div className="mt-4">
+          <SignaturePad
+            label={`Draw your signature${documentTitle ? ` on ${documentTitle}` : ''}`}
+            width={1200}
+            height={400}
+            disabled={preview}
+            channels={{
+              hasInk,
+              setInkPng: onInkPngChange,
+              setStrokes: onStrokesChange,
+              setHasInk: onHasInkChange,
+            }}
+          />
+        </div>
+      ) : (
+        <p className="mt-4 flex items-center gap-2 rounded-xl border border-emerald-100 bg-white px-4 py-3 text-xs font-semibold text-emerald-800">
+          <Paintbrush className="h-4 w-4 shrink-0 text-emerald-700" aria-hidden="true" />
+          Your drawn mark is on this document. Save again to replace it with a new one.
+        </p>
+      )}
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block">
@@ -320,7 +610,7 @@ const SignaturePanel = ({
         <button
           type="button"
           onClick={onSign}
-          disabled={preview || busy || name.trim().length < 2}
+          disabled={preview || busy || name.trim().length < 2 || !hasInk}
           className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-60"
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" aria-hidden="true" />} Save signature
@@ -341,6 +631,12 @@ const SignaturePanel = ({
           <MessageSquareText className="h-3.5 w-3.5" aria-hidden="true" /> Ask PHANTOM about this
         </button>
       </div>
+
+      <p className="mt-3 text-[11px] font-semibold text-emerald-900">
+        {hasInk
+          ? 'Your drawn mark will be saved with this signature.'
+          : 'Draw your mark with the pencil — a name alone cannot sign this document.'}
+      </p>
 
       {notice ? (
         <p role="status" className="mt-3 rounded-xl bg-white px-3.5 py-2.5 text-xs font-bold text-emerald-800 ring-1 ring-emerald-200">{notice}</p>
@@ -759,6 +1055,10 @@ export const ClientProjectRoom = ({
   const [signNotice, setSignNotice] = useState<string | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
   const [sendNotice, setSendNotice] = useState<string | null>(null);
+  /** The pencil pad's drawing: the canvas PNG plus the normalized strokes. */
+  const [inkPng, setInkPng] = useState<string | null>(null);
+  const [inkStrokes, setInkStrokes] = useState<Array<{ points: Array<{ x: number; y: number }> }>>([]);
+  const [hasInk, setHasInk] = useState(false);
 
   const loadSignature = async (documentId: string) => {
     setSignature(null);
@@ -766,6 +1066,9 @@ export const ClientProjectRoom = ({
     setSendNotice(null);
     setSignerName('');
     setSignerTitle('');
+    setInkPng(null);
+    setInkStrokes([]);
+    setHasInk(false);
     if (!transport.signature && !transport.sign) return;
     try {
       const response = await transport.signature!(projectId, documentId);
@@ -787,10 +1090,23 @@ export const ClientProjectRoom = ({
       setSignNotice('Type your full name to sign this document.');
       return;
     }
+    // The drawn mark is required — a name alone is not a signature.
+    if (!hasInk) {
+      setSignNotice('Draw your signature on the pad before saving. A name alone cannot sign this document.');
+      return;
+    }
     setSignBusy(true);
     setSignNotice(null);
     try {
-      const saved = await transport.sign(projectId, String(openDocument.id), { signerName: signerName.trim(), signerTitle: signerTitle.trim() });
+      // The pad's PNG (with its strokes) travels only when something was drawn;
+      // the server re-paints the strokes and never echoes ink back to the room.
+      const saved = await transport.sign(projectId, String(openDocument.id), {
+        signerName: signerName.trim(),
+        signerTitle: signerTitle.trim(),
+        // `hasInk` is checked above, so the pad's PNG is present here.
+        inkPng: inkPng || '',
+        strokes: inkStrokes,
+      });
       setSignNotice(saved.message || 'Signed. Your signature is saved with this document.');
       const current = saved.data || {};
       setSignature((existing: any) => ({ ...(existing || {}), current: {
@@ -798,7 +1114,11 @@ export const ClientProjectRoom = ({
         signerTitle: current.signerTitle || signerTitle.trim(),
         signedAt: current.signedAt || new Date().toISOString(),
         version: current.version || openDocument.version || '1',
+        drawn: Boolean(current.drawn),
       } }));
+      setInkPng(null);
+      setInkStrokes([]);
+      setHasInk(false);
       // The version the client sees is the version they just signed.
       setOpenDocument((document: any) => (document ? { ...document, version: current.version || document.version } : document));
     } catch (failure) {
@@ -810,6 +1130,13 @@ export const ClientProjectRoom = ({
 
   const sendDocumentToPhantom = async () => {
     if (!openDocument || !transport.sendToPhantom) return;
+    // Only a drawn-and-saved signature may be sent: the send stays gated on the
+    // drawing, exactly like save, and the server enforces the same rule.
+    const current = signature?.current || null;
+    if (!current || !current.drawn) {
+      setSendNotice('Sign this document first — type your name and draw your signature on the pad, then save.');
+      return;
+    }
     setSendBusy(true);
     setSendNotice(null);
     try {
@@ -1294,6 +1621,10 @@ export const ClientProjectRoom = ({
                   onSign={() => void signDocument()}
                   onSend={() => void sendDocumentToPhantom()}
                   onTextPhantom={() => void openMessages({ id: String(openDocument.id), title: String(openDocument.title || '') })}
+                  hasInk={hasInk}
+                  onInkPngChange={setInkPng}
+                  onStrokesChange={setInkStrokes}
+                  onHasInkChange={setHasInk}
                 />
 
                 {review ? (

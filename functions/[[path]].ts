@@ -20,6 +20,16 @@ import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLeve
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 import { publicSiteUrl } from './lib/link-address';
+import {
+  FOUNDING_MEMBER_CODENAMES,
+  isPhantomChannel,
+  phantomChannelLabel,
+  phantomInboxMembers,
+  recordPhantomInboxItem,
+  listPhantomInbox,
+  PHANTOM_INBOX_CHANNEL_KEYS,
+  FOUNDING_MEMBER_SQL,
+} from './lib/phantom-inbox';
 import { registerClientRoutes } from './client-routes';
 import { moveToRecycleBin } from './lib/recycle';
 import { CLIENT_ARTIFACT_PREFIX } from './lib/client-document-delivery';
@@ -1511,7 +1521,21 @@ app.post('/api/applications', async (c) => {
       .prepare('INSERT INTO applications (name, email, phone, date, status) VALUES (?, ?, ?, ?, ?)')
       .bind(name, email, phone, new Date().toISOString().split('T')[0], 'pending')
       .run();
-    await audit(c.env.DB, null, 'application.submitted', 'application', Number(applicationResult.meta.last_row_id), { email });
+    const applicationId = Number(applicationResult.meta.last_row_id);
+    await audit(c.env.DB, null, 'application.submitted', 'application', applicationId, { email });
+
+    // A JOIN application is also a PHANTOM Community item (group
+    // "JOIN applications"), so PHANTOM can review it from the one inbox.
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'applications',
+      title: `JOIN application — ${name}`,
+      summary: `${name} (${email}) applied to join the Society.`,
+      source: 'application',
+      sourceId: String(applicationId),
+      actorLabel: name,
+      link: `${publicSiteUrl(c.env)}/#phantom-applications`,
+      body: `Applicant: ${name}\nEmail: ${email}\nPhone: ${phone || '—'}\nSubmitted: ${new Date().toISOString()}`,
+    });
 
     // Also capture as a newsletter subscriber (idempotent)
     await c.env.DB
@@ -1649,7 +1673,24 @@ app.post('/api/subscribers', async (c) => {
       .bind(email, name, phone ?? null, new Date().toISOString().split('T')[0], 'website')
       .run();
 
-    const message = (result.meta.changes ?? 0) > 0 ? 'Subscribed successfully' : 'You are already subscribed';
+    const createdSubscriber = Number(result.meta.changes || 0) > 0;
+    if (createdSubscriber) {
+      // A genuinely new sign-up also reaches PHANTOM's inbox, grouped with the
+      // other website messages.
+      const subscriberId = Number(result.meta.last_row_id);
+      await recordPhantomInboxItem(c.env.DB, {
+        channel: 'website',
+        title: 'New newsletter subscriber',
+        summary: `${name || 'A visitor'} (${email}) subscribed to the newsletter.`,
+        source: 'subscriber',
+        sourceId: String(subscriberId),
+        actorLabel: name || email,
+        link: `${publicSiteUrl(c.env)}/#community/website`,
+        body: `Subscriber: ${name || '—'}\nEmail: ${email}\nPhone: ${phone || '—'}`,
+      });
+    }
+
+    const message = createdSubscriber ? 'Subscribed successfully' : 'You are already subscribed';
     return c.json({ success: true, message });
   } catch (e) {
     console.error('[code-rx] subscribe error:', e);
@@ -1682,10 +1723,25 @@ app.post('/api/contacts', async (c) => {
     }
 
     const receivedAt = new Date().toISOString();
-    await c.env.DB
+    const contactResult = await c.env.DB
       .prepare('INSERT INTO contacts (name, email, subject, message, date, status) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(name, email, subject, message, receivedAt, 'unread')
       .run();
+    const contactId = Number(contactResult.meta.last_row_id);
+
+    // The same message also lands in the PHANTOM Community inbox (group
+    // "Website → PHANTOM"). Non-fatal: the contact is already stored and the
+    // admin email above is already on its way.
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'website',
+      title: `${name} — ${subject}`,
+      summary: `${name} (${email}) wrote about "${subject}".`,
+      source: 'contact',
+      sourceId: String(contactId),
+      actorLabel: name,
+      link: `${publicSiteUrl(c.env)}/#community/website`,
+      body: `From: ${name} <${email}>\nSubject: ${subject}\nReceived: ${receivedAt}\n\n${message}`,
+    });
 
     // Notify the admin (non-blocking; skipped when EmailJS is not configured).
     // The generic fields allow a free EmailJS account to use its one reusable
@@ -2326,6 +2382,107 @@ app.put('/api/phantom/notification-delegates/:id', requireAuth, requirePhantom, 
 });
 
 // ============================================
+// 🏰 PHANTOM COMMUNITY — THE UNIFIED INBOX
+// ============================================
+
+// The single inbox for every message that reaches PHANTOM, grouped by channel.
+// PHANTOM's own account(s) always see everything; a founding member sees only
+// the channels PHANTOM has explicitly granted them. Reads are per member, so
+// PHANTOM and each granted member keep their own unread state.
+app.get('/api/phantom/inbox', requireAuth, requirePhantom, async (c) => {
+  const actor = await actorFromContext(c);
+  if (!actor?.profileId) return c.json({ success: false, error: 'Member profile not found' }, 404);
+  const feed = await listPhantomInbox(c.env.DB, actor.profileId);
+  return c.json({ success: true, data: feed });
+});
+
+// A member PHANTOM has granted at least one channel to reads the very same
+// feed, but the response is scoped to their own grants (PHANTOM-only routes
+// such as the permission matrix stay behind requirePhantom).
+app.get('/api/community/phantom-inbox', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  if (actor.isPhantom) {
+    const feed = await listPhantomInbox(c.env.DB, actor.profileId!);
+    return c.json({ success: true, data: feed });
+  }
+  const grants = await dbRows<any>(c.env.DB.prepare(
+    "SELECT channel_key FROM phantom_inbox_channel_permissions WHERE member_profile_id = ? AND can_receive = 1"
+  ).bind(actor.profileId));
+  const channelKeys = grants.map((grant) => grant.channel_key).filter(isPhantomChannel);
+  if (!channelKeys.length) return c.json({ success: true, data: { channels: [], groups: {}, grantedChannels: [] } });
+  const feed = await listPhantomInbox(c.env.DB, actor.profileId!);
+  const granted: Set<string> = new Set(channelKeys);
+  const channels = feed.channels.filter((channel) => granted.has(channel.key));
+  const groups: Record<string, any[]> = {};
+  for (const channel of channels) groups[channel.key] = feed.groups[channel.key] || [];
+  return c.json({ success: true, data: { channels, groups, grantedChannels: channelKeys } });
+});
+
+// Marks a channel read up to a given inbox item for this member, so their
+// unread count decreases the moment they have actually read the message.
+app.post('/api/community/phantom-inbox/read', requireAuth, async (c) => {
+  const access = await requireActiveActor(c);
+  if (access.response) return access.response;
+  const actor = access.actor!;
+  const body = await c.req.json().catch(() => ({}));
+  const channel = isPhantomChannel(body.channel) ? body.channel : null;
+  const itemId = Number(body.itemId);
+  if (!channel || !Number.isInteger(itemId) || itemId < 1) return c.json({ success: false, error: 'Choose the channel and the message to mark read.' }, 400);
+  if (!actor.isPhantom) {
+    const grants = await dbRows<any>(c.env.DB.prepare(
+      "SELECT channel_key FROM phantom_inbox_channel_permissions WHERE member_profile_id = ? AND can_receive = 1"
+    ).bind(actor.profileId));
+    if (!grants.some((grant) => grant.channel_key === channel)) return c.json({ success: false, error: 'You are not granted this channel.' }, 403);
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO phantom_inbox_read_state (member_profile_id, channel_key, last_read_item_id, read_at)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(member_profile_id, channel_key) DO UPDATE SET last_read_item_id = MAX(last_read_item_id, excluded.last_read_item_id), read_at = CURRENT_TIMESTAMP`
+  ).bind(actor.profileId, channel, itemId).run();
+  return c.json({ success: true, message: 'Marked as read.' });
+});
+
+// Who sees what, from the PHANTOM → Community Control matrix: every founding
+// member with a claimed founding codename, and their current per-channel grant
+// (all off until PHANTOM turns one on).
+app.get('/api/phantom/inbox/permissions', requireAuth, requirePhantom, async (c) => {
+  const members = await phantomInboxMembers(c.env.DB);
+  const channels = PHANTOM_INBOX_CHANNEL_KEYS.map((key) => ({ key, label: phantomChannelLabel(key) }));
+  return c.json({ success: true, data: { members, channels } });
+});
+
+app.put('/api/phantom/inbox/permissions/:profileId', requireAuth, requirePhantom, async (c) => {
+  const profileId = Number(c.req.param('profileId'));
+  const body = await c.req.json().catch(() => ({}));
+  const channel = isPhantomChannel(body.channel) ? body.channel : null;
+  if (!Number.isInteger(profileId) || profileId < 1 || !channel || typeof body.canReceive !== 'boolean') {
+    return c.json({ success: false, error: 'Choose a member, a channel, and a true/false receive permission.' }, 400);
+  }
+  const target = await dbRows<any>(c.env.DB.prepare('SELECT id, status FROM member_profiles WHERE id = ?').bind(profileId));
+  if (!target[0]) return c.json({ success: false, error: 'Member profile not found.' }, 404);
+  if (target[0].status !== 'active') return c.json({ success: false, error: 'Only active members can receive a channel.' }, 409);
+  const founding = await dbRows<any>(c.env.DB.prepare(
+    `SELECT 1 FROM member_profiles mp
+     LEFT JOIN users u ON u.id = mp.user_id
+     LEFT JOIN roles r ON r.id = mp.primary_role_id
+     WHERE mp.id = ? AND ${FOUNDING_MEMBER_SQL}
+       AND NOT (u.role = 'phantom' OR r.code = 'phantom')
+     LIMIT 1`
+  ).bind(profileId));
+  if (!founding[0]) return c.json({ success: false, error: 'Only the founding members can receive community channels.' }, 403);
+  const actor = await actorFromContext(c);
+  await c.env.DB.prepare(
+    `INSERT INTO phantom_inbox_channel_permissions (member_profile_id, channel_key, can_receive, assigned_by_user_id, assigned_at, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(member_profile_id, channel_key) DO UPDATE SET can_receive = excluded.can_receive, assigned_by_user_id = excluded.assigned_by_user_id, updated_at = CURRENT_TIMESTAMP`
+  ).bind(profileId, channel, body.canReceive ? 1 : 0, actor?.userId ?? null).run();
+  await audit(c.env.DB, actor, body.canReceive ? 'phantom.inbox.channel.granted' : 'phantom.inbox.channel.revoked', 'member_profile', profileId, { channel });
+  return c.json({ success: true, message: body.canReceive ? `${phantomChannelLabel(channel)} receive permission enabled.` : `${phantomChannelLabel(channel)} receive permission disabled.` });
+});
+
+// ============================================
 // 🌍 COMMUNITY: PUBLIC FORUM + PUBLIC CHAT
 // ============================================
 
@@ -2372,11 +2529,23 @@ app.post('/api/community/public/threads', async (c) => {
   const title = cleanStr(body.title, 3, 180);
   const message = cleanStr(body.body, 3, 10_000);
   if (!title || !message) return c.json({ success: false, error: 'Use a discussion title and message.' }, 400);
-  const result = await c.env.DB.prepare(
+  const threadCreated = await c.env.DB.prepare(
     `INSERT INTO public_forum_threads (title, body, created_by_guest_id, created_by_member_profile_id, updated_at)
      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`
   ).bind(title, message, identity.kind === 'guest' ? identity.id : null, identity.kind === 'member' ? identity.id : null).run();
-  return c.json({ success: true, data: { id: Number(result.meta.last_row_id) }, message: 'Discussion created.' }, 201);
+  const threadId = Number(threadCreated.meta.last_row_id);
+  await recordPhantomInboxItem(c.env.DB, {
+    channel: 'forum_threads',
+    title: `New discussion — ${title}`,
+    summary: `${identity.handle} started a public discussion.`,
+    source: 'public_forum_thread',
+    sourceId: String(threadId),
+    actorProfileId: identity.kind === 'member' ? identity.id : null,
+    actorLabel: identity.handle,
+    link: `${publicSiteUrl(c.env)}/#community/forum_threads`,
+    body: `${title}\n\n${message}`,
+  });
+  return c.json({ success: true, data: { id: threadId }, message: 'Discussion created.' }, 201);
 });
 
 app.get('/api/community/public/threads/:id', async (c) => {
@@ -2419,12 +2588,24 @@ app.post('/api/community/public/threads/:id/posts', async (c) => {
   if (!Number.isInteger(threadId) || threadId < 1 || !message) return c.json({ success: false, error: 'Use a valid discussion and reply.' }, 400);
   const threadRows = await dbRows<any>(c.env.DB.prepare("SELECT status FROM public_forum_threads WHERE id = ?").bind(threadId));
   if (!threadRows[0] || threadRows[0].status !== 'open') return c.json({ success: false, error: 'This discussion is locked or unavailable.' }, 409);
-  const result = await c.env.DB.prepare(
+  const postCreated = await c.env.DB.prepare(
     `INSERT INTO public_forum_posts (thread_id, body, parent_post_id, created_by_guest_id, created_by_member_profile_id)
      VALUES (?, ?, ?, ?, ?)`
   ).bind(threadId, message, parentId, identity.kind === 'guest' ? identity.id : null, identity.kind === 'member' ? identity.id : null).run();
   await c.env.DB.prepare('UPDATE public_forum_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(threadId).run();
-  return c.json({ success: true, data: { id: Number(result.meta.last_row_id) }, message: 'Reply posted.' }, 201);
+  const postId = Number(postCreated.meta.last_row_id);
+  await recordPhantomInboxItem(c.env.DB, {
+    channel: 'forum_threads',
+    title: `New reply — #${threadId}`,
+    summary: `${identity.handle} replied in a public discussion.`,
+    source: 'public_forum_post',
+    sourceId: String(postId),
+    actorProfileId: identity.kind === 'member' ? identity.id : null,
+    actorLabel: identity.handle,
+    link: `${publicSiteUrl(c.env)}/#community/forum_threads`,
+    body: message,
+  });
+  return c.json({ success: true, data: { id: postId }, message: 'Reply posted.' }, 201);
 });
 
 app.patch('/api/community/public/threads/:id', async (c) => {
@@ -2507,7 +2688,19 @@ app.post('/api/community/public/reports', async (c) => {
   const threadId = Number.isInteger(Number(body.threadId)) ? Number(body.threadId) : null;
   const postId = Number.isInteger(Number(body.postId)) ? Number(body.postId) : null;
   if (!reason || (!threadId && !postId)) return c.json({ success: false, error: 'Choose content and provide a report reason.' }, 400);
-  await c.env.DB.prepare('INSERT INTO public_forum_reports (thread_id, post_id, reporter_key, reason) VALUES (?, ?, ?, ?)').bind(threadId, postId, identity.actorKey, reason).run();
+  const reportCreated = await c.env.DB.prepare('INSERT INTO public_forum_reports (thread_id, post_id, reporter_key, reason) VALUES (?, ?, ?, ?)').bind(threadId, postId, identity.actorKey, reason).run();
+  const reportId = Number(reportCreated.meta.last_row_id);
+  await recordPhantomInboxItem(c.env.DB, {
+    channel: 'public_reports',
+    title: postId ? `Reported post #${postId}` : `Reported discussion #${threadId}`,
+    summary: `Report from ${identity.handle}: ${reason.slice(0, 160)}`,
+    source: 'public_forum_report',
+    sourceId: String(reportId),
+    actorProfileId: identity.kind === 'member' ? identity.id : null,
+    actorLabel: identity.handle,
+    link: `${publicSiteUrl(c.env)}/#community/public_reports`,
+    body: reason,
+  });
   return c.json({ success: true, message: 'Report received for PHANTOM review.' }, 201);
 });
 
@@ -2535,7 +2728,19 @@ app.post('/api/community/public/chat', async (c) => {
   const result = await c.env.DB.prepare(
     'INSERT INTO public_chat_messages (body, created_by_guest_id, created_by_member_profile_id) VALUES (?, ?, ?)'
   ).bind(message, identity.kind === 'guest' ? identity.id : null, identity.kind === 'member' ? identity.id : null).run();
-  return c.json({ success: true, data: { id: Number(result.meta.last_row_id) }, message: 'Message sent.' }, 201);
+  const chatId = Number(result.meta.last_row_id);
+  await recordPhantomInboxItem(c.env.DB, {
+    channel: 'public_chat',
+    title: `Public chat — ${identity.handle}`,
+    summary: message.slice(0, 160),
+    source: 'public_chat_message',
+    sourceId: String(chatId),
+    actorProfileId: identity.kind === 'member' ? identity.id : null,
+    actorLabel: identity.handle,
+    link: `${publicSiteUrl(c.env)}/#community/public_chat`,
+    body: message,
+  });
+  return c.json({ success: true, data: { id: chatId }, message: 'Message sent.' }, 201);
 });
 
 app.get('/api/phantom/community/public/reports', requireAuth, requirePhantom, async (c) => {
@@ -4123,6 +4328,25 @@ app.post('/api/community/conversations/:id/messages', requireAuth, async (c) => 
   // Telegram sync is best-effort and never blocks the Code Rx message itself.
   try { await syncCommunityMessageToTelegram(c.env, c.env.DB, messageId, conversationId, access.actor!.profileId!, `${senderName}: ${text}`); }
   catch (error) { console.warn('[code-rx] community Telegram sync skipped:', error); }
+
+  // A DM, a mention, or a group announcement is also a PHANTOM Community item
+  // (group "Community messages"), so the founder inbox sees it too.
+  const isDmInbox = member.type === 'dm';
+  const isAnnouncement = requestedType === 'announcement';
+  if (isDmInbox || isAnnouncement || mentionHandles.length) {
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'private_messages',
+      title: isAnnouncement ? `Announcement — ${member.title || 'Group'}` : isDmInbox ? `DM — ${senderName}` : `Mention of a member by ${senderName}`,
+      summary: text.slice(0, 160),
+      source: 'community_message',
+      sourceId: String(messageId),
+      actorProfileId: access.actor!.profileId,
+      actorLabel: senderName,
+      link: `${publicSiteUrl(c.env)}/#community/private_messages`,
+      body: text,
+    });
+  }
+
   return c.json({ success: true, data: { id: messageId, createdAt: new Date().toISOString() }, message: 'Message sent.' }, 201);
 });
 
@@ -4544,6 +4768,17 @@ app.post('/api/telegram/webhook', async (c) => {
     const created = await c.env.DB.prepare("INSERT INTO community_messages (conversation_id, sender_member_profile_id, message_type, body, source, telegram_message_id) VALUES (?, ?, 'text', ?, 'telegram', ?)").bind(directConversationId, link.member_profile_id, directText.slice(0, 10_000), String(message.message_id)).run();
     await c.env.DB.prepare("INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'telegram_to_website')").bind(Number(created.meta.last_row_id), String(chatId), String(message.message_id)).run();
     await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(directConversationId).run();
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'telegram',
+      title: 'Telegram direct message',
+      summary: directText.slice(0, 160),
+      source: 'telegram_message',
+      sourceId: String(message.message_id),
+      actorProfileId: link.member_profile_id,
+      actorLabel: 'Telegram',
+      link: `${publicSiteUrl(c.env)}/#community/telegram`,
+      body: directText,
+    });
     return c.json({ success: true });
   }
   const groupRows = await dbRows<any>(c.env.DB.prepare("SELECT id FROM community_conversations WHERE telegram_chat_id = ? AND telegram_sync_enabled = 1 AND type = 'group' AND status = 'active'").bind(String(chatId)));
@@ -4557,6 +4792,17 @@ app.post('/api/telegram/webhook', async (c) => {
       ).bind(conversationId, link.member_profile_id, text.slice(0, 10_000), String(message.message_id)).run();
       await c.env.DB.prepare("INSERT OR IGNORE INTO community_telegram_message_links (message_id, telegram_chat_id, telegram_message_id, direction) VALUES (?, ?, ?, 'telegram_to_website')").bind(Number(created.meta.last_row_id), String(chatId), String(message.message_id)).run();
       await c.env.DB.prepare('UPDATE community_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(conversationId).run();
+      await recordPhantomInboxItem(c.env.DB, {
+        channel: 'telegram',
+        title: 'Telegram group message',
+        summary: text.slice(0, 160),
+        source: 'telegram_message',
+        sourceId: String(message.message_id),
+        actorProfileId: link.member_profile_id,
+        actorLabel: 'Telegram',
+        link: `${publicSiteUrl(c.env)}/#community/telegram`,
+        body: text,
+      });
     }
   }
   return c.json({ success: true });
@@ -6000,6 +6246,8 @@ app.onError((err, c) => {
   return c.json({ success: false, error: 'Internal server error' }, 500);
 });
 
+const recordClientInboxItemForTest = recordPhantomInboxItem;
+
 // ============================================
 // Pages entrypoint: /api/* -> Hono app.
 // Everything else -> static assets (with SPA fallback to index.html).
@@ -6028,5 +6276,10 @@ export const onRequest: PagesFunction<Env> = async (context) => {
 
   return res;
 };
+
+// Test seam: the harness seeds the unified inbox by running the very same
+// production helper the live message routes call, against the D1 database it
+// provides.
+export { recordClientInboxItemForTest };
 
 export default app;

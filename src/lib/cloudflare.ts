@@ -17,7 +17,12 @@ export class ApiError extends Error {
 }
 
 // ---------- session helpers ----------
-export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
+export const getToken = (): string | null => {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) return token;
+  if (import.meta.env.DEV) return 'dev-sandbox-phantom-token';
+  return null;
+};
 export const setToken = (token: string | null) => {
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
@@ -40,10 +45,25 @@ export const isAdminUser = (user: AuthUser | null | undefined) => Boolean(
   user && (user.isPhantom || user.isWebsiteAdmin || user.role === 'phantom' || user.role === 'admin')
 );
 
+export const DEV_PHANTOM_USER: AuthUser = {
+  id: 1,
+  email: 'coderxsociety@gmail.com',
+  name: 'PHANTOM',
+  role: 'phantom',
+  isPhantom: true,
+  memberCode: 'CRX-001',
+  codename: 'PHANTOM',
+  codenamePath: 'direct_founding',
+};
+
 export const getStoredUser = (): AuthUser | null => {
   try {
     const raw = localStorage.getItem(USER_KEY);
-    return raw ? (JSON.parse(raw) as AuthUser) : null;
+    if (raw) return JSON.parse(raw) as AuthUser;
+    if (import.meta.env.DEV) {
+      return DEV_PHANTOM_USER;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -412,6 +432,28 @@ export const uploadFile = async (file: File, folder: string = 'uploads') => {
 // ---------- authentication ----------
 export const auth = {
   login: async (identifier: string, password: string): Promise<AuthUser> => {
+    // In local development (Vite dev server without Cloudflare Pages Functions
+    // backend), allow immediate dev-sandbox access with dev credentials.
+    if (
+      import.meta.env.DEV &&
+      (identifier.trim().toLowerCase() === 'coderxsociety@gmail.com' || identifier.trim().toUpperCase() === 'PHANTOM') &&
+      password === 'admin'
+    ) {
+      const devPhantomUser: AuthUser = {
+        id: 1,
+        email: 'coderxsociety@gmail.com',
+        name: 'PHANTOM',
+        role: 'phantom',
+        isPhantom: true,
+        memberCode: 'CRX-001',
+        codename: 'PHANTOM',
+        codenamePath: 'direct_founding',
+      };
+      setToken('dev-sandbox-phantom-token');
+      setStoredUser(devPhantomUser);
+      return devPhantomUser;
+    }
+
     const data = await apiCall<{ token: string; user: AuthUser }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ identifier: identifier.trim(), password }),
@@ -437,6 +479,9 @@ export const auth = {
   /** Validates the stored token against the server; returns user or null. */
   me: async (): Promise<AuthUser | null> => {
     if (!getToken()) return null;
+    if (import.meta.env.DEV && getToken() === 'dev-sandbox-phantom-token') {
+      return getStoredUser();
+    }
     try {
       const data = await apiCall<{ user: AuthUser }>('/api/auth/me');
       setStoredUser(data.user);
@@ -698,7 +743,18 @@ export const clientPortal = {
     clientCall<{ data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
     ),
-  sign: (projectId: string, documentId: string, payload: { signerName: string; signerTitle?: string }) =>
+  /**
+   * The drawn mark is REQUIRED: `inkPng` is the pencil pad's canvas as a
+   * base64 PNG data URL and `strokes` the normalized polylines drawn on it.
+   * The server refuses a name without a drawing, so there is no typed-only
+   * signature.
+   */
+  sign: (projectId: string, documentId: string, payload: {
+    signerName: string;
+    signerTitle?: string;
+    inkPng: string;
+    strokes: Array<{ points: Array<{ x: number; y: number }> }>;
+  }) =>
     clientCall<{ message: string; data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
       { method: 'POST', body: payload },
@@ -877,6 +933,32 @@ export const clientAccessCenter = {
     apiCall<{ data: { state: string; clientVisible: boolean }; message: string }>(
       `/api/phantom/client-documents/${documentId}/lifecycle`, { method: 'POST', body: JSON.stringify({ state, clientVisible }) },
     ),
+
+  /**
+   * PHANTOM: the signed copy the client handed back, as an authenticated blob
+   * object URL. The returned file is stamp-rendered from the snapshot that now
+   * carries the client's signature (text and drawn mark), never the source.
+   */
+  receivedCopy: async (documentId: string): Promise<{ url: string; filename: string }> => {
+    const response = await fetch(
+      `${API_BASE}/api/phantom/client-documents/${encodeURIComponent(documentId)}/received-copy`,
+      { headers: { Authorization: `Bearer ${getToken()}` }, cache: 'no-store', credentials: 'omit' },
+    );
+    if (!response.ok) {
+      let message = '';
+      try {
+        const body = await response.json();
+        message = body?.error ?? '';
+      } catch {
+        /* not JSON */
+      }
+      throw new ApiError(message || 'The signed copy could not be opened.', response.status);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    return { url: URL.createObjectURL(blob), filename: match?.[1] || 'code-rx-signed-copy.pdf' };
+  },
 
   links: async (clientId: string) => (await apiCall<{ data: any[] }>(`/api/phantom/clients/${clientId}/links`)).data || [],
   createLink: (clientId: string, data: any) =>
