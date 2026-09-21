@@ -225,6 +225,12 @@ export const db = {
     telegramLink: async () => (await apiCall<{ data: any }>('/api/community/telegram/link', { method: 'POST' })).data,
     telegramStatus: async () => (await apiCall<{ data: any }>('/api/community/telegram/status')).data,
     disconnectTelegram: () => apiCall('/api/community/telegram/link', { method: 'DELETE' }),
+
+    phantomInbox: async () => (await apiCall<{ data: any }>('/api/community/phantom-inbox')).data,
+    markPhantomInboxRead: (channel: string, itemId: number) =>
+      apiCall<{ message: string }>('/api/community/phantom-inbox/read', { method: 'POST', body: JSON.stringify({ channel, itemId }) }),
+    replyPhantomInbox: (itemId: number, replyText: string) =>
+      apiCall<{ message: string; emailSent?: boolean }>('/api/community/phantom-inbox/reply', { method: 'POST', body: JSON.stringify({ itemId, replyText }) }),
     mediaPolicy: async (conversationId: number) => (await apiCall<{ data: any[] }>(`/api/community/conversations/${conversationId}/media-policy`)).data || [],
     uploadAttachment: async (conversationId: number, file: File, caption = '') => {
       const form = new FormData(); form.append('file', file); if (caption) form.append('caption', caption);

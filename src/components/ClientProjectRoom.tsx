@@ -235,11 +235,11 @@ export const StampedCopyPanel = ({
  * the authority that persists the drawn mark (no PDF logic lives here).
  */
 const SignaturePad = ({
-  label, width, height, disabled, channels,
+  label, width = 800, height = 260, disabled, channels,
 }: {
   label: string;
-  width: number;
-  height: number;
+  width?: number;
+  height?: number;
   disabled: boolean;
   channels: {
     hasInk: boolean;
@@ -249,195 +249,182 @@ const SignaturePad = ({
   };
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const vramRef = useRef<HTMLCanvasElement | null>(null);
-  const pointerIdRef = useRef<number | null>(null);
+  const isDrawingRef = useRef(false);
   const strokesRef = useRef<Array<{ points: Array<{ x: number; y: number }> }>>([]);
-  const currentRef = useRef<Array<{ x: number; y: number }> | null>(null);
+  const currentStrokeRef = useRef<Array<{ x: number; y: number }>>([]);
 
-  // A brand-codex emerald ink; the slice() keeps it as an opaque stamp colour.
-  const INK: [number, number, number] = [15, 23, 42];
-  const INK_WIDTH = 3.5;
+  const INK_COLOR = '#0f172a';
+  const INK_WIDTH = 3;
 
-  /** Mirrors VRAM onto the visible canvas. */
-  const composite = useCallback(() => {
+  const redrawAll = useCallback(() => {
     const canvas = canvasRef.current;
-    const vram = vramRef.current;
-    if (!canvas || !vram) return;
+    if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+
+    // Clear background
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    // The faint guide line the client signs above, matching the server's copy.
-    ctx.strokeStyle = 'rgba(176, 190, 186, 0.85)';
+
+    // Guide dashed line
+    ctx.strokeStyle = 'rgba(176, 190, 186, 0.7)';
     ctx.lineWidth = 1.5;
-    ctx.setLineDash([2, 6]);
+    ctx.setLineDash([4, 6]);
     ctx.beginPath();
-    ctx.moveTo(24, Math.round(canvas.height * 0.66));
-    ctx.lineTo(canvas.width - 24, Math.round(canvas.height * 0.66));
+    ctx.moveTo(30, Math.round(canvas.height * 0.72));
+    ctx.lineTo(canvas.width - 30, Math.round(canvas.height * 0.72));
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.drawImage(vram, 0, 0);
-  }, []);
 
-  const ensureCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    const vram = vramRef.current;
-    if (!canvas) return [];
-    // The VRAM is where the mark is actually painted; if the browser never
-    // rendered the offscreen copy, composite() still has its pixels.
-    if (!vram) {
-      vramRef.current = document.createElement('canvas');
-    }
-    const target = vramRef.current as HTMLCanvasElement;
-    target.width = canvas.width;
-    target.height = canvas.height;
-    return [canvas, target] as const;
-  }, []);
-
-  const paint = useCallback(() => {
-    composite();
-  }, [composite]);
-
-  const drawSegment = useCallback((from: { x: number; y: number }, to: { x: number; y: number }) => {
-    const vram = vramRef.current;
-    const ctx = vram?.getContext('2d');
-    if (!ctx) return;
-    ctx.strokeStyle = `rgb(${INK[0]},${INK[1]},${INK[2]})`;
+    // Draw all strokes
+    ctx.strokeStyle = INK_COLOR;
     ctx.lineWidth = INK_WIDTH;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
+
+    const allStrokes = [...strokesRef.current];
+    if (currentStrokeRef.current.length > 0) {
+      allStrokes.push({ points: currentStrokeRef.current });
+    }
+
+    for (const stroke of allStrokes) {
+      const points = stroke.points;
+      if (!points || !points.length) continue;
+      if (points.length === 1) {
+        ctx.beginPath();
+        ctx.arc(points[0].x * canvas.width, points[0].y * canvas.height, INK_WIDTH / 2, 0, Math.PI * 2);
+        ctx.fillStyle = INK_COLOR;
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(points[0].x * canvas.width, points[0].y * canvas.height);
+        for (let i = 1; i < points.length; i++) {
+          ctx.lineTo(points[i].x * canvas.width, points[i].y * canvas.height);
+        }
+        ctx.stroke();
+      }
+    }
   }, []);
 
-  const position = useCallback((event: PointerEvent) => {
+  // Sync initial canvas
+  useEffect(() => {
+    redrawAll();
+  }, [redrawAll]);
+
+  const getCoordinates = (event: MouseEvent | TouchEvent | ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+    let clientX = 0;
+    let clientY = 0;
+
+    if ('touches' in event && event.touches.length > 0) {
+      clientX = event.touches[0].clientX;
+      clientY = event.touches[0].clientY;
+    } else if ('changedTouches' in event && event.changedTouches.length > 0) {
+      clientX = event.changedTouches[0].clientX;
+      clientY = event.changedTouches[0].clientY;
+    } else if ('clientX' in event) {
+      clientX = event.clientX;
+      clientY = event.clientY;
+    }
+
+    const x = Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
+    const y = Math.max(0, Math.min(1, (clientY - rect.top) / (rect.height || 1)));
     return { x, y };
-  }, []);
+  };
 
-  const padPoint = useCallback((point: { x: number; y: number }) => {
-    const canvas = canvasRef.current;
-    const vram = vramRef.current;
-    if (!canvas || !vram) return { x: 0, y: 0 };
-    return { x: point.x * vram.width, y: point.y * vram.height };
-  }, []);
+  const startDrawing = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (disabled) return;
+    isDrawingRef.current = true;
+    const pt = getCoordinates(event);
+    currentStrokeRef.current = [pt];
 
-  const onPointerDown = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (disabled || pointerIdRef.current !== null) return;
-    ensureCanvas();
-    const point = position(event.nativeEvent);
-    const px = padPoint(point);
-    pointerIdRef.current = event.pointerId;
-    currentRef.current = [{ x: point.x, y: point.y }];
-    (event.target as HTMLCanvasElement).setPointerCapture?.(event.pointerId);
-    // A tap still leaves a dot the server records.
-    drawSegment(px, { x: px.x + 0.01, y: px.y + 0.01 });
-    paint();
-  }, [disabled, ensureCanvas, position, padPoint, drawSegment, paint]);
-
-  const onPointerMove = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (pointerIdRef.current !== event.pointerId || !currentRef.current) return;
-    ensureCanvas();
-    const point = position(event.nativeEvent);
-    const from = currentRef.current[currentRef.current.length - 1];
-    currentRef.current.push(point);
-    const pxFrom = padPoint(from);
-    const pxTo = padPoint(point);
-    drawSegment(pxFrom, pxTo);
-    paint();
-  }, [ensureCanvas, position, padPoint, drawSegment, paint]);
-
-  const onPointerUp = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (pointerIdRef.current !== event.pointerId) return;
-    pointerIdRef.current = null;
-    const stroke = currentRef.current;
-    currentRef.current = null;
-    if (!stroke) return;
-    if (stroke.length < 2) {
-      // Record a tap as a one-point stroke (a dot).
-      strokesRef.current = [...strokesRef.current.slice(-199), { points: [stroke[0]] }];
-    } else {
-      // Thin the points so a long flourish stays well under the server cap.
-      const keep = stroke.filter((_, index) => index % 4 === 0 || index === stroke.length - 1);
-      strokesRef.current = [...strokesRef.current.slice(-199), { points: keep }];
+    try {
+      (event.target as HTMLCanvasElement).setPointerCapture?.(event.pointerId);
+    } catch {
+      // ignore
     }
-    channels.setStrokes(strokesRef.current);
-    // The PNG travels immediately, so "Save" sends what "the pad" last showed.
-    const canvas = canvasRef.current;
-    const vram = vramRef.current;
-    if (canvas && vram) {
-      const canvasHasInk = strokesRef.current.length > 0;
-      if (canvasHasInk) {
+
+    redrawAll();
+  };
+
+  const moveDrawing = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawingRef.current || disabled) return;
+    const pt = getCoordinates(event);
+    currentStrokeRef.current.push(pt);
+    redrawAll();
+  };
+
+  const stopDrawing = (event?: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawingRef.current) return;
+    isDrawingRef.current = false;
+    const stroke = currentStrokeRef.current;
+    currentStrokeRef.current = [];
+
+    if (stroke && stroke.length > 0) {
+      // Thin points for compact storage
+      const keep = stroke.length <= 3 ? stroke : stroke.filter((_, idx) => idx % 2 === 0 || idx === stroke.length - 1);
+      strokesRef.current = [...strokesRef.current, { points: keep }];
+      channels.setStrokes(strokesRef.current);
+      channels.setHasInk(true);
+
+      const canvas = canvasRef.current;
+      if (canvas) {
         channels.setInkPng(canvas.toDataURL('image/png'));
-      } else {
-        channels.setInkPng(null);
       }
-      channels.setHasInk(canvasHasInk);
     }
-  }, [channels]);
 
-  const clear = useCallback(() => {
-    ensureCanvas();
-    const vram = vramRef.current;
-    const ctx = vram?.getContext('2d');
-    if (ctx && vram) ctx.clearRect(0, 0, vram.width, vram.height);
+    redrawAll();
+  };
+
+  const clear = () => {
     strokesRef.current = [];
-    currentRef.current = null;
-    pointerIdRef.current = null;
+    currentStrokeRef.current = [];
+    isDrawingRef.current = false;
     channels.setStrokes([]);
     channels.setInkPng(null);
     channels.setHasInk(false);
-    paint();
-  }, [channels, ensureCanvas, paint]);
+    redrawAll();
+  };
 
-  const undo = useCallback(() => {
-    ensureCanvas();
-    const strokes = strokesRef.current.slice(0, -1);
-    strokesRef.current = strokes;
-    channels.setStrokes(strokes);
-    // Repaint VRAM from scratch so the visible canvas matches the strokes.
-    const vram = vramRef.current;
-    const ctx = vram?.getContext('2d');
-    if (ctx && vram) {
-      ctx.clearRect(0, 0, vram.width, vram.height);
-      for (const stroke of strokes) {
-        const points = stroke.points.map((point) => ({ x: point.x * vram.width, y: point.y * vram.height }));
-        if (points.length === 1) {
-          drawSegment(points[0], { x: points[0].x + 0.01, y: points[0].y + 0.01 });
-          continue;
-        }
-        for (let index = 1; index < points.length; index += 1) drawSegment(points[index - 1], points[index]);
+  const undo = () => {
+    strokesRef.current = strokesRef.current.slice(0, -1);
+    currentStrokeRef.current = [];
+    isDrawingRef.current = false;
+    channels.setStrokes(strokesRef.current);
+    channels.setHasInk(strokesRef.current.length > 0);
+
+    const canvas = canvasRef.current;
+    if (canvas) {
+      if (strokesRef.current.length > 0) {
+        redrawAll();
+        channels.setInkPng(canvas.toDataURL('image/png'));
+      } else {
+        channels.setInkPng(null);
+        redrawAll();
       }
     }
-    const canvas = canvasRef.current;
-    if (canvas && strokes.length) channels.setInkPng(canvas.toDataURL('image/png'));
-    else channels.setInkPng(null);
-    channels.setHasInk(strokes.length > 0);
-    paint();
-  }, [channels, drawSegment, ensureCanvas, paint]);
+  };
 
   return (
     <div className="rounded-xl border border-emerald-200 bg-white p-3">
       <p className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-800">{label}</p>
-      <div className="mt-2 overflow-hidden rounded-lg ring-1 ring-emerald-100">
+      <div className="mt-2 overflow-hidden rounded-lg ring-1 ring-emerald-200 bg-white">
         <canvas
           ref={canvasRef}
           width={width}
           height={height}
           aria-label={`Draw your signature for ${label}`}
           role="img"
-          className="block h-40 w-full touch-none cursor-crosshair select-none sm:h-48"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
+          className="block h-44 w-full touch-none cursor-crosshair select-none sm:h-52"
+          style={{ touchAction: 'none' }}
+          onPointerDown={startDrawing}
+          onPointerMove={moveDrawing}
+          onPointerUp={stopDrawing}
+          onPointerCancel={stopDrawing}
+          onPointerLeave={stopDrawing}
         />
       </div>
       <div className="mt-2 flex items-center gap-2">
@@ -464,7 +451,6 @@ const SignaturePad = ({
     </div>
   );
 };
-
 /**
  * SIGN THIS DOCUMENT.
  *

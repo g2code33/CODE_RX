@@ -1432,6 +1432,22 @@ const seedCalLevels = async (db: D1Database) => {
   if (statements.length) await runBatchInChunks(db, statements);
 };
 
+const seedDefaultCommunityGroups = async (db: D1Database) => {
+  const groups = [
+    ['Website Talk to PHANTOM', 'All incoming contact form inquiries and public communication with PHANTOM.', 'open'],
+    ['Clients Text PHANTOM', 'Direct communications, questions, and responses from Client Project Rooms.', 'open'],
+    ['General Community Discussions', 'Open discussions, public notices, and collaboration across the Society.', 'open'],
+    ['Code Rx Community Hub', 'Official member announcements, updates, and private society conversations.', 'open'],
+  ] as const;
+
+  for (const [title, desc, mode] of groups) {
+    const existing = await db.prepare("SELECT id FROM community_conversations WHERE type = 'group' AND title = ?").bind(title).all();
+    if (!existing.results || !existing.results.length) {
+      await db.prepare("INSERT INTO community_conversations (type, title, description, join_mode, status, updated_at) VALUES ('group', ?, ?, ?, 'active', CURRENT_TIMESTAMP)").bind(title, desc, mode).run();
+    }
+  }
+};
+
 const seedFeatureSettings = async (db: D1Database) => {
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('vault_sharing_enabled', '0', CURRENT_TIMESTAMP)"),
@@ -1721,6 +1737,8 @@ export async function ensureSchema(env: Env): Promise<void> {
       await backfillCalcitoninLevels(db);
       await seedFeatureSettings(db);
       await seedCommunityMediaSettings(db);
+      await seedDefaultCommunityGroups(db);
+
       await ensurePhantom(env);
       await normalizeCustomFoundingAvailability(db);
       await normalizeDirectFoundingAssignments(db);
