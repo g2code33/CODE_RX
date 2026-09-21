@@ -92,13 +92,14 @@ export interface RoomTransport {
    */
   signature?: (projectId: string, documentId: string) => Promise<{ data: any }>;
   /** `inkPng` is the pencil pad's canvas (base64 PNG) and `strokes` the drawn lines. */
+  /** The drawn mark is required: `inkPng` + `strokes` always accompany the name. */
   sign?: (projectId: string, documentId: string, payload: {
     signerName: string;
     signerTitle?: string;
-    inkPng?: string;
-    strokes?: Array<{ points: Array<{ x: number; y: number }> }>;
+    inkPng: string;
+    strokes: Array<{ points: Array<{ x: number; y: number }> }>;
   }) => Promise<{ message: string; data: any }>;
-  /** Send the document back to PHANTOM, signed or not. */
+  /** Send the document back to PHANTOM — the drawn-signed copy only. */
   sendToPhantom?: (projectId: string, documentId: string) => Promise<{ message: string; data: any }>;
   /** The review section: what the client was asked, and their answer. */
   review?: (projectId: string, documentId: string) => Promise<{ data: any }>;
@@ -514,9 +515,10 @@ const SignaturePanel = ({
             <PenLine className="h-4 w-4" aria-hidden="true" /> Sign this document
           </h3>
           <p className="mt-1.5 max-w-2xl text-xs font-medium leading-5 text-emerald-900">
-            Type your full name, draw your mark with the pencil, then <strong className="font-black">save</strong>.
-            Your mark is written into the signed copy that <strong className="font-black">{documentTitle}</strong>{' '}
-            carries for you and for Code Rx.
+            Type your full name <strong className="font-black">and</strong> draw your mark with the pencil, then{' '}
+            <strong className="font-black">save</strong>. Your drawn mark is written into the signed copy that{' '}
+            <strong className="font-black">{documentTitle}</strong> carries for you and for Code Rx — a name
+            alone is not a signature.
           </p>
         </div>
         {current ? (
@@ -608,7 +610,7 @@ const SignaturePanel = ({
         <button
           type="button"
           onClick={onSign}
-          disabled={preview || busy || name.trim().length < 2}
+          disabled={preview || busy || name.trim().length < 2 || !hasInk}
           className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-[11px] font-black uppercase tracking-[0.14em] text-white transition hover:bg-emerald-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-60"
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" aria-hidden="true" />} Save signature
@@ -633,7 +635,7 @@ const SignaturePanel = ({
       <p className="mt-3 text-[11px] font-semibold text-emerald-900">
         {hasInk
           ? 'Your drawn mark will be saved with this signature.'
-          : 'No mark drawn yet — you can sign with your name only, or draw one above.'}
+          : 'Draw your mark with the pencil — a name alone cannot sign this document.'}
       </p>
 
       {notice ? (
@@ -1088,17 +1090,22 @@ export const ClientProjectRoom = ({
       setSignNotice('Type your full name to sign this document.');
       return;
     }
+    // The drawn mark is required — a name alone is not a signature.
+    if (!hasInk) {
+      setSignNotice('Draw your signature on the pad before saving. A name alone cannot sign this document.');
+      return;
+    }
     setSignBusy(true);
     setSignNotice(null);
     try {
       // The pad's PNG (with its strokes) travels only when something was drawn;
-      // the server is free to re-paint the strokes itself and never echoes ink
-      // back to the room.
+      // the server re-paints the strokes and never echoes ink back to the room.
       const saved = await transport.sign(projectId, String(openDocument.id), {
         signerName: signerName.trim(),
         signerTitle: signerTitle.trim(),
-        inkPng: hasInk ? inkPng ?? undefined : undefined,
-        strokes: hasInk ? inkStrokes : undefined,
+        // `hasInk` is checked above, so the pad's PNG is present here.
+        inkPng: inkPng || '',
+        strokes: inkStrokes,
       });
       setSignNotice(saved.message || 'Signed. Your signature is saved with this document.');
       const current = saved.data || {};
@@ -1123,6 +1130,13 @@ export const ClientProjectRoom = ({
 
   const sendDocumentToPhantom = async () => {
     if (!openDocument || !transport.sendToPhantom) return;
+    // Only a drawn-and-saved signature may be sent: the send stays gated on the
+    // drawing, exactly like save, and the server enforces the same rule.
+    const current = signature?.current || null;
+    if (!current || !current.drawn) {
+      setSendNotice('Sign this document first — type your name and draw your signature on the pad, then save.');
+      return;
+    }
     setSendBusy(true);
     setSendNotice(null);
     try {

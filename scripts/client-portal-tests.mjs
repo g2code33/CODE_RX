@@ -4469,11 +4469,22 @@ const main = async () => {
   check('signing needs a client session', (await request('POST', `${p19DocPath}/signature`, { body: { signerName: 'Nobody' } })).status === 401);
   check('a signature without a name is refused',
     (await request('POST', `${p19DocPath}/signature`, { clientSession: p19BinSession, body: { signerName: '  ' } })).status === 400);
+  // Phase 22 signing: a name alone is no longer a signature — the drawing is
+  // required, so the typed-only fixture now draws its mark like the room does.
+  check('a name without a drawn mark is refused',
+    (await request('POST', `${p19DocPath}/signature`, { clientSession: p19BinSession, body: { signerName: 'Ama Mensah' } })).status === 400
+    && (await request('POST', `${p19DocPath}/signature`, { clientSession: p19BinSession, body: { signerName: 'Ama Mensah' } })).json?.code === 'signature_drawing_required');
 
+  const p19InkDataUrl = `data:image/png;base64,${buildPng(600, 200).toString('base64')}`;
+  const p19Strokes = [
+    { points: [{ x: 0.2, y: 0.8 }, { x: 0.4, y: 0.3 }, { x: 0.6, y: 0.6 }] },
+    { points: [{ x: 0.6, y: 0.5 }, { x: 0.8, y: 0.4 }] },
+  ];
   const p19Signature = await request('POST', `${p19DocPath}/signature`, {
-    clientSession: p19BinSession, body: { signerName: 'Ama Mensah', signerTitle: 'Managing Director' },
+    clientSession: p19BinSession,
+    body: { signerName: 'Ama Mensah', signerTitle: 'Managing Director', inkPng: p19InkDataUrl, strokes: p19Strokes },
   });
-  check('the client can sign the document', p19Signature.status === 200, JSON.stringify(p19Signature.json).slice(0, 160));
+  check('the client can draw and save the signature', p19Signature.status === 200, JSON.stringify(p19Signature.json).slice(0, 160));
   check('the client is told their signature is saved', /Signed/i.test(String(p19Signature.json?.message || '')), String(p19Signature.json?.message || ''));
   const p19SignedRead = await request('GET', `${p19DocPath}/signature`, { clientSession: p19BinSession });
   check('the signature is stored and read back',
@@ -4637,7 +4648,8 @@ const main = async () => {
   await publish(phantomToken, p19BinSignatureTarget.id);
   const p19BinSignaturePath = `/api/client/project/${p19BinSignedProject.id}/documents/${p19BinSignatureTarget.id}`;
   await request('POST', `${p19BinSignaturePath}/signature`, {
-    clientSession: p19BinSignedSession, body: { signerName: 'Kojo Owusu', signerTitle: 'Director' },
+    clientSession: p19BinSignedSession,
+    body: { signerName: 'Kojo Owusu', signerTitle: 'Director', inkPng: p19InkDataUrl, strokes: p19Strokes },
   });
   check('the signature is on the document before the delete',
     (await request('GET', `${p19BinSignaturePath}/signature`, { clientSession: p19BinSignedSession })).json?.data?.current?.signerName === 'Kojo Owusu');
@@ -5218,6 +5230,32 @@ const main = async () => {
     (await request('POST', `${p22SignPath}/signature`, {
       clientSession: p22SignSession, body: { signerName: '  ', inkPng: p22InkDataUrl, strokes: p22Strokes },
     })).status === 400);
+
+  // The send is gated on the drawn signature now: an unsigned document (or one
+  // named but not drawn) cannot be handed back to PHANTOM.
+  const p22SendGateClient = await createClient(phantomToken, 'Phase 22 Send Gate Client');
+  const p22SendGateProject = await createProject(phantomToken, p22SendGateClient.id, 'Phase 22 Send Gate Project');
+  const p22SendGateDocument = await createDocument(phantomToken, p22SendGateClient.id, p22SendGateProject.id, {
+    title: 'Phase 22 send gate letter', category: 'letter', contentText: 'Gate.',
+  });
+  await publish(phantomToken, p22SendGateDocument.id);
+  const p22SendGateKey = await createKey(phantomToken, p22SendGateClient.id, p22SendGateProject.id);
+  const p22SendGateSession = await clientSession(p22SendGateKey.passkey, 'phase 22 send gate');
+  const p22SendGatePath = `/api/client/project/${p22SendGateProject.id}/documents/${p22SendGateDocument.id}`;
+  check('an unsigned document cannot be sent to PHANTOM',
+    (await request('POST', `${p22SendGatePath}/send-to-phantom`, { clientSession: p22SendGateSession })).status === 409);
+  check('a named-but-undrawn document cannot be sent to PHANTOM',
+    (await request('POST', `${p22SendGatePath}/signature`, { clientSession: p22SendGateSession, body: { signerName: 'Efua Baah' } })).status === 400
+    && (await request('POST', `${p22SendGatePath}/send-to-phantom`, { clientSession: p22SendGateSession })).status === 409);
+  check('the refusal tells the client a signature is required',
+    /sign/i.test(String((await request('POST', `${p22SendGatePath}/send-to-phantom`, { clientSession: p22SendGateSession })).json?.error || ''))
+    && (await request('POST', `${p22SendGatePath}/send-to-phantom`, { clientSession: p22SendGateSession })).json?.code === 'signature_required');
+  const p22SendGateSign = await request('POST', `${p22SendGatePath}/signature`, {
+    clientSession: p22SendGateSession,
+    body: { signerName: 'Efua Baah', inkPng: p22InkDataUrl, strokes: p22Strokes },
+  });
+  check('the same document sends once the client has drawn and saved', p22SendGateSign.status === 200
+    && (await request('POST', `${p22SendGatePath}/send-to-phantom`, { clientSession: p22SendGateSession })).status === 200);
 
   // -------------------------------------------------------------------------
   group('34. The unified PHANTOM Community inbox (Phase 22)');

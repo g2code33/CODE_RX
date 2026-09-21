@@ -699,16 +699,16 @@ export const clientPortal = {
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,
     ),
   /**
-   * `payload.inkPng` is the pencil pad's canvas as a base64 PNG data URL, and
-   * `payload.strokes` the normalized polylines drawn on it. Both are optional:
-   * a signature may be typed only, drawn only (with the typed name required),
-   * or both — the server still requires at least the name.
+   * The drawn mark is REQUIRED: `inkPng` is the pencil pad's canvas as a
+   * base64 PNG data URL and `strokes` the normalized polylines drawn on it.
+   * The server refuses a name without a drawing, so there is no typed-only
+   * signature.
    */
   sign: (projectId: string, documentId: string, payload: {
     signerName: string;
     signerTitle?: string;
-    inkPng?: string;
-    strokes?: Array<{ points: Array<{ x: number; y: number }> }>;
+    inkPng: string;
+    strokes: Array<{ points: Array<{ x: number; y: number }> }>;
   }) =>
     clientCall<{ message: string; data: any }>(
       `/api/client/project/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/signature`,

@@ -445,20 +445,6 @@ const MAX_SIGNATURE_NAME_CHARS = 120;
 const MAX_SIGNATURE_TITLE_CHARS = 80;
 const MAX_CLIENT_MESSAGE_CHARS = 4000;
 
-/**
- * The signature, written into the document in blocks the Vault editor already
- * renders: a heading, the signature line, and where and when it was given.
- */
-const signatureBlocks = (input: { signerName: string; signerTitle: string; signedAt: string }) => [
-  { id: 'client-signature-heading', type: 'heading', level: 3, content: 'Signature' },
-  { id: 'client-signature-line', type: 'quote', content: `Signed: ${input.signerName}${input.signerTitle ? `, ${input.signerTitle}` : ''}` },
-  {
-    id: 'client-signature-note',
-    type: 'paragraph',
-    content: `Signed electronically in the Code Rx client portal on ${input.signedAt.slice(0, 10)}.`,
-  },
-];
-
 // ---------------------------------------------------------------------------
 // DRAWN (PENCIL) SIGNATURES
 //
@@ -1516,41 +1502,49 @@ export const registerClientRoutes = (app: ClientApp) => {
         return clientJson({ success: false, error: 'Type your full name to sign this document.', code: 'signature_name_required' }, 400);
       }
 
-      // The drawn signature (optional). It travels as the PNG the pencil pad
+      // The drawn signature is REQUIRED. It travels as the PNG the pencil pad
       // produced plus the normalized strokes the pad recorded; the server
       // repaints the strokes so the stored mark is exactly what the client saw,
-      // and refuses anything that is not a genuine PNG.
+      // and refuses anything that is not a genuine PNG with real strokes.
+      // A name alone is not a signature: there is no typed-only path.
       const rawInk = typeof body.inkPng === 'string' ? body.inkPng : null;
       const rawStrokes = Array.isArray(body.strokes) ? body.strokes : [];
-      let inkPng: Uint8Array | null = null;
-      let strokes: SignatureStroke[] = [];
-      if (typeof rawInk === 'string') {
-        const normalized = rawInk.slice(0, SIGNATURE_MAX_INK_CHARS);
-        if (normalized) {
-          try {
-            inkPng = base64ToBytes(normalized);
-          } catch {
-            return clientJson({ success: false, error: 'The signature image could not be read.', code: 'signature_image_invalid' }, 400);
-          }
-          strokes = boundedSignatureStrokes(rawStrokes);
-        }
+      if (typeof rawInk !== 'string' || !rawInk.trim()) {
+        return clientJson({
+          success: false,
+          error: 'Draw your signature on the pad before saving. A name alone cannot sign this document.',
+          code: 'signature_drawing_required',
+        }, 400);
+      }
+      const normalized = rawInk.slice(0, SIGNATURE_MAX_INK_CHARS);
+      let inkPng: Uint8Array;
+      try {
+        inkPng = base64ToBytes(normalized);
+      } catch {
+        return clientJson({ success: false, error: 'The signature image could not be read.', code: 'signature_image_invalid' }, 400);
+      }
+      const strokes = boundedSignatureStrokes(rawStrokes);
+      if (!strokes.length) {
+        return clientJson({
+          success: false,
+          error: 'Draw your signature on the pad before saving. A name alone cannot sign this document.',
+          code: 'signature_drawing_required',
+        }, 400);
       }
 
-      // A drawn signature becomes an image block: stored (in the linked Vault
-      // copy's attachments or under client-exports), and appended to the
-      // document so the saved copy carries the real mark, not only the name.
+      // The drawn signature becomes an image block: stored under vault/ (or as
+      // the linked Vault copy's attachment) and appended to the document, so
+      // the saved copy carries the real mark, and never only the name.
       const content = await documentContentBlocks(db, document);
-      let drawn: { fileKey: string; attachmentId: number | null } | null = null;
-      if (inkPng) {
-        const rendered = await renderSignaturePng(inkPng, strokes);
-        if (rendered) {
-          drawn = await storeSignatureImage(c, rendered, {
-            document,
-            client: principal,
-            existing: content ? listSignatureImages(content.blocks) : [],
-          });
-        }
+      const rendered = await renderSignaturePng(inkPng, strokes);
+      if (!rendered) {
+        return clientJson({ success: false, error: 'The signature image could not be read.', code: 'signature_image_invalid' }, 400);
       }
+      const drawn = await storeSignatureImage(c, rendered, {
+        document,
+        client: principal,
+        existing: content ? listSignatureImages(content.blocks) : [],
+      });
 
       const signedAt = new Date().toISOString();
       const result = await db.prepare(
@@ -1560,7 +1554,7 @@ export const registerClientRoutes = (app: ClientApp) => {
       ).bind(
         Number(document.id), Number(document.client_id), Number(document.client_project_id),
         signerName, signerTitle, String(document.version || '1'),
-        drawn ? drawn.fileKey : null,
+        drawn.fileKey,
       ).run();
 
       // The signed copy is saved the same way any client version is: the client
@@ -1569,12 +1563,10 @@ export const registerClientRoutes = (app: ClientApp) => {
       let saved: { version: string; savedAt: string; vaultVersion: number | null } | null = null;
       if (content) {
         // What the document already holds stays exactly as it is; the signature
-        // is added to the end of it. A drawn mark replaces the text line with
-        // the picture of the mark, so existing signatures are never re-stamped
-        // on top of each other.
-        const addedBlocks = drawn
-          ? signatureImageBlocks({ signerName, signerTitle, signedAt, fileKey: drawn.fileKey, attachmentId: drawn.attachmentId })
-          : signatureBlocks({ signerName, signerTitle, signedAt });
+        // is added to the end of it. A new mark always replaces the previous
+        // text line with the new picture of the mark, so signatures are never
+        // stacked on top of each other.
+        const addedBlocks = signatureImageBlocks({ signerName, signerTitle, signedAt, fileKey: drawn.fileKey, attachmentId: drawn.attachmentId });
         const kept = content.blocks.filter((block: any) =>
           !(block && typeof block === 'object' && block.id && String(block.id).startsWith('client-signature-'))
         );
@@ -1669,13 +1661,23 @@ export const registerClientRoutes = (app: ClientApp) => {
 
       const db = c.env.DB;
       const signature = await latestSignature(db, Number(document.id));
+      // A document can only be sent back once the client has DRAWN and saved
+      // their signature. There is deliberately no "unsigned send" path.
+      if (!signature || !signature.drawn) {
+        return clientJson({
+          success: false,
+          error: 'Sign this document first — type your name and draw your signature on the pad, then save. Only a signed document can be sent to PHANTOM.',
+          code: 'signature_required',
+          data: { signed: Boolean(signature), drawn: Boolean(signature?.drawn) },
+        }, 409);
+      }
       const version = String(document.version || '1');
       // Once the document comes back, the signed copy is what PHANTOM groups as
       // a received document — the row knows it was handed over, so the panel
       // can show "Received documents" without a second table of its own.
-      if (signature) await markSignatureReceived(db, Number(document.id));
+      await markSignatureReceived(db, Number(document.id));
       const delivered = await sendClientDocumentToPhantom(db, {
-        principal, project, document, version, signed: Boolean(signature), signerName: signature?.signerName || null,
+        principal, project, document, version, signed: true, signerName: signature.signerName || null,
       });
 
       await recordClientActivity(db, 'DOCUMENT_SENT', {
@@ -1684,17 +1686,16 @@ export const registerClientRoutes = (app: ClientApp) => {
           documentId: document.public_id,
           reference: document.reference_code,
           version,
-          signed: Boolean(signature),
+          signed: true,
+          drawn: Boolean(signature.drawn),
           recipients: delivered.recipients,
         },
       });
 
       return clientJson({
         success: true,
-        message: signature
-          ? 'Sent to PHANTOM. They can see your signature on this document.'
-          : 'Sent to PHANTOM. They have been told this document is ready.',
-        data: { recipients: delivered.recipients, sentAt: delivered.sentAt, signed: Boolean(signature) },
+        message: 'Sent to PHANTOM. They can see your drawn signature on this document.',
+        data: { recipients: delivered.recipients, sentAt: delivered.sentAt, signed: true, drawn: true },
       });
     });
 
