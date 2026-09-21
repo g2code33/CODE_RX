@@ -2016,6 +2016,32 @@ export const KeyRevealDialog = ({
  * The controlled publishing workflow:
  * source → client → project → section → view/download → publish.
  */
+/**
+ * Extracts plain text from a client document's stored snapshot.
+ */
+const extractSnapshotText = (snapshot?: string | null, format?: string | null): string => {
+  if (!snapshot) return '';
+  if ((format || '').toLowerCase() === 'text') return snapshot;
+  try {
+    const parsed = JSON.parse(snapshot);
+    const blocks = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.blocks) ? parsed.blocks : [];
+    if (!blocks.length && typeof parsed === 'string') return parsed;
+    return blocks
+      .map((b: any) => {
+        if (!b) return '';
+        if (typeof b === 'string') return b;
+        if (b.content) return String(b.content);
+        if (b.text) return String(b.text);
+        if (Array.isArray(b.items)) return b.items.join('\n');
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n\n');
+  } catch {
+    return snapshot;
+  }
+};
+
 const PublishDialog = ({
   client, projects, existing, presetProjectId, startWithUpload, onClose, onSaved,
 }: {
@@ -2024,47 +2050,42 @@ const PublishDialog = ({
   startWithUpload?: boolean;
   onClose: () => void; onSaved: (message: string) => void | Promise<void>;
 }) => {
-  const [source, setSource] = useState<'text' | 'vault' | 'upload'>(
-    existing?.source === 'vault' ? 'vault' : startWithUpload && !existing ? 'upload' : 'text',
-  );
+  const initialSource: 'text' | 'vault' | 'upload' = existing
+    ? (existing.vaultDocumentId ? 'vault' : 'text')
+    : (startWithUpload ? 'upload' : 'text');
+
+  const [source, setSource] = useState<'text' | 'vault' | 'upload'>(initialSource);
   const [vaultSources, setVaultSources] = useState<any[]>([]);
-  const [vaultDocumentId, setVaultDocumentId] = useState<string>('');
-  // Phase 18 — upload a document file: the bytes go to the Vault through the
-  // existing upload endpoint, and the client copy is produced by the one
-  // stamping pipeline. The source file is never sent to the client.
+  const [vaultDocumentId, setVaultDocumentId] = useState<string>(existing?.vaultDocumentId ? String(existing.vaultDocumentId) : '');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [vaultSections, setVaultSections] = useState<any[]>([]);
   const [sectionSlug, setSectionSlug] = useState<string>('');
-  const [projectId, setProjectId] = useState(existing?.projectId || presetProjectId || projects.find((project) => !project.isArchived)?.id || '');
+  const [projectId, setProjectId] = useState(existing?.project?.id || existing?.projectId || presetProjectId || projects.find((project) => !project.isArchived)?.id || '');
   const [category, setCategory] = useState(existing?.category || 'document');
   const [title, setTitle] = useState(existing?.title || '');
   const [summary, setSummary] = useState(existing?.summary || '');
   const [version, setVersion] = useState(existing?.version || '1.0');
-  const [contentText, setContentText] = useState('');
+  const [contentText, setContentText] = useState(existing ? extractSnapshotText(existing.contentSnapshot, existing.contentSnapshotFormat) : '');
   const [allowView, setAllowView] = useState(existing ? Boolean(existing.allowView) : true);
   const [allowDownload, setAllowDownload] = useState(existing ? Boolean(existing.allowDownload) : false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (source !== 'vault') return;
     clientAccessCenter.vaultSources()
       .then(setVaultSources)
       .catch(() => setVaultSources([]));
-  }, [source]);
+  }, []);
 
   useEffect(() => {
-    if (source !== 'upload') return;
-    // The internal original has to be filed somewhere in the Vault, so the
-    // operator picks from the sections they may create documents in.
     db.vault.sections()
       .then((rows) => {
         const usable = (rows || []).filter((row: any) => sectionAcceptsDocuments(row) && !row.is_sensitive);
         setVaultSections(usable);
-        setSectionSlug((current) => current || usable[0]?.slug || '');
+        if (!sectionSlug) setSectionSlug(usable[0]?.slug || '');
       })
       .catch(() => setVaultSections([]));
-  }, [source]);
+  }, []);
 
   const submit = async (publishNow: boolean) => {
     setError(null);
@@ -2072,25 +2093,23 @@ const PublishDialog = ({
     if (title.trim().length < 1) { setError('A document title is required.'); return; }
     if (!existing && source === 'vault' && !vaultDocumentId) { setError('Choose the internal document to publish.'); return; }
     if (!existing && source === 'text' && contentText.trim().length < 1) { setError('Provide the client-facing document text.'); return; }
-    if (!existing && source === 'upload') {
-      if (!uploadFile) { setError('Choose the document file to upload.'); return; }
-      if (!isStampableUploadMime(uploadFile.type)) {
+    if (source === 'upload') {
+      if (!existing && !uploadFile) { setError('Choose the document file to upload.'); return; }
+      if (uploadFile && !isStampableUploadMime(uploadFile.type)) {
         setError(`A stamped Code Rx copy cannot be produced from ${uploadFile.type || 'that file type'}. Upload ${STAMPABLE_UPLOAD_LABEL}.`);
         return;
       }
-      if (!sectionSlug) { setError('Choose the Vault section that should keep the internal original.'); return; }
+      if (uploadFile && !sectionSlug) { setError('Choose the Vault section that should keep the internal original.'); return; }
     }
 
     setSaving(true);
-    // Declared outside the try so the catch can name the internal document if
-    // the second half of the upload flow fails.
     let filedDocument: UploadedVaultDocument | null = null;
     try {
       let documentId = existing?.id as string | undefined;
       let stampNote = '';
-      if (!existing && source === 'upload' && uploadFile) {
-        // 1 — the file becomes a real internal Vault document (existing upload
-        //     endpoint + existing create endpoint; one attachment, one snapshot)
+
+      if (source === 'upload' && uploadFile) {
+        // Upload file as a Vault document
         const filed = await uploadFileAsVaultDocument({
           file: uploadFile,
           section: sectionSlug,
@@ -2098,18 +2117,31 @@ const PublishDialog = ({
           status: uploadDocumentStatus(vaultSections.find((row) => row.slug === sectionSlug)),
         });
         filedDocument = filed;
-        // 2 — the client document pins that internal document, exactly like the
-        //     "use an internal document" path does
-        const created = await clientAccessCenter.createDocument(client.id, {
-          projectId,
-          category,
-          title: title.trim(),
-          summary: summary.trim(),
-          version: version.trim() || '1.0',
-          vaultDocumentId: String(filed.documentId),
-        });
-        documentId = created.data.id;
-        // 3 — the one existing stamping pipeline renders the watermarked copy
+
+        if (existing) {
+          // Updating an existing document with a new uploaded file
+          await clientAccessCenter.updateDocument(existing.id, {
+            title: title.trim(),
+            summary: summary.trim(),
+            version: version.trim() || '1.0',
+            vaultDocumentId: String(filed.documentId),
+            allowView,
+            allowDownload,
+          });
+          documentId = existing.id;
+        } else {
+          // Creating a brand new document from upload
+          const created = await clientAccessCenter.createDocument(client.id, {
+            projectId,
+            category,
+            title: title.trim(),
+            summary: summary.trim(),
+            version: version.trim() || '1.0',
+            vaultDocumentId: String(filed.documentId),
+          });
+          documentId = created.data.id;
+        }
+
         try {
           const delivery = await clientAccessCenter.prepareDelivery(documentId, true);
           const kilobytes = Math.max(1, Math.round(Number(delivery.data?.sizeBytes || 0) / 1024));
@@ -2128,13 +2160,28 @@ const PublishDialog = ({
         });
         documentId = created.data.id;
       } else {
-        await clientAccessCenter.updateDocument(existing.id, { title: title.trim(), summary: summary.trim(), version: version.trim() || '1.0', allowView, allowDownload });
+        // Editing existing document (updating title, summary, version, permissions, and writings or vault link)
+        await clientAccessCenter.updateDocument(existing.id, {
+          title: title.trim(),
+          summary: summary.trim(),
+          version: version.trim() || '1.0',
+          allowView,
+          allowDownload,
+          ...(source === 'vault' ? { vaultDocumentId: vaultDocumentId || null } : { contentText: contentText.trim() }),
+        });
+        documentId = existing.id;
+
+        // Force refresh stamped artifact so the new writing or replaced document is reflected
+        try {
+          await clientAccessCenter.prepareDelivery(documentId, true);
+        } catch {
+          // stamped copy will render on preview
+        }
       }
 
       if (documentId) {
         await clientAccessCenter.updateDocument(documentId, { allowView, allowDownload });
         if (publishNow) {
-          // The workflow states are explicit: review, then approved, then publish.
           await clientAccessCenter.setDocumentLifecycle(documentId, 'in_review');
           await clientAccessCenter.setDocumentLifecycle(documentId, 'approved');
           await clientAccessCenter.setDocumentLifecycle(documentId, 'published', true);
@@ -2144,8 +2191,6 @@ const PublishDialog = ({
         ? `Published to ${client.name}. The client can see it now.${stampNote}`
         : `Saved as a draft. Nothing is visible to the client yet.${stampNote}`);
     } catch (failure: any) {
-      // A file that reached the Vault is a real internal document: say which
-      // one, so a failed second step is never mistaken for a lost upload.
       const filed = filedDocument as UploadedVaultDocument | null;
       setError([
         failure?.message || 'This document could not be saved.',
@@ -2166,21 +2211,19 @@ const PublishDialog = ({
       wide
     >
       <div className="space-y-5">
-        {!existing ? (
-          <div className="flex flex-wrap gap-2">
-            <button onClick={() => setSource('text')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'text' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
-              1 · Write the client copy
-            </button>
-            <button onClick={() => setSource('vault')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'vault' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
-              1 · Use an internal document
-            </button>
-            <button onClick={() => setSource('upload')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'upload' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-600'}`}>
-              1 · Upload a document
-            </button>
-          </div>
-        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => setSource('text')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'text' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
+            {existing ? 'Edit document text' : '1 · Write the client copy'}
+          </button>
+          <button onClick={() => setSource('vault')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'vault' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-50 text-slate-500'}`}>
+            {existing ? 'Link from Vault' : '1 · Use an internal document'}
+          </button>
+          <button onClick={() => setSource('upload')} className={`rounded-xl px-3.5 py-2.5 text-xs font-black uppercase tracking-wider ${source === 'upload' ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-600'}`}>
+            {existing ? 'Upload replacement file' : '1 · Upload a document'}
+          </button>
+        </div>
 
-        {!existing && source === 'upload' ? (
+        {source === 'upload' ? (
           <div className="space-y-4">
             <VaultUploadField
               file={uploadFile}
@@ -2210,7 +2253,7 @@ const PublishDialog = ({
           </div>
         ) : null}
 
-        {!existing && source === 'vault' ? (
+        {source === 'vault' ? (
           <Field
             label="Internal document"
             hint="Only active, non-sensitive Vault documents are offered. Publishing pins a version snapshot — the Vault itself is never exposed."
@@ -2256,7 +2299,7 @@ const PublishDialog = ({
           </Field>
         </div>
 
-        {!existing && source === 'text' ? (
+        {source === 'text' ? (
           <Field label="Client-facing text" hint="This becomes the document the client reads. Internal working notes do not belong here.">
             <textarea className={`${inputClass} min-h-40`} value={contentText} onChange={(event) => setContentText(event.target.value)} />
           </Field>
