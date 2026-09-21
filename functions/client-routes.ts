@@ -2878,6 +2878,8 @@ export const registerClientRoutes = (app: ClientApp) => {
       isArchived: Number(document.is_archived) === 1,
       vaultDocumentId: document.vault_document_id === null ? null : Number(document.vault_document_id),
       vaultVersion: document.vault_version_number === null ? null : Number(document.vault_version_number),
+      contentSnapshot: document.content_snapshot || '',
+      contentSnapshotFormat: document.content_snapshot_format || 'blocks',
       hasClientArtifact: Boolean(document.storage_reference),
       // The client's signature, when they signed it.
       signature: document.signature_name ? {
@@ -3196,8 +3198,140 @@ export const registerClientRoutes = (app: ClientApp) => {
       }
     }
 
+    let vaultDocumentId = document.vault_document_id;
+    let vaultVersionNumber = document.vault_version_number;
+    let snapshot = document.content_snapshot;
+    let snapshotFormat = document.content_snapshot_format || 'blocks';
+    let contentChanged = false;
+
+    // A. Changing the linked Vault document or uploading a fresh internal file
+    if (body.vaultDocumentId !== undefined) {
+      if (body.vaultDocumentId === null || body.vaultDocumentId === '') {
+        vaultDocumentId = null;
+        vaultVersionNumber = null;
+        contentChanged = true;
+      } else {
+        const vaultId = integerParam(body.vaultDocumentId);
+        if (!vaultId) return c.json({ success: false, error: 'Invalid Vault document reference.' }, 400);
+
+        const vaultDoc = await one<any>(db.prepare(
+          `SELECT d.id, d.is_archived, d.visibility, s.is_sensitive, s.is_archived AS section_archived
+           FROM vault_documents d JOIN vault_sections s ON s.id = d.section_id WHERE d.id = ?`
+        ).bind(vaultId));
+        if (!vaultDoc || vaultDoc.is_archived === 1 || vaultDoc.section_archived === 1) {
+          return c.json({ success: false, error: 'Active Vault document not found.' }, 404);
+        }
+        if (Number(vaultDoc.is_sensitive) === 1 || vaultDoc.visibility === 'restricted') {
+          return c.json({ success: false, error: 'Sensitive or restricted Vault documents cannot be published to a client.' }, 409);
+        }
+
+        const snapshotRow = await one<any>(db.prepare(
+          'SELECT version_number, content_json, content FROM document_versions WHERE document_id = ? ORDER BY version_number DESC LIMIT 1'
+        ).bind(vaultId));
+        if (snapshotRow) {
+          vaultVersionNumber = Number(snapshotRow.version_number);
+          snapshot = snapshotRow.content_json || JSON.stringify({ version: 1, blocks: [] });
+          snapshotFormat = 'blocks';
+        } else {
+          const live = await one<any>(db.prepare('SELECT content_json, content, content_format FROM vault_documents WHERE id = ?').bind(vaultId));
+          if (live?.content_json) {
+            snapshot = live.content_json;
+            snapshotFormat = 'blocks';
+          } else if (live?.content) {
+            snapshot = String(live.content);
+            snapshotFormat = 'text';
+          } else {
+            snapshot = JSON.stringify({ version: 1, blocks: [] });
+            snapshotFormat = 'blocks';
+          }
+        }
+        vaultDocumentId = vaultId;
+        contentChanged = true;
+      }
+    }
+
+    // B. Editing written content / text directly
+    if (body.contentText !== undefined) {
+      const text = cleanOptionalStr(body.contentText, 200_000);
+      if (text !== null) {
+        snapshot = text;
+        snapshotFormat = 'text';
+        contentChanged = true;
+
+        // If this client document is linked to a Vault document, update the Vault document too!
+        // But smart: keep previous records in document_versions so the Vault keeps old revisions safe.
+        if (vaultDocumentId) {
+          const liveVault = await one<any>(db.prepare(
+            'SELECT id, title, content, content_json, status, tags_json, related_project_id, word_count, file_key FROM vault_documents WHERE id = ?'
+          ).bind(vaultDocumentId));
+
+          if (liveVault) {
+            const latestVer = await one<any>(db.prepare(
+              'SELECT MAX(version_number) AS version FROM document_versions WHERE document_id = ?'
+            ).bind(vaultDocumentId));
+            const nextVersion = Number(latestVer?.version || 0) + 1;
+            const words = text.split(/\s+/).filter(Boolean).length;
+
+            // Archive the prior revision in document_versions before overwriting
+            await db.prepare(
+              `INSERT OR IGNORE INTO document_versions
+               (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              vaultDocumentId,
+              nextVersion - 1,
+              String(liveVault.title || title),
+              String(liveVault.content ?? ''),
+              liveVault.content_json ?? null,
+              String(liveVault.status || 'draft'),
+              String(liveVault.tags_json || '[]'),
+              liveVault.related_project_id ?? null,
+              Number(liveVault.word_count || 0),
+              liveVault.file_key ?? null,
+              actor?.profileId ?? null,
+              `Preserved before client document edit (${new Date().toISOString().slice(0, 10)})`,
+            ).run();
+
+            // Update live vault document with new text and increment version
+            await db.prepare(
+              `UPDATE vault_documents SET title = ?, content = ?, content_json = NULL, content_format = 'plain',
+                 word_count = ?, updated_by_member_profile_id = ?, last_saved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`
+            ).bind(title, text, words, actor?.profileId ?? null, vaultDocumentId).run();
+
+            // Insert new version record
+            await db.prepare(
+              `INSERT INTO document_versions
+               (document_id, version_number, title, content, content_json, status, tags_json, related_project_id, word_count, file_key, changed_by_member_profile_id, change_note)
+               VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              vaultDocumentId,
+              nextVersion,
+              title,
+              text,
+              String(liveVault.status || 'draft'),
+              String(liveVault.tags_json || '[]'),
+              liveVault.related_project_id ?? null,
+              words,
+              liveVault.file_key ?? null,
+              actor?.profileId ?? null,
+              'Updated from Client Document Editor',
+            ).run();
+
+            vaultVersionNumber = nextVersion;
+          }
+        }
+      }
+    }
+
+    // If content or source changed, invalidate the stamped artifact so it refreshes with the new edits
+    if (contentChanged && body.storageReference === undefined) {
+      storageReference = null;
+    }
+
     await db.prepare(
       `UPDATE client_documents SET title = ?, summary = ?, version = ?, allow_view = ?, allow_download = ?,
+         vault_document_id = ?, vault_version_number = ?, content_snapshot = ?, content_snapshot_format = ?,
          storage_reference = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     ).bind(
@@ -3206,6 +3340,10 @@ export const registerClientRoutes = (app: ClientApp) => {
       version,
       allowView,
       effectiveAllowDownload,
+      vaultDocumentId,
+      vaultVersionNumber,
+      snapshot,
+      snapshotFormat,
       storageReference,
       document.id,
     ).run();
