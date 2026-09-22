@@ -303,7 +303,7 @@ const headerOperators = (
   if (logos.header !== null) {
     lines.push('q');
     lines.push(`44 0 0 44 44 ${pdfNumber(PAGE_HEIGHT - bandHeight + 24)} cm`);
-    lines.push(circleClipPath(0.5, 0.5, 0.47));
+    lines.push(circleClipPath(0.495, 0.510, 0.435));
     lines.push(`/${names.headerLogo} Do`);
     lines.push('Q');
   }
@@ -445,7 +445,7 @@ const watermarkOperators = (
     lines.push(`${pdfNumber(logo.cos)} ${pdfNumber(logo.sin)} ${pdfNumber(-logo.sin)} ${pdfNumber(logo.cos)} `
       + `${pdfNumber(logo.anchorX)} ${pdfNumber(logo.anchorY)} cm`);
     lines.push(`${pdfNumber(logo.markSize)} 0 0 ${pdfNumber(logo.markSize)} 0 0 cm`);
-    lines.push(circleClipPath(0.5, 0.5, 0.47));
+    lines.push(circleClipPath(0.495, 0.510, 0.455));
     lines.push(`/${names.watermarkLogo} Do`);
     lines.push('Q');
   }
