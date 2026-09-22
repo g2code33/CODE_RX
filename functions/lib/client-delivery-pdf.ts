@@ -273,6 +273,19 @@ const safe = (value: string | null | undefined, fallback = ''): string =>
  * branding is part of the page itself — it prints, it survives a re-save, and
  * there is nothing for a client to switch off.
  */
+/** Circular clipping path in unit coordinates [0, 1] x [0, 1] to cleanly remove square bounding boxes/borders */
+const circleClipPath = (cx = 0.5, cy = 0.5, r = 0.46): string => {
+  const k = 0.552284749831 * r;
+  return [
+    `${(cx + r).toFixed(4)} ${cy.toFixed(4)} m`,
+    `${(cx + r).toFixed(4)} ${(cy + k).toFixed(4)} ${(cx + k).toFixed(4)} ${(cy + r).toFixed(4)} ${cx.toFixed(4)} ${(cy + r).toFixed(4)} c`,
+    `${(cx - k).toFixed(4)} ${(cy + r).toFixed(4)} ${(cx - r).toFixed(4)} ${(cy + k).toFixed(4)} ${(cx - r).toFixed(4)} ${cy.toFixed(4)} c`,
+    `${(cx - r).toFixed(4)} ${(cy - k).toFixed(4)} ${(cx - k).toFixed(4)} ${(cy - r).toFixed(4)} ${cx.toFixed(4)} ${(cy - r).toFixed(4)} c`,
+    `${(cx + k).toFixed(4)} ${(cy - r).toFixed(4)} ${(cx + r).toFixed(4)} ${(cy - k).toFixed(4)} ${(cx + r).toFixed(4)} ${cy.toFixed(4)} c`,
+    'h W n',
+  ].join('\n');
+};
+
 const headerOperators = (
   meta: StampMeta,
   logos: { header: number | null; watermark: number | null },
@@ -290,6 +303,7 @@ const headerOperators = (
   if (logos.header !== null) {
     lines.push('q');
     lines.push(`44 0 0 44 44 ${pdfNumber(PAGE_HEIGHT - bandHeight + 24)} cm`);
+    lines.push(circleClipPath(0.5, 0.5, 0.47));
     lines.push(`/${names.headerLogo} Do`);
     lines.push('Q');
   }
@@ -431,6 +445,7 @@ const watermarkOperators = (
     lines.push(`${pdfNumber(logo.cos)} ${pdfNumber(logo.sin)} ${pdfNumber(-logo.sin)} ${pdfNumber(logo.cos)} `
       + `${pdfNumber(logo.anchorX)} ${pdfNumber(logo.anchorY)} cm`);
     lines.push(`${pdfNumber(logo.markSize)} 0 0 ${pdfNumber(logo.markSize)} 0 0 cm`);
+    lines.push(circleClipPath(0.5, 0.5, 0.47));
     lines.push(`/${names.watermarkLogo} Do`);
     lines.push('Q');
   }
