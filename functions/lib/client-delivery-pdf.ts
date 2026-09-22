@@ -238,9 +238,43 @@ const flattenToRgb = (image: DecodedImage, background: [number, number, number] 
 const addImageObject = async (file: PdfFile, image: DecodedImage, background?: [number, number, number]): Promise<number> => {
   const rgb = flattenToRgb(image, background);
   const compressed = await deflate(rgb);
+
+  // Check if image has transparency or non-opaque pixels
+  let hasAlpha = false;
+  const alphaMask = new Uint8Array(image.width * image.height);
+  const cx = image.width / 2 - 0.5;
+  const cy = image.height / 2 - 0.5;
+  const maxR = (Math.min(image.width, image.height) / 2) * 0.88;
+
+  for (let i = 0; i < image.width * image.height; i += 1) {
+    const a = image.rgba[i * 4 + 3];
+    const x = i % image.width;
+    const y = Math.floor(i / image.width);
+    const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+    // Tightly mask out square frame and outer background noise so only the circular emblem is visible
+    if (dist > maxR || a <= 20) {
+      alphaMask[i] = 0;
+      hasAlpha = true;
+    } else {
+      alphaMask[i] = a;
+      if (a < 250) hasAlpha = true;
+    }
+  }
+
+  let smaskDict = '';
+  if (hasAlpha) {
+    const compressedMask = await deflate(alphaMask);
+    const maskId = file.addStream(
+      `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} `
+      + '/ColorSpace /DeviceGray /BitsPerComponent 8 /Interpolate true',
+      compressedMask,
+    );
+    smaskDict = `/SMask ${maskId} 0 R `;
+  }
+
   return file.addStream(
     `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} `
-    + '/ColorSpace /DeviceRGB /BitsPerComponent 8 /Interpolate true '
+    + `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Interpolate true ${smaskDict}`
     + `/DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${image.width} >>`,
     compressed,
   );
