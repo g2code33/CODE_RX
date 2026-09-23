@@ -88,7 +88,12 @@ const SOURCE_RESTRICTED_MESSAGE =
  */
 export const loadClientDeliveryContext = async (
   db: DbLike,
-  params: { documentRowId: number; clientId: number; projectId: number },
+  params: {
+    documentRowId: number;
+    clientId: number;
+    projectId: number;
+    customization?: any | null;
+  },
 ): Promise<ClientDeliveryContext | null> => {
   const row = await db.prepare(
     `SELECT d.id, d.public_id, d.client_id, d.client_project_id, d.reference_code, d.title, d.summary,
@@ -119,6 +124,7 @@ export const loadClientDeliveryContext = async (
     clientName: row.client_name,
     category: row.category,
     issuedAt: Number.isNaN(issuedAt.getTime()) ? new Date() : issuedAt,
+    customization: params.customization || null,
   };
 
   return {

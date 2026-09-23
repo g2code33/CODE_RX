@@ -284,7 +284,18 @@ const addImageObject = async (file: PdfFile, image: DecodedImage, background?: [
 // Page furniture
 // ---------------------------------------------------------------------------
 
-interface StampMeta {
+export interface PresentationCustomization {
+  customHeaderHeadline?: string | null;
+  customHeaderDesignation?: string | null;
+  hideHeader?: boolean | null;
+  hideWatermark?: boolean | null;
+  customWatermarkText?: string | null;
+  customWatermarkOpacity?: number | null;
+  hideLogo?: boolean | null;
+  rawDocumentDelivery?: boolean | null;
+}
+
+export interface StampMeta {
   projectName: string;
   projectReference: string;
   documentTitle: string;
@@ -293,6 +304,7 @@ interface StampMeta {
   clientName: string;
   category: string;
   issuedAt: Date;
+  customization?: PresentationCustomization | null;
 }
 
 const formatDate = (date: Date): string =>
@@ -325,6 +337,7 @@ const headerOperators = (
   logos: { header: number | null; watermark: number | null },
   names: StampNames = GENERATED_NAMES,
 ): string => {
+  if (meta.customization?.hideHeader) return '';
   const lines: string[] = [];
   const bandHeight = 92;
   lines.push('q');
@@ -334,7 +347,8 @@ const headerOperators = (
   lines.push(`0 ${pdfNumber(PAGE_HEIGHT - bandHeight)} ${pdfNumber(PAGE_WIDTH)} 3 re f`);
   lines.push('Q');
 
-  if (logos.header !== null) {
+  const showLogo = !meta.customization?.hideLogo && logos.header !== null;
+  if (showLogo) {
     lines.push('q');
     lines.push(`44 0 0 44 44 ${pdfNumber(PAGE_HEIGHT - bandHeight + 24)} cm`);
     lines.push(circleClipPath(0.495, 0.510, 0.435));
@@ -342,19 +356,22 @@ const headerOperators = (
     lines.push('Q');
   }
 
-  const textX = logos.header !== null ? 100 : 44;
+  const headline = (meta.customization?.customHeaderHeadline || STAMP_HEADLINE).trim();
+  const designation = (meta.customization?.customHeaderDesignation || STAMP_DESIGNATION).trim();
+
+  const textX = showLogo ? 100 : 44;
   lines.push('BT');
   lines.push(`/${names.bold} 16 Tf`);
   lines.push('1 1 1 rg');
   lines.push(`${pdfNumber(textX)} ${pdfNumber(PAGE_HEIGHT - 44)} Td`);
-  lines.push(`(${escapePdfString(STAMP_HEADLINE)}) Tj`);
+  lines.push(`(${escapePdfString(headline)}) Tj`);
   lines.push('ET');
 
   lines.push('BT');
   lines.push(`/${names.bold} 8 Tf`);
   lines.push('0.85 0.93 0.89 rg');
   lines.push(`${pdfNumber(textX)} ${pdfNumber(PAGE_HEIGHT - 60)} Td`);
-  lines.push(`(${escapePdfString(STAMP_DESIGNATION)}) Tj`);
+  lines.push(`(${escapePdfString(designation)}) Tj`);
   lines.push('ET');
 
   lines.push('BT');
@@ -377,8 +394,11 @@ const headerOperators = (
 };
 
 const runningHeaderOperators = (meta: StampMeta, names: StampNames = GENERATED_NAMES): string => {
+  if (meta.customization?.hideHeader) return '';
   const lines: string[] = [];
-  const text = `${STAMP_HEADLINE}  ·  ${STAMP_DESIGNATION}`;
+  const headline = (meta.customization?.customHeaderHeadline || STAMP_HEADLINE).trim();
+  const designation = (meta.customization?.customHeaderDesignation || STAMP_DESIGNATION).trim();
+  const text = `${headline}  ·  ${designation}`;
   lines.push('q');
   lines.push('0.86 0.89 0.92 rg');
   lines.push(`44 ${pdfNumber(PAGE_HEIGHT - 60)} ${pdfNumber(PAGE_WIDTH - 88)} 0.6 re f`);
@@ -460,10 +480,12 @@ const markPosition = (pageWidth: number, pageHeight: number, leanRight: boolean)
 const watermarkOperators = (
   logos: { watermark: number | null },
   names: StampNames = GENERATED_NAMES,
-  options: { leanRight?: boolean } = {},
+  options: { leanRight?: boolean; customization?: PresentationCustomization | null } = {},
 ): string => {
+  const cust = options.customization;
+  if (cust?.hideWatermark) return '';
   const lines: string[] = [];
-  const word = 'CODE Rx SOCIETY';
+  const word = (cust?.customWatermarkText || 'CODE Rx SOCIETY').trim();
   const size = 58;
   const width = measure(word, 'bold', size);
   const angle = Math.atan2(1, 2.6);
@@ -472,7 +494,8 @@ const watermarkOperators = (
   const centerX = PAGE_WIDTH / 2;
   const centerY = PAGE_HEIGHT / 2;
 
-  if (logos.watermark !== null) {
+  const showWatermarkLogo = !cust?.hideLogo && logos.watermark !== null;
+  if (showWatermarkLogo) {
     const logo = markPosition(PAGE_WIDTH, PAGE_HEIGHT, options.leanRight === true);
     lines.push('q');
     lines.push(`/${names.gs} gs`);
@@ -606,7 +629,10 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
   const fontRegular = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
   const fontBold = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
   const fontMono = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>');
-  const gstate = file.add('<< /Type /ExtGState /ca 0.10 /CA 0.10 /BM /Multiply >>');
+  const wmOpacity = options.meta?.customization?.customWatermarkOpacity !== undefined && options.meta?.customization?.customWatermarkOpacity !== null
+    ? Math.max(0.01, Math.min(1.0, options.meta.customization.customWatermarkOpacity)).toFixed(2)
+    : '0.10';
+  const gstate = file.add(`<< /Type /ExtGState /ca ${wmOpacity} /CA ${wmOpacity} /BM /Multiply >>`);
   const headerLogo = options.logo ? await addImageObject(file, options.logo, BRAND.greenDark) : null;
   const watermarkLogo = options.logo ? await addImageObject(file, squareCropArtwork(options.logo), [255, 255, 255]) : null;
 
@@ -822,7 +848,7 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
   for (let index = 0; index < total; index += 1) {
     const pageNumber = index + 1;
     const ops = [
-      watermarkOperators({ watermark: watermarkLogo }, names),
+      watermarkOperators({ watermark: watermarkLogo }, names, { customization: meta.customization }),
       pageNumber === 1
         ? headerOperators(meta, { header: headerLogo, watermark: watermarkLogo }, names)
         : runningHeaderOperators(meta),
@@ -896,10 +922,14 @@ export const stampPdfSource = async (
 const buildStampFurniture = async (
   file: PdfFile,
   logo: DecodedImage | null | undefined,
+  customization?: PresentationCustomization | null,
 ): Promise<{ fontRegular: number; fontBold: number; gstate: number; headerLogo: number | null; watermarkLogo: number | null }> => {
   const fontRegular = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
   const fontBold = file.add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
-  const gstate = file.add('<< /Type /ExtGState /ca 0.10 /CA 0.10 /BM /Multiply >>');
+  const wmOpacity = customization?.customWatermarkOpacity !== undefined && customization?.customWatermarkOpacity !== null
+    ? Math.max(0.01, Math.min(1.0, customization.customWatermarkOpacity)).toFixed(2)
+    : '0.10';
+  const gstate = file.add(`<< /Type /ExtGState /ca ${wmOpacity} /CA ${wmOpacity} /BM /Multiply >>`);
   const headerLogo = logo ? await addImageObject(file, logo, BRAND.greenDark) : null;
   const watermarkLogo = logo ? await addImageObject(file, squareCropArtwork(logo), [255, 255, 255]) : null;
   return { fontRegular, fontBold, gstate, headerLogo, watermarkLogo };
@@ -965,7 +995,7 @@ const stampPdfInternal = async (
 
   // --- stamp furniture ------------------------------------------------------
   const furniture = new PdfFile();
-  const { fontRegular, fontBold, gstate, headerLogo, watermarkLogo } = await buildStampFurniture(furniture, logo);
+  const { fontRegular, fontBold, gstate, headerLogo, watermarkLogo } = await buildStampFurniture(furniture, logo, meta.customization);
   const furnitureObjects = await furniture.exportObjects();
   const furnitureBase = Math.max(0, ...objects.keys());
   const furnitureNumber = (local: number): number => furnitureBase + local;
@@ -1016,7 +1046,7 @@ const stampPdfInternal = async (
       // transparent watermark group; the rotated wordmark is kept on the
       // opposite diagonal from the centred logo so neither clashes with the
       // client's content.
-      watermarkOperators({ watermark: watermarkLogo === null ? null : furnitureNumber(watermarkLogo) }, SOURCE_NAMES, { leanRight: true }),
+      watermarkOperators({ watermark: watermarkLogo === null ? null : furnitureNumber(watermarkLogo) }, SOURCE_NAMES, { leanRight: true, customization: meta.customization }),
       'Q',
       'q',
       parts.join('\n'),

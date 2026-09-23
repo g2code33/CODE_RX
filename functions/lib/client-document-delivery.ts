@@ -31,6 +31,7 @@ import {
   STAMP_HEADLINE,
   STAMP_NOTE,
   type ContentBlock,
+  type PresentationCustomization,
 } from './client-delivery-pdf';
 import { getBrandMark } from './client-delivery-logo';
 import { convertOfficeDocument } from './client-delivery-office';
@@ -44,6 +45,7 @@ export interface DeliveryMeta {
   clientName: string;
   category: string;
   issuedAt: Date;
+  customization?: PresentationCustomization | null;
 }
 
 export type DeliverySourceKind =
@@ -602,6 +604,7 @@ export const sourceFingerprint = async (input: RenderInput): Promise<string> => 
     input.document.contentSnapshot || '',
     input.attachment?.fileKey || '',
     String(input.attachment?.sizeBytes ?? ''),
+    JSON.stringify(input.meta?.customization || {}),
   ];
   return (await sha256Hex(parts.join('\u0000'))).slice(0, 16);
 };
@@ -615,6 +618,7 @@ const metaFor = (meta: DeliveryMeta) => ({
   clientName: meta.clientName,
   category: meta.category,
   issuedAt: meta.issuedAt,
+  customization: meta.customization || null,
 });
 
 /**
@@ -629,6 +633,11 @@ export const renderClientDelivery = async (input: RenderInput): Promise<Rendered
   const logo = await getBrandMark();
   const fingerprint = await sourceFingerprint(input);
   const attempt = async (): Promise<Uint8Array> => {
+    if (input.meta?.customization?.rawDocumentDelivery) {
+      if (input.attachmentBytes && input.attachmentBytes.length) {
+        return input.attachmentBytes;
+      }
+    }
     switch (plan.sourceKind) {
       case 'attachment_pdf': {
         const bytes = input.attachmentBytes;

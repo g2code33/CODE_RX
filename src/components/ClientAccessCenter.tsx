@@ -1,3 +1,272 @@
+// Presentation Customizer Modal Component
+const PresentationPreviewDialog = ({
+  document: doc,
+  onClose,
+  onApplied,
+}: {
+  document: any;
+  onClose: () => void;
+  onApplied: (message: string) => void;
+}) => {
+  const [headline, setHeadline] = useState('CODE Rx SOCIETY');
+  const [designation, setDesignation] = useState('CLIENT PROJECT DOCUMENT');
+  const [hideHeader, setHideHeader] = useState(false);
+  const [watermarkText, setWatermarkText] = useState('CODE Rx SOCIETY');
+  const [watermarkOpacity, setWatermarkOpacity] = useState(10);
+  const [hideWatermark, setHideWatermark] = useState(false);
+  const [hideLogo, setHideLogo] = useState(false);
+  const [rawDelivery, setRawDelivery] = useState(false);
+
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
+
+  const customizationPayload = {
+    customHeaderHeadline: headline.trim() || null,
+    customHeaderDesignation: designation.trim() || null,
+    hideHeader,
+    hideWatermark,
+    customWatermarkText: watermarkText.trim() || null,
+    customWatermarkOpacity: watermarkOpacity / 100,
+    hideLogo,
+    rawDocumentDelivery: rawDelivery,
+  };
+
+  const loadPreview = async () => {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const res = await clientAccessCenter.presentationPreview(doc.id, customizationPayload);
+      setPreviewUrl(res.url);
+    } catch (err: any) {
+      setPreviewError(err?.message || 'Could not load presentation preview.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadPreview();
+  }, [hideHeader, hideWatermark, hideLogo, rawDelivery]);
+
+  const applyCustomization = async () => {
+    setApplying(true);
+    setPreviewError(null);
+    try {
+      const res = await clientAccessCenter.prepareDelivery(doc.id, true, customizationPayload);
+      const kb = Math.max(1, Math.round(Number(res.data?.sizeBytes || 0) / 1024));
+      onApplied(`Client presentation customized and saved (${kb} KB ready for client delivery).`);
+      onClose();
+    } catch (err: any) {
+      setPreviewError(err?.message || 'Failed to save presentation settings.');
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <Dialog
+      title="Client presentation preview & editor"
+      subtitle={`${doc.title} (${doc.reference})`}
+      onClose={onClose}
+      wide
+    >
+      <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
+        {/* Controls Column */}
+        <div className="space-y-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-4">
+          <div>
+            <h5 className="text-xs font-black uppercase tracking-wider text-slate-700">Presentation customization</h5>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Inspect and customize exactly how this document appears when delivered to the client.
+            </p>
+          </div>
+
+          {/* Raw document toggle */}
+          <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2">
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                checked={rawDelivery}
+                onChange={(e) => setRawDelivery(e.target.checked)}
+              />
+              <div>
+                <span className="block text-xs font-bold text-slate-800">Raw unformatted delivery</span>
+                <span className="block text-[11px] text-slate-500 leading-normal">
+                  Deliver the source file exactly as uploaded without applying header banner or watermarks.
+                </span>
+              </div>
+            </label>
+          </div>
+
+          {/* Header Block Section */}
+          <div className={`space-y-3 rounded-xl border border-slate-200 bg-white p-3.5 transition ${rawDelivery ? 'opacity-40 pointer-events-none' : ''}`}>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800">Header block</span>
+              <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-semibold text-slate-600">
+                <input
+                  type="checkbox"
+                  className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  checked={hideHeader}
+                  onChange={(e) => setHideHeader(e.target.checked)}
+                />
+                Hide header
+              </label>
+            </div>
+            {!hideHeader && (
+              <div className="space-y-2 pt-1">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Headline</label>
+                  <input
+                    type="text"
+                    value={headline}
+                    onChange={(e) => setHeadline(e.target.value)}
+                    className="mt-0.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+                    placeholder="CODE Rx SOCIETY"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Designation subtitle</label>
+                  <input
+                    type="text"
+                    value={designation}
+                    onChange={(e) => setDesignation(e.target.value)}
+                    className="mt-0.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+                    placeholder="CLIENT PROJECT DOCUMENT"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Watermark Section */}
+          <div className={`space-y-3 rounded-xl border border-slate-200 bg-white p-3.5 transition ${rawDelivery ? 'opacity-40 pointer-events-none' : ''}`}>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800">Watermark</span>
+              <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-semibold text-slate-600">
+                <input
+                  type="checkbox"
+                  className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  checked={hideWatermark}
+                  onChange={(e) => setHideWatermark(e.target.checked)}
+                />
+                Hide watermark
+              </label>
+            </div>
+            {!hideWatermark && (
+              <div className="space-y-2 pt-1">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Watermark text</label>
+                  <input
+                    type="text"
+                    value={watermarkText}
+                    onChange={(e) => setWatermarkText(e.target.value)}
+                    className="mt-0.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+                    placeholder="CODE Rx SOCIETY"
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    <span>Opacity</span>
+                    <span>{watermarkOpacity}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="60"
+                    value={watermarkOpacity}
+                    onChange={(e) => setWatermarkOpacity(Number(e.target.value))}
+                    className="mt-1 w-full accent-emerald-600"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Logo Section */}
+          <div className={`space-y-3 rounded-xl border border-slate-200 bg-white p-3.5 transition ${rawDelivery ? 'opacity-40 pointer-events-none' : ''}`}>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800">Official Society emblem</span>
+              <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-semibold text-slate-600">
+                <input
+                  type="checkbox"
+                  className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  checked={hideLogo}
+                  onChange={(e) => setHideLogo(e.target.checked)}
+                />
+                Hide emblem
+              </label>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              When enabled, the circular official emblem appears in the green header and background watermark with clean transparent alpha boundary.
+            </p>
+          </div>
+
+          <div className="pt-2 flex flex-col gap-2">
+            <button
+              onClick={loadPreview}
+              disabled={previewLoading}
+              className="mini-button w-full justify-center !bg-white !border-slate-300 !text-slate-700"
+            >
+              {previewLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Update preview
+            </button>
+            <button
+              onClick={applyCustomization}
+              disabled={applying}
+              className="mini-button mini-button--primary w-full justify-center"
+            >
+              {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+              Save &amp; apply to client presentation
+            </button>
+          </div>
+
+          {previewError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700">
+              {previewError}
+            </p>
+          )}
+        </div>
+
+        {/* Live Presentation Preview Viewer */}
+        <div className="flex flex-col rounded-2xl border border-slate-200 bg-slate-900/5 p-2 overflow-hidden min-h-[560px]">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white rounded-t-xl text-xs font-bold text-slate-700">
+            <span className="flex items-center gap-2">
+              <Eye className="h-4 w-4 text-emerald-600" />
+              Client presentation live preview
+            </span>
+            {previewLoading && (
+              <span className="flex items-center gap-1.5 text-emerald-600 font-medium">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Rendering...
+              </span>
+            )}
+          </div>
+          <div className="flex-1 w-full bg-slate-100 rounded-b-xl flex items-center justify-center relative overflow-hidden">
+            {previewUrl ? (
+              <iframe
+                src={previewUrl}
+                title="Client presentation preview"
+                className="w-full h-full min-h-[500px] border-0"
+              />
+            ) : previewLoading ? (
+              <div className="flex flex-col items-center gap-3 p-8 text-slate-500">
+                <Loader2 className="h-8 w-8 animate-spin text-emerald-600" />
+                <p className="text-xs font-semibold">Generating live client presentation...</p>
+              </div>
+            ) : (
+              <div className="p-8 text-center text-xs font-medium text-slate-500">
+                Click &quot;Update preview&quot; to inspect client presentation.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </Dialog>
+  );
+};
+
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useModalBehaviour } from './AppDialog';
 import {
@@ -181,6 +450,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
   const [publishFlow, setPublishFlow] = useState<null | { clientId: string; projectId?: string; document?: any; upload?: boolean }>(null);
   const [linkDialog, setLinkDialog] = useState<null | { clientId: string }>(null);
   const [previewClient, setPreviewClient] = useState<null | { client: any; projectId: string; room: any; projects: any[] }>(null);
+  const [presentationDialog, setPresentationDialog] = useState<any | null>(null);
   /** The received document whose signed copy is loading right now, if any. */
   const [openingReceivedId, setOpeningReceivedId] = useState<string | null>(null);
 
@@ -566,6 +836,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
               {section === 'documents' && (
                 <DocumentsPanel
                   can={can} client={detail} documents={documents} projects={projects}
+                  onPresentation={(document: any) => setPresentationDialog(document)}
                   onPrepare={(document: any) => void prepareStampedCopy(document, refresh, onMessage, setError)}
                   onUpload={() => setPublishFlow({ clientId: detail.id, projectId: projects[0]?.id, upload: true })}
                   onDirectLink={(document: any) => void sendDirectLink(
@@ -675,6 +946,16 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
           startWithUpload={publishFlow.upload === true}
           onClose={() => setPublishFlow(null)}
           onSaved={async (message) => { setPublishFlow(null); await refresh(message); }}
+        />
+      )}
+
+      {presentationDialog && (
+        <PresentationPreviewDialog
+          document={presentationDialog}
+          onClose={() => setPresentationDialog(null)}
+          onApplied={async (message) => {
+            await refresh(message);
+          }}
         />
       )}
 
@@ -855,7 +1136,7 @@ const ProjectsPanel = ({
 );
 
 const DocumentsPanel = ({
-  can, client, documents, projects, onPublish, onUpload, onLifecycle, onEdit, onDelete, onPrepare, onDirectLink, busy,
+  can, client, documents, projects, onPublish, onUpload, onLifecycle, onEdit, onDelete, onPrepare, onDirectLink, onPresentation, busy,
   openingReceivedId, onOpenReceived,
 }: {
   can: (capability: string) => boolean;
@@ -868,6 +1149,8 @@ const DocumentsPanel = ({
   onPrepare: (document: any) => void;
   /** Generates a link that opens this document straight away, with no key. */
   onDirectLink: (document: any) => void;
+  /** Opens presentation customizer and live preview */
+  onPresentation: (document: any) => void;
   /** Opens the signed copy the client handed back (PHANTOM, received documents). */
   onOpenReceived: (document: any) => void;
   /** The received document whose signed copy is loading right now, if any. */
@@ -1031,6 +1314,16 @@ const DocumentsPanel = ({
                   title={`Generate an address that opens ${document.title} straight away, without asking for a key`}
                 >
                   <Link2 className="h-4 w-4" /> Direct link
+                </button>
+              ) : null}
+              {can('clients.documents.edit') ? (
+                <button
+                  onClick={() => onPresentation(document)}
+                  className="mini-button border border-emerald-300 !bg-emerald-100/70 !text-emerald-900 font-bold"
+                  disabled={busy}
+                  title="Inspect and edit header, watermark, logo, or raw presentation for this client document"
+                >
+                  <Eye className="h-4 w-4" /> Preview &amp; edit presentation
                 </button>
               ) : null}
               {can('clients.documents.edit') ? (
