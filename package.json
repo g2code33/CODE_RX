@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test:client-portal": "node --experimental-sqlite scripts/client-portal-tests.mjs",
     "test:client-portal-ui": "node scripts/client-portal-ui-tests.mjs",
+    "test:raw-delivery": "node scripts/raw-delivery-tests.mjs",
     "test:client-portal-all": "npm run test:client-portal && npm run test:client-portal-ui"
   },
   "dependencies": {

@@ -964,6 +964,10 @@ CREATE TABLE IF NOT EXISTS client_documents (
   -- R2 key of the watermarked client-facing artifact produced by the stamping
   -- pipeline. An internal vault/... key must never be stored or served here.
   storage_reference TEXT,
+  -- The presentation PHANTOM saved for this document's client delivery
+  -- (custom header/watermark, or raw unformatted delivery), as JSON. NULL
+  -- means the default branded, watermarked presentation.
+  presentation_customization TEXT,
   published_at DATETIME,
   published_by_user_id INTEGER,
   unpublished_at DATETIME,
@@ -1162,6 +1166,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action, created_a
 // created by older versions receive non-destructive columns. Duplicate-column
 // errors are safely ignored by runSafeMigrations below.
 const SAFE_MIGRATIONS = [
+  { table: 'client_documents', column: 'presentation_customization', sql: 'ALTER TABLE client_documents ADD COLUMN presentation_customization TEXT' },
   { table: 'community_conversations', column: 'telegram_chat_id', sql: 'ALTER TABLE community_conversations ADD COLUMN telegram_chat_id TEXT' },
   { table: 'community_media_settings', column: 'telegram_auto_delete_after_sync', sql: 'ALTER TABLE community_media_settings ADD COLUMN telegram_auto_delete_after_sync INTEGER NOT NULL DEFAULT 0' },
   { table: 'community_message_attachments', column: 'telegram_sync_status', sql: "ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_status TEXT NOT NULL DEFAULT 'not_requested'" },

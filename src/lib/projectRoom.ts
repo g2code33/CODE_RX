@@ -68,6 +68,12 @@ export interface RoomDelivery {
   contentType?: string;
   designation?: string;
   stamped?: boolean;
+  /**
+   * True when PHANTOM saved raw unformatted delivery for this document: the
+   * client receives the source file exactly as uploaded — an operator
+   * decision, and the only way an unstamped file is ever rendered.
+   */
+  raw?: boolean;
   message?: string;
   reason?: string | null;
   viewerPath?: string | null;
@@ -78,18 +84,22 @@ export interface RoomDelivery {
 /** Normalises whatever the server sent into a room-safe delivery descriptor. */
 export const parseDelivery = (value: unknown): RoomDelivery => {
   const source = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const raw = source.raw === true;
   // Fail closed, twice over: the server has to say a copy is available, and it
-  // has to confirm that copy is stamped. A response that admits to serving an
-  // unstamped file is treated as no delivery at all, never rendered.
-  const available = source.available === true && source.stamped !== false;
+  // has to confirm that copy is stamped — unless it explicitly marks the copy
+  // as a raw delivery, which is a saved PHANTOM decision. A response that
+  // admits to serving an unstamped file without that mark is treated as no
+  // delivery at all, never rendered.
+  const available = source.available === true && (source.stamped !== false || raw);
   return {
     available,
     kind: typeof source.kind === 'string' ? source.kind : null,
     sourceKind: typeof source.sourceKind === 'string' ? source.sourceKind : null,
-    label: typeof source.label === 'string' ? source.label : available ? 'Stamped copy' : 'Unavailable',
+    label: typeof source.label === 'string' ? source.label : available ? (raw ? 'Client copy' : 'Stamped copy') : 'Unavailable',
     contentType: typeof source.contentType === 'string' ? source.contentType : 'application/pdf',
     designation: typeof source.designation === 'string' ? source.designation : 'CLIENT PROJECT DOCUMENT',
     stamped: source.stamped !== false,
+    raw,
     message: typeof source.message === 'string' ? source.message : '',
     reason: typeof source.reason === 'string' ? source.reason : null,
     viewerPath: typeof source.viewerPath === 'string' ? source.viewerPath : null,

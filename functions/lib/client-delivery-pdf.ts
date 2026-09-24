@@ -295,6 +295,69 @@ export interface PresentationCustomization {
   rawDocumentDelivery?: boolean | null;
 }
 
+/** The watermark opacity the stamp engine applies unless told otherwise. */
+export const DEFAULT_WATERMARK_OPACITY = 0.10;
+
+/**
+ * Reduces an operator-supplied presentation payload to the known fields only,
+ * so nothing unknown can ever be persisted or reach the renderer. Values that
+ * match the default branded presentation are dropped: when nothing changes,
+ * nothing is stored, and the document keeps the plain default fingerprint.
+ */
+export const normalizePresentationCustomization = (value: unknown): PresentationCustomization | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const text = (input: unknown, maxLength: number): string | null => {
+    if (typeof input !== 'string') return null;
+    const trimmed = input.replace(/[\r\n]+/g, ' ').trim().slice(0, maxLength);
+    return trimmed || null;
+  };
+  const flag = (input: unknown): boolean => input === true;
+
+  const headline = text(record.customHeaderHeadline, 120);
+  const designation = text(record.customHeaderDesignation, 120);
+  const watermarkText = text(record.customWatermarkText, 120);
+  const opacity = typeof record.customWatermarkOpacity === 'number' && Number.isFinite(record.customWatermarkOpacity)
+    ? Math.max(0.01, Math.min(1, record.customWatermarkOpacity))
+    : null;
+
+  const customization: PresentationCustomization = {
+    customHeaderHeadline: headline && headline.toUpperCase() !== STAMP_HEADLINE.toUpperCase() ? headline : null,
+    customHeaderDesignation: designation && designation.toUpperCase() !== STAMP_DESIGNATION.toUpperCase() ? designation : null,
+    hideHeader: flag(record.hideHeader),
+    hideWatermark: flag(record.hideWatermark),
+    customWatermarkText: watermarkText && watermarkText.toUpperCase() !== 'CODE RX SOCIETY' ? watermarkText : null,
+    customWatermarkOpacity: opacity !== null && Math.abs(opacity - DEFAULT_WATERMARK_OPACITY) > 0.0001 ? opacity : null,
+    hideLogo: flag(record.hideLogo),
+    rawDocumentDelivery: flag(record.rawDocumentDelivery),
+  };
+
+  const isDefault = !customization.customHeaderHeadline
+    && !customization.customHeaderDesignation
+    && !customization.customWatermarkText
+    && customization.customWatermarkOpacity === null
+    && !customization.hideHeader
+    && !customization.hideWatermark
+    && !customization.hideLogo
+    && !customization.rawDocumentDelivery;
+  return isDefault ? null : customization;
+};
+
+/**
+ * Reads the presentation persisted on `client_documents.presentation_customization`.
+ * Anything that does not parse cleanly is treated as "no customization", so a
+ * malformed stored value can never break delivery — it falls back to the
+ * default branded copy.
+ */
+export const parseStoredPresentationCustomization = (raw: string | null | undefined): PresentationCustomization | null => {
+  if (!raw || typeof raw !== 'string') return null;
+  try {
+    return normalizePresentationCustomization(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+};
+
 export interface StampMeta {
   projectName: string;
   projectReference: string;
@@ -634,12 +697,14 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
     ? Math.max(0.01, Math.min(1.0, options.meta.customization.customWatermarkOpacity)).toFixed(2)
     : '0.10';
   const gstate = file.add(`<< /Type /ExtGState /ca ${wmOpacity} /CA ${wmOpacity} /BM /Multiply >>`);
-  const headerLogo = options.logo ? await addImageObject(file, options.logo, BRAND.greenDark) : null;
-  const watermarkLogo = options.logo ? await addImageObject(file, squareCropArtwork(options.logo), [255, 255, 255]) : null;
+  const isRaw = !!options.meta?.customization?.rawDocumentDelivery;
+  // Raw unformatted delivery embeds no brand material at all: the logo
+  // objects are never even added to the file, so nothing branded can render.
+  const headerLogo = options.logo && !isRaw ? await addImageObject(file, options.logo, BRAND.greenDark) : null;
+  const watermarkLogo = options.logo && !isRaw ? await addImageObject(file, squareCropArtwork(options.logo), [255, 255, 255]) : null;
 
   const pages: string[][] = [];
   let pageLines: string[] = [];
-  const isRaw = !!options.meta?.customization?.rawDocumentDelivery;
   const isHeaderHidden = isRaw || !!options.meta?.customization?.hideHeader;
   let cursorY = isHeaderHidden ? PAGE_HEIGHT - 44 : CONTENT_TOP;
   const bodyImages: Array<[string, number]> = [];
@@ -877,14 +942,20 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
   file.setObject(pagesRef, `<< /Type /Pages /Kids [${pageRefs.map((ref) => `${ref} 0 R`).join(' ')}] /Count ${pageRefs.length} >>`);
   file.setObject(catalogRef, `<< /Type /Catalog /Pages ${pagesRef} 0 R >>`);
 
+  // Raw unformatted delivery keeps the document metadata neutral too — no
+  // designation, no brand author — only the document's own title survives.
   const info = file.add(
-    `<< /Title (${escapePdfString(`${safe(meta.documentTitle)} — ${safe(meta.documentReference)}`)}) `
-    + `/Author (${escapePdfString(STAMP_HEADLINE)}) `
-    + `/Subject (${escapePdfString(`${STAMP_DESIGNATION}: ${safe(meta.projectName)} (${safe(meta.projectReference)}) ${safe(meta.documentReference)} v${safe(meta.version)}`)}) `
-    + `/Keywords (${escapePdfString(`${STAMP_HEADLINE}, ${STAMP_DESIGNATION}, ${safe(meta.projectName)}, ${safe(meta.documentReference)}, v${safe(meta.version)}, ${safe(meta.clientName)}`)}) `
-    + `/Creator (${escapePdfString(`${STAMP_HEADLINE} Client Portal`)}) `
-    + `/Producer (${escapePdfString(`${STAMP_HEADLINE} stamping pipeline`)}) `
-    + `/CreationDate (D:${meta.issuedAt.toISOString().replace(/[-:T]/g, '').slice(0, 14)}Z) >>`,
+    isRaw
+      ? `<< /Title (${escapePdfString(`${safe(meta.documentTitle)} — ${safe(meta.documentReference)}`)}) `
+        + `/Producer (${escapePdfString('Code Rx document delivery')}) `
+        + `/CreationDate (D:${meta.issuedAt.toISOString().replace(/[-:T]/g, '').slice(0, 14)}Z) >>`
+      : `<< /Title (${escapePdfString(`${safe(meta.documentTitle)} — ${safe(meta.documentReference)}`)}) `
+        + `/Author (${escapePdfString(STAMP_HEADLINE)}) `
+        + `/Subject (${escapePdfString(`${STAMP_DESIGNATION}: ${safe(meta.projectName)} (${safe(meta.projectReference)}) ${safe(meta.documentReference)} v${safe(meta.version)}`)}) `
+        + `/Keywords (${escapePdfString(`${STAMP_HEADLINE}, ${STAMP_DESIGNATION}, ${safe(meta.projectName)}, ${safe(meta.documentReference)}, v${safe(meta.version)}, ${safe(meta.clientName)}`)}) `
+        + `/Creator (${escapePdfString(`${STAMP_HEADLINE} Client Portal`)}) `
+        + `/Producer (${escapePdfString(`${STAMP_HEADLINE} stamping pipeline`)}) `
+        + `/CreationDate (D:${meta.issuedAt.toISOString().replace(/[-:T]/g, '').slice(0, 14)}Z) >>`,
   );
 
   return file.serialize(catalogRef, info);

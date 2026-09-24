@@ -160,7 +160,9 @@ export const StampedCopyPanel = ({
             {delivery.designation || 'CLIENT PROJECT DOCUMENT'}
           </p>
           <p className="mt-1 text-xs font-semibold text-emerald-900">
-            {delivery.label || 'Stamped copy'} · watermarked by Code Rx Society
+            {delivery.raw
+              ? `${delivery.label || 'Client copy'} · delivered as the source file by Code Rx Society`
+              : `${delivery.label || 'Stamped copy'} · watermarked by Code Rx Society`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -189,8 +191,8 @@ export const StampedCopyPanel = ({
       <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
         {preview ? (
           <p className="px-4 py-10 text-center text-sm font-semibold text-slate-500">
-            Preview shows the client&apos;s room, not their files. In their own session the stamped
-            {' '}{delivery.label || 'client copy'} opens here.
+            Preview shows the client&apos;s room, not their files. In their own session the{' '}
+            {delivery.raw ? '' : 'stamped '}{delivery.label || 'client copy'} opens here.
           </p>
         ) : copy ? (
           <object
@@ -201,7 +203,7 @@ export const StampedCopyPanel = ({
           >
             <p className="px-4 py-10 text-center text-sm font-semibold text-slate-500">
               Your browser cannot display this file inline.{' '}
-              <a className="underline" href={copy.url} target="_blank" rel="noreferrer">Open the stamped copy</a>.
+              <a className="underline" href={copy.url} target="_blank" rel="noreferrer">Open the {delivery.raw ? 'client copy' : 'stamped copy'}</a>.
             </p>
           </object>
         ) : (
@@ -212,10 +214,12 @@ export const StampedCopyPanel = ({
               disabled={busy}
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-[11px] font-black uppercase tracking-[0.16em] text-white transition hover:bg-emerald-700 disabled:opacity-70"
             >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />} Open stamped copy
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />} Open {delivery.raw ? 'client copy' : 'stamped copy'}
             </button>
             <p className="mt-3 text-xs font-medium text-slate-500">
-              Every copy is stamped with the Code Rx watermark, your project reference and the version.
+              {delivery.raw
+                ? 'This copy is delivered as the original source file, without Code Rx headers or watermarks.'
+                : 'Every copy is stamped with the Code Rx watermark, your project reference and the version.'}
             </p>
           </div>
         )}
@@ -1637,7 +1641,9 @@ export const ClientProjectRoom = ({
                       {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Download copy
                     </button>
                     <p className="text-xs font-medium text-slate-500">
-                      Your download is the stamped Code Rx copy of this document — watermarked and print-safe.
+                      {openDelivery.raw
+                        ? 'Your download is the original source file of this document, delivered without Code Rx branding.'
+                        : 'Your download is the stamped Code Rx copy of this document — watermarked and print-safe.'}
                     </p>
                   </div>
                 ) : (
