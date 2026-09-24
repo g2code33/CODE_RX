@@ -1104,6 +1104,30 @@ const main = async () => {
     && !/CRX-AAAA/.test(hostileMarkup) && !/[0-9a-f]{64}/.test(hostileMarkup)
     && !/client-exports\/|vault\//.test(hostileMarkup));
 
+  // --- the timeline shows the five newest entries first --------------------
+  const manyEntries = Array.from({ length: 8 }, (_, index) =>
+    buildClientActivityEntry({ id: index + 10, action: 'client.login', created_at: `2026-01-01 10:0${index}:00`, details_json: '{}' }, {}));
+  const truncatedMarkup = activityPanel({
+    activity: { entries: manyEntries, meta: { total: 8, counts: { all: 8 }, kinds: [], labels: {} } },
+  });
+  check('only the five newest activities render before "Show all"',
+    (truncatedMarkup.match(/<li /g) || []).length === 5
+    && /Show all 8 activities/.test(truncatedMarkup)
+    && /3 older entries hidden/.test(truncatedMarkup)
+    && !/10:07/.test(truncatedMarkup),
+    truncatedMarkup.slice(-300));
+  check('"Show all" reveals the whole timeline, offers a way back, and resets per client and filter',
+    /showAll \? entries : entries\.slice\(0, ACTIVITY_VISIBLE_LIMIT\)/.test(centerSource)
+    && /setShowAll\(true\)/.test(centerSource) && /setShowAll\(false\)/.test(centerSource)
+    && /Show fewer activities/.test(centerSource)
+    && /useEffect\(\(\) => \{ setShowAll\(false\); \}, \[client\?\.id, filters\.kind\]\)/.test(centerSource));
+  const fewEntriesMarkup = activityPanel({
+    activity: { entries: sampleEntries, meta: { total: 3, counts: { all: 3 }, kinds: [], labels: {} } },
+  });
+  check('a timeline with five or fewer entries shows no "Show all" button',
+    (fewEntriesMarkup.match(/<li /g) || []).length === 3 && !/Show all 3 activities/.test(fewEntriesMarkup));
+
+
   // --- the transport the workspace uses -----------------------------------
   check('the activity request asks the server to filter and to count',
     /activity: async \([\s\S]{0,700}limit[\s\S]{0,700}kind[\s\S]{0,400}project[\s\S]{0,400}document/.test(cloudflareLib)

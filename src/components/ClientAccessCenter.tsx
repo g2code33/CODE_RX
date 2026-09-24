@@ -1590,6 +1590,9 @@ const LinksPanel = ({
   </div>
 );
 
+/** How many activity entries are visible before "Show all" is needed. */
+const ACTIVITY_VISIBLE_LIMIT = 5;
+
 /** One recorded entry, with only display-safe details. */
 const ACTIVITY_DETAIL_KEYS: Array<[string, string]> = [
   ['reference', 'Reference'],
@@ -1642,6 +1645,12 @@ export const ActivityPanel = ({
   onFilterChange: (kind: string | null) => void;
 }) => {
   const entries = activity?.entries || [];
+  // The five newest entries are shown first; the rest of the timeline stays one
+  // "Show all" click away below the list instead of rendering up to 120 rows.
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => { setShowAll(false); }, [client?.id, filters.kind]);
+  const visibleEntries = showAll ? entries : entries.slice(0, ACTIVITY_VISIBLE_LIMIT);
+  const hiddenCount = Math.max(0, entries.length - ACTIVITY_VISIBLE_LIMIT);
   const counts = activity?.meta?.counts || { all: entries.length };
   const kindLabels: Record<string, string> = activity?.meta?.labels?.kinds || {};
   const kindLabel = (kind?: string | null) => (kind ? kindLabels[kind] || String(kind) : 'Activity');
@@ -1697,8 +1706,9 @@ export const ActivityPanel = ({
             ))}
           </div>
         ) : entries.length ? (
-          <ul className="divide-y divide-slate-100">
-            {entries.map((entry) => {
+          <>
+            <ul className="divide-y divide-slate-100">
+              {visibleEntries.map((entry) => {
               const details = ACTIVITY_DETAIL_KEYS
                 .map(([key, label]) => (entry.details?.[key] === undefined || entry.details?.[key] === ''
                   ? null
@@ -1729,8 +1739,27 @@ export const ActivityPanel = ({
                   <span className="whitespace-nowrap text-[11px] font-semibold text-slate-500">{activityWhen(entry.at)}</span>
                 </li>
               );
-            })}
-          </ul>
+              })}
+            </ul>
+            {entries.length > ACTIVITY_VISIBLE_LIMIT && (
+              <div className="border-t border-slate-100 px-4 py-3 text-center sm:px-5">
+                {hiddenCount > 0 ? (
+                  <>
+                    <button type="button" onClick={() => setShowAll(true)} className="mini-button">
+                      Show all {entries.length} activities
+                    </button>
+                    <p className="mt-1.5 text-[11px] font-medium text-slate-400">
+                      Showing the {ACTIVITY_VISIBLE_LIMIT} most recent · {hiddenCount} older {hiddenCount === 1 ? 'entry' : 'entries'} hidden
+                    </p>
+                  </>
+                ) : (
+                  <button type="button" onClick={() => setShowAll(false)} className="mini-button">
+                    Show fewer activities
+                  </button>
+                )}
+              </div>
+            )}
+          </>
         ) : (
           <div className="px-5 py-10 text-center">
             <Clock className="mx-auto h-6 w-6 text-slate-500" />
