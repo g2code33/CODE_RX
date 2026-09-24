@@ -28,6 +28,10 @@ import {
   type DeliveryPlan,
   type RenderInput,
 } from './client-document-delivery';
+import {
+  parseStoredPresentationCustomization,
+  type PresentationCustomization,
+} from './client-delivery-pdf';
 
 /** Minimal D1 surface, matching how the rest of `functions/lib` talks to it. */
 export interface DbLike {
@@ -58,6 +62,7 @@ interface ContextRow {
   vault_is_sensitive: number | null;
   vault_section_sensitive: number | null;
   vault_visibility: string | null;
+  presentation_customization: string | null;
 }
 
 export interface ClientDeliveryContext {
@@ -73,6 +78,13 @@ export interface ClientDeliveryContext {
   createdAt: string | null;
   /** True when the linked Vault source has been marked sensitive or restricted. */
   sourceRestricted: boolean;
+  /**
+   * The presentation PHANTOM saved for this document (persisted on the row),
+   * or `null` for the default branded presentation. `meta.customization` is
+   * the one in force for this render — the stored value unless the caller
+   * supplied an explicit override (the live preview does).
+   */
+  storedCustomization: PresentationCustomization | null;
   meta: DeliveryMeta;
   document: DeliveryDocument;
   attachment: DeliveryAttachment | null;
@@ -92,13 +104,25 @@ export const loadClientDeliveryContext = async (
     documentRowId: number;
     clientId: number;
     projectId: number;
-    customization?: any | null;
+    /**
+     * Explicit presentation for THIS render only (the live preview passes
+     * one). `undefined` means "use whatever PHANTOM saved on the document",
+     * which is what every client-facing read must do.
+     */
+    customization?: PresentationCustomization | null;
+    /**
+     * Strip raw delivery from the effective presentation. The signed
+     * received-copy read uses it: a raw render would hand back the source
+     * attachment and drop the signature overlay, so the record PHANTOM opens
+     * always keeps the signed, stamped representation.
+     */
+    disableRawDelivery?: boolean;
   },
 ): Promise<ClientDeliveryContext | null> => {
   const row = await db.prepare(
     `SELECT d.id, d.public_id, d.client_id, d.client_project_id, d.reference_code, d.title, d.summary,
             d.category, d.version, d.content_snapshot, d.content_snapshot_format, d.storage_reference,
-            d.vault_document_id, d.vault_version_number, d.published_at, d.created_at,
+            d.presentation_customization, d.vault_document_id, d.vault_version_number, d.published_at, d.created_at,
             p.name AS project_name, p.reference_code AS project_reference, p.public_id AS project_public_id,
             c.name AS client_name, c.public_id AS client_public_id,
             vd.is_archived AS vault_is_archived, vd.visibility AS vault_visibility,
@@ -113,6 +137,14 @@ export const loadClientDeliveryContext = async (
 
   if (!row) return null;
 
+  const storedCustomization = parseStoredPresentationCustomization(row.presentation_customization);
+  // An explicit override wins (live preview); every other caller leaves it
+  // undefined so the presentation PHANTOM saved is the one that renders.
+  let effectiveCustomization = params.customization !== undefined ? params.customization : storedCustomization;
+  if (params.disableRawDelivery && effectiveCustomization?.rawDocumentDelivery) {
+    effectiveCustomization = { ...effectiveCustomization, rawDocumentDelivery: false };
+  }
+
   const attachment = await resolveAttachment(db, row);
   const issuedAt = new Date(row.published_at || row.created_at || Date.now());
   const meta: DeliveryMeta = {
@@ -124,7 +156,7 @@ export const loadClientDeliveryContext = async (
     clientName: row.client_name,
     category: row.category,
     issuedAt: Number.isNaN(issuedAt.getTime()) ? new Date() : issuedAt,
-    customization: params.customization || null,
+    customization: effectiveCustomization || null,
   };
 
   return {
@@ -141,6 +173,7 @@ export const loadClientDeliveryContext = async (
     sourceRestricted: Number(row.vault_section_sensitive) === 1
       || row.vault_visibility === 'restricted'
       || Number(row.vault_is_archived) === 1,
+    storedCustomization,
     meta,
     document: {
       title: row.title,

@@ -57,7 +57,7 @@ export type DeliverySourceKind =
   | 'attachment_office'
   | 'unsupported';
 
-export type DeliveryKind = 'generated_pdf' | 'stamped_pdf' | 'stamped_png' | 'converted_pdf';
+export type DeliveryKind = 'generated_pdf' | 'stamped_pdf' | 'stamped_png' | 'converted_pdf' | 'raw_file';
 
 export interface DeliveryPlan {
   /** True when a stamped client copy can be produced right now. */
@@ -147,6 +147,36 @@ const UNSUPPORTED_MESSAGE =
   'A stamped Code Rx copy cannot be produced for this source format, so no download is offered. '
   + 'Contact Code Rx Society for a watermarked copy.';
 
+const RAW_UNAVAILABLE_MESSAGE =
+  'The raw source file could not be read right now. Contact Code Rx Society.';
+
+/** Extensions for raw delivery, used when the attachment name carries none. */
+const RAW_EXTENSION_BY_MIME: Record<string, string> = {
+  'application/pdf': 'pdf',
+  'image/png': 'png',
+  'text/plain': 'txt',
+  'text/csv': 'csv',
+  'text/markdown': 'md',
+  'text/x-markdown': 'md',
+  'application/json': 'json',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.oasis.opendocument.text': 'odt',
+  'application/zip': 'zip',
+};
+
+const rawAttachmentExtension = (attachment: DeliveryAttachment): string => {
+  const named = /\.([A-Za-z0-9]{1,8})$/.exec(attachment.name || '')?.[1];
+  if (named) return named.toLowerCase();
+  const mime = (attachment.mimeType || '').toLowerCase();
+  if (RAW_EXTENSION_BY_MIME[mime]) return RAW_EXTENSION_BY_MIME[mime];
+  if (mime.startsWith('text/')) return 'txt';
+  return 'bin';
+};
+
+const rawAttachmentContentType = (attachment: DeliveryAttachment): string =>
+  attachment.mimeType || 'application/octet-stream';
+
 /**
  * Decides how the document is delivered. Pure: no storage access, so the portal
  * and the Phantom panel can both show the same answer without rendering bytes.
@@ -156,25 +186,35 @@ const UNSUPPORTED_MESSAGE =
  *   PNG attachment                      → the PNG repainted with the Code Rx stamp
  *   office document                     → converted to a stamped PDF
  *   anything else                       → refusal (never the original file)
+ *
+ * The one deliberate exception is raw unformatted delivery: when PHANTOM saved
+ * it for the document, an attachment is handed back exactly as uploaded (its
+ * own type, its own name), and a text document renders as a clean unbranded
+ * PDF. Raw delivery is an operator decision persisted on the document row —
+ * never a fallback and never something a client can trigger.
  */
 export const planClientDelivery = (input: DeliveryInput): DeliveryPlan => {
   const { document, attachment } = input;
+  const raw = Boolean(input.meta?.customization?.rawDocumentDelivery);
 
   if (attachment) {
     const mimeType = (attachment.mimeType || '').toLowerCase();
+    let stamped: DeliveryPlan | null = null;
     if (mimeType === 'application/pdf') {
-      return planFor('stamped_pdf', 'attachment_pdf', 'Stamped PDF', 'application/pdf', 'pdf');
+      stamped = planFor('stamped_pdf', 'attachment_pdf', 'Stamped PDF', 'application/pdf', 'pdf');
+    } else if (mimeType === 'image/png') {
+      stamped = planFor('stamped_png', 'attachment_png', 'Stamped image', 'image/png', 'png');
+    } else if (isTextMime(mimeType)) {
+      stamped = planFor('converted_pdf', 'attachment_text', 'Stamped PDF', 'application/pdf', 'pdf');
+    } else if (isOfficeMime(mimeType)) {
+      stamped = planFor('converted_pdf', 'attachment_office', 'Stamped PDF', 'application/pdf', 'pdf');
     }
-    if (mimeType === 'image/png') {
-      return planFor('stamped_png', 'attachment_png', 'Stamped image', 'image/png', 'png');
+    if (!stamped) return refusalFor('unsupported', 'unsupported_attachment_mime', UNSUPPORTED_MESSAGE);
+    if (raw) {
+      return planFor('raw_file', stamped.sourceKind, 'Raw source file',
+        rawAttachmentContentType(attachment), rawAttachmentExtension(attachment));
     }
-    if (isTextMime(mimeType)) {
-      return planFor('converted_pdf', 'attachment_text', 'Stamped PDF', 'application/pdf', 'pdf');
-    }
-    if (isOfficeMime(mimeType)) {
-      return planFor('converted_pdf', 'attachment_office', 'Stamped PDF', 'application/pdf', 'pdf');
-    }
-    return refusalFor('unsupported', 'unsupported_attachment_mime', UNSUPPORTED_MESSAGE);
+    return stamped;
   }
 
   const snapshot = document.contentSnapshot || '';
@@ -182,11 +222,12 @@ export const planClientDelivery = (input: DeliveryInput): DeliveryPlan => {
     return refusalFor('unsupported', 'no_source_content',
       'This document has no client-facing content yet. Contact Code Rx Society.');
   }
+  const label = raw ? 'Unbranded PDF' : 'Stamped PDF';
   const format = (document.contentSnapshotFormat || 'blocks').toLowerCase();
   if (format === 'blocks' || format === 'json' || format === 'html' || format === 'markdown') {
-    return planFor('generated_pdf', 'rich_text', 'Stamped PDF', 'application/pdf', 'pdf');
+    return planFor('generated_pdf', 'rich_text', label, 'application/pdf', 'pdf');
   }
-  return planFor('generated_pdf', 'plain_text', 'Stamped PDF', 'application/pdf', 'pdf');
+  return planFor('generated_pdf', 'plain_text', label, 'application/pdf', 'pdf');
 };
 
 // ---------------------------------------------------------------------------
@@ -633,10 +674,13 @@ export const renderClientDelivery = async (input: RenderInput): Promise<Rendered
   const logo = await getBrandMark();
   const fingerprint = await sourceFingerprint(input);
   const attempt = async (): Promise<Uint8Array> => {
-    if (input.meta?.customization?.rawDocumentDelivery) {
-      if (input.attachmentBytes && input.attachmentBytes.length) {
-        return input.attachmentBytes;
-      }
+    if (plan.kind === 'raw_file') {
+      // Raw unformatted delivery: the attachment exactly as uploaded — no
+      // header, no watermark, no repaint. Bytes missing means the source could
+      // not be read; that is a controlled refusal, never a stamped fallback.
+      const bytes = input.attachmentBytes;
+      if (!bytes || !bytes.length) throw new DeliveryRefusal('attachment_unavailable', RAW_UNAVAILABLE_MESSAGE, plan);
+      return bytes;
     }
     switch (plan.sourceKind) {
       case 'attachment_pdf': {
@@ -763,6 +807,29 @@ export interface ArtifactResult {
 export const deliveryFilename = (meta: DeliveryMeta, extension: string): string =>
   `CODE-Rx-${safeSegment(meta.documentReference)}-v${safeSegment(meta.version)}-client-copy.${extension}`;
 
+/**
+ * The filename a raw delivery travels under: the source file's own name, so
+ * the client receives the document exactly as it was uploaded. The name is
+ * sanitized for a Content-Disposition header; a name without a usable
+ * extension gets the plan's extension appended.
+ */
+export const rawDeliveryFilename = (attachment: DeliveryAttachment | null, extension: string): string => {
+  const cleaned = String(attachment?.name || '')
+    .replace(/[\\/:*?"<>|;&\u0000-\u001f]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  if (cleaned && /\.[A-Za-z0-9]{1,8}$/.test(cleaned)) return cleaned;
+  const stem = cleaned.replace(/\.+$/, '') || 'client-document';
+  return extension ? `${stem}.${extension}` : stem;
+};
+
+/** The delivered filename for a plan: raw keeps the source's own name. */
+export const artifactFilenameFor = (input: RenderInput, plan: DeliveryPlan): string =>
+  plan.kind === 'raw_file'
+    ? rawDeliveryFilename(input.attachment, plan.extension)
+    : deliveryFilename(input.meta, plan.extension);
+
 export interface BucketLike {
   get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null>;
   put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
@@ -787,7 +854,7 @@ export const ensureClientDeliveryArtifact = async (options: {
   }
   const fingerprint = await sourceFingerprint(input);
   const key = artifactKey(clientPublicId, documentPublicId, plan.extension, fingerprint);
-  const filename = deliveryFilename(input.meta, plan.extension);
+  const filename = artifactFilenameFor(input, plan);
 
   const cached = await bucket.get(key);
   if (cached) {
@@ -843,7 +910,7 @@ export const refreshClientDeliveryArtifact = async (options: {
     size: rendered.bytes.length,
     sha256: rendered.sha256,
     kind: rendered.kind,
-    filename: deliveryFilename(input.meta, plan.extension),
+    filename: artifactFilenameFor(input, plan),
     cached: false,
   };
 };

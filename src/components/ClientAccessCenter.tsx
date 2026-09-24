@@ -8,14 +8,33 @@ const PresentationPreviewDialog = ({
   onClose: () => void;
   onApplied: (message: string) => void;
 }) => {
-  const [headline, setHeadline] = useState('CODE Rx SOCIETY');
-  const [designation, setDesignation] = useState('CLIENT PROJECT DOCUMENT');
-  const [hideHeader, setHideHeader] = useState(false);
-  const [watermarkText, setWatermarkText] = useState('CODE Rx SOCIETY');
-  const [watermarkOpacity, setWatermarkOpacity] = useState(10);
-  const [hideWatermark, setHideWatermark] = useState(false);
-  const [hideLogo, setHideLogo] = useState(false);
-  const [rawDelivery, setRawDelivery] = useState(false);
+  // Start from the presentation PHANTOM saved on this document, so reopening
+  // the editor — even after a full page refresh — shows exactly what is in
+  // force for the client, tick for tick.
+  const saved = (doc?.presentationCustomization && typeof doc.presentationCustomization === 'object'
+    ? doc.presentationCustomization
+    : null) as {
+    customHeaderHeadline?: string | null;
+    customHeaderDesignation?: string | null;
+    hideHeader?: boolean | null;
+    hideWatermark?: boolean | null;
+    customWatermarkText?: string | null;
+    customWatermarkOpacity?: number | null;
+    hideLogo?: boolean | null;
+    rawDocumentDelivery?: boolean | null;
+  } | null;
+  const [headline, setHeadline] = useState(saved?.customHeaderHeadline || 'CODE Rx SOCIETY');
+  const [designation, setDesignation] = useState(saved?.customHeaderDesignation || 'CLIENT PROJECT DOCUMENT');
+  const [hideHeader, setHideHeader] = useState(saved?.hideHeader === true);
+  const [watermarkText, setWatermarkText] = useState(saved?.customWatermarkText || 'CODE Rx SOCIETY');
+  const [watermarkOpacity, setWatermarkOpacity] = useState(
+    typeof saved?.customWatermarkOpacity === 'number'
+      ? Math.min(60, Math.max(1, Math.round(saved.customWatermarkOpacity * 100)))
+      : 10,
+  );
+  const [hideWatermark, setHideWatermark] = useState(saved?.hideWatermark === true);
+  const [hideLogo, setHideLogo] = useState(saved?.hideLogo === true);
+  const [rawDelivery, setRawDelivery] = useState(saved?.rawDocumentDelivery === true);
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -56,7 +75,9 @@ const PresentationPreviewDialog = ({
     try {
       const res = await clientAccessCenter.prepareDelivery(doc.id, true, customizationPayload);
       const kb = Math.max(1, Math.round(Number(res.data?.sizeBytes || 0) / 1024));
-      onApplied(`Client presentation customized and saved (${kb} KB ready for client delivery).`);
+      onApplied(rawDelivery
+        ? `Raw unformatted delivery saved — the client now receives the source file exactly as uploaded (${kb} KB).`
+        : `Client presentation customized and saved (${kb} KB ready for client delivery).`);
       onClose();
     } catch (err: any) {
       setPreviewError(err?.message || 'Failed to save presentation settings.');
@@ -348,6 +369,18 @@ const Pill = ({ children, tone = 'slate' }: { children: any; tone?: string }) =>
     tone === 'slate' ? 'bg-slate-100 text-slate-600 ring-slate-200' : statusTone(tone)
   }`}>{children}</span>
 );
+
+/**
+ * What the client receives for this document, at a glance: the default
+ * stamped copy shows nothing, a saved customization shows "custom look", and
+ * raw unformatted delivery shows "raw delivery".
+ */
+const PresentationPill = ({ document }: { document: any }) => {
+  const presentation = document?.presentationCustomization;
+  if (!presentation) return null;
+  if (presentation.rawDocumentDelivery === true) return <Pill tone="published">raw delivery</Pill>;
+  return <Pill tone="in_review">custom look</Pill>;
+};
 
 const Field = ({ label, children, hint }: { label: string; children: any; hint?: string }) => (
   <label className="block">
@@ -1233,6 +1266,7 @@ const DocumentsPanel = ({
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="font-black text-slate-900">{document.title}</p>
                     <Pill tone={document.lifecycle}>{LIFECYCLE_LABELS[document.lifecycle] || document.lifecycle}</Pill>
+                    <PresentationPill document={document} />
                   </div>
                   <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
                     <span className="font-mono uppercase tracking-wider">{document.reference}</span>
@@ -1276,6 +1310,7 @@ const DocumentsPanel = ({
                 <p className="font-black text-slate-900">{document.title}</p>
                 <Pill tone={document.lifecycle}>{LIFECYCLE_LABELS[document.lifecycle] || document.lifecycle}</Pill>
                 {document.clientVisible ? <Pill tone="published">client visible</Pill> : <Pill>not visible</Pill>}
+                <PresentationPill document={document} />
               </div>
               <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
                 <span className="font-mono uppercase tracking-wider">{document.reference}</span>

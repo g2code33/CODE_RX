@@ -89,6 +89,10 @@ import {
   isDeliveryArtifactKey,
 } from './lib/client-document-delivery';
 import {
+  normalizePresentationCustomization,
+  parseStoredPresentationCustomization,
+} from './lib/client-delivery-pdf';
+import {
   Canvas,
   decodePng,
   encodePng,
@@ -762,6 +766,11 @@ const clientDeliveryPayload = (
 ) => {
   const base = `/api/client/project/${encodeURIComponent(ids.projectId)}/documents/${encodeURIComponent(ids.documentId)}`;
   const available = !!delivery.artifact;
+  // Raw unformatted delivery is a deliberate, persisted PHANTOM decision — the
+  // payload says so explicitly, so the portal shows the right wording instead
+  // of claiming a watermark that is not there.
+  const raw = delivery.plan.kind === 'raw_file'
+    || Boolean(delivery.context.meta.customization?.rawDocumentDelivery);
   return {
     available,
     kind: delivery.plan.kind,
@@ -769,7 +778,8 @@ const clientDeliveryPayload = (
     label: delivery.plan.label,
     contentType: delivery.plan.contentType,
     designation: 'CLIENT PROJECT DOCUMENT',
-    stamped: true,
+    stamped: !raw,
+    raw,
     message: available ? '' : delivery.message,
     reason: available ? null : delivery.reason,
     viewerPath: available && exposure.canView ? `${base}/preview` : null,
@@ -2881,6 +2891,10 @@ export const registerClientRoutes = (app: ClientApp) => {
       contentSnapshot: document.content_snapshot || '',
       contentSnapshotFormat: document.content_snapshot_format || 'blocks',
       hasClientArtifact: Boolean(document.storage_reference),
+      // The presentation PHANTOM saved for this document (custom header,
+      // watermark, or raw unformatted delivery) — the customizer re-opens
+      // with exactly these settings, and the row can show what is in force.
+      presentationCustomization: parseStoredPresentationCustomization(document.presentation_customization),
       // The client's signature, when they signed it.
       signature: document.signature_name ? {
         signerName: document.signature_name,
@@ -3026,14 +3040,31 @@ export const registerClientRoutes = (app: ClientApp) => {
     const document = await findDocumentByPublicId(db, documentPublicId);
     if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
     const body = await c.req.json().catch(() => ({}));
-    const refresh = body.refresh === true || Boolean(body.customization);
-    const customization = body.customization || null;
+    const hasCustomization = body.customization !== undefined;
+    // Normalized to the known fields only; `null` means the default branded
+    // presentation (saving an all-default form clears a previous setup).
+    const customization = hasCustomization ? normalizePresentationCustomization(body.customization) : undefined;
+    const refresh = body.refresh === true || hasCustomization;
 
+    // Persist BEFORE rendering, so this row becomes the single source of truth
+    // for every client read that follows (viewer, download, print, links).
+    if (hasCustomization) {
+      await db.prepare(
+        `UPDATE client_documents SET presentation_customization = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND client_id = ? AND client_project_id = ?`,
+      ).bind(
+        customization ? JSON.stringify(customization) : null,
+        Number(document.id), Number(document.client_id), Number(document.client_project_id),
+      ).run();
+    }
+
+    // No explicit customization here: the render picks up exactly what was
+    // just saved on the row, so the prepared artifact and every later client
+    // read always agree.
     const context = await loadClientDeliveryContext(db, {
       documentRowId: Number(document.id),
       clientId: Number(document.client_id),
       projectId: Number(document.client_project_id),
-      customization,
     });
     if (!context) return c.json({ success: false, error: 'Client document not found.' }, 404);
 
@@ -3060,6 +3091,9 @@ export const registerClientRoutes = (app: ClientApp) => {
       sizeBytes: delivery.artifact.size,
       sha256: delivery.artifact.sha256,
       refreshed: refresh,
+      presentation: context.storedCustomization
+        ? (context.storedCustomization.rawDocumentDelivery ? 'raw' : 'custom')
+        : 'default',
     });
 
     return c.json({
@@ -3076,6 +3110,9 @@ export const registerClientRoutes = (app: ClientApp) => {
         sizeBytes: delivery.artifact.size,
         sha256: delivery.artifact.sha256,
         cached: delivery.artifact.cached,
+        // The presentation now saved on the document, so the panel re-opens
+        // with exactly what is in force.
+        presentationCustomization: context.storedCustomization,
       },
     });
   });
@@ -3091,7 +3128,10 @@ export const registerClientRoutes = (app: ClientApp) => {
     if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
 
     const body = await c.req.json().catch(() => ({}));
-    const customization = body.customization || null;
+    // Preview only: the override is normalized but never persisted — saving
+    // happens through the delivery action, so a preview can never change what
+    // the client receives.
+    const customization = normalizePresentationCustomization(body.customization);
 
     const context = await loadClientDeliveryContext(db, {
       documentRowId: Number(document.id),
@@ -3160,6 +3200,9 @@ export const registerClientRoutes = (app: ClientApp) => {
       documentRowId: Number(document.id),
       clientId: Number(document.client_id),
       projectId: Number(document.client_project_id),
+      // The signed record PHANTOM opens must carry the signature overlay:
+      // raw delivery is suspended for this read only.
+      disableRawDelivery: true,
     });
     if (!context) return c.json({ success: false, error: 'Client document not found.' }, 404);
 
