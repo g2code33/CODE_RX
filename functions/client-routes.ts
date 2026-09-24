@@ -3026,12 +3026,14 @@ export const registerClientRoutes = (app: ClientApp) => {
     const document = await findDocumentByPublicId(db, documentPublicId);
     if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
     const body = await c.req.json().catch(() => ({}));
-    const refresh = body.refresh === true;
+    const refresh = body.refresh === true || Boolean(body.customization);
+    const customization = body.customization || null;
 
     const context = await loadClientDeliveryContext(db, {
       documentRowId: Number(document.id),
       clientId: Number(document.client_id),
       projectId: Number(document.client_project_id),
+      customization,
     });
     if (!context) return c.json({ success: false, error: 'Client document not found.' }, 404);
 
@@ -3074,6 +3076,55 @@ export const registerClientRoutes = (app: ClientApp) => {
         sizeBytes: delivery.artifact.size,
         sha256: delivery.artifact.sha256,
         cached: delivery.artifact.cached,
+      },
+    });
+  });
+
+  /**
+   * PHANTOM: preview client presentation with live customization options.
+   * Delivers the customized rendered copy directly for inspection in the viewer.
+   */
+  app.post('/api/phantom/client-documents/:documentId/presentation-preview', requireAuth, documentView, async (c: any) => {
+    const db = c.env.DB;
+    const documentPublicId = String(c.req.param('documentId') || '').trim();
+    const document = await findDocumentByPublicId(db, documentPublicId);
+    if (!document) return c.json({ success: false, error: 'Client document not found.' }, 404);
+
+    const body = await c.req.json().catch(() => ({}));
+    const customization = body.customization || null;
+
+    const context = await loadClientDeliveryContext(db, {
+      documentRowId: Number(document.id),
+      clientId: Number(document.client_id),
+      projectId: Number(document.client_project_id),
+      customization,
+    });
+    if (!context) return c.json({ success: false, error: 'Client document not found.' }, 404);
+
+    const delivery = await resolveClientDelivery({ db, bucket: c.env.BUCKET, context, refresh: true });
+    if (!delivery.artifact) {
+      return c.json({
+        success: false,
+        error: delivery.message || 'The client presentation copy could not be prepared.',
+        code: 'delivery_unavailable',
+        data: { reason: delivery.reason || 'delivery_unavailable' },
+      }, 409);
+    }
+
+    const object = await c.env.BUCKET.get(delivery.artifact.key);
+    if (!object) {
+      return c.json({ success: false, error: 'The presentation preview could not be read.' }, 503);
+    }
+
+    const disposition = /[;&]/.test(delivery.artifact.filename) ? '' : `inline; filename="${delivery.artifact.filename}"`;
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': object.httpMetadata?.contentType || delivery.artifact.contentType || 'application/pdf',
+        'Content-Disposition': disposition,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'X-Code-Rx-Delivery': delivery.artifact.kind || 'stamped',
       },
     });
   });

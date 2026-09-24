@@ -929,11 +929,45 @@ export const clientAccessCenter = {
    * error instead of any file. Response:
    * `{ available, kind, label, contentType, filename, sizeBytes, sha256, cached }`.
    */
-  prepareDelivery: (documentId: string, refresh = false) =>
+  prepareDelivery: (documentId: string, refresh = false, customization?: any) =>
     apiCall<{ data: { available: boolean; kind: string; label: string; filename: string; sizeBytes: number; cached: boolean } }>(
       `/api/phantom/client-documents/${encodeURIComponent(documentId)}/delivery`,
-      { method: 'POST', body: JSON.stringify({ refresh }) },
+      { method: 'POST', body: JSON.stringify({ refresh, customization }) },
     ),
+
+  presentationPreview: async (documentId: string, customization?: any): Promise<{ url: string; filename: string; contentType: string }> => {
+    const response = await fetch(
+      `${API_BASE}/api/phantom/client-documents/${encodeURIComponent(documentId)}/presentation-preview`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${getToken()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customization }),
+        cache: 'no-store',
+        credentials: 'omit',
+      },
+    );
+    if (!response.ok) {
+      let message = '';
+      try {
+        const body = await response.json();
+        message = body?.error ?? '';
+      } catch {
+        /* not JSON */
+      }
+      throw new ApiError(message || 'The client presentation preview could not be generated.', response.status);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    return {
+      url: URL.createObjectURL(blob),
+      filename: match?.[1] || 'client-presentation-preview.pdf',
+      contentType: response.headers.get('Content-Type') || 'application/pdf',
+    };
+  },
 
   setDocumentLifecycle: (documentId: string, state: string, clientVisible?: boolean) =>
     apiCall<{ data: { state: string; clientVisible: boolean }; message: string }>(
