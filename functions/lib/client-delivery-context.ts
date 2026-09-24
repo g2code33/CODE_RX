@@ -178,7 +178,7 @@ const resolveAttachment = async (db: DbLike, row: ContextRow): Promise<DeliveryA
     const contentBlocks = blocks.filter((block: any) => block
       && !['image', 'file', 'embed'].includes(String(block.type))
       && String(block.content ?? '').trim() !== '').length;
-    if (refs.length === 1 && contentBlocks === 0) fileKey = refs[0].fileKey;
+    if (refs.length >= 1 && (contentBlocks === 0 || refs.length === 1)) fileKey = refs[0].fileKey;
   } catch {
     return null;
   }
