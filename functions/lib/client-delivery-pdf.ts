@@ -337,7 +337,7 @@ const headerOperators = (
   logos: { header: number | null; watermark: number | null },
   names: StampNames = GENERATED_NAMES,
 ): string => {
-  if (meta.customization?.hideHeader) return '';
+  if (meta.customization?.hideHeader || meta.customization?.rawDocumentDelivery) return '';
   const lines: string[] = [];
   const bandHeight = 92;
   lines.push('q');
@@ -394,7 +394,7 @@ const headerOperators = (
 };
 
 const runningHeaderOperators = (meta: StampMeta, names: StampNames = GENERATED_NAMES): string => {
-  if (meta.customization?.hideHeader) return '';
+  if (meta.customization?.hideHeader || meta.customization?.rawDocumentDelivery) return '';
   const lines: string[] = [];
   const headline = (meta.customization?.customHeaderHeadline || STAMP_HEADLINE).trim();
   const designation = (meta.customization?.customHeaderDesignation || STAMP_DESIGNATION).trim();
@@ -420,6 +420,7 @@ const runningHeaderOperators = (meta: StampMeta, names: StampNames = GENERATED_N
 };
 
 const footerOperators = (meta: StampMeta, page: number, total: number, names: StampNames = GENERATED_NAMES): string => {
+  if (meta.customization?.rawDocumentDelivery || meta.customization?.hideHeader) return '';
   const lines: string[] = [];
   lines.push('q');
   lines.push('0.86 0.89 0.92 rg');
@@ -483,7 +484,7 @@ const watermarkOperators = (
   options: { leanRight?: boolean; customization?: PresentationCustomization | null } = {},
 ): string => {
   const cust = options.customization;
-  if (cust?.hideWatermark) return '';
+  if (cust?.hideWatermark || cust?.rawDocumentDelivery) return '';
   const lines: string[] = [];
   const word = (cust?.customWatermarkText || 'CODE Rx SOCIETY').trim();
   const size = 58;
@@ -638,13 +639,15 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
 
   const pages: string[][] = [];
   let pageLines: string[] = [];
-  let cursorY = CONTENT_TOP;
+  const isRaw = !!options.meta?.customization?.rawDocumentDelivery;
+  const isHeaderHidden = isRaw || !!options.meta?.customization?.hideHeader;
+  let cursorY = isHeaderHidden ? PAGE_HEIGHT - 44 : CONTENT_TOP;
   const bodyImages: Array<[string, number]> = [];
 
   const pushPage = () => {
     pages.push(pageLines);
     pageLines = [];
-    cursorY = PAGE_HEIGHT - 92;
+    cursorY = isHeaderHidden ? PAGE_HEIGHT - 44 : PAGE_HEIGHT - 92;
   };
   const ensure = (needed: number) => {
     if (cursorY - needed < CONTENT_BOTTOM) pushPage();
@@ -665,30 +668,32 @@ export const buildBrandedPdf = async (options: BuildOptions): Promise<Uint8Array
   };
 
   // --- metadata block (page 1) ---------------------------------------------
-  const metaRows: Array<[string, string]> = [
-    ['Project', safe(meta.projectName)],
-    ['Document', safe(meta.documentTitle)],
-    ['Reference', safe(meta.documentReference)],
-    ['Version', safe(meta.version)],
-    ['Client', safe(meta.clientName)],
-    ['Designation', `${STAMP_DESIGNATION} · ${STAMP_HEADLINE}`],
-  ];
-  const blockHeight = metaRows.length * ROW_HEIGHT + 18;
-  pageLines.push('q');
-  pageLines.push('0.94 0.97 0.95 rg');
-  pageLines.push(`${MARGIN} ${pdfNumber(cursorY - blockHeight)} ${pdfNumber(CONTENT_WIDTH)} ${pdfNumber(blockHeight)} re f`);
-  pageLines.push('0.85 0.91 0.87 RG 0.7 w');
-  pageLines.push(`${MARGIN} ${pdfNumber(cursorY - blockHeight)} ${pdfNumber(CONTENT_WIDTH)} ${pdfNumber(blockHeight)} re S`);
-  pageLines.push('Q');
-  let rowY = cursorY - 26;
-  for (const [label, value] of metaRows) {
-    pageLines.push(t(label.toUpperCase(), 'bold', 7, MARGIN + 14, rowY + 8, BRAND.slate));
-    pageLines.push(t(value.slice(0, 120), 'regular', 10, MARGIN + 130, rowY, BRAND.ink));
-    rowY -= ROW_HEIGHT;
+  if (!isRaw && !options.meta?.customization?.hideHeader) {
+    const metaRows: Array<[string, string]> = [
+      ['Project', safe(meta.projectName)],
+      ['Document', safe(meta.documentTitle)],
+      ['Reference', safe(meta.documentReference)],
+      ['Version', safe(meta.version)],
+      ['Client', safe(meta.clientName)],
+      ['Designation', `${STAMP_DESIGNATION} · ${STAMP_HEADLINE}`],
+    ];
+    const blockHeight = metaRows.length * ROW_HEIGHT + 18;
+    pageLines.push('q');
+    pageLines.push('0.94 0.97 0.95 rg');
+    pageLines.push(`${MARGIN} ${pdfNumber(cursorY - blockHeight)} ${pdfNumber(CONTENT_WIDTH)} ${pdfNumber(blockHeight)} re f`);
+    pageLines.push('0.85 0.91 0.87 RG 0.7 w');
+    pageLines.push(`${MARGIN} ${pdfNumber(cursorY - blockHeight)} ${pdfNumber(CONTENT_WIDTH)} ${pdfNumber(blockHeight)} re S`);
+    pageLines.push('Q');
+    let rowY = cursorY - 26;
+    for (const [label, value] of metaRows) {
+      pageLines.push(t(label.toUpperCase(), 'bold', 7, MARGIN + 14, rowY + 8, BRAND.slate));
+      pageLines.push(t(value.slice(0, 120), 'regular', 10, MARGIN + 130, rowY, BRAND.ink));
+      rowY -= ROW_HEIGHT;
+    }
+    cursorY -= blockHeight + 22;
+    pageLines.push(t(`Issued ${formatDate(meta.issuedAt)} by ${STAMP_HEADLINE}`, 'regular', 8.5, MARGIN, cursorY, BRAND.slate));
+    cursorY -= 24;
   }
-  cursorY -= blockHeight + 22;
-  pageLines.push(t(`Issued ${formatDate(meta.issuedAt)} by ${STAMP_HEADLINE}`, 'regular', 8.5, MARGIN, cursorY, BRAND.slate));
-  cursorY -= 24;
 
   // --- body ----------------------------------------------------------------
   for (const block of blocks) {
