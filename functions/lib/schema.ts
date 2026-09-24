@@ -1225,7 +1225,7 @@ const SAFE_MIGRATIONS = [
 // Bumped so the additive client-portal tables, indexes and feature flags above
 // are applied once on an existing live database. The migration path only ever
 // adds objects; it never alters or drops an existing table, column, or row.
-const VAULT_SCHEMA_VERSION = '2026-09-20-code-rx14-client-portal-3-phantom-inbox-2-signing';
+const VAULT_SCHEMA_VERSION = '2026-09-24-code-rx15-client-document-presentation-customization';
 
 
 // Role codes stay stable for member history and permissions. Their visible
