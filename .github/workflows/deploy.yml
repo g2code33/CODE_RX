@@ -1,20 +1,24 @@
-name: Deploy to Cloudflare Pages
+name: Test, Build and Deploy to Cloudflare Pages
+
+# The deployment gate: every required test suite and the production build
+# must pass before any deploy step runs. Deployment status is reported
+# honestly — passed / skipped (credentials unavailable) / failed.
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  test:
+    name: Test suites & production build
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -23,16 +27,101 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
+      - name: CGM backend tests (real worker + SQLite)
+        run: npm run test:cgm
+
+      - name: CGM UI checks
+        run: npm run test:cgm-ui
+
+      - name: Client Portal tests
+        run: npm run test:client-portal
+
+      - name: Client Portal UI checks
+        run: npm run test:client-portal-ui
+
+      - name: Raw delivery tests
+        run: npm run test:raw-delivery
+
+      - name: Production build
         run: npm run build
 
+      - name: Browser-level CGM journeys (jsdom against wrangler pages dev)
+        run: |
+          mkdir -p /tmp/browser && cd /tmp/browser && npm i jsdom --no-audit --no-fund
+          cd "$GITHUB_WORKSPACE"
+          printf 'JWT_SECRET=ci-secret\nADMIN_PASSWORD=DevPreviewPassword1\nADMIN_EMAIL=coderxsociety@gmail.com\n' > .dev.vars
+          npx wrangler pages dev dist --port 8788 --persist-to /tmp/wrangler-persist > /tmp/wrangler-dev.log 2>&1 &
+          WRANGLER_PID=$!
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:8788/api/health && break
+            sleep 2
+          done
+          NODE_PATH=/tmp/browser/node_modules node scripts/cgm-browser-check.mjs
+          EXIT_CODE=$?
+          kill $WRANGLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Cloudflare Pages (production)
+    needs: test
+    runs-on: ubuntu-latest
+    # Deploy only on the main branch (PRs and other branches build+test only).
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (wrangler)
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Resolve deployment credentials
+        id: creds
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CF_TOKEN" ] && [ -n "$CF_ACCOUNT" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Credentials present — deployment will proceed."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DEPLOYMENT SKIPPED — CLOUDFLARE_API_TOKEN and/or CLOUDFLARE_ACCOUNT_ID secrets are not set. Tests and build PASSED; nothing was deployed."
+          fi
+
       - name: Deploy to Cloudflare Pages (Production)
-        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
-        run: npx wrangler pages deploy dist --project-name coderxsociety --branch main
+        if: steps.creds.outputs.available == 'true'
+        run: npx wrangler pages deploy dist --project-name coderxsociety --branch main --commit-dirty=true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: Warn if secrets are missing
-        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
-        run: echo "::warning::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets, then re-run."
+      - name: Deployment summary
+        if: always()
+        run: |
+          if [ "${{ steps.creds.outputs.available }}" = "true" ] && [ "${{ job.status }}" = "success" ]; then
+            echo "DEPLOYMENT COMPLETED: tests passed, build passed, production deployed."
+          elif [ "${{ steps.creds.outputs.available }}" != "true" ]; then
+            echo "DEPLOYMENT SKIPPED: credentials unavailable. Tests and build passed; no deploy was attempted."
+          else
+            echo "DEPLOYMENT FAILED: see the deploy step output."
+            exit 1
+          fi

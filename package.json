@@ -12,7 +12,8 @@
     "test:raw-delivery": "node scripts/raw-delivery-tests.mjs",
     "test:client-portal-all": "npm run test:client-portal && npm run test:client-portal-ui",
     "test:cgm": "node --experimental-sqlite scripts/cgm-tests.mjs",
-    "test:cgm-ui": "node scripts/cgm-ui-tests.mjs"
+    "test:cgm-ui": "node scripts/cgm-ui-tests.mjs",
+    "test:cgm-browser": "node scripts/cgm-browser-check.mjs"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",

@@ -354,7 +354,9 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
       setInviteNotice(failure?.message || 'The invitation could not be used.');
     } finally {
       setPendingInvite(null);
-      if (session === studentSession.read()) void refreshMe();
+      // Token comparison (object identity would never match a fresh parse):
+      // the dashboard must show the joined class without a manual reload.
+      if (session?.token && session.token === studentSession.read()?.token) void refreshMe();
     }
   }, [pendingInvite, refreshMe]);
 

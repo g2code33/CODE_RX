@@ -428,8 +428,13 @@ export const cgm = {
 // ---------------------------------------------------------------------------
 
 export const cgmStudent = {
-  register: (body: { classCode: string; indexNumber: string; entryPassword: string }) =>
-    studentCall('/api/cgm/student/register', { method: 'POST', body }),
+  register: async (body: { classCode: string; indexNumber: string; entryPassword: string }) => {
+    const data = await studentCall<{ session?: CgmStudentSession }>('/api/cgm/student/register', { method: 'POST', body });
+    // Automatic approval returns a live session — persist it exactly like the
+    // login session so the dashboard and page reloads stay authenticated.
+    if (data?.session) studentSession.write(data.session);
+    return data;
+  },
   login: async (body: { identifierType: string; identifier: string; passkey: string }) => {
     const data = await studentCall<{ session: CgmStudentSession; student: any }>('/api/cgm/student/login', { method: 'POST', body });
     studentSession.write(data.session);

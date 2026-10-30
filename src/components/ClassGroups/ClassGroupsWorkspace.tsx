@@ -334,34 +334,21 @@ const NoClassPane = ({ area, onOverview }: { area: Area; onOverview: () => void 
   );
 };
 
-const NoClassView = ({ classes, onCreated }: { classes: any[]; onCreated: () => void }) => {
-  const [open, setOpen] = useState(false);  const [form, setForm] = useState({ name: '', institution: '', department: '', academicYear: '', level: '', description: '' });
+// Shared draft-creation form — reachable both from the empty state and from
+// My Classes, so an organizer with classes can still create new ones.
+const CreateClassForm = ({ onCreated, idPrefix = 'cgm-new', defaultOpen = false }: { onCreated: () => void; idPrefix?: string; defaultOpen?: boolean }) => {
+  const [open, setOpen] = useState(defaultOpen);
+  const [form, setForm] = useState({ name: '', institution: '', department: '', academicYear: '', level: '', description: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <div className="space-y-5">
-      <div className={card}>
-        <p className={label}>My classes</p>
-        <h2 className="mt-1 text-xl font-black text-slate-900">{classes.length ? 'Choose a class' : 'Create your first class'}</h2>
-        {classes.length ? (
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            {classes.map((entry) => (
-              <div key={entry.id} className="rounded-xl border border-slate-100 px-4 py-3">
-                <p className="font-black text-slate-900">{entry.name}</p>
-                <p className="mt-0.5 text-xs font-semibold text-slate-500">{entry.code} · {entry.status} · {entry.role.replace('_', ' ')}</p>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-2 text-sm font-medium text-slate-500">A class starts as a draft. PHANTOM approves it before students can join.</p>
-        )}
-        <button type="button" onClick={() => setOpen((value) => !value)} className="cgm-primary-button mt-4">
-          <Plus className="mr-1 inline h-4 w-4" /> {open ? 'Hide form' : 'Create a class draft'}
-        </button>
-      </div>
+    <>
+      <button type="button" onClick={() => setOpen((value) => !value)} className="cgm-primary-button mt-4">
+        <Plus className="mr-1 inline h-4 w-4" /> {open ? 'Hide form' : 'Create a class draft'}
+      </button>
       {open && (
         <form
-          className={`${card} space-y-3`}
+          className={`${card} space-y-3 mt-4`}
           onSubmit={async (event) => {
             event.preventDefault();
             setBusy(true); setError(null);
@@ -375,20 +362,40 @@ const NoClassView = ({ classes, onCreated }: { classes: any[]; onCreated: () => 
           }}
         >
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className={label} htmlFor="cgm-new-name">Class name *</label><input id="cgm-new-name" required className={`${inputClass} mt-1`} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></div>
-            <div><label className={label} htmlFor="cgm-new-institution">Institution *</label><input id="cgm-new-institution" required className={`${inputClass} mt-1`} value={form.institution} onChange={(event) => setForm({ ...form, institution: event.target.value })} /></div>
-            <div><label className={label} htmlFor="cgm-new-dept">Department</label><input id="cgm-new-dept" className={`${inputClass} mt-1`} value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })} /></div>
-            <div><label className={label} htmlFor="cgm-new-year">Academic year</label><input id="cgm-new-year" className={`${inputClass} mt-1`} value={form.academicYear} onChange={(event) => setForm({ ...form, academicYear: event.target.value })} placeholder="2026/2027" /></div>
-            <div><label className={label} htmlFor="cgm-new-level">Level</label><input id="cgm-new-level" className={`${inputClass} mt-1`} value={form.level} onChange={(event) => setForm({ ...form, level: event.target.value })} placeholder="Year 2 / Level 300" /></div>
+            <div><label className={label} htmlFor={`${idPrefix}-name`}>Class name *</label><input id={`${idPrefix}-name`} required className={`${inputClass} mt-1`} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></div>
+            <div><label className={label} htmlFor={`${idPrefix}-institution`}>Institution *</label><input id={`${idPrefix}-institution`} required className={`${inputClass} mt-1`} value={form.institution} onChange={(event) => setForm({ ...form, institution: event.target.value })} /></div>
+            <div><label className={label} htmlFor={`${idPrefix}-dept`}>Department</label><input id={`${idPrefix}-dept`} className={`${inputClass} mt-1`} value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })} /></div>
+            <div><label className={label} htmlFor={`${idPrefix}-year`}>Academic year</label><input id={`${idPrefix}-year`} className={`${inputClass} mt-1`} value={form.academicYear} onChange={(event) => setForm({ ...form, academicYear: event.target.value })} placeholder="2026/2027" /></div>
+            <div><label className={label} htmlFor={`${idPrefix}-level`}>Level</label><input id={`${idPrefix}-level`} className={`${inputClass} mt-1`} value={form.level} onChange={(event) => setForm({ ...form, level: event.target.value })} placeholder="Year 2 / Level 300" /></div>
           </div>
-          <div><label className={label} htmlFor="cgm-new-desc">Description</label><textarea id="cgm-new-desc" className={`${inputClass} mt-1 min-h-20`} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></div>
+          <div><label className={label} htmlFor={`${idPrefix}-desc`}>Description</label><textarea id={`${idPrefix}-desc`} className={`${inputClass} mt-1 min-h-20`} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></div>
           <button type="submit" disabled={busy} className="cgm-primary-button">{busy ? 'Creating…' : 'Create draft'}</button>
           {error && <Banner tone="error">{error}</Banner>}
         </form>
       )}
-    </div>
+    </>
   );
 };
+
+const NoClassView = ({ classes, onCreated }: { classes: any[]; onCreated: () => void }) => (
+  <div className={card}>
+    <p className={label}>My classes</p>
+    <h2 className="mt-1 text-xl font-black text-slate-900">{classes.length ? 'Choose a class' : 'Create your first class'}</h2>
+    {classes.length ? (
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        {classes.map((entry) => (
+          <div key={entry.id} className="rounded-xl border border-slate-100 px-4 py-3">
+            <p className="font-black text-slate-900">{entry.name}</p>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">{entry.code} · {entry.status} · {entry.role.replace('_', ' ')}</p>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <p className="mt-2 text-sm font-medium text-slate-500">A class starts as a draft. PHANTOM approves it before students can join.</p>
+    )}
+    <CreateClassForm onCreated={onCreated} />
+  </div>
+);
 
 const OverviewArea = ({ classEntry, onGo }: { classEntry: any; onGo: (area: Area) => void }) => (
   <div className="space-y-5">
@@ -419,8 +426,14 @@ const ClassesArea = ({ classes, activeClassId, onSwitch, onCreated }: { classes:
   useEffect(() => {
     if (activeClassId) void cgm.classDetail(activeClassId).then(setDetail).catch(() => setDetail(null));
   }, [activeClassId]);
+  const [creating, setCreating] = useState(false);
   return (
     <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className={label}>My classes — tap a card to open it</p>
+        {!creating && <button type="button" className="mini-button" onClick={() => setCreating(true)}><Plus className="mr-1 inline h-3.5 w-3.5" />New class</button>}
+      </div>
+      {creating && <CreateClassForm onCreated={() => { setCreating(false); onCreated(); }} idPrefix="cgm-new-2" defaultOpen />}
       <div className="grid gap-3 sm:grid-cols-2">
         {classes.map((entry) => (
           <button key={entry.id} type="button" onClick={() => onSwitch(Number(entry.id))} className={`${card} text-left transition ${Number(entry.id) === activeClassId ? 'border-emerald-400' : 'hover:border-emerald-300'}`}>

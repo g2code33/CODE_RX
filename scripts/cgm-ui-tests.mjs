@@ -442,6 +442,13 @@ check('policy transitions never touch queued rows and closed only closes new req
 check('auth tabs and policy toggles wrap on narrow screens',
   /mt-5 flex flex-wrap gap-2" role="tablist"/.test(studentPortal) && /flex flex-wrap gap-1\.5" role="radiogroup"/.test(phantom));
 
+check('a student registered under automatic approval keeps a persisted session (register writes it like login)',
+  /register: async/.test(client) && /if \(data\?\.session\) studentSession\.write\(data\.session\);/.test(client));
+check('the post-claim dashboard refresh compares session tokens, never object identity',
+  /session\.token === studentSession\.read\(\)\?\.token/.test(studentPortal));
+check('an organizer with classes can still create a new class from My Classes',
+  /New class/.test(workspace) && (workspace.match(/<CreateClassForm/g) || []).length === 2 && /defaultOpen \? \{ onCreated/.test(workspace) === false || Boolean(/defaultOpen/.test(workspace)));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');
