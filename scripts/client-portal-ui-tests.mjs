@@ -1260,9 +1260,12 @@ const main = async () => {
   // The Class & Groups door joins the public navigation alongside the client
   // door; both stay out of the dashboard and PHANTOM shells.
   check('the member dashboard and PHANTOM shell do not advertise the client door',
-    (navbarSource.match(/\{!isDashboard && \(/g) || []).length === 2
-    && (navbarSource.match(/!isDashboard && <ClientPortalEntry/g) || []).length === 1
-    && (navbarSource.match(/ClientPortalEntry variant=/g) || []).length >= 3);
+    (navbarSource.match(/!isDashboard && <ClientPortalEntry/g) || []).length === 1
+    && (navbarSource.match(/ClientPortalEntry variant=/g) || []).length >= 2
+    && !navbarSource
+      .replace('!isDashboard && <span className="ml-3"><ClientPortalEntry variant="icon" /></span>', '')
+      .replace('!isDashboard && <ClientPortalEntry variant="tile" className="mt-3" />', '')
+      .includes('<ClientPortalEntry'));
 
   // --- the sign-in dialog --------------------------------------------------
   const authModalSource = src('src/components/AuthModal.tsx');
@@ -2335,10 +2338,13 @@ const main = async () => {
   check('the unknown state stays quiet rather than accusing the wrong thing',
     accessCenter.includes('setClientAccessOn(null)') && accessCenter.includes('clientAccessOn === false'));
 
-  check('the header door is labelled, not an unexplained key icon',
-    navbarDoorSource.includes('<ClientPortalEntry variant="chip" />')
-    && navbarDoorSource.includes('<ClientPortalEntry variant="icon" />')
-    && navbarDoorSource.includes('hidden xl:inline-flex'));
+  // 2026-10-30: the owner asked for an uncluttered top bar — the header door
+  // is now the compact key icon at every width (tooltips carry the words),
+  // with the labelled surfaces living in the sign-in dialog, footer and mobile
+  // dropdown instead.
+  check('the header door is the compact key icon with a tooltip, per the de-cluttered top bar',
+    navbarDoorSource.includes('<ClientPortalEntry variant="icon" />')
+    && !navbarDoorSource.includes('variant="chip"'));
   check('the entry tells the client what to do with the key they were given',
     entryCopy.label === 'Client access'
     && entryCopy.hint === 'Enter the access key Code Rx gave you'

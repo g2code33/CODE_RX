@@ -39,13 +39,14 @@ section('1. The dedicated navigation entry exists exactly once');
 check('the navbar carries the dedicated Class & Groups door to #class-groups',
   /href="#class-groups"/.test(navbar) && /Classes &amp; Groups|Classes & Groups/.test(navbar));
 const classGroupsEntry = src('src/components/ClassGroupsEntry.tsx');
-check('the Class & Groups door is a pill with a group icon beside the client access door',
+check('the Class & Groups door is a compact icon button beside the client access door (no header text pills)',
   /href="#class-groups"/.test(classGroupsEntry) && /Users className/.test(classGroupsEntry)
-  && /<ClassGroupsEntry variant="chip" \/>/.test(navbar) && /<ClassGroupsEntry variant="icon" \/>/.test(navbar)
+  && /<ClassGroupsEntry variant="icon" \/>/.test(navbar) && /<ClientPortalEntry variant="icon" \/>/.test(navbar)
+  && !/variant="chip"/.test(navbar)
   && navbar.indexOf('<ClassGroupsEntry') < navbar.indexOf('<ClientPortalEntry'));
-check('the door appears on desktop (chip), narrow screens (icon) and the mobile dropdown',
+check('the door appears in the header and keeps its labelled row in the mobile dropdown',
   (navbar.match(/href="#class-groups"/g) || []).length === 1
-  && /<ClassGroupsEntry variant="chip" \/>/.test(navbar) && /<ClassGroupsEntry variant="icon" \/>/.test(navbar));
+  && /Classes &amp; Groups/.test(navbar));
 check('the door is titled with the full module name',
   /title="CODE Rx — Class & Group Management"/.test(navbar));
 

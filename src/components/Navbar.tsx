@@ -77,21 +77,11 @@ export const Navbar = ({
               to the client access door so a visitor can jump straight to the
               classes area — organizers land in their workspace, students in
               their portal. */}
-          {!isDashboard && (
-            <>
-              <span className="ml-3 hidden xl:inline-flex"><ClassGroupsEntry variant="chip" /></span>
-              <span className="ml-3 xl:hidden"><ClassGroupsEntry variant="icon" /></span>
-            </>
-          )}
+          {!isDashboard && <span className="ml-3"><ClassGroupsEntry variant="icon" /></span>}
           {/* The client door. A client who was sent an access key has one
               question — where do I type it — so on wide screens the header says
               the words, and the key icon stays on narrow ones. */}
-          {!isDashboard && (
-            <>
-              <span className="ml-3 hidden xl:inline-flex"><ClientPortalEntry variant="chip" /></span>
-              <span className="ml-3 xl:hidden"><ClientPortalEntry variant="icon" /></span>
-            </>
-          )}
+          {!isDashboard && <span className="ml-3"><ClientPortalEntry variant="icon" /></span>}
           <button
             type="button"
             onClick={onDashboardToggle}
