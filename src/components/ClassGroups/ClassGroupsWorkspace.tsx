@@ -1693,7 +1693,7 @@ const NotificationsArea = ({ classId }: { classId: number }) => <ApprovalsArea c
 const ReportsArea = ({ classId }: { classId: number }) => {
   const [format, setFormat] = useState<'csv' | 'xlsx' | 'pdf'>('csv');
   const reports: Array<[string, string]> = [
-    ['roster', 'Class roster'], ['assignments', 'Group assignments'], ['movements', 'Group movements'],
+    ['roster', 'Class roster'], ['activities', 'Activities overview'], ['assignments', 'Group assignments'], ['movements', 'Group movements'],
     ['leadership', 'Leadership appointments'], ['elections', 'Elections'], ['turnout', 'Election turnout'],
     ['attendance', 'Attendance'], ['pending', 'Pending requests'], ['organizer-actions', 'Organizer actions'],
   ];
@@ -2098,9 +2098,9 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
 
       <div className={card}>
         <p className={label}>Privacy &amp; approvals</p>
-        <p className="mt-1 text-xs font-medium text-slate-500">Choose what classmates may see. Sensitive data additionally needs the organizer permission.</p>
+        <p className="mt-1 text-xs font-medium text-slate-500">Choose what classmates may see. Names are always visible; contact fields are further limited per activity to the group or the class. Index numbers, university IDs and gender are never shown to classmates — the index number is half of a sign-in credential, and sensitive data additionally needs the organizer permission.</p>
         <div className="mt-3 flex flex-wrap gap-3">
-          {['full_name', 'index_number', 'university_id', 'phone', 'gender', 'email'].map((key) => (
+          {['full_name', 'phone', 'email'].map((key) => (
             <label key={key} className="flex items-center gap-2 text-xs font-bold text-slate-600">
               <input
                 type="checkbox"

@@ -27,6 +27,9 @@
  *   17. step-5 additions: attachments, read tracking, deadline reminders,
  *       succession methods, election windows, WhatsApp links, delegated
  *       visibility, verify-by-email organizer applications, file reports
+ *   18. step-6/7 additions: notification preferences, contact & field
+ *       visibility, own-records export, sample templates, published-config
+ *       freeze, activities overview report
  *
  * Usage: node --experimental-sqlite scripts/cgm-tests.mjs
  */
@@ -1187,6 +1190,10 @@ const attendanceUnmuted = q1("SELECT COUNT(*) c FROM cgm_student_notifications W
 check('unmuting restores the notifications', Number(attendanceUnmuted) === Number(attendanceMuted) + 1, `muted=${attendanceMuted} unmuted=${attendanceUnmuted}`);
 
 // --- §35 Contact visibility ---------------------------------------------------
+// The class's field-visibility gate must share phone/email with classmates for
+// these tests; the privacy-first default is names only.
+const widenFieldsS17 = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'phone', 'email'] }, amaToken);
+check('the organizer can set class-level field visibility', widenFieldsS17.status === 200, `status ${widenFieldsS17.status} ${widenFieldsS17.text?.slice(0, 140)}`);
 // Fixture shaping: the roster gave these students contact details.
 sqlite.prepare("UPDATE cgm_students SET phone = '+233201111111', email = 'ama.boakye@example.com' WHERE index_number_key = 'bio-201-001'").run();
 sqlite.prepare("UPDATE cgm_students SET phone = '+233202222222', email = 'kofi.mensah@example.com' WHERE index_number_key = 'bio-201-002'").run();
@@ -1265,6 +1272,63 @@ check('the sample roster template downloads as a real workbook',
   templateXlsx.status === 200 && templateXlsx.bytes[0] === 0x50 && templateXlsx.bytes[1] === 0x4b, `status ${templateXlsx.status}`);
 const templateNoAuth = await rawMember('GET', '/api/cgm/roster/template', '');
 check('roster templates need a member sign-in', templateNoAuth.status === 401, `status ${templateNoAuth.status}`);
+
+// --- §35 per-class field visibility (step 7) ----------------------------------
+const privacyClass = await makeContactActivity('Privacy Chips', 'class');
+const tighten = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name'] }, amaToken);
+check('the organizer can tighten class-level field visibility', tighten.status === 200, `status ${tighten.status} ${tighten.text?.slice(0, 140)}`);
+const tightenedView = await studentCall('GET', `/api/cgm/student/activities/${privacyClass}`, undefined, sessionsToUse[1]);
+const tightenedMembers = tightenedView.json?.data?.members || [];
+check('with contact fields hidden at class level, even "class" contact visibility shows no phones',
+  tightenedMembers.length >= 2 && tightenedMembers.every((m) => !m.phone && !m.email),
+  JSON.stringify(tightenedMembers.slice(0, 2)));
+check('identity fields never reach classmates whatever the settings say',
+  tightenedMembers.every((m) => m.index_number === undefined && m.university_id === undefined && m.gender === undefined));
+const widen = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'phone', 'email'] }, amaToken);
+check('the organizer can re-open contact fields', widen.status === 200, `status ${widen.status}`);
+const widenedView = await studentCall('GET', `/api/cgm/student/activities/${privacyClass}`, undefined, sessionsToUse[1]);
+const widenedMembers = widenedView.json?.data?.members || [];
+check('with contact fields visible at class level, "class" scope shares them again',
+  widenedMembers.some((m) => m.phone === '+233203333333'), JSON.stringify(widenedMembers.slice(0, 2)));
+const settingsReadback = await memberCall('GET', `/api/cgm/classes/${classAId}`, undefined, amaToken);
+check('the settings readback carries the sanitized field list',
+  JSON.stringify(settingsReadback.json?.data?.settings?.studentVisibleFields) === JSON.stringify(['full_name', 'phone', 'email']),
+  JSON.stringify(settingsReadback.json?.data?.settings || {}).slice(0, 200));
+const badFields = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'index_number'] }, amaToken);
+const badFieldsView = await studentCall('GET', `/api/cgm/student/activities/${privacyClass}`, undefined, sessionsToUse[1]);
+check('identity fields listed as "visible" still never reach classmates (server floor)',
+  badFields.status === 200 && (badFieldsView.json?.data?.members || []).every((m) => m.index_number === undefined && m.university_id === undefined && m.gender === undefined),
+  JSON.stringify(badFieldsView.json?.data?.members || []).slice(0, 160));
+// restore the widened setting for later sections
+await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'phone', 'email'] }, amaToken);
+
+// --- §13 published-config freeze (step 7) --------------------------------------
+const freezeCapacity = await memberCall('PATCH', `/api/cgm/activities/${activityAId}`, { config: { capacity: 3 } }, amaToken);
+check('a published activity refuses structural config changes',
+  freezeCapacity.status === 409 && /silently change/.test(String(freezeCapacity.json?.error)), `status ${freezeCapacity.status} ${freezeCapacity.text?.slice(0, 140)}`);
+const freezeMethod = await memberCall('PATCH', `/api/cgm/activities/${activityAId}`, { config: { method: 'self' } }, amaToken);
+check('switching the assignment method after publication is refused too', freezeMethod.status === 409, `status ${freezeMethod.status}`);
+check('the refused change never reached the database',
+  JSON.parse(q1('SELECT config_json FROM cgm_activities WHERE id = ?', activityAId).config_json).capacity !== 3);
+const extendDeadline = await memberCall('PATCH', `/api/cgm/activities/${activityAId}`, { config: { selfDeadline: new Date(Date.now() + 172_800_000).toISOString() } }, amaToken);
+check('deadline extensions stay open while published', extendDeadline.status === 200, `status ${extendDeadline.status} ${extendDeadline.text?.slice(0, 140)}`);
+const renameActivity = await memberCall('PATCH', `/api/cgm/activities/${activityAId}`, { name: 'Lab Session 1 (revised)' }, amaToken);
+check('cosmetic edits (name) stay open while published', renameActivity.status === 200, `status ${renameActivity.status}`);
+const draftEdit = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Draft Playground', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 2, capacity: 5, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const draftEditId = draftEdit.json?.data?.activityId ?? draftEdit.json?.data?.activity?.id ?? draftEdit.json?.data?.id;
+const draftCapacity = await memberCall('PATCH', `/api/cgm/activities/${draftEditId}`, { config: { capacity: 9 } }, amaToken);
+check('draft activities remain fully editable', draftCapacity.status === 200, `status ${draftCapacity.status}`);
+
+// --- §16 activities overview report (step 7) ------------------------------------
+const activitiesReport = await rawMember('GET', `/api/cgm/classes/${classAId}/reports/activities`, amaToken);
+check('the activities overview report downloads with per-activity counters',
+  activitiesReport.status === 200 && /Activity,Status,Groups,Assigned,Waiting,Active leaders/.test(activitiesReport.text) && /Lab Session 1 \(revised\)/.test(activitiesReport.text),
+  activitiesReport.text.split('\n').slice(0, 3).join(' | '));
+const activitiesDenied = await memberCall('GET', `/api/cgm/classes/${classAId}/reports/activities`, undefined, applyToken);
+check('a member outside the class team cannot read the activities report', activitiesDenied.status === 403, `status ${activitiesDenied.status}`);
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

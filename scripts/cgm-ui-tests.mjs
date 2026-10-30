@@ -296,6 +296,21 @@ check('the import card offers sample roster templates in all three formats',
 check('notification preferences live in their own table with a unique per-category row',
   /cgm_notification_prefs/.test(schemaCgm) && /UNIQUE \(student_id, category\)/.test(schemaCgm));
 
+// ===========================================================================
+section('13. Step-7 additions: field-visibility floor, published-config freeze, activities report');
+check('the privacy editor offers only fields the server will honour for classmates',
+  /\['full_name', 'phone', 'email'\]\.map/.test(workspace) && !/\['full_name', 'index_number', 'university_id', 'phone', 'gender', 'email'\]\.map/.test(workspace));
+check('the settings copy explains the credential floor and per-activity scoping',
+  /half of a sign-in credential/.test(workspace) && /limited per activity to the group or the class/.test(workspace));
+check('published activities refuse structural config changes server-side',
+  /silently change/.test(backend) && /STRUCTURE_FIELDS/.test(backend) && /A published activity cannot change/.test(backend));
+check('deadline extensions stay open while the structure is frozen',
+  /selfDeadline/.test(backend) && !/STRUCTURE_FIELDS = \['method', 'groupCount', 'targetGroupSize', 'capacity', 'genderRule', 'overflow', 'selfDeadline'\]/.test(backend));
+check('the reports list includes the activities overview',
+  /\['activities', 'Activities overview'\]/.test(workspace) && /Active leaders/.test(backend));
+check('the class field-visibility gate runs in the student payload path',
+  /sanitizeClassSettings/.test(src('functions/lib/cgm/routes-student.ts')) && /studentVisibleFields\.includes\('phone'\)/.test(src('functions/lib/cgm/routes-student.ts')));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

@@ -194,6 +194,17 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const body = await readBody(c);
     const current = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
     const config = sanitizeActivityConfig({ ...current, ...((body.config && typeof body.config === 'object') ? body.config : {}) });
+    // §13 — published assignments never silently change. Once students can see
+    // their activity, the structure that decides their groups is frozen: only
+    // deadline extensions and everyday logistics may change. Draft and open
+    // activities stay fully editable; duplicating is the way to restructure.
+    const STRUCTURE_FIELDS = ['method', 'groupCount', 'targetGroupSize', 'capacity', 'genderRule', 'overflow'] as const;
+    if (['published', 'active'].includes(activity.status) && body.config && typeof body.config === 'object') {
+      const changed = STRUCTURE_FIELDS.filter((key) => JSON.stringify((current as any)[key] ?? null) !== JSON.stringify((config as any)[key] ?? null));
+      if (changed.length) {
+        return bad(c, `A published activity cannot change ${changed.join(', ')} — group assignments students already see would silently change. Extend deadlines instead, or duplicate the activity with the new structure.`, 409);
+      }
+    }
     const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
     const values: any[] = [];
     if (body.name !== undefined) { updates.push('name = ?'); values.push(clean(body.name, 160)); }
@@ -1942,6 +1953,16 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         FROM cgm_elections e JOIN cgm_groups g ON g.id = e.group_id
         JOIN cgm_activities a ON a.id = e.activity_id
         WHERE a.class_id = ${classId} ORDER BY e.id DESC`,
+    },
+    activities: {
+      permission: 'view_roster',
+      header: ['Activity', 'Status', 'Groups', 'Assigned', 'Waiting', 'Active leaders'],
+      sql: (classId) => `SELECT a.name, a.status,
+        (SELECT COUNT(*) FROM cgm_groups g WHERE g.activity_id = a.id AND g.status = 'active'),
+        (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.activity_id = a.id AND ga.status = 'active'),
+        (SELECT COUNT(*) FROM cgm_activity_waitlist w WHERE w.activity_id = a.id AND w.status = 'waiting'),
+        (SELECT COUNT(*) FROM cgm_leadership_appointments l WHERE l.activity_id = a.id AND l.status = 'active')
+        FROM cgm_activities a WHERE a.class_id = ${classId} ORDER BY a.id`,
     },
     turnout: {
       permission: 'manage_elections',

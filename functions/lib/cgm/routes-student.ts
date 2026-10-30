@@ -36,6 +36,7 @@ import {
   sequenceForPasskey,
   STUDENT_PROFILE_FIELDS,
   sanitizeActivityConfig,
+  sanitizeClassSettings,
   type LoginIdentifierKey,
 } from './core';
 import {
@@ -484,7 +485,17 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
        WHERE ga.activity_id = ? AND ga.status = 'active'
        ORDER BY g_position_index, s.full_name`.replace('g_position_index', '(SELECT position FROM cgm_groups WHERE id = ga.group_id)')
     ).bind(activity.id)) : [];
-    if (members.length && (config.contactVisibility === 'class' || (config.contactVisibility === 'group' && myAssignment[0]))) {
+    // §35 — per-class field visibility decides WHICH fields classmates may see
+    // at all (privacy-first default: names only); the activity's contact
+    // visibility then scopes those fields to the group or the class. Identity
+    // fields (index number, university ID, gender) never reach classmates:
+    // the index number is half of a sign-in credential.
+    const classSettings = sanitizeClassSettings(JSON.parse(activity.class_settings || '{}'));
+    const showPhone = classSettings.studentVisibleFields.includes('phone')
+      && (config.contactVisibility === 'class' || (config.contactVisibility === 'group' && myAssignment[0]));
+    const showEmail = classSettings.studentVisibleFields.includes('email')
+      && (config.contactVisibility === 'class' || (config.contactVisibility === 'group' && myAssignment[0]));
+    if (members.length && (showPhone || showEmail)) {
       const visibleScope: number[] = config.contactVisibility === 'class'
         ? members.map((row) => Number(row.student_id))
         : members.filter((row) => Number(row.group_id) === Number(myAssignment[0].group_id)).map((row) => Number(row.student_id));
@@ -495,8 +506,8 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       for (const row of members) {
         const contact = byId.get(Number(row.student_id));
         if (contact && Number(row.student_id) !== Number(student.id)) {
-          if (contact.phone) row.phone = contact.phone;
-          if (contact.email) row.email = contact.email;
+          if (showPhone && contact.phone) row.phone = contact.phone;
+          if (showEmail && contact.email) row.email = contact.email;
         }
       }
     }
