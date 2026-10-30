@@ -32,6 +32,8 @@ const client = src('src/lib/cgm.ts');
 const app = src('src/App.tsx');
 const navbar = src('src/components/Navbar.tsx');
 const phantomCenter = src('src/components/PhantomControlCenter.tsx');
+const organizerRoutesSrc = src('functions/lib/cgm/routes-organizer.ts');
+const activityRoutesSrc = src('functions/lib/cgm/routes-activities.ts');
 const css = src('src/index.css');
 
 // ===========================================================================
@@ -392,6 +394,34 @@ check('the workspace reads the classes list as the unwrapped array the client re
   && !/setClasses\(myClasses\.classes/.test(workspace));
 check('My Classes with zero classes opens the create-first-class guidance instead of an empty pane',
   (workspace.match(/<NoClassView/g) || []).length === 2 && /classes\.length\s*\n?\s*\?\s*<ClassesArea/.test(workspace));
+
+check('verification tokens are gated: production responses never carry one',
+  /CGM_DEV_PREVIEW_TOKENS/.test(organizerRoutesSrc) && /\.\.\.\(devPreview \? \{ verifyToken: token \} : \{\}\)/.test(organizerRoutesSrc));
+check('a secure resend-verification workflow exists with a cooldown and audit',
+  /resend-verification/.test(organizerRoutesSrc) && /cgm\.organizer\.verification_resent/.test(organizerRoutesSrc)
+  && /verification link has expired/i.test(organizerRoutesSrc));
+check('verification links embed an expiry in the hashed material',
+  /CGM_VERIFY_TTL_HOURS/.test(organizerRoutesSrc) && /Math\.floor\(Date\.now\(\) \/ 1000\) \+ ttlHours \* 3600/.test(organizerRoutesSrc));
+{
+  const leakInNotification = (source) => {
+    for (const match of source.matchAll(/passkey is \$\{[^}]*\}/g)) {
+      const before = source.lastIndexOf('notifyStudent(', match.index);
+      if (before >= 0 && !source.slice(before, match.index).includes(');')) return true;
+    }
+    return false;
+  };
+  check('raw passkeys are never written into student notifications (both issuance paths)',
+    !leakInNotification(studentRoutes) && !leakInNotification(organizerRoutesSrc)
+    && /passkey was issued at approval/.test(organizerRoutesSrc)
+    && /shown once on your registration screen/.test(studentRoutes));
+}
+check('lockout counts the verifier half as well as the identifier half',
+  /registerFailedAttempt/.test(studentRoutes)
+  && (studentRoutes.match(/await registerFailedAttempt\(\);/g) || []).length === 2);
+check('the organizer UI offers resend verification and no longer hints at the token endpoint',
+  /Resend verification email/.test(workspace) && !/verify at \/api\/cgm\/organizer\/verify/.test(workspace));
+check('PHANTOM sees email delivery health (status only, never secret values)',
+  /Verification email delivery:/g.test(phantom) && /emailConfigStatus/.test(activityRoutesSrc));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

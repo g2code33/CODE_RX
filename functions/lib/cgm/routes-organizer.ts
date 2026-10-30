@@ -112,7 +112,12 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       return bad(c, 'Your application is already awaiting review.', 409);
     }
 
-    const token = randomToken();
+    // The verification token is a 64-hex random value with the expiry embedded
+    // (`<random>.<epochSeconds>`). Only its hash is stored; the raw token
+    // travels exclusively through the verification email and — in explicitly
+    // gated dev/preview environments — through the API response.
+    const ttlHours = Math.min(168, Math.max(1, Number(c.env.CGM_VERIFY_TTL_HOURS) || 24));
+    const token = `${randomToken()}.${Math.floor(Date.now() / 1000) + ttlHours * 3600}`;
     await c.env.DB.prepare(
       `INSERT INTO cgm_organizer_applications
        (user_id, member_profile_id, name, email, institution, motivation, status, verification_token_hash)
@@ -121,8 +126,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       await sha256Hex(`cgm-organizer-verify:${token}`)).run();
 
     // §5 email verification: the link goes out through the platform's EmailJS
-    // pathway. Without configured email credentials the token is still
-    // returned so preview environments can complete the flow.
+    // pathway. Delivery problems are reported honestly; the raw token is never
+    // a production fallback.
     const verifyUrl = `${new URL(c.req.url).origin}/api/cgm/organizer/verify?token=${encodeURIComponent(token)}`;
     const emailSent = await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_GENERAL), {
       member_name: member.name,
@@ -150,14 +155,75 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       link: '#classes',
       body: motivation || '',
     });
+    const devPreview = String(c.env.CGM_DEV_PREVIEW_TOKENS || '') === '1';
     return c.json({
       success: true,
       data: {
         message: emailSent
           ? 'Application received. We emailed you a verification link — verify, then PHANTOM reviews.'
-          : 'Application received. Email delivery is not configured for this preview, so use the returned token to verify.',
+          : 'Application received and safely saved, but the verification email could not be sent right now. Open the organizer area and choose "Resend verification email".',
         emailSent,
-        verifyToken: token,
+        // Raw token: dev/preview environments ONLY (explicit runtime gate).
+        // Production responses never contain it.
+        ...(devPreview ? { verifyToken: token } : {}),
+      },
+    });
+  });
+
+  // Secure resend: new token invalidates the previous one, cooldown per
+  // account, honest delivery reporting, and never a raw token in production.
+  app.post('/api/cgm/organizer/resend-verification', async (c: any) => {
+    const dark = await requireModuleEnabled(c);
+    if (dark) return dark;
+    if (!throttle(c, 3, 3600)) return bad(c, 'Too many resend attempts. Try again later.', 429);
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in as a Society member first.' }, 401);
+    const rows = await asRows<{ id: number; status: string; updated_at: string | null }>(c.env.DB.prepare(
+      'SELECT id, status, updated_at FROM cgm_organizer_applications WHERE user_id = ? ORDER BY id DESC LIMIT 1'
+    ).bind(member.userId));
+    const application = rows[0];
+    if (!application) return bad(c, 'You have no organizer application to verify.', 404);
+    if (String(application.status) === 'email_verified') return bad(c, 'Your email is already verified — PHANTOM is reviewing your application.', 409);
+    if (String(application.status) !== 'pending') return bad(c, 'This application has already been concluded.', 409);
+    const lastSent = application.updated_at ? new Date(`${String(application.updated_at).replace(' ', 'T')}Z`).getTime() : 0;
+    if (Number.isFinite(lastSent) && Date.now() - lastSent < 60_000) {
+      return bad(c, 'A verification email was just sent. Please wait a minute before asking for another.', 429);
+    }
+    const ttlHours = Math.min(168, Math.max(1, Number(c.env.CGM_VERIFY_TTL_HOURS) || 24));
+    const token = `${randomToken()}.${Math.floor(Date.now() / 1000) + ttlHours * 3600}`;
+    await c.env.DB.prepare(
+      `UPDATE cgm_organizer_applications SET verification_token_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(await sha256Hex(`cgm-organizer-verify:${token}`), Number(application.id)).run();
+    const origin = new URL(c.req.url).origin;
+    const verifyUrl = `${origin}/api/cgm/organizer/verify?token=${encodeURIComponent(token)}`;
+    const emailSent = await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_GENERAL), {
+      member_name: member.name,
+      verification_link: verifyUrl,
+      ...generalEmailNotification({
+        toEmail: member.email,
+        replyTo: String(c.env.ADMIN_EMAIL || '').trim() || member.email,
+        title: 'Verify your organizer application',
+        greeting: `Hello ${member.name},`,
+        body: 'Confirm your email so PHANTOM can review your organizer application. This link replaces any earlier one.',
+        actionLabel: 'Verify email',
+        actionLink: verifyUrl,
+        sentAt: new Date().toISOString(),
+      }),
+    });
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.organizer.verification_resent', entityType: 'organizer_application', entityId: Number(application.id),
+      context: { emailSent },
+    });
+    const devPreview = String(c.env.CGM_DEV_PREVIEW_TOKENS || '') === '1';
+    return c.json({
+      success: true,
+      data: {
+        message: emailSent
+          ? 'Verification email sent — check your inbox. Any earlier link no longer works.'
+          : 'The verification email could not be sent right now. Please wait a minute and try again.',
+        emailSent,
+        ...(devPreview ? { verifyToken: token } : {}),
       },
     });
   });
@@ -165,6 +231,12 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
   app.get('/api/cgm/organizer/verify', async (c: any) => {
     const token = clean(c.req.query('token'), 120);
     if (!token) return bad(c, 'Verification link is invalid.');
+    // Tokens issued since the hardening carry `<random>.<expiry-epoch>`; the
+    // expiry is part of the hashed material, so it cannot be tampered with.
+    const dot = token.lastIndexOf('.');
+    if (dot > 0 && /^\d+$/.test(token.slice(dot + 1)) && Date.now() / 1000 > Number(token.slice(dot + 1))) {
+      return bad(c, 'This verification link has expired. Open the organizer area and choose "Resend verification email".', 410);
+    }
     const hash = await sha256Hex(`cgm-organizer-verify:${token}`);
     const rows = await asRows<{ id: number; status: string }>(c.env.DB.prepare(
       'SELECT id, status FROM cgm_organizer_applications WHERE verification_token_hash = ?'
@@ -1337,8 +1409,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     ).bind(studentId, member.profileId, member.name, requestId).run();
 
     if (issuedPasskey) {
+      // One-time disclosure rule: the passkey itself is shown once in this
+      // approval response (for the organizer to hand over securely) and never
+      // stored in notification history.
       await notifyStudent(c.env.DB, studentId, 'registration', 'Your permanent student passkey',
-        `Your registration for ${request.class_name} was approved. Your permanent passkey is ${issuedPasskey}. It is shown only here — save it now; sign-in also needs your index number.`);
+        `Your registration for ${request.class_name} was approved. Your permanent passkey was issued at approval — collect it from your organizer, then sign in with the passkey and your index number.`);
     }
     if (access.viaDelegation && member.profileId !== null) {
       await c.env.DB.prepare(

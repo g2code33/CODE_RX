@@ -215,8 +215,10 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
          reviewer_label = 'Policy (automatic)', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
       ).bind(studentId, requestId).run();
       if (issuedPasskey) {
+        // One-time disclosure rule: the passkey itself lives only in the
+        // registration response, never in persistent notification history.
         await notifyStudent(c.env.DB, studentId, 'registration', 'Your permanent student passkey',
-          `Your registration for ${fullClass.name} was approved automatically. Your permanent passkey is ${issuedPasskey}. It is shown only here — save it now; sign-in also needs your index number.`);
+          `Your registration for ${fullClass.name} was approved automatically. Your permanent passkey was shown once on your registration screen — save it now; sign-in also needs your index number.`);
       }
       await auditCgm(c.env.DB, {
         actorType: 'system', actorLabel: 'Policy (automatic)', actorStudentId: studentId,
@@ -290,7 +292,10 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const storedIdentifier = identifierType === 'phone'
       ? student.phone_key
       : identifierType === 'university_id' ? student.university_id_key : student.index_number_key;
-    if (!storedIdentifier || storedIdentifier !== normalizedIdentifier) {
+    // Every failed attempt on a known identity counts toward the same lockout,
+    // whichever half was wrong — brute-forcing the passkey against a known
+    // identifier is locked exactly like identifier guessing.
+    const registerFailedAttempt = async () => {
       await c.env.DB.prepare('UPDATE cgm_students SET failed_attempts = failed_attempts + 1 WHERE id = ?').bind(student.id).run();
       const fresh = await asRows<{ failed_attempts: number }>(c.env.DB.prepare('SELECT failed_attempts FROM cgm_students WHERE id = ?').bind(student.id));
       if (Number(fresh[0]?.failed_attempts || 0) >= STUDENT_MAX_FAILED_ATTEMPTS) {
@@ -302,11 +307,15 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
           action: 'cgm.student.locked', entityType: 'student', entityId: student.id,
         });
       }
+    };
+
+    if (!storedIdentifier || storedIdentifier !== normalizedIdentifier) {
+      await registerFailedAttempt();
       return c.json({ success: false, error: GENERIC_LOGIN_FAILURE }, 400);
     }
 
     if (!student.passkey_verifier || !await verifyPassword(passkey, student.passkey_verifier)) {
-      await c.env.DB.prepare('UPDATE cgm_students SET failed_attempts = failed_attempts + 1 WHERE id = ?').bind(student.id).run();
+      await registerFailedAttempt();
       return c.json({ success: false, error: GENERIC_LOGIN_FAILURE }, 400);
     }
 

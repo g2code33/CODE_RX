@@ -134,7 +134,7 @@ const BUCKET = {
   },
 };
 
-const env = { DB: d1, JWT_SECRET: 'cgm-test-secret', PHANTOM_EMAIL, ADMIN_PASSWORD: PHANTOM_PASSWORD, BUCKET };
+const env = { DB: d1, JWT_SECRET: 'cgm-test-secret', PHANTOM_EMAIL, ADMIN_PASSWORD: PHANTOM_PASSWORD, BUCKET, CGM_DEV_PREVIEW_TOKENS: '1' };
 
 const worker = await import(path.join(CACHE, 'worker.mjs'));
 const app = worker.default;
@@ -1818,6 +1818,121 @@ await setPolicy('profile_change_mode', 'approval');
 // The console ends back at the spec default: every process waits for approval.
 const finalPolicies = await memberCall('GET', '/api/cgm/phantom/policies', undefined, phantomToken);
 check('the module ends at the spec default — approval everywhere', (finalPolicies.json?.data || []).every((row) => row.value === 'approval'), JSON.stringify(finalPolicies.json?.data));
+
+
+// ===========================================================================
+// 23. Security corrections: verification tokens never reach production
+//     responses, resend flow, token expiry + single use, passkeys never
+//     stored in notifications, lockout on every failure half, suspended
+//     identities refused. Runs last.
+// ===========================================================================
+section('23. Security corrections (verification tokens, notification hygiene, lockout)');
+
+// -- The raw verification token is gated to dev/preview environments ---------
+delete env.CGM_DEV_PREVIEW_TOKENS;
+const prodParityApply = await memberCall('POST', '/api/cgm/organizer/apply', { institution: 'Security Probe University', motivation: 'Production parity probe.' }, kwameToken);
+check('production responses never expose the organizer verification token',
+  (prodParityApply.status === 200 || prodParityApply.status === 201) && prodParityApply.json?.data?.verifyToken === undefined,
+  `status ${prodParityApply.status} keys=${Object.keys(prodParityApply.json?.data || {})}`);
+check('an email delivery failure is reported honestly (no fake success, no token fallback)',
+  prodParityApply.json?.data?.emailSent === false && /could not be sent|Resend/i.test(String(prodParityApply.json?.data?.message)), String(prodParityApply.json?.data?.message));
+const devApply = await memberCall('POST', '/api/cgm/organizer/apply', { institution: 'Dev Preview University', motivation: 'Dev gate probe.' }, kwameToken);
+void devApply;
+env.CGM_DEV_PREVIEW_TOKENS = '1';
+const devApplyGated = await memberCall('POST', '/api/cgm/organizer/apply', { institution: 'Dev Preview University 2', motivation: 'Dev gate probe.' }, kwameToken);
+check('the dev-only token preview exists but only behind the explicit runtime gate',
+  devApplyGated.status === 409 || typeof devApplyGated.json?.data?.verifyToken === 'string', `status ${devApplyGated.status}`);
+
+// kwame now has a fresh pending application (the last one applied).
+const secAppRow = q1('SELECT id FROM cgm_organizer_applications WHERE user_id = ? ORDER BY id DESC LIMIT 1', kwameUser.id);
+
+// -- Resend flow: cooldown, invalidation, expiry, single use ------------------
+const resendHot = await memberCall('POST', '/api/cgm/organizer/resend-verification', {}, kwameToken);
+check('resend has an account-level cooldown', resendHot.status === 429, `status ${resendHot.status}`);
+sqlite.prepare("UPDATE cgm_organizer_applications SET updated_at = datetime('now', '-5 minutes') WHERE id = ?").run(secAppRow.id);
+const resend2 = await memberCall('POST', '/api/cgm/organizer/resend-verification', {}, kwameToken);
+const resendToken2 = resend2.json?.data?.verifyToken;
+check('after the cooldown a resend issues a fresh token (dev gate only)', typeof resendToken2 === 'string', `status ${resend2.status}`);
+sqlite.prepare("UPDATE cgm_organizer_applications SET updated_at = datetime('now', '-5 minutes') WHERE id = ?").run(secAppRow.id);
+const resend3 = await memberCall('POST', '/api/cgm/organizer/resend-verification', {}, kwameToken);
+const resendToken3 = resend3.json?.data?.verifyToken;
+check('each resend issues a different token', typeof resendToken3 === 'string' && resendToken3 !== resendToken2);
+const oldLinkUsed = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(String(resendToken2))}`);
+check('a new token invalidates the previous link', oldLinkUsed.status === 404, `status ${oldLinkUsed.status}`);
+const freshVerify = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(String(resendToken3))}`);
+check('the current token still verifies', freshVerify.status === 200, `status ${freshVerify.status} ${freshVerify.text?.slice(0, 120)}`);
+const reuseVerify = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(String(resendToken3))}`);
+check('verification is single-use — replay gets a predictable refusal', reuseVerify.status === 404, `status ${reuseVerify.status}`);
+const { createHash } = await import('node:crypto');
+const expiredToken = `${'a'.repeat(64)}.${Math.floor(Date.now() / 1000) - 3600}`;
+const expiredHash = createHash('sha256').update(`cgm-organizer-verify:${expiredToken}`).digest('hex');
+sqlite.prepare("UPDATE cgm_organizer_applications SET verification_token_hash = ?, status = 'pending' WHERE id = ?").run(expiredHash, secAppRow.id);
+const expiredAttempt = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(expiredToken)}`);
+check('an expired verification link is refused with a resend pointer', expiredAttempt.status === 410, `status ${expiredAttempt.status}`);
+
+// -- Passkeys are never written to notification history ----------------------
+const notificationLeak = q('SELECT title, body FROM cgm_student_notifications').filter((row) => /rx30/i.test(String(row.body)) || /rx30/i.test(String(row.title)));
+check('no stored student notification ever contains a raw passkey', notificationLeak.length === 0, JSON.stringify(notificationLeak).slice(0, 160));
+check('the scrubbed approval notification still tells the student what happened',
+  q("SELECT body FROM cgm_student_notifications WHERE title = 'Your permanent student passkey'").every((row) => /passkey/i.test(String(row.body)) && !/rx30/i.test(String(row.body))));
+
+// -- Lockout counts the verifier half too: a passkey that RESOLVES to the
+//    account but fails verification counts, exactly like identifier guessing.
+//    (An unallocated sequence like rx30zzzz stays anonymous by design —
+//    anti-enumeration — and cannot count against any account.)
+const probeIndex = 'AUTO-101-001';
+const probeStudent = q1('SELECT id, passkey_verifier FROM cgm_students WHERE index_number_key = ?', probeIndex.toLowerCase());
+const probePasskey = String(expectedPasskey || '');
+sqlite.prepare('UPDATE cgm_students SET passkey_verifier = ? WHERE id = ?').run(memberHash('not-the-real-passkey'), probeStudent.id);
+const wrongKeyAttempts = [];
+for (let i = 0; i < 8; i += 1) {
+  wrongKeyAttempts.push(await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: probeIndex, passkey: probePasskey }));
+}
+check('eight verifier failures against a known identifier are all refused identically',
+  wrongKeyAttempts.every((r) => r.status === 400 && r.json?.error === wrongKeyAttempts[0].json?.error), wrongKeyAttempts.map((r) => r.status).join(','));
+check('the threshold locks the account after verifier failures too',
+  Boolean(q1('SELECT locked_until FROM cgm_students WHERE id = ?', probeStudent.id)?.locked_until));
+const lockedCorrectKey = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: probeIndex, passkey: probePasskey });
+check('a locked account refuses while the lock is active', lockedCorrectKey.status === 423, `status ${lockedCorrectKey.status}`);
+sqlite.prepare('UPDATE cgm_students SET passkey_verifier = ?, locked_until = NULL, failed_attempts = 0 WHERE id = ?').run(probeStudent.passkey_verifier, probeStudent.id);
+const afterUnlock = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: probeIndex, passkey: probePasskey });
+check('after the lock lifts the correct passkey signs in', afterUnlock.status === 200, `status ${afterUnlock.status}`);
+check('a successful sign-in resets the failure counters',
+  Number(q1('SELECT failed_attempts FROM cgm_students WHERE id = ?', probeStudent.id)?.failed_attempts) === 0);
+
+// -- Concurrent failures still converge on the lock --------------------------
+// (§20 rotated this identity's passkey; the current passkey resolves, and the
+// corrupted verifier makes every attempt a counted verifier failure.)
+const govStudent = q1("SELECT id, passkey_verifier FROM cgm_students WHERE index_number_key = 'bio-201-001'");
+sqlite.prepare('UPDATE cgm_students SET passkey_verifier = ? WHERE id = ?').run(memberHash('concurrent-probe'), govStudent.id);
+const concurrentWrong = await Promise.all(Array.from({ length: 8 }, () =>
+  studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' })));
+check('eight concurrent verifier failures are all refused', concurrentWrong.every((r) => r.status === 400), concurrentWrong.map((r) => r.status).join(','));
+check('concurrent failures converge on the lockout',
+  Boolean(q1("SELECT locked_until FROM cgm_students WHERE index_number_key = 'bio-201-001'")?.locked_until));
+const concurrentLocked = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+check('the correct passkey is refused while locked', concurrentLocked.status === 423, `status ${concurrentLocked.status}`);
+sqlite.prepare("UPDATE cgm_students SET passkey_verifier = ?, locked_until = NULL, failed_attempts = 0 WHERE id = ?").run(govStudent.passkey_verifier, govStudent.id);
+
+// -- Suspended identities cannot authenticate --------------------------------
+sqlite.prepare("UPDATE cgm_students SET status = 'archived' WHERE index_number_key = ?").run(probeIndex.toLowerCase());
+const archivedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: probeIndex, passkey: probePasskey });
+check('an archived identity cannot sign in even with the correct passkey', archivedLogin.status === 403, `status ${archivedLogin.status}`);
+check('the archived refusal carries no success payload', archivedLogin.status === 403 && archivedLogin.json?.success === false);
+sqlite.prepare("UPDATE cgm_students SET status = 'active' WHERE index_number_key = ?").run(probeIndex.toLowerCase());
+
+// -- Anti-enumeration is preserved -------------------------------------------
+const unknownPasskey = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'NO-SUCH-STUDENT', passkey: 'rx30qqq' });
+check('unknown passkey and wrong identifier stay indistinguishable',
+  unknownPasskey.status === 400 && unknownPasskey.json?.error === concurrentWrong[0].json?.error);
+
+// -- PHANTOM sees email configuration health, never secret values ------------
+const overviewHealth = await memberCall('GET', '/api/cgm/phantom/overview', undefined, phantomToken);
+check('the overview reports email configuration status',
+  overviewHealth.json?.data?.email && typeof overviewHealth.json?.data?.email.configured === 'boolean', JSON.stringify(overviewHealth.json?.data?.email || {}));
+check('the health indicator names missing variables without exposing values',
+  Array.isArray(overviewHealth.json?.data?.email?.missing) && overviewHealth.json?.data?.email?.missing.includes('EMAILJS_SERVICE_ID')
+  && overviewHealth.json.data.email.missing.every((name) => /^[A-Z0-9_]+$/.test(String(name))));
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

@@ -213,6 +213,8 @@ export const cgm = {
   // organizer applications
   applyOrganizer: (body: { institution: string; motivation?: string }) =>
     memberCall('/api/cgm/organizer/apply', { method: 'POST', body }),
+  resendOrganizerVerification: () =>
+    memberCall('/api/cgm/organizer/resend-verification', { method: 'POST', body: {} }),
   // Shape note: data.application plus delegatedClassIds (PHANTOM registration-
   // approval delegations that unlock the Approvals area for this member).
   organizerStatus: () =>

@@ -53,6 +53,19 @@ export const generalEmailNotification = ({
 const configuredValue = (value: unknown) => String(value || '').trim();
 
 /**
+ * Configuration health for PHANTOM/system surfaces: reports WHICH variable
+ * names are missing, never their values or any other secret material.
+ */
+export const emailConfigStatus = (env: Env) => {
+  const missing = [
+    !configuredValue(env.EMAILJS_SERVICE_ID) ? 'EMAILJS_SERVICE_ID' : '',
+    !configuredValue(env.EMAILJS_PUBLIC_KEY) ? 'EMAILJS_PUBLIC_KEY' : '',
+    !configuredValue(env.EMAILJS_TEMPLATE_ID_GENERAL) ? 'EMAILJS_TEMPLATE_ID_GENERAL' : '',
+  ].filter(Boolean);
+  return { configured: missing.length === 0, missing };
+};
+
+/**
  * Sends through EmailJS from a Cloudflare Pages Function. EmailJS blocks
  * server/non-browser calls by default, so the account must explicitly allow
  * them in Account → Security. When the recommended EmailJS Private Key mode

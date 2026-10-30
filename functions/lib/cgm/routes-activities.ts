@@ -48,6 +48,7 @@ import {
   studentFromRequest,
   throttle,
 } from './service';
+import { emailConfigStatus } from '../email';
 
 type CgmApp = Hono<any>;
 
@@ -2156,6 +2157,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         counters: counts[0] || {},
         queues: queues[0] || {},
         moduleEnabled: String(flag[0]?.setting_value ?? '1') === '1',
+        email: emailConfigStatus(c.env),
       },
     });
   });

@@ -185,6 +185,11 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   Module {overview.moduleEnabled ? 'ENABLED' : 'DISABLED'}
                   <span className="ml-2 text-xs font-semibold text-slate-500">{overview.moduleEnabled ? 'routes are live for organizers and students.' : 'every class & group route answers 404 until you enable it.'}</span>
                 </p>
+                <p className="mt-0.5 text-xs font-semibold text-slate-500">
+                  Verification email delivery: {overview.email?.configured
+                    ? <span className="text-emerald-700">ready</span>
+                    : <span className="text-amber-600">not configured — missing {(overview.email?.missing || []).join(', ')}</span>}
+                </p>
               </div>
               <button type="button" disabled={busy} className={overview.moduleEnabled ? 'mini-button text-red-600' : 'cgm-primary-button'} onClick={() => void act(() => cgm.phantomModule(!overview.moduleEnabled), overview.moduleEnabled ? 'Module disabled.' : 'Module enabled.')}>
                 {overview.moduleEnabled ? 'Disable module' : 'Enable module'}

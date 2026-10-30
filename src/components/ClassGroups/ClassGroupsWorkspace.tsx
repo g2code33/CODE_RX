@@ -257,7 +257,24 @@ const OrganizerApplication = ({ status, embedded, onClose, onDone }: { status: a
           {application.institution && <p className="mt-1 text-xs text-slate-500">{application.institution}</p>}
           {application.reviewReason && <p className="mt-1 text-xs font-semibold text-slate-500">PHANTOM: {application.reviewReason}</p>}
           {!application.emailVerified && application.status === 'pending' && (
-            <p className="mt-2 text-xs font-bold text-amber-600">Verify your email — use the verification link you received when applying.</p>
+            <div className="mt-2">
+              <p className="text-xs font-bold text-amber-600">Verify your email — use the verification link we emailed you when applying. It expires; resend a fresh one any time.</p>
+              <button
+                type="button"
+                disabled={busy}
+                className="mini-button mt-2"
+                onClick={async () => {
+                  setBusy(true); setError(null); setMessage(null);
+                  try {
+                    const result: any = await cgm.resendOrganizerVerification();
+                    setMessage(String(result?.message || 'Verification email sent.'));
+                  } catch (failure: any) { setError(failure?.message || 'Could not resend the verification email.'); }
+                  finally { setBusy(false); }
+                }}
+              >
+                Resend verification email
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -270,7 +287,7 @@ const OrganizerApplication = ({ status, embedded, onClose, onDone }: { status: a
             setBusy(true); setError(null); setMessage(null);
             try {
               const result = await cgm.applyOrganizer({ institution, motivation: motivation || undefined });
-              setMessage(`${String((result as any)?.message || 'Application received.')} Verification link: verify at /api/cgm/organizer/verify?token=… (delivered to your member email in production).`);
+              setMessage(String((result as any)?.message || 'Application received.'));
               onDone?.();
             } catch (failure: any) { setError(failure?.message || 'The application failed.'); }
             finally { setBusy(false); }
