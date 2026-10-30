@@ -45,6 +45,7 @@ import {
   bad,
   clean,
   cleanOrNull,
+  insertAssignmentGuarded,
   createStudentSession,
   notifyStudent,
   readBody,
@@ -625,10 +626,46 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       return bad(c, 'Every group is full.', 409);
     }
 
-    await c.env.DB.prepare(
-      `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label)
-       VALUES (?, ?, ?, 'self', ?)`
-    ).bind(activity.id, Number(target.id), student.id, student.full_name).run();
+    // §37 — the seat is claimed by one atomic statement that re-checks capacity
+    // and "not already assigned" inside the INSERT, so concurrent students can
+    // never both squeeze into the last seat.
+    let placed = await insertAssignmentGuarded(c.env.DB, {
+      activityId: Number(activity.id), groupId: Number(target.id), studentId: student.id,
+      via: 'self', label: student.full_name,
+    });
+    if (!placed) {
+      // Lost the race for that seat. If the student slipped in through another
+      // request, say so; otherwise re-balance once before giving up.
+      const nowAssigned = await asRows<{ id: number }>(c.env.DB.prepare(
+        `SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(activity.id, student.id));
+      if (nowAssigned[0]) return bad(c, 'You are already in a group for this activity.', 409);
+      const retryGroups = await asRows<any>(c.env.DB.prepare(
+        `SELECT g.id, g.capacity,
+                (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+         FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
+         ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active'), g.position`
+      ).bind(activity.id));
+      const retryTarget = retryGroups.find((group) => group.capacity === null || Number(group.size) < Number(group.capacity));
+      if (retryTarget && !requestedGroupId) {
+        placed = await insertAssignmentGuarded(c.env.DB, {
+          activityId: Number(activity.id), groupId: Number(retryTarget.id), studentId: student.id,
+          via: 'self', label: student.full_name,
+        });
+        target = retryTarget;
+      }
+      if (!placed) {
+        if (config.overflow === 'waitlist') {
+          await c.env.DB.prepare(
+            `INSERT OR IGNORE INTO cgm_activity_waitlist (activity_id, student_id) VALUES (?, ?)`
+          ).bind(activity.id, student.id).run();
+          await notifyStudent(c.env.DB, student.id, 'groups', 'Added to the waiting list',
+            `All groups in ${activity.name} are full. You are on the waiting list and will be placed when a seat opens.`);
+          return c.json({ success: true, data: { waitlisted: true, message: 'All groups are full. You have been added to the waiting list.' } });
+        }
+        return bad(c, 'That group just filled up. Pick another group or ask your organizer.', 409);
+      }
+    }
     await c.env.DB.prepare(
       `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
        VALUES (?, ?, ?, 'assigned', ?, 'self-assignment')`
@@ -840,13 +877,27 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       return c.json({ success: true, data: { message: 'Your vote was updated. Only your latest vote counts.' } });
     }
 
-    await c.env.DB.prepare(
-      `INSERT INTO cgm_election_ballots (election_id, candidate_id, voter_pseudonym, voter_student_id)
-       VALUES (?, ?, ?, ?)`
-    ).bind(electionId, candidateId, pseudonym, pseudonym ? null : student.id).run();
-    await c.env.DB.prepare(
-      `INSERT INTO cgm_election_participation (election_id, student_id) VALUES (?, ?)`
-    ).bind(electionId, student.id).run();
+    // §37 — the participation row is claimed atomically: the unique index on
+    // (election, voter) settles a simultaneous double vote, and the loser gets
+    // a clean 409 instead of a raw constraint error. Participation and ballot
+    // commit together, so a voter can never be locked out ballot-less and a
+    // ballot can never exist without its voter ledger row.
+    try {
+      await c.env.DB.batch([
+        c.env.DB.prepare(
+          `INSERT INTO cgm_election_participation (election_id, student_id) VALUES (?, ?)`
+        ).bind(electionId, student.id),
+        c.env.DB.prepare(
+          `INSERT INTO cgm_election_ballots (election_id, candidate_id, voter_pseudonym, voter_student_id)
+           VALUES (?, ?, ?, ?)`
+        ).bind(electionId, candidateId, pseudonym, pseudonym ? null : student.id),
+      ]);
+    } catch (error) {
+      if (String((error as any)?.errcode || '') === '2067' || /UNIQUE/i.test(String((error as any)?.message || error))) {
+        return bad(c, 'You have already voted in this election.', 409);
+      }
+      throw error;
+    }
 
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,

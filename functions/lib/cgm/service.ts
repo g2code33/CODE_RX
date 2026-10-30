@@ -72,6 +72,45 @@ export const auditCgm = async (db: D1Database, input: CgmAuditInput) => {
 };
 
 // ---------------------------------------------------------------------------
+// Atomic assignment writes (§36/§37)
+// ---------------------------------------------------------------------------
+
+/**
+ * Inserts a group assignment in ONE atomic statement that re-checks, inside
+ * the INSERT itself, that (a) the student has no other active assignment in
+ * the activity and (b) the group still has a free seat. SQLite/D1 serialise
+ * single statements, so two concurrent writers can never both pass a
+ * check-then-insert race and overfill a group.
+ * Returns true when the row was written, false when the guard rejected it.
+ */
+export const insertAssignmentGuarded = async (
+  db: D1Database,
+  input: { activityId: number; groupId: number; studentId: number; via: string; label: string },
+): Promise<boolean> => {
+  const result = await db.prepare(
+    `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label)
+     SELECT ?, ?, ?, ?, ?
+     WHERE NOT EXISTS (SELECT 1 FROM cgm_group_assignments
+                       WHERE activity_id = ? AND student_id = ? AND status = 'active')
+       AND (SELECT COUNT(*) FROM cgm_group_assignments WHERE group_id = ? AND status = 'active')
+           < COALESCE((SELECT capacity FROM cgm_groups WHERE id = ?), 9223372036854775807)`
+  ).bind(input.activityId, input.groupId, input.studentId, input.via, input.label,
+    input.activityId, input.studentId, input.groupId, input.groupId).run();
+  return Number((result as any)?.meta?.changes || 0) > 0;
+};
+
+/** Re-activates a row that a move deactivated before its insert was rejected. */
+export const restoreAssignment = async (
+  db: D1Database,
+  assignmentId: number,
+) => {
+  await db.prepare(
+    `UPDATE cgm_group_assignments SET status = 'active', removed_at = NULL, removal_reason = NULL
+     WHERE id = ? AND status = 'removed'`
+  ).bind(assignmentId).run();
+};
+
+// ---------------------------------------------------------------------------
 // Student notifications
 // ---------------------------------------------------------------------------
 

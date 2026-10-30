@@ -31,6 +31,8 @@ import {
   type ClassPermission,
 } from './core';
 import {
+  insertAssignmentGuarded,
+  restoreAssignment,
   asRows,
   auditCgm,
   bad,
@@ -652,9 +654,13 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') LIMIT 1`
       ).bind(activityId, activityId, Number(row.student_id)));
       if (!freeGroup[0]) break;
-      await c.env.DB.prepare(
-        `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label) VALUES (?, ?, ?, 'waitlist', ?)`
-      ).bind(activityId, Number(freeGroup[0].id), Number(row.student_id), member.name).run();
+      // Same atomic guard as self-assignment: if a concurrent request took
+      // the seat, skip this waiter instead of overfilling the group.
+      const promotedSeat = await insertAssignmentGuarded(c.env.DB, {
+        activityId, groupId: Number(freeGroup[0].id), studentId: Number(row.student_id),
+        via: 'waitlist', label: member.name,
+      });
+      if (!promotedSeat) continue;
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
          VALUES (?, ?, ?, 'assigned', ?, 'promoted from waiting list')`
@@ -708,19 +714,24 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       await c.env.DB.prepare(
         `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = 'moved by organizer' WHERE id = ?`
       ).bind(Number(current[0].id)).run();
+      const wrote = await insertAssignmentGuarded(c.env.DB, {
+        activityId, groupId, studentId, via: 'organizer', label: member.name,
+      });
+      if (!wrote) {
+        // The destination filled up between the check and the write; put the
+        // student back exactly where they were instead of leaving them seatless.
+        await restoreAssignment(c.env.DB, Number(current[0].id));
+        return bad(c, 'That group just filled up — the student keeps their current group.', 409);
+      }
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, from_group_id, to_group_id, action, actor_label, reason)
          VALUES (?, ?, ?, ?, 'moved', ?, 'organizer move')`
       ).bind(activityId, studentId, Number(current[0].group_id), groupId, member.name).run();
-      await c.env.DB.prepare(
-        `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label)
-         VALUES (?, ?, ?, 'organizer', ?)`
-      ).bind(activityId, groupId, studentId, member.name).run();
     } else {
-      await c.env.DB.prepare(
-        `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label)
-         VALUES (?, ?, ?, 'organizer', ?)`
-      ).bind(activityId, groupId, studentId, member.name).run();
+      const wrote = await insertAssignmentGuarded(c.env.DB, {
+        activityId, groupId, studentId, via: 'organizer', label: member.name,
+      });
+      if (!wrote) return bad(c, 'That group just filled up.', 409);
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
          VALUES (?, ?, ?, 'assigned', ?, 'organizer placement')`
@@ -818,10 +829,16 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = 'move approved' WHERE id = ?`
         ).bind(Number(current[0].id)).run();
       }
-      await c.env.DB.prepare(
-        `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label)
-         VALUES (?, ?, ?, 'organizer', ?)`
-      ).bind(activityId, Number(request.to_group_id), Number(request.student_id), member.name).run();
+      const wrote = await insertAssignmentGuarded(c.env.DB, {
+        activityId, groupId: Number(request.to_group_id), studentId: Number(request.student_id),
+        via: 'organizer', label: member.name,
+      });
+      if (!wrote) {
+        // Another approved move or self-assignment claimed the seat first;
+        // restore the student's original group and refuse this one.
+        if (current[0]) await restoreAssignment(c.env.DB, Number(current[0].id));
+        return bad(c, 'The destination group just filled up — the student keeps their current group.', 409);
+      }
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, from_group_id, to_group_id, action, actor_label, reason)
          VALUES (?, ?, ?, ?, 'moved', ?, 'approved student request')`

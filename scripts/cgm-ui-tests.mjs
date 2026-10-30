@@ -311,6 +311,23 @@ check('the reports list includes the activities overview',
 check('the class field-visibility gate runs in the student payload path',
   /sanitizeClassSettings/.test(src('functions/lib/cgm/routes-student.ts')) && /studentVisibleFields\.includes\('phone'\)/.test(src('functions/lib/cgm/routes-student.ts')));
 
+// ===========================================================================
+section('14. Step-8 hardening: atomic seat claims, vote ledger, move compensation');
+const service = src('functions/lib/cgm/service.ts');
+const studentRoutes = src('functions/lib/cgm/routes-student.ts');
+check('assignment inserts re-check capacity and uniqueness inside one atomic statement',
+  /insertAssignmentGuarded/.test(service) && /WHERE NOT EXISTS \(SELECT 1 FROM cgm_group_assignments/.test(service)
+  && /< COALESCE\(\(SELECT capacity FROM cgm_groups/.test(service));
+check('self-assignment, waitlist promotion and organizer placement all use the atomic guard',
+  (studentRoutes.match(/insertAssignmentGuarded/g) || []).length >= 2
+  && (backend.match(/insertAssignmentGuarded/g) || []).length >= 4);
+check('a lost move restores the student\'s original seat instead of leaving them seatless',
+  /restoreAssignment/.test(service) && /keeps their current group/.test(backend));
+check('the vote ledger commits participation and ballot together with a clean 409 on double votes',
+  /cgm_election_participation[\s\S]*cgm_election_ballots/.test(studentRoutes.match(/DB\.batch\(\[[\s\S]*?\]\);/)?.[0] || '')
+  && /You have already voted in this election\.', 409/.test(studentRoutes));
+check('the service worker keeps caching the shell only', /CACHE = 'code-rx-v7'/.test(src('public/sw.js')));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

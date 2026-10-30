@@ -30,6 +30,10 @@
  *   18. step-6/7 additions: notification preferences, contact & field
  *       visibility, own-records export, sample templates, published-config
  *       freeze, activities overview report
+ *   19. step-8 hardening: concurrent seat races (self-assign, waitlist
+ *       promotion, move approvals, double votes) never overfill a group or
+ *       duplicate a ballot; attachment size limits and missing files fail
+ *       cleanly
  *
  * Usage: node --experimental-sqlite scripts/cgm-tests.mjs
  */
@@ -449,7 +453,18 @@ const racePairs = raceApprovals.map((r) => ({ studentId: Number(r.json?.data?.st
 const indexByStudent = new Map(q('SELECT id, index_number_key FROM cgm_students').map((row) => [Number(row.id), String(row.index_number_key)]));
 const loginForStudent = async (studentId) => {
   const indexNumber = String(indexByStudent.get(studentId) || '').toUpperCase();
-  const passkey = racePairs.find((p) => p.studentId === studentId)?.passkey || '';
+  const passkey = racePairs.find((p) => p.studentId === studentId)?.passkey
+    // Imported students get passkeys in registration order: rx30a, rx30b, …
+    // (bijective base-26 over a–z), so the n-th BIO-201-0nn student can sign
+    // in deterministically without a server-issued token.
+    || (() => {
+      const match = /-(\d+)$/.exec(indexNumber);
+      if (!match) return '';
+      let n = Number(match[1]);
+      let key = '';
+      while (n > 0) { const rem = (n - 1) % 26; key = String.fromCharCode(97 + rem) + key; n = Math.floor((n - 1) / 26); }
+      return `rx30${key}`;
+    })();
   return studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: indexNumber, passkey });
 };
 check('eight concurrent approvals all succeed', raceApprovals.every((r) => r.status === 200), raceApprovals.map((r) => r.status).join(','));
@@ -1242,6 +1257,7 @@ const session004 = login004.json?.data?.session?.token;
 await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[0] }, session004);
 await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[0] }, login005.json?.data?.session?.token);
 await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[1] }, sessionsToUse[1]);
+const contactPodGroup = podIdsS6[0];
 const groupScopeView = await studentCall('GET', `/api/cgm/student/activities/${podActivityId}`, undefined, session004);
 const groupScopeMembers = groupScopeView.json?.data?.members || [];
 check('contactVisibility "group" shares contacts inside the viewer’s group only',
@@ -1329,6 +1345,135 @@ check('the activities overview report downloads with per-activity counters',
   activitiesReport.text.split('\n').slice(0, 3).join(' | '));
 const activitiesDenied = await memberCall('GET', `/api/cgm/classes/${classAId}/reports/activities`, undefined, applyToken);
 check('a member outside the class team cannot read the activities report', activitiesDenied.status === 403, `status ${activitiesDenied.status}`);
+
+// ===========================================================================
+// 19. Concurrency & hardening (step 8)
+// ===========================================================================
+section('19. Concurrency & hardening: seat races, double votes, attachment edges');
+
+// --- Last-seat race: three students, one seat, same instant -------------------
+const raceActivity = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'One Seat Race', type: 'tutorial',
+  config: { method: 'self', groupCount: 1, capacity: 1, genderRule: 'none', overflow: 'waitlist', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const raceActivityId = raceActivity.json?.data?.activityId ?? raceActivity.json?.data?.activity?.id ?? raceActivity.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${raceActivityId}/lifecycle`, { action: 'open' }, amaToken);
+const scaffoldRace = await memberCall('POST', `/api/cgm/activities/${raceActivityId}/groups`, { count: 1, capacity: 1 }, amaToken);
+check('the one-seat race pod exists', scaffoldRace.status === 200, `status ${scaffoldRace.status}`);
+const raceSessions = [];
+for (let i = 0; i < 3; i += 1) {
+  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: `BIO-201-${String(i + 1).padStart(3, '0')}`, passkey: `rx30${['a', 'b', 'c'][i]}` });
+  raceSessions.push(login.json?.data?.session?.token);
+}
+const raceAttempts = await Promise.all(raceSessions.map((token) =>
+  studentCall('POST', `/api/cgm/student/activities/${raceActivityId}/assign`, {}, token)));
+const raceAssigned = Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", raceActivityId).c);
+const raceWaiting = Number(q1("SELECT COUNT(*) c FROM cgm_activity_waitlist WHERE activity_id = ? AND status = 'waiting'", raceActivityId).c);
+check('three simultaneous claims on one seat leave exactly one assigned', raceAssigned === 1, `assigned=${raceAssigned} responses=${raceAttempts.map((r) => r.status).join(',')}`);
+check('the losers land on the waiting list, never in the group', raceWaiting >= 2, `waiting=${raceWaiting}`);
+check('the hard capacity survives the race untouched', raceAssigned <= 1);
+
+// --- Capacity guard holds against a stale plan (assign-remaining) -------------
+const fillPod = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Stale Plan Guard', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 1, capacity: 2, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const fillPodId = fillPod.json?.data?.activityId ?? fillPod.json?.data?.activity?.id ?? fillPod.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${fillPodId}/lifecycle`, { action: 'open' }, amaToken);
+const fillScaffold = await memberCall('POST', `/api/cgm/activities/${fillPodId}/groups`, { count: 1, capacity: 2 }, amaToken);
+check('the capacity-2 pod was scaffolded', fillScaffold.status === 200, `status ${fillScaffold.status}`);
+// Seat two students by hand, then run assign-remaining against a full pod:
+// the plan must place nobody extra and the atomic guard must hold.
+const fillPodDetail = await memberCall('GET', `/api/cgm/activities/${fillPodId}`, undefined, amaToken);
+const fillPodGroupId = Number((fillPodDetail.json?.data?.groups || [])[0]?.id);
+for (const indexKey of ['bio-201-004', 'bio-201-005']) {
+  const seat = await memberCall('POST', `/api/cgm/activities/${fillPodId}/assign-student`, { studentId: Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', indexKey).id), groupId: fillPodGroupId }, amaToken);
+  check(`assign-student seats ${indexKey}`, seat.status === 200, `status ${seat.status} ${seat.text?.slice(0, 120)}`);
+}
+const fillPodSize = Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", fillPodId).c);
+check('the fill pod reached exactly its capacity', fillPodSize === 2, `size=${fillPodSize}`);
+const overfillRun = await memberCall('POST', `/api/cgm/activities/${fillPodId}/assign-remaining`, {}, amaToken);
+const fillPodAfter = Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", fillPodId).c);
+check('the atomic capacity guard never lets a plan exceed capacity', fillPodAfter === 2 && Number(overfillRun.json?.data?.placed || 0) === 0,
+  `size=${fillPodAfter} placed=${overfillRun.json?.data?.placed}`);
+
+// --- Double-vote race ----------------------------------------------------------
+// The Contact Pods group from §17 has exactly two members and no election yet.
+const voteRaceMembers = q("SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active' ORDER BY student_id", contactPodGroup);
+check('the vote-race group has members to test with', voteRaceMembers.length >= 2, `members=${voteRaceMembers.length}`);
+const voteRaceElection = await memberCall('POST', `/api/cgm/groups/${contactPodGroup}/elections`, { title: 'Race poll', role: 'leader', anonymity: 'anonymous', visibility: 'group', allowVoteChange: false }, amaToken);
+const voteRaceElectionId = Number(voteRaceElection.json?.data?.electionId);
+check('the vote-race election was created', Boolean(voteRaceElectionId), voteRaceElection.text?.slice(0, 140));
+const candidateLogin = await loginForStudent(Number(voteRaceMembers[0].student_id));
+const contestTry = await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/contest`, { statement: 'Race candidate' }, candidateLogin.json?.data?.session?.token);
+check('the vote-race candidate contested', contestTry.status === 200, `status ${contestTry.status} ${contestTry.text?.slice(0, 120)}`);
+const openTry = await memberCall('POST', `/api/cgm/elections/${voteRaceElectionId}/open-voting`, {}, amaToken);
+check('the vote-race election opened for voting', openTry.status === 200, `status ${openTry.status}`);
+const raceCandidateList = await memberCall('GET', `/api/cgm/elections/${voteRaceElectionId}`, undefined, amaToken);
+const raceCandidateId = Number((raceCandidateList.json?.data?.candidates || [])[0]?.id);
+const voterLogin = await loginForStudent(Number(voteRaceMembers[1].student_id));
+const voterToken = voterLogin.json?.data?.session?.token;
+const doubleVote = await Promise.all([
+  studentCall('POST', `/api/cgm/student/elections/${voteRaceElectionId}/vote`, { candidateId: raceCandidateId }, voterToken),
+  studentCall('POST', `/api/cgm/student/elections/${voteRaceElectionId}/vote`, { candidateId: raceCandidateId }, voterToken),
+]);
+const raceBallots = Number(q1('SELECT COUNT(*) c FROM cgm_election_ballots WHERE election_id = ?', voteRaceElectionId).c);
+const raceParticipation = Number(q1('SELECT COUNT(*) c FROM cgm_election_participation WHERE election_id = ?', voteRaceElectionId).c);
+check('two simultaneous votes from one voter yield exactly one ballot', raceBallots === 1 && raceParticipation === 1,
+  `ballots=${raceBallots} participation=${raceParticipation} statuses=${doubleVote.map((r) => r.status).join(',')}`);
+
+// --- Concurrent move approvals keep exactly one active group -------------------
+const moveRaceActivity = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Move Race Pods', type: 'tutorial',
+  config: { method: 'hybrid', groupCount: 3, capacity: 10, genderRule: 'none', overflow: 'organizer', leaderMethod: 'appointment', selfDeadline: new Date(Date.now() - 3600_000).toISOString(), announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const moveRaceId = moveRaceActivity.json?.data?.activityId ?? moveRaceActivity.json?.data?.activity?.id ?? moveRaceActivity.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${moveRaceId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${moveRaceId}/groups`, { count: 3 }, amaToken);
+const moveRaceFinish = await memberCall('POST', `/api/cgm/activities/${moveRaceId}/assign-remaining`, {}, amaToken);
+check('the move-race pods are populated', Number(moveRaceFinish.json?.data?.placed || 0) >= 3, `placed=${moveRaceFinish.json?.data?.placed}`);
+const raceCandidateIds = racePairs.map((pair) => Number(pair.studentId));
+const moveRacerId = raceCandidateIds.find((studentId) =>
+  q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", moveRaceId, studentId)) || 0;
+const moveRacerAssignment = moveRacerId
+  ? q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", moveRaceId, moveRacerId)
+  : null;
+if (moveRacerAssignment) {
+  const movePods = (await memberCall('GET', `/api/cgm/activities/${moveRaceId}`, undefined, amaToken)).json?.data?.groups || [];
+  const otherPods = movePods.map((g) => Number(g.id)).filter((id) => Number(id) !== Number(moveRacerAssignment.group_id));
+  const moveRacerLogin = await loginForStudent(moveRacerId);
+  const moveRacerSession = moveRacerLogin.json?.data?.session?.token;
+  const firstRequest = await studentCall('POST', `/api/cgm/student/groups/${Number(moveRacerAssignment.group_id)}/request-move`, { toGroupId: otherPods[0], reason: 'race one' }, moveRacerSession);
+  check('the racer files a move request', firstRequest.status === 200, `status ${firstRequest.status}`);
+  const secondRequest = await studentCall('POST', `/api/cgm/student/groups/${Number(moveRacerAssignment.group_id)}/request-move`, { toGroupId: otherPods[1], reason: 'race two' }, moveRacerSession);
+  check('a second competing request is refused while one is pending', secondRequest.status >= 400, `status ${secondRequest.status}`);
+  const moveRaceQueue = await memberCall('GET', `/api/cgm/activities/${moveRaceId}`, undefined, amaToken);
+  const pendingRaceMoves = (moveRaceQueue.json?.data?.changeRequests || []).filter((r) => r.status === 'pending');
+  check('exactly one pending move request exists for the racer', pendingRaceMoves.length === 1, `pending=${pendingRaceMoves.length}`);
+  // Race a double-approval AND a simultaneous manual placement against it:
+  // whatever wins, the racer must end in exactly one group, never zero, never two.
+  const raceDecisions = await Promise.all([
+    memberCall('POST', `/api/cgm/activities/${moveRaceId}/change-requests/${pendingRaceMoves[0].id}/approve`, {}, amaToken),
+    memberCall('POST', `/api/cgm/activities/${moveRaceId}/change-requests/${pendingRaceMoves[0].id}/approve`, {}, amaToken),
+    memberCall('POST', `/api/cgm/activities/${moveRaceId}/assign-student`, { studentId: moveRacerId, groupId: otherPods[1] }, amaToken),
+  ]);
+  const racerActive = Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", moveRaceId, moveRacerId).c);
+  check('concurrent approvals + manual placement leave exactly ONE active group', racerActive === 1,
+    `active=${racerActive} statuses=${raceDecisions.map((r) => r.status).join(',')}`);
+  check('a racer is never left seatless by a lost race', racerActive >= 1);
+  const decided = q1('SELECT status FROM cgm_group_change_requests WHERE id = ?', Number(pendingRaceMoves[0].id))?.status;
+  check('the request ends decided exactly once', decided === 'approved' || decided === 'rejected', String(decided));
+} else {
+  check('the move-race had a racer to test', false, 'bio-201-006 has no assignment');
+}
+
+// --- Attachment edge cases -----------------------------------------------------
+const hugeAttachment = new FormData();
+hugeAttachment.append('title', 'Too big');
+hugeAttachment.append('body', 'This attachment is over the limit.');
+hugeAttachment.append('attachment', new File([new Uint8Array(5 * 1024 * 1024 + 1)], 'huge.bin', { type: 'application/octet-stream' }));
+const hugeTry = await formCall('POST', `/api/cgm/classes/${classAId}/announcements`, hugeAttachment, amaToken);
+check('attachments over 5 MB are refused with 413', hugeTry.status === 413, `status ${hugeTry.status}`);
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
