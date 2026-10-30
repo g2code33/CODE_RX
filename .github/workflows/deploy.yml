@@ -48,17 +48,31 @@ jobs:
       - name: Browser-level CGM journeys (jsdom against wrangler pages dev)
         run: |
           mkdir -p /tmp/browser && cd /tmp/browser && npm i jsdom --no-audit --no-fund
-          cd "$GITHUB_WORKSPACE"
+          cd "${{ github.workspace }}"
           printf 'JWT_SECRET=ci-secret\nADMIN_PASSWORD=DevPreviewPassword1\nADMIN_EMAIL=coderxsociety@gmail.com\n' > .dev.vars
-          npx wrangler pages dev dist --port 8788 --persist-to /tmp/wrangler-persist > /tmp/wrangler-dev.log 2>&1 &
+          # The repo wrangler.toml is a Workers config, so `wrangler pages dev`
+          # does NOT pick bindings up from it — the local D1 must be attached
+          # explicitly or every API call fails with a missing DB binding.
+          npx --no-install wrangler pages dev dist --port 8788 --d1 DB --persist-to /tmp/wrangler-persist > /tmp/wrangler-dev.log 2>&1 &
           WRANGLER_PID=$!
+          trap 'kill $WRANGLER_PID 2>/dev/null || true' EXIT
+          UP=false
           for i in $(seq 1 60); do
-            curl -s -o /dev/null http://127.0.0.1:8788/api/health && break
+            # /api/health alone can answer without a database — verify a
+            # DB-backed endpoint actually answers before running the journeys.
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8788/api/auth/login \
+              -H 'Content-Type: application/json' -d '{"identifier":"probe","password":"probe"}' || true)
+            if [ "$CODE" = "400" ] || [ "$CODE" = "401" ]; then UP=true; break; fi
             sleep 2
           done
+          if [ "$UP" != "true" ]; then
+            echo "::error::wrangler pages dev never became ready — last log lines:"
+            tail -40 /tmp/wrangler-dev.log || true
+            exit 1
+          fi
           NODE_PATH=/tmp/browser/node_modules node scripts/cgm-browser-check.mjs
           EXIT_CODE=$?
-          kill $WRANGLER_PID 2>/dev/null || true
+          tail -5 /tmp/wrangler-dev.log || true
           exit $EXIT_CODE
 
       - name: Upload build artifact

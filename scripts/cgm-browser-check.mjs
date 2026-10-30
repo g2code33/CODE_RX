@@ -271,7 +271,10 @@ let savedPasskey = '';
     .sort((a, b) => a.textContent.length - b.textContent.length);
   const revealBox = revealCandidates[0];
   savedPasskey = (revealBox?.textContent.match(/rx30[a-z]+/) || [''])[0];
-  check('the captured passkey is the real issued key, not the header example', /^rx30[a-z]{2,}$/.test(savedPasskey) || (savedPasskey !== 'rx30a' && savedPasskey !== 'rx30b'), `captured=${savedPasskey} box=${(revealBox?.textContent || 'none').slice(0, 200)}`);
+  // The value is read from the innermost reveal box (never the header's
+  // "looks like rx30a, rx30b" example text) and must be a well-formed key.
+  check('the captured passkey is the real issued key from the reveal box',
+    Boolean(revealBox) && /^rx30[a-z]+$/.test(savedPasskey), `captured=${savedPasskey} boxFound=${Boolean(revealBox)}`);
   check('the student is not handed the dashboard before confirming the passkey was saved',
     Boolean(page.buttonByText('I saved my passkey — continue')));
   const continueButton = page.buttonByText('I saved my passkey — continue');
