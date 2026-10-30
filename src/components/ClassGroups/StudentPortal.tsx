@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, GraduationCap,
   LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
@@ -72,6 +72,32 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
   const [passkey, setPasskey] = useState('');
   // join fields
   const [joinCode, setJoinCode] = useState(inviteCode || '');
+  // Invitation continuation: the class an open invitation points at, and a
+  // session awaiting the one-time passkey confirmation.
+  const [invite, setInvite] = useState<any>(null);
+  const [inviteProblem, setInviteProblem] = useState<string | null>(null);
+  const [pendingSession, setPendingSession] = useState<CgmStudentSession | null>(null);
+
+  useEffect(() => {
+    if (!inviteCode) return;
+    // An individual invitation token (64 hex chars) has no public landing —
+    // it is claimed the moment its student authenticates.
+    if (/^[0-9a-f]{64}$/i.test(inviteCode.trim())) { setMode('login'); return; }
+    let alive = true;
+    cgmStudent.invitationInfo(inviteCode.trim()).then((info: any) => {
+      if (!alive) return;
+      setInvite(info);
+      // Guide the (typically new) invited student straight into registration
+      // with the class code prefilled — the entry password is still required.
+      setClassCode(String(info?.class?.code || ''));
+      setMode('register');
+    }).catch((failure: any) => {
+      if (!alive) return;
+      setInviteProblem(failure?.message || 'This invitation is not available right now.');
+      setMode('login');
+    });
+    return () => { alive = false; };
+  }, [inviteCode]);
 
   const identifierLabels: Record<string, string> = {
     index_number: 'Index number',
@@ -94,6 +120,24 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
         <p className="mt-1 text-sm font-medium text-slate-500">
           Students sign in with a permanent passkey that looks like <strong>rx30a</strong>, <strong>rx30b</strong> … issued once your registration is approved.
         </p>
+
+        {inviteCode && (
+          <div className={`mt-4 rounded-xl border px-4 py-3 ${inviteProblem ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-emerald-50/70'}`} role="status">
+            {inviteProblem ? (
+              <p className="text-xs font-bold text-amber-700">{inviteProblem} You can still sign in or register below{inviteProblem.includes('expired') || inviteProblem.includes('available') ? ' — ask your organizer for a fresh invitation.' : '.'}</p>
+            ) : (
+              <>
+                <p className="text-xs font-black uppercase tracking-wider text-emerald-700">You are invited</p>
+                <p className="mt-0.5 text-sm font-bold text-slate-800">{invite?.class?.name || 'A class'}{invite?.class?.institution ? ` · ${invite.class.institution}` : ''}</p>
+                <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+                  {invite?.class?.code ? `Class code ${invite.class.code} · ` : ''}
+                  {invite?.invitation?.remainingUses != null ? `${invite.invitation.remainingUses} places left · ` : ''}
+                  New here? Register below — your invitation continues automatically after you sign in.
+                </p>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="mt-5 flex gap-2" role="tablist" aria-label="Choose an action">
           {([['login', 'Sign in'], ['register', 'Register'], ['join', 'Join a class']] as const).map(([key, text]) => (
@@ -152,7 +196,17 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               void run(async () => {
                 const data = await cgmStudent.register({ classCode, indexNumber, entryPassword });
                 if ((data as any)?.passkey) setIssuedPasskey(String((data as any).passkey));
-                setMessage(String((data as any)?.message || 'Registration received.'));
+                if ((data as any)?.session) {
+                  // Automatic approval: authenticated at once. If a passkey was
+                  // just issued we stay here until the student confirms they
+                  // saved it — it is never shown again.
+                  const session = (data as any).session as CgmStudentSession;
+                  if ((data as any)?.passkey) setPendingSession(session);
+                  else onAuthenticated(session);
+                  setMessage(String((data as any)?.message || 'You are in.'));
+                  return;
+                }
+                setMessage(`${String((data as any)?.message || 'Registration received.')} Once it is approved, sign in and any invitation you opened continues automatically.`);
               });
             }}
           >
@@ -178,6 +232,15 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
                 <p className="text-xs font-black uppercase tracking-wider text-amber-700">Your permanent passkey — shown only now</p>
                 <p className="mt-1 font-mono text-lg font-black text-amber-900">{issuedPasskey}</p>
                 <p className="mt-1 text-[11px] font-semibold text-amber-700">Save it immediately. Sign-in needs this passkey plus your index number, and it cannot be re-issued.</p>
+                {pendingSession && (
+                  <button
+                    type="button"
+                    className="cgm-primary-button mt-3 w-full"
+                    onClick={() => onAuthenticated(pendingSession)}
+                  >
+                    I saved my passkey — continue
+                  </button>
+                )}
               </div>
             )}
           </form>
@@ -192,8 +255,11 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
                 const session = studentSession.read();
                 if (!session) {
                   const info = await cgmStudent.invitationInfo(joinCode.trim()).catch(() => null);
-                  if (!info) throw new CgmError('Sign in or register first, then use this invitation again.', 401);
-                  setMessage(`Invitation for ${info.class?.name || 'a class'} is valid. Sign in (or register), then tap Join again.`);
+                  if (!info) throw new CgmError('This invitation is not available. Ask your organizer for a fresh one.', 404);
+                  setInvite(info);
+                  setClassCode(String(info?.class?.code || ''));
+                  setMessage(`Invitation for ${info.class?.name || 'a class'} is valid. Register (or sign in) below — the invitation continues automatically.`);
+                  setMode('register');
                   return;
                 }
                 const data = await cgmStudent.claimInvitation(joinCode.trim());
@@ -217,6 +283,31 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
 // Student shell + views
 // ---------------------------------------------------------------------------
 
+// Short-lived invitation continuation. GENERAL codes (shareable, not secret)
+// may ride through sessionStorage so a page refresh or an approval wait keeps
+// the context; INDIVIDUAL tokens are identity-bound secrets and live in
+// memory only. Cleared on completion, cancellation, sign-out or expiry.
+const INVITE_CONTINUATION_KEY = 'codeRx_cgmInviteContinuation';
+const INVITE_CONTINUATION_TTL_MS = 10 * 60_000;
+type InviteContinuation = { code: string; individual: boolean; expiresAt: number };
+const toContinuation = (rawCode: string): InviteContinuation => {
+  const code = String(rawCode || '').trim();
+  return { code, individual: /^[0-9a-f]{64}$/i.test(code), expiresAt: Date.now() + INVITE_CONTINUATION_TTL_MS };
+};
+const readContinuation = (): InviteContinuation | null => {
+  try {
+    const raw = sessionStorage.getItem(INVITE_CONTINUATION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as InviteContinuation;
+    if (!parsed?.code || Number(parsed.expiresAt) <= Date.now()) {
+      sessionStorage.removeItem(INVITE_CONTINUATION_KEY);
+      return null;
+    }
+    return parsed;
+  } catch { return null; }
+};
+const clearContinuation = () => { try { sessionStorage.removeItem(INVITE_CONTINUATION_KEY); } catch { /* private mode */ } };
+
 export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | null; onExit: () => void }) => {
   const [session, setSession] = useState<CgmStudentSession | null>(() => studentSession.read());
   const [me, setMe] = useState<any>(null);
@@ -225,6 +316,19 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
   const [openActivityId, setOpenActivityId] = useState<number | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [pendingInvite, setPendingInvite] = useState<InviteContinuation | null>(() => (inviteCode ? toContinuation(inviteCode) : readContinuation()));
+  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
+  const claimedInvites = useRef(new Set<string>());
+
+  // General codes survive a refresh via a short-lived sessionStorage entry;
+  // individual tokens never touch storage.
+  useEffect(() => {
+    if (!pendingInvite) { clearContinuation(); return; }
+    if (pendingInvite.individual) return;
+    try { sessionStorage.setItem(INVITE_CONTINUATION_KEY, JSON.stringify(pendingInvite)); } catch { /* private mode */ }
+  }, [pendingInvite]);
+
+
 
   const refreshMe = useCallback(async () => {
     try {
@@ -235,10 +339,29 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
     } finally { setLoading(false); }
   }, []);
 
+  const continueInvite = useCallback(async (session: CgmStudentSession | null) => {
+    if (!session || !pendingInvite || claimedInvites.current.has(pendingInvite.code)) return;
+    claimedInvites.current.add(pendingInvite.code);
+    try {
+      const result: any = await cgmStudent.claimInvitation(pendingInvite.code);
+      const state = String((result as any)?.state || '');
+      setInviteNotice(
+        state === 'joined' ? String((result as any)?.message || 'You joined the class.')
+          : state === 'requested' ? String((result as any)?.message || 'Request sent.') + ' You will see the class once the organizer approves it.'
+          : String((result as any)?.message || 'Invitation used.'),
+      );
+    } catch (failure: any) {
+      setInviteNotice(failure?.message || 'The invitation could not be used.');
+    } finally {
+      setPendingInvite(null);
+      if (session === studentSession.read()) void refreshMe();
+    }
+  }, [pendingInvite, refreshMe]);
+
   useEffect(() => { if (session) void refreshMe(); else setLoading(false); }, [session, refreshMe]);
 
   if (!session) {
-    return <AuthScreen inviteCode={inviteCode} onAuthenticated={(next) => { setSession(next); void refreshMe(); }} />;
+    return <AuthScreen inviteCode={inviteCode} onAuthenticated={(next) => { setSession(next); void refreshMe(); void continueInvite(next); }} />;
   }
 
   const unread = Number(me?.unreadNotifications || 0);
@@ -258,12 +381,19 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" className="mini-button" onClick={() => { void cgmStudent.logout(); studentSession.clear(); setSession(null); setMe(null); }}>
+          <button type="button" className="mini-button" onClick={() => { void cgmStudent.logout(); studentSession.clear(); clearContinuation(); setPendingInvite(null); setSession(null); setMe(null); }}>
             <LogOut className="mr-1 inline h-3.5 w-3.5" /> Sign out
           </button>
           <button type="button" className="mini-button" onClick={onExit}>Exit</button>
         </div>
       </header>
+      {inviteNotice && (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <p className="text-sm font-bold text-emerald-800">{inviteNotice}</p>
+          <button type="button" className="mini-button" onClick={() => setInviteNotice(null)}>Dismiss</button>
+        </div>
+      )}
+
 
       <div className="cgm-body">
         <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''}`} aria-label="Student navigation">

@@ -423,6 +423,20 @@ check('the organizer UI offers resend verification and no longer hints at the to
 check('PHANTOM sees email delivery health (status only, never secret values)',
   /Verification email delivery:/g.test(phantom) && /emailConfigStatus/.test(activityRoutesSrc));
 
+check('invitation context survives authentication and is claimed automatically after sign-in',
+  /continueInvite\(next\)/.test(studentPortal) && /INVITE_CONTINUATION_KEY/.test(studentPortal));
+check('general codes ride a short-lived sessionStorage continuation; individual tokens never touch storage',
+  /INVITE_CONTINUATION_TTL_MS/.test(studentPortal) && /if \(pendingInvite\.individual\) return;/.test(studentPortal)
+  && /clearContinuation\(\)/.test(studentPortal));
+check('the invitation landing shows the class and guides registration with the class prefilled',
+  /You are invited/.test(studentPortal) && /setClassCode\(String\(info\?\.class\?\.code \|\| ''\)\)/.test(studentPortal));
+check('the dead-end "tap Join again" flow is gone',
+  !studentPortal.includes('tap Join again'));
+check('a just-issued passkey blocks the handoff until the student confirms saving it',
+  /I saved my passkey — continue/.test(studentPortal));
+check('the claim result is shown on the dashboard and can be dismissed',
+  /inviteNotice/.test(studentPortal) && /Dismiss/.test(studentPortal));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

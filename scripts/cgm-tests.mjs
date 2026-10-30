@@ -1934,6 +1934,140 @@ check('the health indicator names missing variables without exposing values',
   Array.isArray(overviewHealth.json?.data?.email?.missing) && overviewHealth.json?.data?.email?.missing.includes('EMAILJS_SERVICE_ID')
   && overviewHealth.json.data.email.missing.every((name) => /^[A-Z0-9_]+$/.test(String(name))));
 
+
+// ===========================================================================
+// 24. Invitation continuation: the code a student opened survives sign-in and
+//     registration, claims are idempotent, and every response carries a
+//     machine-readable state. Runs after the security section.
+// ===========================================================================
+section('24. Invitation continuation journey');
+
+// A fresh active class with its own roster and settings.
+const invClass = await memberCall('POST', '/api/cgm/classes', { name: 'INV 101 Invitation Journey', institution: 'Accra Technical University' }, phantomToken);
+const invClassId = invClass.json?.data?.classId ?? invClass.json?.data?.id;
+const invClassCode = invClass.json?.data?.code;
+await memberCall('POST', `/api/cgm/classes/${invClassId}/entry-password`, { entryPassword: 'inv-101-entry' }, phantomToken);
+await memberCall('POST', `/api/cgm/classes/${invClassId}/submit`, {}, phantomToken);
+await memberCall('POST', `/api/cgm/phantom/classes/${invClassId}/approve`, {}, phantomToken);
+const invRosterCsv = ['Full Name,Index Number', 'Ivy Newby,INV-101-001', 'Ivan Newby,INV-101-002'].join('\n');
+const invRosterForm = new FormData();
+invRosterForm.append('file', new File([invRosterCsv], 'roster.csv', { type: 'text/csv' }));
+invRosterForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number' }));
+invRosterForm.append('policy', 'skip');
+await formCall('POST', `/api/cgm/classes/${invClassId}/roster/import`, invRosterForm, phantomToken);
+check('the invitation-journey class is ready', q1('SELECT status FROM cgm_classes WHERE id = ?', invClassId)?.status === 'active');
+
+// -- 1. A new student opens the invitation: public landing answers -----------
+const invInvite = await memberCall('POST', `/api/cgm/classes/${invClassId}/invitations`, { kind: 'general', maxUses: 5 }, phantomToken);
+const invCode = invInvite.json?.data?.code;
+const invLanding = await call('GET', `/api/cgm/invitations/${invCode}`);
+check('a new student opening the invitation sees the class information',
+  invLanding.status === 200 && invLanding.json?.data?.class?.name === 'INV 101 Invitation Journey' && Boolean(landing.json?.data?.class?.code), invLanding.text?.slice(0, 120));
+
+// -- 2-4. Registration under approval mode → approve → sign in → request ----
+const ivyRegister = await call('POST', '/api/cgm/student/register', { classCode: invClassCode, indexNumber: 'INV-101-001', entryPassword: 'inv-101-entry' });
+check('a pending registration returns state received and no session',
+  ivyRegister.json?.data?.state === 'received' && !ivyRegister.json?.data?.session, ivyRegister.text?.slice(0, 120));
+const invQueue = await memberCall('GET', `/api/cgm/classes/${invClassId}/registrations?status=pending`, undefined, phantomToken);
+const ivyQueueRow = (invQueue.json?.data || []).find((row) => row.indexNumber === 'INV-101-001');
+const ivyApprove = await memberCall('POST', `/api/cgm/classes/${invClassId}/registrations/${ivyQueueRow.id}/approve`, {}, phantomToken);
+const ivyPasskey = ivyApprove.json?.data?.passkey;
+check('the organizer approves the invited student (passkey issued once)', Boolean(ivyPasskey), `status ${ivyApprove.status}`);
+const ivyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'INV-101-001', passkey: ivyPasskey });
+const ivySession = ivyLogin.json?.data?.session?.token;
+check('the invited student signs in', Boolean(ivySession), `status ${ivyLogin.status}`);
+// Ivy is already a member of INV 101 through her approved registration — the
+// invitation honestly reports that — so the request path uses the §22 class.
+const ivyMemberCheck = await studentCall('POST', '/api/cgm/student/join', { code: invCode }, ivySession);
+check('an invited student already in the class is told so (no fake join)',
+  ivyMemberCheck.status === 200 && ivyMemberCheck.json?.data?.state === 'member', ivyMemberCheck.text?.slice(0, 120));
+const ivyJoin = await studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, ivySession);
+check('after sign-in the claim reports requested (organizer approval mode)',
+  ivyJoin.status === 200 && ivyJoin.json?.data?.state === 'requested', ivyJoin.text?.slice(0, 140));
+
+// -- 5. Claiming twice stays idempotent --------------------------------------
+const ivyRejoin = await studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, ivySession);
+check('claiming the same invitation again never duplicates the request',
+  ivyRejoin.status === 200 && ivyRejoin.json?.data?.state === 'requested'
+  && q1("SELECT COUNT(*) c FROM cgm_membership_requests WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'inv-101-001')", autoClassId).c === 1,
+  ivyRejoin.text?.slice(0, 120));
+const ivyRequestRow = q1("SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'inv-101-001')", autoClassId);
+const ivyApproveJoin = await memberCall('POST', `/api/cgm/classes/${autoClassId}/membership-requests/${ivyRequestRow.id}/approve`, {}, phantomToken);
+check('the organizer approves the continued request', ivyApproveJoin.status === 200, `status ${ivyApproveJoin.status}`);
+
+// -- 6. Approval-free class: an existing student joins automatically ---------
+const settingsFree = await memberCall('POST', `/api/cgm/classes/${invClassId}/settings`, { membershipApprovalRequired: false }, phantomToken);
+void settingsFree;
+const adjoaSession = (await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'AUTO-101-001', passkey: String(expectedPasskey || '') })).json?.data?.session?.token;
+const adjoaJoin = await studentCall('POST', '/api/cgm/student/join', { code: invCode }, adjoaSession);
+check('an existing identity joins automatically with state joined',
+  adjoaJoin.status === 200 && adjoaJoin.json?.data?.state === 'joined', adjoaJoin.text?.slice(0, 140));
+const adjoaRejoin = await studentCall('POST', '/api/cgm/student/join', { code: invCode }, adjoaSession);
+check('re-joining reports member without creating a second membership',
+  adjoaRejoin.json?.data?.state === 'member'
+  && q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'auto-101-001')", invClassId).c === 1);
+check('the joining student kept their original permanent passkey',
+  q1("SELECT passkey_suffix FROM cgm_students WHERE index_number_key = 'auto-101-001'")?.passkey_suffix === String(expectedPasskey || '').slice(4));
+
+// -- 7. Registration with automatic approval returns a session the invitation
+//       can continue with ------------------------------------------------------
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'auto' }, phantomToken);
+const ivanRegister = await call('POST', '/api/cgm/student/register', { classCode: invClassCode, indexNumber: 'INV-101-002', entryPassword: 'inv-101-entry' });
+check('automatic registration returns an authenticated session',
+  ivanRegister.json?.data?.state === 'active' && Boolean(ivanRegister.json?.data?.session?.token), Object.keys(ivanRegister.json?.data || {}).join(','));
+const ivanSession = ivanRegister.json?.data?.session?.token;
+const ivanOwnCheck = await studentCall('POST', '/api/cgm/student/join', { code: invCode }, ivanSession);
+check('the invitation to the class they just joined reports membership honestly',
+  ivanOwnCheck.status === 200 && ivanOwnCheck.json?.data?.state === 'member', ivanOwnCheck.text?.slice(0, 120));
+// A second class set approval-free: the continuation is fully automatic.
+await memberCall('POST', `/api/cgm/classes/${autoClassId}/settings`, { membershipApprovalRequired: false }, phantomToken);
+const ivanJoin = await studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, ivanSession);
+check('a freshly registered student continues an invitation without re-entering it',
+  ivanJoin.status === 200 && ivanJoin.json?.data?.state === 'joined', ivanJoin.text?.slice(0, 140));
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'approval' }, phantomToken);
+
+// -- 8-9. Expired and revoked invitations -------------------------------------
+const expInvite = await memberCall('POST', `/api/cgm/classes/${invClassId}/invitations`, { kind: 'general', maxUses: 5, expiresAt: new Date(Date.now() - 3600_000).toISOString() }, phantomToken);
+const expLanding2 = await call('GET', `/api/cgm/invitations/${expInvite.json?.data?.code}`);
+check('an expired invitation lands on a clear refusal', expLanding2.status === 410, `status ${expLanding2.status}`);
+const expJoin = await studentCall('POST', '/api/cgm/student/join', { code: expInvite.json?.data?.code }, ivanSession);
+check('an expired invitation cannot be claimed', expJoin.status === 410, `status ${expJoin.status}`);
+const revInviteRow = q1('SELECT id FROM cgm_invitations WHERE class_id = ? AND kind = ? ORDER BY id DESC LIMIT 1', invClassId, 'general');
+await memberCall('POST', `/api/cgm/invitations/${revInviteRow.id}/revoke`, {}, phantomToken);
+const revLanding2 = await call('GET', `/api/cgm/invitations/${expInvite.json?.data?.code}`);
+check('a revoked invitation is no longer available', revLanding2.status === 404, `status ${revLanding2.status}`);
+
+// -- 10. Individual invitations stay identity-bound and single-use ------------
+const invIndividual = await memberCall('POST', `/api/cgm/classes/${invClassId}/invitations`, { kind: 'individual', studentId: Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'inv-101-001'").id) }, phantomToken);
+const invIndividualToken = invIndividual.json?.data?.token || invIndividual.json?.data?.code;
+check('an individual invitation returns its raw token exactly once at creation', /^[0-9a-f]{40,}$/i.test(String(invIndividualToken || '')), String(invIndividualToken || '').slice(0, 12));
+const invIndividualClaim = await studentCall('POST', `/api/cgm/student/invitations/${invIndividualToken}/claim`, {}, ivySession);
+check('the bound student claims the individual invitation', invIndividualClaim.status === 200, `status ${invIndividualClaim.status} ${invIndividualClaim.text?.slice(0, 120)}`);
+const invIndividualReclaim = await studentCall('POST', `/api/cgm/student/invitations/${invIndividualToken}/claim`, {}, ivySession);
+check('the individual token is single-use', invIndividualReclaim.status === 410, `status ${invIndividualReclaim.status}`);
+const invStrangerClaim = await studentCall('POST', `/api/cgm/student/invitations/${invIndividualToken}/claim`, {}, adjoaSession);
+check('nobody else can use a claimed individual token', [403, 410].includes(invStrangerClaim.status), `status ${invStrangerClaim.status}`);
+
+// -- 11. Two simultaneous claims never duplicate the membership ---------------
+// (INV 101 is approval-free now; the raced student is not a member yet.)
+const raceClaims = await Promise.all([
+  studentCall('POST', '/api/cgm/student/join', { code: invCode }, chmJoinerToken),
+  studentCall('POST', '/api/cgm/student/join', { code: invCode }, chmJoinerToken),
+]);
+check('two simultaneous claims both answer sanely', raceClaims.every((r) => r.status === 200 && ['joined', 'member'].includes(r.json?.data?.state)), raceClaims.map((r) => `${r.status}:${r.json?.data?.state}`).join(' '));
+check('the race leaves exactly one membership row',
+  q1('SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND student_id = ?', invClassId, chmStudentId).c === 1);
+// Pending-request races are equally idempotent: replaying an already-used
+// claim never duplicates anything.
+const ivanRace = await Promise.all([
+  studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, ivanSession),
+  studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, ivanSession),
+]);
+check('replayed simultaneous claims stay sane and single',
+  ivanRace.every((r) => r.status === 200 && ['joined', 'member'].includes(r.json?.data?.state))
+  && q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'inv-101-002')", autoClassId).c === 1,
+  ivanRace.map((r) => `${r.status}:${r.json?.data?.state}`).join(' '));
+
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

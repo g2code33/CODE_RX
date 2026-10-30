@@ -225,10 +225,15 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         action: 'cgm.registration.auto_approved', entityType: 'class', entityId: klass.id, classId: klass.id,
         context: { classCode: klass.code },
       });
+      const session = await createStudentSession(c.env.DB, studentId, {
+        ip: c.req.header('cf-connecting-ip'),
+        userAgent: c.req.header('user-agent'),
+      });
       return c.json({
         success: true,
         data: {
           state: 'active',
+          session,
           passkey: issuedPasskey,
           message: issuedPasskey
             ? 'Automatic registration is on — you are approved. Your permanent passkey is shown once: save it now.'
@@ -1477,6 +1482,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
             response: c.json({ success: true, data: { message: 'Your registration was submitted through your personal invitation and awaits approval.' } }),
           };
         }
+      } else {
+        // Student-bound (non-roster) individual invitations consume their
+        // single use at claim time — replay gets the single-use refusal even
+        // when the bound student already holds the membership.
+        await c.env.DB.prepare(
+          'UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?'
+        ).bind(Number(invitation.id)).run();
       }
     }
 
@@ -1485,7 +1497,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const existingMember = await asRows<{ id: number }>(c.env.DB.prepare(
       'SELECT id FROM cgm_class_members WHERE class_id = ? AND student_id = ?'
     ).bind(classId, student.id));
-    if (existingMember[0]) return { status: 200 as const, response: c.json({ success: true, data: { message: 'You are already a member of this class.' } }) };
+    if (existingMember[0]) return { status: 200 as const, response: c.json({ success: true, data: { state: 'member', message: 'You are already a member of this class.' } }) };
 
     // §30 — the module-wide switch wins over the per-class default: 'closed'
     // refuses the request, 'auto' walks straight through to the approval-free
@@ -1498,7 +1510,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       const pending = await asRows<{ id: number }>(c.env.DB.prepare(
         `SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = ? AND status = 'pending'`
       ).bind(classId, student.id));
-      if (pending[0]) return { status: 200 as const, response: c.json({ success: true, data: { message: 'Your membership request is already awaiting review.' } }) };
+      if (pending[0]) return { status: 200 as const, response: c.json({ success: true, data: { state: 'requested', message: 'Your membership request is already awaiting review.' } }) };
       await c.env.DB.prepare(
         `INSERT INTO cgm_membership_requests (class_id, student_id, invitation_id) VALUES (?, ?, ?)`
       ).bind(classId, student.id, Number(invitation.id)).run();
@@ -1509,7 +1521,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
         action: 'cgm.membership.requested', entityType: 'class', entityId: classId, classId,
       });
-      return { status: 200 as const, response: c.json({ success: true, data: { message: 'Your membership request was sent for approval.' } }) };
+      return { status: 200 as const, response: c.json({ success: true, data: { state: 'requested', message: 'Your membership request was sent for approval.' } }) };
     }
 
     // Approval-free join (organizer configured it that way).
@@ -1523,7 +1535,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
       action: 'cgm.membership.joined', entityType: 'class', entityId: classId, classId,
     });
-    return { status: 200 as const, response: c.json({ success: true, data: { message: 'Welcome — you have joined the class.' } }) };
+    return { status: 200 as const, response: c.json({ success: true, data: { state: 'joined', message: 'Welcome — you have joined the class.' } }) };
   };
 
   app.post('/api/cgm/student/join', async (c: any) => {
