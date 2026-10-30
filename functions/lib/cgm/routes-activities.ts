@@ -2215,6 +2215,14 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          WHERE member_profile_id = ? AND status = 'active'`
       ).bind(`PHANTOM (${member.name})`, Number(application.member_profile_id)).run();
     }
+    // Reinstating restores every team seat the suspension revoked — otherwise
+    // the organizer would be "approved" on paper with no class access at all.
+    if (action === 'reinstate' && application.member_profile_id) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_class_organizers SET status = 'active', revoked_at = NULL, revoked_by_label = NULL
+         WHERE member_profile_id = ? AND status = 'revoked' AND revoked_by_label LIKE 'PHANTOM%'`
+      ).bind(Number(application.member_profile_id)).run();
+    }
     if (member.profileId) {
       await createNotification(c.env.DB, {
         title: `Organizer application ${status}`,

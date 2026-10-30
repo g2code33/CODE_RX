@@ -38,6 +38,9 @@
  *       passkey change and logout, and an audit-table scan that must never
  *       contain raw passkeys, entry passwords, invitation tokens or vote
  *       choices
+ *   21. step-10 governance: organizer suspend/reinstate actually removes and
+ *       restores class access, PHANTOM suspends and reinstates a whole class,
+ *       and ownership transfer proposes, accepts and swaps roles
  *
  * Usage: node --experimental-sqlite scripts/cgm-tests.mjs
  */
@@ -1563,6 +1566,66 @@ check('vote audit rows record anonymity, never the candidate or the choice',
   `rows=${voteAuditRows.length}`);
 const passkeyChangeAudit = auditRowsAll.filter((row) => row.action === 'cgm.passkey.self_change');
 check('the passkey change is audited without the new value', passkeyChangeAudit.length === 1, `rows=${passkeyChangeAudit.length}`);
+
+// ===========================================================================
+// 21. Governance (step 10, spec §5/§6/§30) — runs last: the transfer test
+// hands class A to a new primary organizer.
+// ===========================================================================
+section('21. Governance: organizer suspend/reinstate, class suspend/reinstate, ownership transfer');
+
+// --- PHANTOM suspends an organizer: class access dies immediately -------------
+const amaApplication = q1("SELECT id FROM cgm_organizer_applications WHERE user_id = (SELECT id FROM users WHERE email = 'ama.boakye@example.com') ORDER BY id DESC LIMIT 1");
+const amaReadsBefore = await memberCall('GET', `/api/cgm/classes/${classAId}`, undefined, amaToken);
+check('the organizer reads their class before suspension', amaReadsBefore.status === 200, `status ${amaReadsBefore.status}`);
+const suspendOrganizer = await memberCall('POST', `/api/cgm/phantom/organizer-applications/${Number(amaApplication?.id)}/suspend`, { reason: 'Pending conduct review' }, phantomToken);
+check('PHANTOM can suspend an organizer with a recorded reason', suspendOrganizer.status === 200, `status ${suspendOrganizer.status}`);
+const amaReadsSuspended = await memberCall('GET', `/api/cgm/classes/${classAId}`, undefined, amaToken);
+check('a suspended organizer loses every class route immediately', amaReadsSuspended.status === 403, `status ${amaReadsSuspended.status}`);
+const amaRosterSuspended = await memberCall('GET', `/api/cgm/classes/${classAId}/roster`, undefined, amaToken);
+check('the suspension covers the roster too, not just the class record', amaRosterSuspended.status === 403, `status ${amaRosterSuspended.status}`);
+check('suspension revoked the team rows',
+  q1("SELECT COUNT(*) c FROM cgm_class_organizers WHERE member_profile_id = (SELECT member_profile_id FROM cgm_organizer_applications WHERE id = ?) AND status = 'revoked'", Number(amaApplication?.id)).c >= 1);
+
+// --- Reinstatement restores the seats (regression for the step-10 fix) --------
+const reinstateOrganizer = await memberCall('POST', `/api/cgm/phantom/organizer-applications/${Number(amaApplication?.id)}/reinstate`, {}, phantomToken);
+check('PHANTOM can reinstate the organizer', reinstateOrganizer.status === 200, `status ${reinstateOrganizer.status}`);
+const amaReadsAfter = await memberCall('GET', `/api/cgm/classes/${classAId}`, undefined, amaToken);
+check('a reinstated organizer has their class access back', amaReadsAfter.status === 200, `status ${amaReadsAfter.status}`);
+check('reinstatement restored the revoked team rows',
+  q1("SELECT COUNT(*) c FROM cgm_class_organizers WHERE member_profile_id = (SELECT member_profile_id FROM cgm_organizer_applications WHERE id = ?) AND status = 'active'", Number(amaApplication?.id)).c >= 1);
+
+// --- PHANTOM suspends and reinstates a whole class ------------------------------
+const suspendClass = await memberCall('POST', `/api/cgm/phantom/classes/${classAId}/suspend`, { reason: ' Examination period audit' }, phantomToken);
+check('PHANTOM can suspend a class', suspendClass.status === 200, `status ${suspendClass.status}`);
+check('the suspended class is marked in the database', q1('SELECT status FROM cgm_classes WHERE id = ?', classAId)?.status === 'suspended');
+// Logout in §20 revoked every session of this identity (logout-all is the
+// safer default on shared school devices), so sign in fresh for the class views.
+const governanceLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+const governanceSession = governanceLogin.json?.data?.session?.token || sessionAfterChange;
+const suspendedClassView = await studentCall('GET', `/api/cgm/student/classes/${classAId}`, undefined, governanceSession);
+check('students cannot open a suspended class', suspendedClassView.status >= 400, `status ${suspendedClassView.status}`);
+const reinstateClass = await memberCall('POST', `/api/cgm/phantom/classes/${classAId}/reinstate`, {}, phantomToken);
+check('PHANTOM can reinstate the class', reinstateClass.status === 200, `status ${reinstateClass.status}`);
+const reinstatedClassView = await studentCall('GET', `/api/cgm/student/classes/${classAId}`, undefined, governanceSession);
+check('the class opens for students again after reinstatement', reinstatedClassView.status === 200, `status ${reinstatedClassView.status}`);
+
+// --- Ownership transfer: propose → accept → roles swap --------------------------
+const assistantProfileRow = q1("SELECT mp.id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = 'assistant.cgm@example.com'");
+const proposeTransfer = await memberCall('POST', `/api/cgm/classes/${classAId}/transfer`, { toProfileId: Number(assistantProfileRow?.id) }, amaToken);
+check('the primary organizer proposes an ownership transfer to their assistant', proposeTransfer.status === 200, `status ${proposeTransfer.status} ${proposeTransfer.text?.slice(0, 140)}`);
+const wrongAccept = await memberCall('POST', `/api/cgm/classes/${classAId}/transfer/accept`, {}, phantomToken);
+check('nobody but the named successor can accept the transfer', wrongAccept.status === 404 || wrongAccept.status === 403, `status ${wrongAccept.status}`);
+const acceptTransfer = await memberCall('POST', `/api/cgm/classes/${classAId}/transfer/accept`, {}, assistantToken);
+check('the successor accepts and becomes the primary organizer', acceptTransfer.status === 200, `status ${acceptTransfer.status}`);
+const teamAfter = q("SELECT role, status FROM cgm_class_organizers WHERE class_id = ? AND status = 'active' ORDER BY role", classAId);
+check('the roles actually swapped',
+  teamAfter.some((row) => row.role === 'primary') && teamAfter.filter((row) => row.role === 'primary').length === 1
+  && teamAfter.some((row) => row.role === 'co_organizer'),
+  JSON.stringify(teamAfter));
+const amaEditAfterTransfer = await memberCall('PATCH', `/api/cgm/classes/${classAId}`, { description: 'Attempted by a former primary' }, amaToken);
+check('the former primary can no longer edit the class record (primary-only guard)', amaEditAfterTransfer.status === 403, `status ${amaEditAfterTransfer.status}`);
+const newPrimaryEdit = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'phone', 'email'] }, assistantToken);
+check('the new primary can manage class settings', newPrimaryEdit.status === 200, `status ${newPrimaryEdit.status}`);
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

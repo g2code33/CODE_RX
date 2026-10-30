@@ -331,6 +331,12 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const classId = Number(c.req.param('classId'));
     const membership = await activeMembership(c, student.id, classId);
     if (!membership) return bad(c, 'You are not a member of this class.', 403);
+    // A PHANTOM suspension freezes the class for students; the organizer and
+    // PHANTOM keep full management access through the member routes.
+    const classStatus = await asRows<{ status: string }>(c.env.DB.prepare(
+      'SELECT status FROM cgm_classes WHERE id = ?'
+    ).bind(classId));
+    if (classStatus[0]?.status === 'suspended') return bad(c, 'This class is currently suspended. Ask your organizer.', 403);
 
     const organizers = await asRows<any>(c.env.DB.prepare(
       `SELECT o.role, COALESCE(u.name, mu.name, 'Member') AS name FROM cgm_class_organizers o
