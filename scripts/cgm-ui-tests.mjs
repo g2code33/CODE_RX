@@ -49,6 +49,10 @@ check('the door appears in the header and keeps its labelled row in the mobile d
   && /Classes &amp; Groups/.test(navbar));
 check('the door is titled with the full module name',
   /title="CODE Rx — Class & Group Management"/.test(navbar));
+check('classless sidebar areas open real guidance panes, never a frozen create card',
+  /NoClassPane/.test(workspace) && /area !== 'overview' && area !== 'classes'/.test(workspace)
+  && /arrive per class/.test(workspace) && /Templates store an activity/.test(workspace)
+  && /area === 'overview' && \(\n?\s*<NoClassView/.test(workspace));
 
 section('2. Hash routing in App.tsx');
 check('#class-groups opens the workspace for members',

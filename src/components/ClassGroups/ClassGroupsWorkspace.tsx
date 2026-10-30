@@ -177,8 +177,14 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
         <main className="cgm-main">
           {applyOpen && <OrganizerApplication status={status} onClose={() => setApplyOpen(false)} onDone={() => { setApplyOpen(false); void refresh(); }} />}
 
-          {!activeClass && !showApplication && (
+          {!activeClass && !showApplication && area === 'overview' && (
             <NoClassView classes={classes} onCreated={() => void refresh()} />
+          )}
+          {!activeClass && !showApplication && area === 'classes' && (
+            <ClassesArea classes={classes} activeClassId={activeClassId} onSwitch={setActiveClassId} onCreated={() => void refresh()} />
+          )}
+          {!activeClass && !showApplication && area !== 'overview' && area !== 'classes' && (
+            <NoClassPane area={area} onOverview={() => setArea('overview')} />
           )}
           {showApplication && <OrganizerApplication status={status} embedded onDone={() => void refresh()} />}
 
@@ -282,9 +288,32 @@ const OrganizerApplication = ({ status, embedded, onClose, onDone }: { status: a
   );
 };
 
+/**
+ * Shown when a sidebar area needs a class but none exists yet. Every door the
+ * user can click must open SOMETHING — never a frozen pane.
+ */
+const NoClassPane = ({ area, onOverview }: { area: Area; onOverview: () => void }) => {
+  const areaLabel = AREAS.find(([key]) => key === area)?.[1] || 'This area';
+  const guidance: Partial<Record<Area, string>> = {
+    notifications: 'Organizer notifications arrive per class — registration decisions, queue news and PHANTOM messages land here once your first class exists.',
+    templates: 'Templates store an activity’s configuration so you can reuse it in one click. They live inside a class, so create your first class first.',
+  };
+  return (
+    <div className={card}>
+      <p className={label}>Nothing here yet</p>
+      <h2 className="mt-1 text-xl font-black text-slate-900">{areaLabel}</h2>
+      <p className="mt-2 max-w-xl text-sm font-medium text-slate-500">
+        {guidance[area] || `${areaLabel} works inside one of your classes. Create your first class — once PHANTOM approves it, this area unlocks with everything in its place.`}
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" className="cgm-primary-button" onClick={onOverview}>Create your first class</button>
+      </div>
+    </div>
+  );
+};
+
 const NoClassView = ({ classes, onCreated }: { classes: any[]; onCreated: () => void }) => {
-  const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', institution: '', department: '', academicYear: '', level: '', description: '' });
+  const [open, setOpen] = useState(false);  const [form, setForm] = useState({ name: '', institution: '', department: '', academicYear: '', level: '', description: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
