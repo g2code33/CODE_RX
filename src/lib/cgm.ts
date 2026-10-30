@@ -61,28 +61,53 @@ export class CgmError extends Error {
   }
 }
 
+// §38 duplicate-submission guard: while one mutating request to an endpoint is
+// in flight, a second identical call is refused instead of silently firing twice.
+const inFlight = new Set<string>();
+
+function guardDuplicate(method: string, endpoint: string): () => void {
+  if (method === 'GET') return () => undefined;
+  const key = `${method} ${endpoint}`;
+  if (inFlight.has(key)) throw new CgmError('One moment — that action is already being sent.', 409, 'duplicate');
+  inFlight.add(key);
+  return () => inFlight.delete(key);
+}
+
 async function memberCall<T = any>(endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+  const method = options.method || 'GET';
+  const release = guardDuplicate(method, endpoint);
   const { getToken } = await import('./cloudflare');
-  const headers = new Headers({ Accept: 'application/json' });
-  const token = getToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (options.body !== undefined) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    method: options.method || 'GET',
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    credentials: 'omit',
-    cache: 'no-store',
-  });
-  let json: any = null;
-  try { json = await response.json(); } catch { /* non-JSON (CSV) */ }
-  if (!response.ok) {
-    throw new CgmError(json?.error || 'The request could not be completed.', response.status, json?.code || null, json?.data || null);
+  try {
+    const headers = new Headers({ Accept: 'application/json' });
+    const token = getToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    if (options.body !== undefined) headers.set('Content-Type', 'application/json');
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE}${endpoint}`, {
+        method,
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        credentials: 'omit',
+        cache: 'no-store',
+      });
+    } catch {
+      throw new CgmError('We could not reach Code Rx Society. Check your connection and try again.', 0, 'offline');
+    }
+    let json: any = null;
+    try { json = await response.json(); } catch { /* non-JSON (CSV) */ }
+    if (!response.ok) {
+      throw new CgmError(json?.error || 'The request could not be completed.', response.status, json?.code || null, json?.data || null);
+    }
+    return (json?.data !== undefined ? json.data : json) as T;
+  } finally {
+    release();
   }
-  return (json?.data !== undefined ? json.data : json) as T;
 }
 
 async function studentCall<T = any>(endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+  const release = guardDuplicate(options.method || 'GET', endpoint);
+  try {
   const headers = new Headers({ Accept: 'application/json' });
   const session = studentSession.read();
   if (session?.token) headers.set(STUDENT_SESSION_HEADER, session.token);
@@ -106,21 +131,47 @@ async function studentCall<T = any>(endpoint: string, options: { method?: string
     throw new CgmError(json?.error || 'The request could not be completed.', response.status, json?.code || null, json?.data || null);
   }
   return (json?.data !== undefined ? json.data : json) as T;
+  } finally {
+    release();
+  }
 }
 
-/** CSV download helper for organizer reports (Bearer-authenticated). */
-export async function downloadReport(classId: number, kind: string) {
+/** Multipart member call (attachments). */
+async function memberFormCall<T = any>(endpoint: string, form: FormData): Promise<T> {
+  const release = guardDuplicate('POST', endpoint);
+  try {
+    const { getToken } = await import('./cloudflare');
+    const headers = new Headers({ Accept: 'application/json' });
+    const token = getToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers, body: form, credentials: 'omit', cache: 'no-store' });
+    } catch {
+      throw new CgmError('We could not reach Code Rx Society. Check your connection and try again.', 0, 'offline');
+    }
+    let json: any = null;
+    try { json = await response.json(); } catch { /* non-JSON */ }
+    if (!response.ok) throw new CgmError(json?.error || 'The request could not be completed.', response.status, json?.code || null, json?.data || null);
+    return (json?.data !== undefined ? json.data : json) as T;
+  } finally {
+    release();
+  }
+}
+
+/** Report download (CSV, Excel or PDF) for organizers (Bearer-authenticated). */
+export async function downloadReport(classId: number, kind: string, format: 'csv' | 'xlsx' | 'pdf' = 'csv') {
   const { getToken } = await import('./cloudflare');
   const headers = new Headers({ Accept: 'text/csv' });
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${API_BASE}/api/cgm/classes/${classId}/reports/${kind}`, { headers, credentials: 'omit' });
+  const response = await fetch(`${API_BASE}/api/cgm/classes/${classId}/reports/${kind}?format=${format}`, { headers, credentials: 'omit' });
   if (!response.ok) throw new CgmError('The report could not be generated.', response.status);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `code-rx-${kind}-${classId}.csv`;
+  anchor.download = `code-rx-${kind}-${classId}.${format}`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -162,7 +213,10 @@ export const cgm = {
   // organizer applications
   applyOrganizer: (body: { institution: string; motivation?: string }) =>
     memberCall('/api/cgm/organizer/apply', { method: 'POST', body }),
-  organizerStatus: () => memberCall('/api/cgm/organizer/status'),
+  // Shape note: data.application plus delegatedClassIds (PHANTOM registration-
+  // approval delegations that unlock the Approvals area for this member).
+  organizerStatus: () =>
+    memberCall('/api/cgm/organizer/status') as Promise<{ data?: { delegatedClassIds?: number[]; [key: string]: unknown } }>,
 
   // classes
   createClass: (body: Record<string, unknown>) => memberCall('/api/cgm/classes', { method: 'POST', body }),
@@ -285,8 +339,20 @@ export const cgm = {
 
   // announcements
   announcements: (classId: number) => memberCall(`/api/cgm/classes/${classId}/announcements`),
-  createAnnouncement: (classId: number, body: Record<string, unknown>) =>
-    memberCall(`/api/cgm/classes/${classId}/announcements`, { method: 'POST', body }),
+  createAnnouncement: async (classId: number, body: Record<string, unknown>, attachment?: File | null) => {
+    if (!attachment) return memberCall(`/api/cgm/classes/${classId}/announcements`, { method: 'POST', body });
+    const form = new FormData();
+    form.append('title', String(body.title ?? ''));
+    form.append('body', String(body.body ?? ''));
+    if (body.pinned !== undefined) form.append('pinned', body.pinned ? 'true' : 'false');
+    form.append('attachment', attachment);
+    return memberFormCall(`/api/cgm/classes/${classId}/announcements`, form);
+  },
+  announcementReads: (announcementId: number) => memberCall(`/api/cgm/announcements/${announcementId}/reads`),
+  remindActivity: (activityId: number) =>
+    memberCall(`/api/cgm/activities/${activityId}/reminders`, { method: 'POST', body: {} }),
+  planSuccession: (groupId: number, body: { method: 'automatic' | 'appointment' | 'election'; studentId?: number; tieBreak?: string }) =>
+    memberCall(`/api/cgm/groups/${groupId}/succession`, { method: 'POST', body }),
   updateAnnouncement: (announcementId: number, body: Record<string, unknown>) =>
     memberCall(`/api/cgm/announcements/${announcementId}`, { method: 'PATCH', body }),
   pinAnnouncement: (announcementId: number) =>

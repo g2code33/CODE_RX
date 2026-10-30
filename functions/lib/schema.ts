@@ -1174,6 +1174,13 @@ const SAFE_MIGRATIONS = [
   { table: 'community_message_attachments', column: 'telegram_sync_status', sql: "ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_status TEXT NOT NULL DEFAULT 'not_requested'" },
   { table: 'community_message_attachments', column: 'telegram_synced_at', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_synced_at DATETIME' },
   { table: 'community_message_attachments', column: 'telegram_sync_error', sql: 'ALTER TABLE community_message_attachments ADD COLUMN telegram_sync_error TEXT' },
+  // Class & Group Management step 5: announcement attachments (R2) and
+  // reminder-notification de-duplication.
+  { table: 'cgm_announcements', column: 'attachment_r2_key', sql: 'ALTER TABLE cgm_announcements ADD COLUMN attachment_r2_key TEXT' },
+  { table: 'cgm_announcements', column: 'attachment_name', sql: 'ALTER TABLE cgm_announcements ADD COLUMN attachment_name TEXT' },
+  { table: 'cgm_announcements', column: 'attachment_type', sql: 'ALTER TABLE cgm_announcements ADD COLUMN attachment_type TEXT' },
+  { table: 'cgm_announcements', column: 'attachment_size', sql: 'ALTER TABLE cgm_announcements ADD COLUMN attachment_size INTEGER' },
+  { table: 'cgm_student_notifications', column: 'dedupe_key', sql: 'ALTER TABLE cgm_student_notifications ADD COLUMN dedupe_key TEXT' },
 
   { table: 'members', column: 'phone_login_key', sql: 'ALTER TABLE members ADD COLUMN phone_login_key TEXT' },
   { table: 'member_activations', column: 'revoked_at', sql: 'ALTER TABLE member_activations ADD COLUMN revoked_at DATETIME' },
@@ -1230,7 +1237,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-10-30-code-rx17-class-group-management-phantom-oversight';
+const VAULT_SCHEMA_VERSION = '2026-10-30-code-rx18-class-group-management-step5';
 
 
 // Role codes stay stable for member history and permissions. Their visible

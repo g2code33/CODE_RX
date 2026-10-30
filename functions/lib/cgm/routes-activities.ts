@@ -11,6 +11,7 @@ import type { Hono } from 'hono';
 import { recordPhantomInboxItem } from '../phantom-inbox';
 import { createNotification } from '../notifications';
 import { cleanEmail } from '../validate';
+import { buildReportPdf } from './pdf';
 import {
   planAssignments,
   rebalanceGenders,
@@ -41,6 +42,7 @@ import {
   readBody,
   requireClassPermission,
   requireModuleEnabled,
+  studentFromRequest,
   throttle,
 } from './service';
 
@@ -149,6 +151,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT e.*, s.full_name FROM cgm_assignment_events e JOIN cgm_students s ON s.id = e.student_id
        WHERE e.activity_id = ? ORDER BY e.id DESC LIMIT 200`
     ).bind(activityId));
+    const whatsappLinks = await asRows<any>(c.env.DB.prepare(
+      `SELECT w.id, w.group_id, w.url, w.status, w.click_count, w.created_at FROM cgm_whatsapp_links w
+       WHERE w.activity_id = ? ORDER BY w.id DESC LIMIT 100`
+    ).bind(activityId));
     const waitlist = await asRows<any>(c.env.DB.prepare(
       `SELECT w.*, s.full_name FROM cgm_activity_waitlist w JOIN cgm_students s ON s.id = w.student_id
        WHERE w.activity_id = ? AND w.status = 'waiting' ORDER BY w.id`
@@ -168,6 +174,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           capacity: row.capacity === null ? null : Number(row.capacity), size: Number(row.size),
         })),
         unassigned, members, changeRequests, history, waitlist,
+        whatsapp: whatsappLinks.map((row) => ({
+          id: Number(row.id), groupId: Number(row.group_id), url: row.url, status: row.status,
+          clickCount: Number(row.click_count || 0), createdAt: row.created_at,
+        })),
       },
     });
   });
@@ -982,30 +992,81 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(groupId));
     if (vacancy[0]) return bad(c, 'This group already has an active leader.', 409);
 
-    // Automatic succession: the most senior active assistant takes over.
-    const assistants = await asRows<any>(c.env.DB.prepare(
-      `SELECT * FROM cgm_leadership_appointments WHERE group_id = ? AND role = 'assistant' AND status = 'active' ORDER BY started_at LIMIT 1`
-    ).bind(groupId));
-    if (!assistants[0]) return bad(c, 'No assistant is available for automatic succession.', 409);
-    const assistant = assistants[0];
-    await c.env.DB.prepare(
-      `UPDATE cgm_leadership_appointments SET status = 'ended', ended_at = CURRENT_TIMESTAMP, end_reason = 'promoted to leader' WHERE id = ?`
-    ).bind(Number(assistant.id)).run();
+    const body = await readBody(c);
+    const method = String(body.method || 'automatic');
+    if (!['automatic', 'appointment', 'election'].includes(method)) return bad(c, 'Choose automatic succession, an appointment, or a fresh election.');
+
+    // Fresh election: create a nominating leader election for this group and
+    // let the members decide; the organizer only triggers it.
+    if (method === 'election') {
+      const activeElection = await asRows<{ id: number }>(c.env.DB.prepare(
+        `SELECT id FROM cgm_elections WHERE group_id = ? AND status IN ('nominating','voting')`
+      ).bind(groupId));
+      if (activeElection[0]) return bad(c, 'This group already has an active election.', 409);
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      const salt = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      const election = await c.env.DB.prepare(
+        `INSERT INTO cgm_elections
+         (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method, salt, created_by_profile_id)
+         VALUES (?, ?, ?, 'leader', 'anonymous', 'group', 0, ?, ?, ?)`
+      ).bind(activityId, groupId, 'Group leadership election', ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
+        salt, member.profileId).run();
+      const members = await asRows<{ student_id: number }>(c.env.DB.prepare(
+        `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
+      ).bind(groupId));
+      for (const row of members) {
+        await notifyStudent(c.env.DB, Number(row.student_id), 'election', 'Nominate your group leader',
+          `A leadership election was opened for your group in ${group.activity_name}. Contest or get ready to vote.`);
+      }
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.leadership.succession_election', entityType: 'group', entityId: groupId,
+        classId: Number(group.class_id), activityId,
+        context: { electionId: Number(election.meta.last_row_id) },
+      });
+      return c.json({ success: true, data: { electionId: Number(election.meta.last_row_id) } });
+    }
+
+    let successorId: number | null = null;
+    let successionMethod = 'automatic';
+    if (method === 'appointment') {
+      successorId = Number(body.studentId) || null;
+      if (!successorId) return bad(c, 'Choose the member to appoint as leader.', 400);
+      const membership = await asRows<{ id: number }>(c.env.DB.prepare(
+        `SELECT id FROM cgm_group_assignments WHERE group_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(groupId, successorId));
+      if (!membership[0]) return bad(c, 'That student is not in this group.', 400);
+      successionMethod = 'appointment';
+    } else {
+      // Automatic succession: the most senior active assistant takes over.
+      const assistants = await asRows<any>(c.env.DB.prepare(
+        `SELECT * FROM cgm_leadership_appointments WHERE group_id = ? AND role = 'assistant' AND status = 'active' ORDER BY started_at LIMIT 1`
+      ).bind(groupId));
+      if (!assistants[0]) return bad(c, 'No assistant is available for automatic succession — appoint someone or run an election.', 409);
+      successorId = Number(assistants[0].student_id);
+      if (assistants[0].role === 'assistant') {
+        await c.env.DB.prepare(
+          `UPDATE cgm_leadership_appointments SET status = 'ended', ended_at = CURRENT_TIMESTAMP, end_reason = 'promoted to leader' WHERE id = ?`
+        ).bind(Number(assistants[0].id)).run();
+      }
+    }
+    const successor = successorId;
     // The successor does NOT inherit the previous leader's permissions; they
     // start from the activity's configured leader set.
     await c.env.DB.prepare(
       `INSERT INTO cgm_leadership_appointments (activity_id, group_id, student_id, role, method, permissions_json, appointed_by_label)
-       VALUES (?, ?, ?, 'leader', 'succession', ?, ?)`
-    ).bind(activityId, groupId, Number(assistant.student_id), JSON.stringify(config.leaderPermissions), member.name).run();
-    await notifyStudent(c.env.DB, Number(assistant.student_id), 'leadership', 'You are now the group leader',
-      `You were promoted from assistant to leader of your group in ${group.activity_name}.`);
+       VALUES (?, ?, ?, 'leader', ?, ?, ?)`
+    ).bind(activityId, groupId, successor, successionMethod, JSON.stringify(config.leaderPermissions), member.name).run();
+    await notifyStudent(c.env.DB, successor, 'leadership', 'You are now the group leader',
+      `You were made leader of your group in ${group.activity_name}.`);
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.leadership.succession', entityType: 'group', entityId: groupId,
       classId: Number(group.class_id), activityId,
-      context: { studentId: Number(assistant.student_id) },
+      context: { studentId: successor, method: successionMethod },
     });
-    return c.json({ success: true });
+    return c.json({ success: true, data: { studentId: successor, method: successionMethod } });
   });
 
   // -------------------------------------------------------------------------
@@ -1325,6 +1386,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT r.*, a.title AS announcement_title FROM cgm_announcement_reports r
        JOIN cgm_announcements a ON a.id = r.announcement_id WHERE a.class_id = ? AND r.status = 'open' ORDER BY r.id DESC LIMIT 50`
     ).bind(classId));
+    const readCounts = await asRows<{ announcement_id: number; c: number }>(c.env.DB.prepare(
+      `SELECT announcement_id, COUNT(*) AS c FROM cgm_announcement_reads
+       WHERE announcement_id IN (${rows.map(() => '?').join(',') || 'NULL'}) GROUP BY announcement_id`
+    ).bind(...rows.map((row) => Number(row.id))));
+    const readCountFor = (id: number) => Number(readCounts.find((entry) => Number(entry.announcement_id) === id)?.c || 0);
     return c.json({
       success: true,
       data: {
@@ -1333,6 +1399,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           pinned: Number(row.pinned) === 1, authorType: row.author_type, authorLabel: row.author_label,
           groupId: row.group_id ? Number(row.group_id) : null, activityId: row.activity_id ? Number(row.activity_id) : null,
           createdAt: row.created_at, updatedAt: row.updated_at,
+          attachmentName: row.attachment_name || null,
+          attachmentUrl: row.attachment_name ? `/api/cgm/announcements/${Number(row.id)}/attachment` : null,
+          readCount: readCountFor(Number(row.id)),
         })),
         reports: reports.map((row) => ({
           id: Number(row.id), announcementId: Number(row.announcement_id), title: row.announcement_title,
@@ -1348,20 +1417,146 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const classId = Number(c.req.param('id'));
     const guard = await requireClassPermission(c, member, classId, 'manage_announcements');
     if (!guard.ok) return guard.response;
-    const body = await readBody(c);
+    // JSON bodies and multipart (with an optional R2 attachment) both land here.
+    let body: Record<string, unknown>;
+    let attachment: File | null = null;
+    if (String(c.req.header('content-type') || '').includes('multipart/form-data')) {
+      const form = await c.req.parseBody();
+      attachment = form.attachment instanceof File && form.attachment.size > 0 ? form.attachment : null;
+      body = {
+        title: form.title, body: form.body, pinned: form.pinned === 'true' || form.pinned === '1',
+        activityId: form.activityId, groupId: form.groupId,
+      };
+    } else {
+      body = await readBody(c);
+    }
     const title = clean(body.title, 180);
     const message = clean(body.body, 5000);
     if (!title || !message) return bad(c, 'An announcement needs a title and a message.');
+    if (attachment && attachment.size > 5 * 1024 * 1024) return bad(c, 'Keep attachments under 5 MB.', 413);
     const result = await c.env.DB.prepare(
       `INSERT INTO cgm_announcements (class_id, activity_id, group_id, author_type, author_profile_id, author_label, title, body, pinned)
        VALUES (?, ?, ?, 'organizer', ?, ?, ?, ?, ?)`
     ).bind(classId, body.activityId ? Number(body.activityId) : null, body.groupId ? Number(body.groupId) : null,
       member.profileId, member.name, title, message, body.pinned === true ? 1 : 0).run();
+    const announcementId = Number(result.meta.last_row_id);
+    // The file goes straight into the platform's existing R2 bucket; the row
+    // keeps only the key, name, type and size.
+    if (attachment && c.env.BUCKET) {
+      const key = `cgm/announcements/${classId}/${announcementId}-${Date.now()}-${attachment.name.replace(/[^\w.-]+/g, '_').slice(0, 80)}`;
+      await c.env.BUCKET.put(key, await attachment.arrayBuffer(), { httpMetadata: { contentType: attachment.type || 'application/octet-stream' } });
+      await c.env.DB.prepare(
+        `UPDATE cgm_announcements SET attachment_r2_key = ?, attachment_name = ?, attachment_type = ?, attachment_size = ? WHERE id = ?`
+      ).bind(key, attachment.name.slice(0, 200), (attachment.type || 'application/octet-stream').slice(0, 120), attachment.size, announcementId).run();
+    }
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
-      action: 'cgm.announcement.created', entityType: 'announcement', entityId: Number(result.meta.last_row_id), classId,
+      action: 'cgm.announcement.created', entityType: 'announcement', entityId: announcementId, classId,
+      context: { attachment: attachment ? attachment.name.slice(0, 120) : null },
     });
-    return c.json({ success: true, data: { id: Number(result.meta.last_row_id) } });
+    return c.json({ success: true, data: { id: announcementId } });
+  });
+
+  // -------------------------------------------------------------------------
+  // §12 — Announcement attachments (stored in the platform R2 bucket)
+  // -------------------------------------------------------------------------
+
+  app.get('/api/cgm/announcements/:id/attachment', async (c: any) => {
+    const announcementId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      'SELECT id, class_id, attachment_r2_key, attachment_name, attachment_type FROM cgm_announcements WHERE id = ?'
+    ).bind(announcementId));
+    const announcement = rows[0];
+    if (!announcement || !announcement.attachment_r2_key) return bad(c, 'This announcement has no attachment.', 404);
+    // Class members (students) and the class team both may download.
+    const student = await studentFromRequest(c);
+    let allowed = false;
+    if (student) {
+      const membership = await asRows<{ id: number }>(c.env.DB.prepare(
+        "SELECT id FROM cgm_class_members WHERE class_id = ? AND student_id = ? AND status = 'active'"
+      ).bind(Number(announcement.class_id), student.id));
+      allowed = Boolean(membership[0]);
+    }
+    if (!allowed) {
+      const member = await memberFromRequest(c);
+      if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+      const context = await organizerContextFor(c.env.DB, member, Number(announcement.class_id));
+      allowed = Boolean(member.isPhantom || context.role);
+    }
+    if (!allowed) return bad(c, 'Only this class can download the attachment.', 403);
+    const object = await c.env.BUCKET.get(String(announcement.attachment_r2_key));
+    if (!object) return bad(c, 'The attachment file is missing.', 404);
+    return new Response(object.body, {
+      status: 200,
+      headers: {
+        'Content-Type': String(announcement.attachment_type || 'application/octet-stream'),
+        'Content-Disposition': `attachment; filename="${String(announcement.attachment_name || 'attachment').replace(/[^\w.-]+/g, '_')}"`,
+      },
+    });
+  });
+
+  // §12 — Read tracking: the organizer sees who has read an announcement.
+  app.get('/api/cgm/announcements/:id/reads', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const announcementId = Number(c.req.param('id'));
+    const rows = await asRows<{ id: number; class_id: number }>(c.env.DB.prepare(
+      'SELECT id, class_id FROM cgm_announcements WHERE id = ?'
+    ).bind(announcementId));
+    if (!rows[0]) return bad(c, 'Announcement not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(rows[0].class_id), 'manage_announcements');
+    if (!guard.ok) return guard.response;
+    const reads = await asRows<{ full_name: string; read_at: string }>(c.env.DB.prepare(
+      `SELECT s.full_name, r.read_at FROM cgm_announcement_reads r JOIN cgm_students s ON s.id = r.student_id
+       WHERE r.announcement_id = ? ORDER BY r.read_at DESC LIMIT 500`
+    ).bind(announcementId));
+    return c.json({
+      success: true,
+      data: {
+        count: reads.length,
+        readers: reads.map((row) => ({ fullName: row.full_name, readAt: row.read_at })),
+      },
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // §31 — Deadline reminders (organizer-triggered, de-duplicated per student)
+  // -------------------------------------------------------------------------
+
+  app.post('/api/cgm/activities/:id/reminders', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'manage_activities');
+    if (!guard.ok) return guard.response;
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    const deadline = config.selfDeadline ? new Date(String(config.selfDeadline)) : null;
+    if (!deadline || Number.isNaN(deadline.getTime())) return bad(c, 'This activity has no self-assignment deadline to remind about.', 409);
+    const dayKey = deadline.toISOString().slice(0, 10);
+    const students = await asRows<{ id: number }>(c.env.DB.prepare(
+      `SELECT s.id FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
+       WHERE cm.class_id = ? AND cm.status = 'active'
+         AND NOT EXISTS (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')`
+    ).bind(Number(activity.class_id), activityId));
+    let sent = 0; let skipped = 0;
+    for (const student of students) {
+      const before = await asRows<{ c: number }>(c.env.DB.prepare(
+        'SELECT COUNT(*) AS c FROM cgm_student_notifications WHERE student_id = ? AND dedupe_key = ?'
+      ).bind(student.id, `activity-deadline:${activityId}:${dayKey}`));
+      if (Number(before[0]?.c || 0) > 0) { skipped += 1; continue; }
+      await notifyStudent(c.env.DB, student.id, 'activity', 'Deadline coming up',
+        `${activity.name}: choose your group before ${dayKey}. After the deadline your organizer places you.`, null,
+        `activity-deadline:${activityId}:${dayKey}`);
+      sent += 1;
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.activity.reminders', entityType: 'activity', entityId: activityId,
+      classId: Number(activity.class_id), context: { sent, skipped, dayKey },
+    });
+    return c.json({ success: true, data: { sent, skipped, eligible: students.length } });
   });
 
   app.patch('/api/cgm/announcements/:id', async (c: any) => {
@@ -1805,20 +2000,49 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       sqlText = sqlText.replace('s.university_id, s.phone,', 'NULL, NULL,').replace('s.email,', 'NULL,');
     }
     rows = await asRows<any>(c.env.DB.prepare(sqlText));
+    await auditCgm(c.env.DB, {
+      actorType: member.isPhantom ? 'phantom' : 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.report.exported', entityType: 'class', entityId: classId, classId,
+      context: { kind, format: String(c.req.query('format') || 'csv') },
+    });
+    const disposition = (extension: string) => `attachment; filename="code-rx-${kind}-${classId}.${extension}"`;
+    const tableRows = rows.map((row) => Object.values(row));
+
+    if (String(c.req.query('format')) === 'pdf') {
+      const pdf = buildReportPdf(`${kind.charAt(0).toUpperCase()}${kind.slice(1)} report`,
+        report.header, tableRows as string[][], `class #${classId} · ${member.name}`);
+      return new Response(pdf as unknown as BodyInit, {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': disposition('pdf') },
+      });
+    }
+    if (String(c.req.query('format')) === 'xlsx') {
+      // The same ESM build the roster import uses; write() with type 'array'
+      // stays inside the Workers runtime.
+      // @ts-ignore -- xlsx/xlsx.mjs has no bundled declaration file.
+      const XLSXLib = (await import('xlsx/xlsx.mjs')) as unknown as typeof import('xlsx');
+      const sheet = XLSXLib.utils.aoa_to_sheet([report.header, ...tableRows]);
+      const book = XLSXLib.utils.book_new();
+      XLSXLib.utils.book_append_sheet(book, sheet, 'Report');
+      const buffer = XLSXLib.write(book, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+      return new Response(buffer, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': disposition('xlsx'),
+        },
+      });
+    }
     const csvEscape = (value: unknown) => {
       const text = value === null || value === undefined ? '' : String(value);
       return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
     };
-    const csv = [report.header.join(','), ...rows.map((row) => Object.values(row).map(csvEscape).join(','))].join('\n');
-    await auditCgm(c.env.DB, {
-      actorType: member.isPhantom ? 'phantom' : 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
-      action: 'cgm.report.exported', entityType: 'class', entityId: classId, classId, context: { kind },
-    });
+    const csv = [report.header.join(','), ...tableRows.map((row) => (row as unknown[]).map(csvEscape).join(','))].join('\n');
     return new Response(csv, {
       status: 200,
       headers: {
         'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="code-rx-${kind}-${classId}.csv"`,
+        'Content-Disposition': disposition('csv'),
       },
     });
   });

@@ -4,6 +4,7 @@ import {
   LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, studentSession, type CgmStudentSession } from '../../lib/cgm';
+import { ConnectionBanner } from './ConnectionBanner';
 
 /**
  * CODE Rx — Student Portal.
@@ -235,6 +236,7 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
 
   return (
     <div className="cgm-shell">
+      <ConnectionBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
@@ -482,7 +484,18 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity }: { classId: number;
               <li key={row.id} className={`rounded-xl border px-4 py-3 ${row.pinned ? 'border-amber-200 bg-amber-50/50' : 'border-slate-100'}`}>
                 <p className="text-sm font-black text-slate-800">{row.pinned ? '📌 ' : ''}{row.title}</p>
                 <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{row.body}</p>
-                <p className="mt-2 text-[11px] font-semibold text-slate-400">{row.author_label} · {formatWhen(row.created_at)}</p>
+                <p className="mt-2 text-[11px] font-semibold text-slate-400">
+                  {row.author_label || row.authorLabel} · {formatWhen(row.created_at || row.createdAt)}
+                  {row.attachment_name || row.attachmentName ? (
+                    <a
+                      href={row.attachment_url || row.attachmentUrl}
+                      className="ml-2 font-black text-emerald-700 underline"
+                      download
+                    >
+                      📎 {row.attachment_name || row.attachmentName}
+                    </a>
+                  ) : null}
+                </p>
               </li>
             ))}
           </ul>
@@ -774,8 +787,27 @@ const AttendanceView = () => {
 const CalendarView = () => {
   const [events, setEvents] = useState<any[] | null>(null);
   const [filter, setFilter] = useState<string>('all');
+  const [monthCursor, setMonthCursor] = useState(() => { const now = new Date(); return new Date(now.getFullYear(), now.getMonth(), 1); });
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   useEffect(() => { void cgmStudent.calendar().then(setEvents).catch(() => setEvents([])); }, []);
   const visible = (events || []).filter((event) => filter === 'all' || event.type === filter);
+
+  const dayKey = (value: unknown) => {
+    const date = new Date(String(value).replace(' ', 'T'));
+    return Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  };
+  const monthLabel = monthCursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const firstWeekday = (monthCursor.getDay() + 6) % 7; // Monday-first grid
+  const daysInMonth = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0).getDate();
+  const eventsByDay = new Map<string, any[]>();
+  for (const event of visible) {
+    const key = dayKey(event.at);
+    if (!key) continue;
+    eventsByDay.set(key, [...(eventsByDay.get(key) || []), event]);
+  }
+  const todayKey = dayKey(new Date().toISOString());
+  const selectedEvents = selectedDay ? (eventsByDay.get(selectedDay) || []) : null;
+
   return (
     <div className="space-y-4">
       <div className={card}>
@@ -787,7 +819,64 @@ const CalendarView = () => {
             ))}
           </div>
         </div>
-        <ul className="mt-4 space-y-2">
+
+        <div className="mt-4">
+          <div className="flex items-center justify-between">
+            <button type="button" className="mini-button" onClick={() => setMonthCursor(new Date(monthCursor.getFullYear(), monthCursor.getMonth() - 1, 1))} aria-label="Previous month">‹</button>
+            <p className="text-sm font-black text-slate-800">{monthLabel}</p>
+            <button type="button" className="mini-button" onClick={() => setMonthCursor(new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 1))} aria-label="Next month">›</button>
+          </div>
+          <div className="mt-3 grid grid-cols-7 gap-1 text-center">
+            {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => (
+              <p key={`${day}-${index}`} className="text-[10px] font-black uppercase text-slate-400">{day}</p>
+            ))}
+            {Array.from({ length: firstWeekday }, (_, index) => <span key={`pad-${index}`} />)}
+            {Array.from({ length: daysInMonth }, (_, index) => {
+              const date = new Date(monthCursor.getFullYear(), monthCursor.getMonth(), index + 1);
+              const key = dayKey(date.toISOString());
+              const dayEvents = eventsByDay.get(key) || [];
+              const isSelected = selectedDay === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSelectedDay(isSelected ? null : key)}
+                  aria-label={`${date.toLocaleDateString()} — ${dayEvents.length} event(s)`}
+                  aria-pressed={isSelected}
+                  className={`relative rounded-lg py-1.5 text-xs font-bold transition ${isSelected ? 'bg-emerald-600 text-white' : key === todayKey ? 'bg-emerald-100 text-emerald-800' : dayEvents.length ? 'bg-slate-100 text-slate-700 hover:bg-emerald-50' : 'text-slate-400 hover:bg-slate-50'}`}
+                >
+                  {index + 1}
+                  {dayEvents.length > 0 && (
+                    <span className={`absolute inset-x-0 bottom-0.5 mx-auto h-1 w-1 rounded-full ${isSelected ? 'bg-white' : 'bg-emerald-500'}`} />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {selectedEvents && (
+          <div className="mt-4">
+            <p className={label}>{selectedDay && new Date(`${selectedDay}T00:00:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+            <ul className="mt-2 space-y-2">
+              {selectedEvents.map((event, index) => (
+                <li key={index} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">{event.title}</p>
+                    <p className="text-[11px] font-semibold text-slate-400">{event.type}</p>
+                  </div>
+                  <span className="text-xs font-black text-slate-500">{String(event.at).slice(11, 16) || '—'}</span>
+                </li>
+              ))}
+              {!selectedEvents.length && <li className="py-3 text-center text-xs font-medium text-slate-400">Nothing on this day.</li>}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <div className={card}>
+        <p className={label}>All upcoming</p>
+        <ul className="mt-3 space-y-2">
           {visible.map((event, index) => (
             <li key={index} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
               <div>

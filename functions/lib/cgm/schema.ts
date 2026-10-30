@@ -646,6 +646,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_whatsapp_active ON cgm_whatsapp_links(
 CREATE INDEX IF NOT EXISTS idx_cgm_attendance_sessions_activity ON cgm_attendance_sessions(activity_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_attendance_record ON cgm_attendance_records(session_id, student_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_notifications_student ON cgm_student_notifications(student_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_notifications_dedupe ON cgm_student_notifications(student_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cgm_audit_class ON cgm_audit(class_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_audit_action ON cgm_audit(action);
 CREATE INDEX IF NOT EXISTS idx_cgm_snapshots_activity ON cgm_activity_snapshots(activity_id);

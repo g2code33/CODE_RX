@@ -7,6 +7,8 @@ import * as QRCode from 'qrcode';
 import {
   cgm, downloadReport, importRosterFile,
 } from '../../lib/cgm';
+import { appDialog } from '../AppDialog';
+import { ConnectionBanner } from './ConnectionBanner';
 
 /**
  * CODE Rx — Class & Group Management (organizer workspace).
@@ -80,7 +82,10 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
 
   const activeClass = classes.find((entry) => Number(entry.id) === activeClassId) || null;
   const permissions = new Set<string>(activeClass?.permissions || []);
+  const delegated = activeClass ? (status?.delegatedClassIds || []).map(Number).includes(Number(activeClass.id)) : false;
   const can = (permission: string) => !activeClass || activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has(permission);
+  // Registration approvals also open for members PHANTOM delegated to this class.
+  const canApprovals = can('approve_registrations') || can('approve_memberships') || can('review_profile_changes') || delegated;
 
   const visibleAreas = useMemo(() => AREAS.filter(([key]) => {
     if (['overview', 'classes', 'templates', 'notifications'].includes(key)) return true;
@@ -95,7 +100,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
       case 'calendar': return true;
       case 'announcements': return can('manage_announcements');
       case 'reports': return can('generate_reports') || can('view_roster');
-      case 'approvals': return can('approve_registrations') || can('approve_memberships') || can('review_profile_changes');
+      case 'approvals': return canApprovals;
       case 'permissions': return can('manage_class_settings');
       case 'archives': return can('archive_activities') || can('view_roster');
       case 'settings': return can('manage_class_settings');
@@ -112,6 +117,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
 
   return (
     <div className="cgm-shell">
+      <ConnectionBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
@@ -181,7 +187,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'students' && can('view_roster') && <StudentsArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} canImport={can('import_roster')} sensitive={activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has('view_sensitive_profiles')} onChanged={() => void refresh()} />}
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} />}
-          {activeClass && area === 'groups' && <GroupsArea classId={activeClass.id} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} onChanged={() => void refresh()} />}
+          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} onChanged={() => void refresh()} />}
           {activeClass && area === 'elections' && can('manage_elections') && <ElectionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} />}
           {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -190,7 +196,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'notifications' && <NotificationsArea classId={activeClass.id} />}
           {activeClass && area === 'reports' && <ReportsArea classId={activeClass.id} />}
           {activeClass && area === 'templates' && <TemplatesArea classId={activeClass.id} onChanged={() => void refresh()} />}
-          {activeClass && area === 'approvals' && <ApprovalsArea classId={activeClass.id} canRegistrations={can('approve_registrations')} canMemberships={can('approve_memberships')} canProfiles={can('review_profile_changes')} onChanged={() => void refresh()} />}
+          {activeClass && area === 'approvals' && <ApprovalsArea classId={Number(activeClass.id)} canRegistrations={can('approve_registrations') || delegated} canMemberships={can('approve_memberships')} canProfiles={can('review_profile_changes')} delegated={delegated} onChanged={() => void refresh()} />}
           {activeClass && area === 'permissions' && <PermissionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'archives' && <ArchivesArea classId={Number(activeClass.id)} />}
           {activeClass && area === 'settings' && <SettingsArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -726,6 +732,7 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [templates, setTemplates] = useState<any[]>([]);
   const [form, setForm] = useState({
     name: '', type: 'tutorial', description: '',
@@ -838,6 +845,7 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
         </form>
       )}
 
+      {message && <Banner tone="success">{message}</Banner>}
       {rows === null && <p className="text-sm font-semibold text-slate-400">Loading…</p>}
       {rows?.length === 0 && <EmptyArea icon={Layers} title="No activities yet" text="Tutorial groups, practicals, presentations — each one is independent." />}
       {rows && rows.length > 0 && (
@@ -849,7 +857,24 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
                   <p className="text-sm font-black text-slate-800">{row.name}</p>
                   <p className="text-[11px] font-semibold text-slate-400">{row.type} · {row.status} · {row.assignedCount} assigned in {row.groupCount} groups · {row.config.method}</p>
                 </div>
-                <ActivityLifecycleButtons activity={row} onChanged={async () => { await load(); onChanged(); }} />
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {['open', 'published', 'active'].includes(String(row.status)) && row.config?.selfDeadline && (
+                    <button
+                      type="button"
+                      className="mini-button"
+                      title="Notify every student who has not been placed yet (once per student per deadline)"
+                      onClick={async () => {
+                        try {
+                          const result = await cgm.remindActivity(Number(row.id));
+                          setMessage(`Reminders sent to ${(result as any).sent} student(s)${(result as any).skipped ? ` — ${(result as any).skipped} already reminded for this deadline.` : '.'}`);
+                        } catch (failure: any) { setMessage(failure?.message || 'Reminders failed.'); }
+                      }}
+                    >
+                      Remind
+                    </button>
+                  )}
+                  <ActivityLifecycleButtons activity={row} onChanged={async () => { await load(); onChanged(); }} />
+                </div>
               </li>
             ))}
           </ul>
@@ -915,7 +940,7 @@ const ActivityLifecycleButtons = ({ activity, onChanged }: { activity: any; onCh
   );
 };
 
-const GroupsArea = ({ classId, canGenerate, canMove, canRemove, onChanged }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; onChanged: () => void }) => {
+const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, onChanged }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; onChanged: () => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
   const [activityId, setActivityId] = useState<number | null>(null);
   const [data, setData] = useState<any>(null);
@@ -939,6 +964,23 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, onChanged }: { c
     try { const result = await work(); if (activityId) await load(activityId); onChanged(); return result; }
     catch (failure: any) { setError(failure?.message || 'That did not work.'); return null; }
     finally { setBusy(false); }
+  };
+
+  const [qrByGroup, setQrByGroup] = useState<Record<number, string>>({});
+
+  const setWhatsapp = async (groupId: number, url: string) => {
+    await run(() => cgm.setWhatsApp(groupId, url));
+    setMessage(url ? 'WhatsApp link saved — only group members can open it.' : 'WhatsApp link revoked.');
+  };
+
+  const whatsappAction = async (groupId: number, action: 'disable' | 'enable' | 'revoke') => {
+    await run(() => cgm.whatsappAction(groupId, action));
+    setMessage(`WhatsApp link ${action}d.`);
+  };
+
+  const showWhatsappQr = async (groupId: number, url: string) => {
+    const dataUrl = await QRCode.toDataURL(url, { width: 256, margin: 1 }).catch(() => null);
+    setQrByGroup((current) => ({ ...current, [groupId]: dataUrl || '' }));
   };
 
   return (
@@ -1020,6 +1062,42 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, onChanged }: { c
                   ))}
                   {!((data.members || []).some((member: any) => Number(member.group_id) === Number(group.id))) && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Empty</li>}
                 </ul>
+                {canManageWhatsapp && (
+                  <div className="mt-3 border-t border-slate-100 pt-3">
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">WhatsApp group</p>
+                    {(data.whatsapp || []).filter((link: any) => Number(link.groupId) === Number(group.id)).slice(0, 1).map((link: any) => (
+                      <div key={link.id} className="mt-1.5">
+                        <p className="break-all text-[11px] font-semibold {link.status === 'active' ? 'text-slate-600' : 'text-slate-400 line-through'}">{link.url}</p>
+                        <p className="text-[10px] font-bold uppercase text-slate-400">{link.status} · {link.clickCount} click(s){link.clickCount ? ' — clicks are not proof of joining' : ''}</p>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {link.status === 'active' && (
+                            <>
+                              <button type="button" className="mini-button" onClick={() => void showWhatsappQr(Number(group.id), String(link.url))}>QR</button>
+                              <button type="button" className="mini-button" onClick={() => void whatsappAction(Number(group.id), 'disable')}>Disable</button>
+                              <button type="button" className="mini-button text-red-600" onClick={() => void whatsappAction(Number(group.id), 'revoke')}>Revoke</button>
+                            </>
+                          )}
+                          {link.status === 'disabled' && <button type="button" className="mini-button" onClick={() => void whatsappAction(Number(group.id), 'enable')}>Enable</button>}
+                          <button type="button" className="mini-button" onClick={async () => {
+                            const url = await appDialog.prompt({ title: 'Replace the WhatsApp link', label: 'Paste the new https://chat.whatsapp.com/… link', confirmLabel: 'Replace' });
+                            if (url) await setWhatsapp(Number(group.id), url);
+                          }}>Replace</button>
+                        </div>
+                        {qrByGroup[Number(group.id)] && (
+                          <div className="mt-2 inline-block rounded-xl bg-white p-2 ring-1 ring-slate-100">
+                            <img src={qrByGroup[Number(group.id)]} alt={`WhatsApp QR for ${group.name}`} className="h-28 w-28" />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {!(data.whatsapp || []).some((link: any) => Number(link.groupId) === Number(group.id)) && (
+                      <button type="button" className="mini-button mt-1.5" onClick={async () => {
+                        const url = await appDialog.prompt({ title: `Add the WhatsApp group link for ${group.name}`, label: 'Paste the https://chat.whatsapp.com/… invite link', confirmLabel: 'Save' });
+                        if (url) await setWhatsapp(Number(group.id), url);
+                      }}>Paste link…</button>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1105,6 +1183,10 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
               if (!groupId) return;
               setBusy(true);
               try {
+                const windowValue = (name: string) => {
+                  const raw = String((form.elements.namedItem(name) as HTMLInputElement).value || '');
+                  return raw ? new Date(raw).toISOString() : undefined;
+                };
                 await cgm.createElection(groupId, {
                   title: String((form.elements.namedItem('title') as HTMLInputElement).value || `Group leadership election`),
                   role: String((form.elements.namedItem('role') as HTMLSelectElement).value),
@@ -1112,6 +1194,10 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
                   visibility: String((form.elements.namedItem('visibility') as HTMLSelectElement).value),
                   allowVoteChange: ((form.elements.namedItem('allowChange') as HTMLSelectElement).value) === 'yes',
                   tieBreak: String((form.elements.namedItem('tieBreak') as HTMLSelectElement).value),
+                  ...(windowValue('nominationOpenAt') ? { nominationOpenAt: windowValue('nominationOpenAt') } : {}),
+                  ...(windowValue('nominationCloseAt') ? { nominationCloseAt: windowValue('nominationCloseAt') } : {}),
+                  ...(windowValue('votingOpenAt') ? { votingOpenAt: windowValue('votingOpenAt') } : {}),
+                  ...(windowValue('votingCloseAt') ? { votingCloseAt: windowValue('votingCloseAt') } : {}),
                 });
                 setMessage('Election created — the group has been notified.');
                 await loadGroups(Number(activityId));
@@ -1128,6 +1214,14 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
             <select name="visibility" className={inputClass} aria-label="Results visibility"><option value="group">Group</option><option value="class">Class</option><option value="private">Private</option></select>
             <select name="allowChange" className={inputClass} aria-label="Vote changes"><option value="no">Votes locked</option><option value="yes">Changeable until close</option></select>
             <select name="tieBreak" className={inputClass} aria-label="Tie-break"><option value="random">Tie → secure random</option><option value="runoff">Tie → runoff</option><option value="appointment">Tie → appointment</option><option value="manual">Tie → manual</option></select>
+            <div><label className="label-cgm text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-nom-open">Nominations open</label>
+              <input id="cgm-nom-open" name="nominationOpenAt" type="datetime-local" className={inputClass} aria-label="Nominations open" /></div>
+            <div><label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-nom-close">Nominations close</label>
+              <input id="cgm-nom-close" name="nominationCloseAt" type="datetime-local" className={inputClass} aria-label="Nominations close" /></div>
+            <div><label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-vote-open">Voting opens</label>
+              <input id="cgm-vote-open" name="votingOpenAt" type="datetime-local" className={inputClass} aria-label="Voting opens" /></div>
+            <div><label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-vote-close">Voting closes</label>
+              <input id="cgm-vote-close" name="votingCloseAt" type="datetime-local" className={inputClass} aria-label="Voting closes" /></div>
             <input name="title" className={inputClass} placeholder="Title (optional)" />
             <button type="submit" disabled={busy} className="cgm-primary-button">Create</button>
           </form>
@@ -1236,25 +1330,46 @@ const LeadershipArea = ({ classId, canAppoint, onChanged }: { classId: number; c
         <>
           {(data.groupsWithoutLeaders || []).length > 0 && (
             <div className={card}>
-              <p className={label}>Groups missing a leader</p>
-              <ul className="mt-2 space-y-1">
+              <p className={label}>Groups missing a leader — plan the succession</p>
+              <p className="mt-1 text-[11px] font-medium text-slate-500">Automatic promotes the most senior assistant; Appointment names anyone in the group; Fresh election opens an anonymous vote for the group.</p>
+              <ul className="mt-2 space-y-2">
                 {data.groupsWithoutLeaders.map((group: any) => (
-                  <li key={group.id} className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2 text-xs">
-                    <span className="font-bold text-amber-800">{group.name}</span>
+                  <li key={group.id} className="rounded-lg bg-amber-50 px-3 py-2 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-amber-800">{group.name}</span>
+                      {canAppoint && (
+                        <select disabled={busy} className="rounded border border-amber-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Appoint leader for ${group.name}`} onChange={async (event) => {
+                          const studentId = Number(event.target.value);
+                          if (!studentId) return;
+                          setBusy(true);
+                          try { await cgm.appointLeader(Number(group.id), { studentId, role: 'leader' }); setMessage('Leader appointed.'); await load(Number(activityId)); onChanged(); }
+                          catch (failure: any) { setMessage(failure?.message || 'That did not work.'); }
+                          finally { setBusy(false); }
+                        }}>
+                          <option value="">Appoint directly…</option>
+                          {(detail.members || []).filter((member: any) => Number(member.group_id) === Number(group.id)).map((member: any) => (
+                            <option key={member.student_id} value={member.student_id}>{member.full_name}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
                     {canAppoint && (
-                      <select disabled={busy} className="rounded border border-amber-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Appoint leader for ${group.name}`} onChange={async (event) => {
-                        const studentId = Number(event.target.value);
-                        if (!studentId) return;
-                        setBusy(true);
-                        try { await cgm.appointLeader(Number(group.id), { studentId, role: 'leader' }); setMessage('Leader appointed.'); await load(Number(activityId)); onChanged(); }
-                        catch (failure: any) { setMessage(failure?.message || 'That did not work.'); }
-                        finally { setBusy(false); }
-                      }}>
-                        <option value="">Appoint…</option>
-                        {(detail.members || []).filter((member: any) => Number(member.group_id) === Number(group.id)).map((member: any) => (
-                          <option key={member.student_id} value={member.student_id}>{member.full_name}</option>
-                        ))}
-                      </select>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        <button type="button" disabled={busy} className="rounded bg-white px-2 py-1 text-[10px] font-black uppercase text-emerald-700 ring-1 ring-emerald-200 disabled:opacity-50"
+                          onClick={async () => {
+                            setBusy(true);
+                            try { await cgm.planSuccession(Number(group.id), { method: 'automatic' }); setMessage('The most senior assistant was promoted.'); await load(Number(activityId)); onChanged(); }
+                            catch (failure: any) { setMessage(failure?.message || 'Automatic succession needs an active assistant.'); }
+                            finally { setBusy(false); }
+                          }}>Auto (senior assistant)</button>
+                        <button type="button" disabled={busy} className="rounded bg-white px-2 py-1 text-[10px] font-black uppercase text-emerald-700 ring-1 ring-emerald-200 disabled:opacity-50"
+                          onClick={async () => {
+                            setBusy(true);
+                            try { const result = await cgm.planSuccession(Number(group.id), { method: 'election' }); setMessage(`Fresh election opened (#${(result as any).electionId}) — the group was notified.`); await load(Number(activityId)); onChanged(); }
+                            catch (failure: any) { setMessage(failure?.message || 'That did not work.'); }
+                            finally { setBusy(false); }
+                          }}>Fresh election</button>
+                      </div>
                     )}
                   </li>
                 ))}
@@ -1442,6 +1557,7 @@ const CalendarArea = ({ classId }: { classId: number }) => {
 const AnnouncementsArea = ({ classId, onChanged }: { classId: number; onChanged: () => void }) => {
   const [data, setData] = useState<any>(null);
   const [form, setForm] = useState({ title: '', body: '', pinned: false });
+  const [attachment, setAttachment] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -1457,16 +1573,26 @@ const AnnouncementsArea = ({ classId, onChanged }: { classId: number; onChanged:
           onSubmit={async (event) => {
             event.preventDefault();
             setBusy(true);
-            try { await cgm.createAnnouncement(classId, form); setForm({ title: '', body: '', pinned: false }); await load(); onChanged(); }
+            try {
+              await cgm.createAnnouncement(classId, form, attachment);
+              setForm({ title: '', body: '', pinned: false }); setAttachment(null);
+              await load(); onChanged();
+            }
             catch (failure: any) { setMessage(failure?.message || 'Publishing failed.'); }
             finally { setBusy(false); }
           }}
         >
           <input required className={inputClass} placeholder="Title" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} aria-label="Title" />
           <textarea required className={`${inputClass} min-h-24`} placeholder="Message" value={form.body} onChange={(event) => setForm({ ...form, body: event.target.value })} aria-label="Message" />
-          <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
-            <input type="checkbox" checked={form.pinned} onChange={(event) => setForm({ ...form, pinned: event.target.checked })} /> Pin to the top
-          </label>
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
+              <input type="checkbox" checked={form.pinned} onChange={(event) => setForm({ ...form, pinned: event.target.checked })} /> Pin to the top
+            </label>
+            <label className="text-xs font-bold text-slate-600">
+              Attachment (optional, max 5 MB):{' '}
+              <input type="file" className="ml-2 text-xs" onChange={(event) => setAttachment(event.target.files?.[0] || null)} aria-label="Attachment" />
+            </label>
+          </div>
           <button type="submit" disabled={busy} className="cgm-primary-button">{busy ? 'Publishing…' : 'Publish'}</button>
         </form>
         {message && <div className="mt-3"><Banner tone="error">{message}</Banner></div>}
@@ -1500,7 +1626,32 @@ const AnnouncementsArea = ({ classId, onChanged }: { classId: number; onChanged:
                 </div>
               </div>
               <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{row.body}</p>
-              <p className="mt-2 text-[11px] font-semibold text-slate-400">{row.authorLabel} · {formatWhen(row.createdAt)}</p>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p className="text-[11px] font-semibold text-slate-400">{row.authorLabel} · {formatWhen(row.createdAt)}</p>
+                {row.attachmentName && (
+                  <a href={`${row.attachmentUrl}`} className="text-[11px] font-black text-emerald-700 underline" download>
+                    📎 {row.attachmentName}
+                  </a>
+                )}
+                {row.status === 'published' && (
+                  <button
+                    type="button"
+                    className="text-[11px] font-black uppercase tracking-wider text-slate-500 hover:text-emerald-700"
+                    onClick={async () => {
+                      try {
+                        const reads = await cgm.announcementReads(Number(row.id));
+                        const names = (reads.readers || []).map((reader: any) => reader.fullName).join(', ');
+                        await appDialog.alert({
+                          title: `Seen by ${reads.count} student${reads.count === 1 ? '' : 's'}`,
+                          message: names || 'No read receipts yet.',
+                        });
+                      } catch { /* the viewer failed silently */ }
+                    }}
+                  >
+                    Seen by {row.readCount ?? 0}
+                  </button>
+                )}
+              </div>
             </li>
           ))}
           {!(data?.announcements || []).length && <li className="py-4 text-center text-xs font-medium text-slate-400">Nothing published yet.</li>}
@@ -1524,6 +1675,7 @@ const formatWhen = (value: unknown) => {
 const NotificationsArea = ({ classId }: { classId: number }) => <ApprovalsArea classId={classId} canRegistrations={false} canMemberships={false} canProfiles={false} onChanged={() => {}} compact />;
 
 const ReportsArea = ({ classId }: { classId: number }) => {
+  const [format, setFormat] = useState<'csv' | 'xlsx' | 'pdf'>('csv');
   const reports: Array<[string, string]> = [
     ['roster', 'Class roster'], ['assignments', 'Group assignments'], ['movements', 'Group movements'],
     ['leadership', 'Leadership appointments'], ['elections', 'Elections'], ['turnout', 'Election turnout'],
@@ -1532,10 +1684,24 @@ const ReportsArea = ({ classId }: { classId: number }) => {
   return (
     <div className={card}>
       <p className={label}>Reports &amp; exports</p>
-      <p className="mt-1 text-xs font-medium text-slate-500">CSV downloads respect your permissions — sensitive columns only appear with the sensitive-data permission.</p>
+      <p className="mt-1 text-xs font-medium text-slate-500">Downloads respect your permissions — sensitive columns only appear with the sensitive-data permission.</p>
+      <div className="mt-3 flex gap-1.5" role="radiogroup" aria-label="Export format">
+        {(['csv', 'xlsx', 'pdf'] as const).map((key) => (
+          <button
+            key={key}
+            type="button"
+            role="radio"
+            aria-checked={format === key}
+            onClick={() => setFormat(key)}
+            className={`rounded-full px-3.5 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${format === key ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}
+          >
+            {key === 'xlsx' ? 'Excel' : key.toUpperCase()}
+          </button>
+        ))}
+      </div>
       <div className="mt-4 grid gap-2 sm:grid-cols-3">
         {reports.map(([kind, text]) => (
-          <button key={kind} type="button" className="mini-button justify-start" onClick={() => void downloadReport(classId, kind).catch(() => {})}>
+          <button key={kind} type="button" className="mini-button justify-start" onClick={() => void downloadReport(classId, kind, format).catch(() => {})}>
             <FileText className="mr-1.5 inline h-3.5 w-3.5" /> {text}
           </button>
         ))}
@@ -1568,7 +1734,7 @@ const TemplatesArea = ({ classId, onChanged }: { classId: number; onChanged: () 
   );
 };
 
-const ApprovalsArea = ({ classId, canRegistrations, canMemberships, canProfiles, onChanged, compact }: { classId: number; canRegistrations: boolean; canMemberships: boolean; canProfiles: boolean; onChanged: () => void; compact?: boolean }) => {
+const ApprovalsArea = ({ classId, canRegistrations, canMemberships, canProfiles, onChanged, compact, delegated }: { classId: number; canRegistrations: boolean; canMemberships: boolean; canProfiles: boolean; onChanged: () => void; compact?: boolean; delegated?: boolean }) => {
   const [registrations, setRegistrations] = useState<any[]>([]);
   const [memberships, setMemberships] = useState<any[]>([]);
   const [profileChanges, setProfileChanges] = useState<any[]>([]);
@@ -1593,6 +1759,9 @@ const ApprovalsArea = ({ classId, canRegistrations, canMemberships, canProfiles,
 
   return (
     <div className="space-y-5">
+      {delegated && (
+        <Banner tone="info">PHANTOM delegated registration approvals for this class to you — the registration queue below works even though you hold no other permissions here.</Banner>
+      )}
       {issuedPasskeys.length > 0 && (
         <div className={`${card} border-emerald-300 bg-emerald-50/60`}>
           <p className={label}>Passkeys issued just now — shown once</p>

@@ -202,6 +202,83 @@ for (const endpoint of [
 }
 check('the worker mounts the class & group routes', src('functions/[[path]].ts').includes('registerClassGroupRoutes(app)'));
 
+// ===========================================================================
+section('11. Step-5 additions: attachments, reads, reminders, succession, windows, WhatsApp, offline guard, file reports');
+const banner = src('src/components/ClassGroups/ConnectionBanner.tsx');
+const schemaCgm = src('functions/lib/cgm/schema.ts');
+const schemaVault = src('functions/lib/schema.ts');
+const pdfWriter = src('functions/lib/cgm/pdf.ts');
+
+// Offline & connection state (spec §38)
+check('the connection banner exists with online/offline states and a status role',
+  /ConnectionBanner/.test(banner) && /role="status"/.test(banner) && /offline/i.test(banner));
+check('every class & group shell renders the connection banner',
+  /<ConnectionBanner \/>/.test(workspace) && /<ConnectionBanner \/>/.test(studentPortal) && /<ConnectionBanner \/>/.test(phantom));
+check('mutating calls are guarded against duplicate submissions (in-flight lock → 409)',
+  /guardDuplicate/.test(client) && /'duplicate'/.test(client) && /409/.test(client));
+check('a failed fetch raises a real offline error instead of faking a result',
+  /CgmError\('We could not reach Code Rx Society[^']*', 0, 'offline'\)/.test(client));
+
+// Announcement attachments + read tracking (spec §12)
+check('the announcement composer accepts a file attachment', /setAttachment\]/.test(workspace) && /type="file"/.test(workspace));
+check('organizers see who read an announcement ("Seen by" + reads endpoint client)',
+  /Seen by/.test(workspace) && /announcementReads:/.test(client));
+check('students download attachments straight from the announcement row (📎 link)',
+  /attachment_url \|\| row\.attachmentUrl/.test(studentPortal) && /📎/.test(studentPortal));
+check('the announcement rows carry the R2 attachment columns',
+  /attachment_r2_key/.test(schemaVault) && /attachment_name/.test(schemaVault) && /attachment_size/.test(schemaVault));
+
+// Deadline reminders (spec §31)
+check('the activities area can send deadline reminders with a dedupe-aware result message',
+  /remindActivity:/.test(client) && /already reminded for this deadline/.test(workspace) && /Remind\s*<\/button>/.test(workspace));
+check('reminder notifications carry a dedupe key backed by a unique index',
+  /dedupe_key/.test(schemaVault) && /idx_cgm_notifications_dedupe/.test(schemaCgm) && /UNIQUE INDEX/.test(schemaCgm));
+
+// Succession & election windows (spec §11)
+check('leadership offers the three succession paths (automatic, appointment, fresh election)',
+  /planSuccession:/.test(client) && /method: 'election'/.test(workspace) && /Fresh election/.test(workspace) && /Automatic promotes the most senior assistant/.test(workspace));
+check('the election form collects nomination and voting windows',
+  /nominationOpenAt/.test(workspace) && /nominationCloseAt/.test(workspace) && /votingOpenAt/.test(workspace) && /votingCloseAt/.test(workspace));
+
+// WhatsApp manager (spec §12)
+check('organizers manage one WhatsApp link per group (set, replace, disable, revoke)',
+  /canManageWhatsapp/.test(workspace) && /cgm\.setWhatsApp\(/.test(workspace) && /whatsappAction\(/.test(workspace) && /setWhatsApp:/.test(client) && /whatsappAction:/.test(client));
+check('the WhatsApp link shows a QR and tracks clicks without claiming join-proof',
+  /qrByGroup/.test(workspace) && /QRCode\.toDataURL\(url/.test(workspace) && /clickCount/.test(workspace));
+
+// Reports in three formats (spec §16)
+check('reports download as CSV, Excel or PDF from one control',
+  /downloadReport/.test(client) && /\['csv', 'xlsx', 'pdf'\]/.test(workspace) && existsSync(path.join(ROOT, 'functions/lib/cgm/pdf.ts')));
+check('the PDF writer produces a real PDF 1.4 header without dependencies',
+  /%PDF-1\.4/.test(pdfWriter) && /buildReportPdf/.test(pdfWriter));
+check('the xlsx export goes through the same ESM build the roster import uses',
+  /xlsx\/xlsx\.mjs/.test(backend) && /bookType: 'xlsx'/.test(backend));
+
+// Delegated approvals visibility (spec §30)
+check('a delegated organizer sees the delegation banner and gains the approvals area',
+  /delegatedClassIds/.test(workspace) && /PHANTOM delegated registration approvals/.test(workspace) && /delegated=\{delegated\}/.test(workspace));
+check('the client exposes delegatedClassIds on the organizer status payload', /delegatedClassIds/.test(client));
+
+// Student month-grid calendar (spec §31)
+check('the student calendar renders a Monday-first month grid with navigation',
+  /grid-cols-7/.test(studentPortal) && /Previous month/.test(studentPortal) && /Next month/.test(studentPortal));
+check('calendar days are selectable buttons with an event count label',
+  /aria-pressed=\{isSelected\}/.test(studentPortal) && /event\(s\)/.test(studentPortal));
+check('the agenda list survives next to the month grid', /All upcoming/.test(studentPortal));
+
+// Organizer email verification surfaced in the UI (spec §5)
+check('the apply flow surfaces the email-verification result to the applicant', /emailSent|verification/i.test(workspace) || /emailSent/.test(client));
+
+// Server-side endpoints behind the new UI
+for (const endpoint of [
+  '/api/cgm/announcements/:id/attachment', '/api/cgm/announcements/:id/reads',
+  '/api/cgm/activities/:id/reminders', '/api/cgm/groups/:id/succession',
+  '/api/cgm/groups/:id/whatsapp', '/api/cgm/groups/:id/whatsapp/:action',
+  '/api/cgm/whatsapp/:linkId/click',
+]) {
+  check(`${endpoint} is registered server-side`, backend.includes(`'${endpoint}'`));
+}
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

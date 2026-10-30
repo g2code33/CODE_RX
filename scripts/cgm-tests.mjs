@@ -24,6 +24,9 @@
  *   14. reports and permission-stripped exports
  *   15. permissions, IDOR and cross-class protection
  *   16. the module flag
+ *   17. step-5 additions: attachments, read tracking, deadline reminders,
+ *       succession methods, election windows, WhatsApp links, delegated
+ *       visibility, verify-by-email organizer applications, file reports
  *
  * Usage: node --experimental-sqlite scripts/cgm-tests.mjs
  */
@@ -98,7 +101,26 @@ const d1 = {
 
 const PHANTOM_EMAIL = 'coderxsociety@gmail.com';
 const PHANTOM_PASSWORD = 'DevPreviewPassword1';
-const env = { DB: d1, JWT_SECRET: 'cgm-test-secret', PHANTOM_EMAIL, ADMIN_PASSWORD: PHANTOM_PASSWORD };
+
+// A tiny R2 stand-in: the announcement attachment path stores and streams real
+// bytes through the same BUCKET binding the worker uses in production.
+const r2Objects = new Map();
+const BUCKET = {
+  async put(key, value, options) {
+    r2Objects.set(String(key), { value: value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(await value), options: options || {} });
+    return {};
+  },
+  async get(key) {
+    const object = r2Objects.get(String(key));
+    if (!object) return null;
+    return {
+      body: new Blob([object.value]).stream(),
+      arrayBuffer: async () => object.value.buffer.slice(object.value.byteOffset, object.value.byteOffset + object.value.byteLength),
+    };
+  },
+};
+
+const env = { DB: d1, JWT_SECRET: 'cgm-test-secret', PHANTOM_EMAIL, ADMIN_PASSWORD: PHANTOM_PASSWORD, BUCKET };
 
 const worker = await import(path.join(CACHE, 'worker.mjs'));
 const app = worker.default;
@@ -932,6 +954,214 @@ check('election decisions are audited', auditActions.some((a) => a.includes('ele
 check('PHANTOM decisions are audited', auditActions.some((a) => a.includes('phantom') || a.includes('delegation')), 'no phantom audit rows');
 check('the audit never logs credentials or raw passkeys',
   !auditRows.some((r) => JSON.stringify(r.context_json || r.context || {}).includes('rx30') && /passkey\s*is/.test(JSON.stringify(r.context_json || r.context || {}))));
+
+// ===========================================================================
+// 17. Step-5 additions
+// ===========================================================================
+section('17. Step-5 additions: attachments, reads, reminders, succession, windows, WhatsApp, delegation visibility, file reports');
+
+// Raw (non-JSON) fetches for binary downloads.
+const rawStudent = async (urlPath, session) => {
+  const response = await app.fetch(new Request(`https://cgm-test.local${urlPath}`, {
+    headers: session ? { 'X-Code-Rx-Student-Session': session } : {},
+  }), env);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return { status: response.status, contentType: response.headers.get('content-type') || '', bytes, text: Buffer.from(bytes).toString('utf8') };
+};
+const rawMember = async (method, urlPath, token) => {
+  const response = await app.fetch(new Request(`https://cgm-test.local${urlPath}`, {
+    method,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  }), env);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return { status: response.status, contentType: response.headers.get('content-type') || '', bytes, text: Buffer.from(bytes).toString('utf8') };
+};
+
+// --- Announcement attachments (R2) -----------------------------------------
+const attachmentForm = new FormData();
+attachmentForm.append('title', 'Lab manual v2');
+attachmentForm.append('body', 'The updated lab manual is attached. Read it before Friday.');
+attachmentForm.append('pinned', 'false');
+const attachmentBytes = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52]); // "%PDF-1.4"
+attachmentForm.append('attachment', new File([attachmentBytes], 'lab-manual.pdf', { type: 'application/pdf' }));
+const withAttachment = await formCall('POST', `/api/cgm/classes/${classAId}/announcements`, attachmentForm, amaToken);
+const attachmentAnnouncementId = Number(withAttachment.json?.data?.id);
+check('an organizer posts an announcement with an attachment (multipart)', withAttachment.status === 200 && Boolean(attachmentAnnouncementId), `status ${withAttachment.status} ${withAttachment.text?.slice(0, 140)}`);
+const attachmentRow = q1('SELECT attachment_name, attachment_type, attachment_size, attachment_r2_key FROM cgm_announcements WHERE id = ?', attachmentAnnouncementId);
+check('the attachment metadata lands on the announcement row', attachmentRow?.attachment_name === 'lab-manual.pdf' && Number(attachmentRow?.attachment_size) === 8 && Boolean(attachmentRow?.attachment_r2_key), JSON.stringify(attachmentRow));
+
+const memberDownload = await rawStudent(`/api/cgm/announcements/${attachmentAnnouncementId}/attachment`, freshSession);
+check('a class member downloads the attachment with its original bytes',
+  memberDownload.status === 200 && Buffer.from(memberDownload.bytes).equals(Buffer.from(attachmentBytes)) && /pdf/.test(memberDownload.contentType),
+  `status ${memberDownload.status} type=${memberDownload.contentType}`);
+const outsiderPairS5 = racePairs.find((p) => q1('SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND student_id = ?', classAId, Number(p.studentId)).c === 0);
+check('the outsider student really is outside class A', Boolean(outsiderPairS5));
+const outsiderLoginS5 = outsiderPairS5 ? await loginForStudent(outsiderPairS5.studentId) : null;
+const outsiderTokenS5 = outsiderLoginS5?.json?.data?.session?.token || '';
+const outsiderDownload = await rawStudent(`/api/cgm/announcements/${attachmentAnnouncementId}/attachment`, outsiderTokenS5);
+check('a student outside the class cannot fetch the attachment', outsiderDownload.status === 401 || outsiderDownload.status === 403, `status ${outsiderDownload.status}`);
+
+// --- Read tracking ----------------------------------------------------------
+const classViewS5 = await studentCall('GET', `/api/cgm/student/classes/${classAId}`, undefined, freshSession);
+const viewedAnnouncement = (classViewS5.json?.data?.announcements || []).find((a) => Number(a.id) === attachmentAnnouncementId);
+check('the student dashboard lists the attachment with a download URL', Boolean(viewedAnnouncement?.attachmentUrl) && viewedAnnouncement?.attachmentName === 'lab-manual.pdf', JSON.stringify(viewedAnnouncement || {}).slice(0, 200));
+check('opening the dashboard records exactly one read', q1('SELECT COUNT(*) c FROM cgm_announcement_reads WHERE announcement_id = ?', attachmentAnnouncementId).c === 1);
+await studentCall('GET', `/api/cgm/student/classes/${classAId}`, undefined, freshSession);
+check('re-opening the dashboard never duplicates the read', q1('SELECT COUNT(*) c FROM cgm_announcement_reads WHERE announcement_id = ?', attachmentAnnouncementId).c === 1);
+const reads = await memberCall('GET', `/api/cgm/announcements/${attachmentAnnouncementId}/reads`, undefined, amaToken);
+check('the organizer sees who read the announcement', reads.status === 200 && Number(reads.json?.data?.count) === 1 && Boolean(reads.json?.data?.readers?.[0]?.fullName), JSON.stringify(reads.json?.data || {}).slice(0, 200));
+const readsDenied = await memberCall('GET', `/api/cgm/announcements/${attachmentAnnouncementId}/reads`, undefined, assistantToken);
+check('reading the reader list needs manage_announcements', readsDenied.status === 403, `status ${readsDenied.status}`);
+const organizerAnnouncements = await memberCall('GET', `/api/cgm/classes/${classAId}/announcements`, undefined, amaToken);
+const listedAnnouncement = (organizerAnnouncements.json?.data?.announcements || []).find((a) => Number(a.id) === attachmentAnnouncementId);
+check('the organizer list carries read counts and attachment info', Boolean(listedAnnouncement) && Number(listedAnnouncement?.readCount) === 1 && listedAnnouncement?.attachmentName === 'lab-manual.pdf', JSON.stringify(listedAnnouncement || {}).slice(0, 200));
+
+// --- Deadline reminders with de-duplication ---------------------------------
+const activityD = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Field Work Pods', type: 'project',
+  config: { method: 'hybrid', groupCount: 2, capacity: 20, genderRule: 'none', overflow: 'organizer', leaderMethod: 'appointment', selfDeadline: new Date(Date.now() + 86_400_000).toISOString(), announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const activityDId = activityD.json?.data?.activityId ?? activityD.json?.data?.activity?.id ?? activityD.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${activityDId}/lifecycle`, { action: 'open' }, amaToken);
+const activeStudents = Number(q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND status = 'active'", classAId).c);
+check('the reminder activity has eligible students', activeStudents > 0, `active=${activeStudents}`);
+const remindDay = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+const remind = await memberCall('POST', `/api/cgm/activities/${activityDId}/reminders`, {}, amaToken);
+check('deadline reminders reach every unassigned active student',
+  remind.status === 200 && Number(remind.json?.data?.sent) === activeStudents && Number(remind.json?.data?.eligible) === activeStudents,
+  JSON.stringify(remind.json?.data));
+check('every reminder carries the day-scoped dedupe key',
+  q1('SELECT COUNT(*) c FROM cgm_student_notifications WHERE dedupe_key = ?', `activity-deadline:${activityDId}:${remindDay}`).c === activeStudents);
+const remindAgain = await memberCall('POST', `/api/cgm/activities/${activityDId}/reminders`, {}, amaToken);
+check('a second reminder run sends nothing new (de-duplicated)',
+  remindAgain.status === 200 && Number(remindAgain.json?.data?.sent) === 0 && Number(remindAgain.json?.data?.skipped) === activeStudents,
+  JSON.stringify(remindAgain.json?.data));
+const remindNoDeadline = await memberCall('POST', `/api/cgm/activities/${activityBId}/reminders`, {}, amaToken);
+check('reminders need a self-assignment deadline', remindNoDeadline.status === 409, `status ${remindNoDeadline.status}`);
+const remindDenied = await memberCall('POST', `/api/cgm/activities/${activityDId}/reminders`, {}, assistantToken);
+check('reminders need manage_activities', remindDenied.status === 403, `status ${remindDenied.status}`);
+
+// --- Succession methods -------------------------------------------------------
+const remainingMember = Number(q("SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active' ORDER BY id", electionGroup)[0]?.student_id);
+check('the election group still has one member after the section-9 removal', Boolean(remainingMember));
+const successionElection = await memberCall('POST', `/api/cgm/groups/${electionGroup}/succession`, { method: 'election', tieBreak: 'runoff' }, amaToken);
+const successionElectionId = Number(successionElection.json?.data?.electionId);
+check('succession can start a fresh anonymous leader election', successionElection.status === 200 && Boolean(successionElectionId), successionElection.text?.slice(0, 160));
+check('the succession election starts in its nominating window', q1('SELECT status FROM cgm_elections WHERE id = ?', successionElectionId)?.status === 'nominating');
+const successionElectionDup = await memberCall('POST', `/api/cgm/groups/${electionGroup}/succession`, { method: 'election' }, amaToken);
+check('a group cannot run two leadership elections at once', successionElectionDup.status === 409, `status ${successionElectionDup.status}`);
+const successionAutoBlocked = await memberCall('POST', `/api/cgm/groups/${electionGroup}/succession`, { method: 'automatic' }, amaToken);
+check('automatic succession refuses while an election is running', successionAutoBlocked.status === 409, `status ${successionAutoBlocked.status}`);
+const detailB3 = await memberCall('GET', `/api/cgm/activities/${activityBId}`, undefined, amaToken);
+const emptyPod = Number((detailB3.json?.data?.groups || []).find((g) => Number(g.id) !== Number(electionGroup))?.id);
+const successionForeign = await memberCall('POST', `/api/cgm/groups/${emptyPod}/succession`, { method: 'appointment', studentId: remainingMember }, amaToken);
+check('appointment succession requires the student to belong to the group', successionForeign.status === 400, `status ${successionForeign.status}`);
+const successionNoAssistant = await memberCall('POST', `/api/cgm/groups/${emptyPod}/succession`, { method: 'automatic' }, amaToken);
+check('automatic succession needs an assistant to promote', successionNoAssistant.status === 409, `status ${successionNoAssistant.status}`);
+// Positive automatic path on the class-B group with a real assistant.
+const genderDetailS5 = await memberCall('GET', `/api/cgm/activities/${genderActivityId}`, undefined, phantomToken);
+const genderGroupS5 = Number((genderDetailS5.json?.data?.groups || [])[0]?.id);
+const genderMembersS5 = q("SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active' ORDER BY id", genderGroupS5);
+if (genderMembersS5.length >= 2) {
+  await memberCall('POST', `/api/cgm/groups/${genderGroupS5}/leaders`, { studentId: Number(genderMembersS5[0].student_id), role: 'assistant' }, phantomToken);
+  const successionAuto = await memberCall('POST', `/api/cgm/groups/${genderGroupS5}/succession`, { method: 'automatic' }, phantomToken);
+  check('automatic succession promotes the assistant on record',
+    successionAuto.status === 200 && Number(successionAuto.json?.data?.studentId) === Number(genderMembersS5[0].student_id) && successionAuto.json?.data?.method === 'automatic',
+    JSON.stringify(successionAuto.json?.data));
+  const successionAutoDup = await memberCall('POST', `/api/cgm/groups/${genderGroupS5}/succession`, { method: 'automatic' }, phantomToken);
+  check('succession refuses a group that already has a leader', successionAutoDup.status === 409, `status ${successionAutoDup.status}`);
+} else {
+  check('automatic succession had a populated class-B group to test', false, `members=${genderMembersS5.length}`);
+}
+
+// --- Election windows ---------------------------------------------------------
+const windowElection = await memberCall('POST', `/api/cgm/groups/${emptyPod}/elections`, {
+  title: 'Pod coordinator', role: 'leader', anonymity: 'anonymous', visibility: 'group',
+  nominationOpenAt: '2026-11-02T08:00', nominationCloseAt: '2026-11-03T20:00',
+  votingOpenAt: '2026-11-04T08:00', votingCloseAt: '2026-11-05T20:00',
+}, amaToken);
+const windowElectionId = Number(windowElection.json?.data?.electionId);
+check('an election can be created with nomination and voting windows', windowElection.status === 200 && Boolean(windowElectionId), windowElection.text?.slice(0, 160));
+const windowRow = q1('SELECT nomination_open_at, nomination_close_at, voting_open_at, voting_close_at FROM cgm_elections WHERE id = ?', windowElectionId);
+check('the stored windows keep the organizer’s timestamps',
+  String(windowRow?.nomination_open_at || '').startsWith('2026-11-02') && String(windowRow?.voting_close_at || '').startsWith('2026-11-05'), JSON.stringify(windowRow));
+
+// --- WhatsApp links -----------------------------------------------------------
+const setLink = await memberCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp`, { url: 'https://chat.whatsapp.com/AbCdEfGh123' }, amaToken);
+check('the organizer pastes the WhatsApp invite link', setLink.status === 200, setLink.text?.slice(0, 160));
+const replaceLink = await memberCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp`, { url: 'https://chat.whatsapp.com/XyZ987654abc' }, amaToken);
+check('pasting a new link replaces the old one — one live link per group',
+  replaceLink.status === 200
+  && q1("SELECT COUNT(*) c FROM cgm_whatsapp_links WHERE group_id = ? AND status = 'active'", electionGroup).c === 1
+  && q1("SELECT COUNT(*) c FROM cgm_whatsapp_links WHERE group_id = ? AND status = 'revoked'", electionGroup).c >= 1);
+const badLink = await memberCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp`, { url: 'https://t.me/somewhere' }, amaToken);
+check('only WhatsApp invite links are accepted', badLink.status === 400, `status ${badLink.status}`);
+const activeLinkRow = q1("SELECT id FROM cgm_whatsapp_links WHERE group_id = ? AND status = 'active'", electionGroup);
+const clickOutsider = await studentCall('POST', `/api/cgm/whatsapp/${Number(activeLinkRow?.id)}/click`, {}, freshSession);
+check('a removed student cannot open the group’s WhatsApp link', clickOutsider.status === 403, `status ${clickOutsider.status}`);
+const clickMember = await studentCall('POST', `/api/cgm/whatsapp/${Number(activeLinkRow?.id)}/click`, {}, sessionsToUse[1]);
+check('a current group member opens the link (click tracked, never join-proof)',
+  clickMember.status === 200 && clickMember.json?.data?.url === 'https://chat.whatsapp.com/XyZ987654abc' && q1('SELECT click_count FROM cgm_whatsapp_links WHERE id = ?', Number(activeLinkRow?.id)).click_count === 1,
+  JSON.stringify(clickMember.json?.data || {}));
+const disableLink = await memberCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp/disable`, {}, amaToken);
+check('the organizer can disable the link',
+  disableLink.status === 200 && q1("SELECT status FROM cgm_whatsapp_links WHERE id = ?", Number(activeLinkRow?.id))?.status === 'disabled');
+const clickDisabled = await studentCall('POST', `/api/cgm/whatsapp/${Number(activeLinkRow?.id)}/click`, {}, sessionsToUse[1]);
+check('a disabled link opens for nobody', clickDisabled.status === 404, `status ${clickDisabled.status}`);
+const enableLink = await memberCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp/enable`, {}, amaToken);
+const revokeLink = await memberCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp/revoke`, {}, amaToken);
+check('the organizer can revoke the link entirely',
+  revokeLink.status === 200 && q1("SELECT COUNT(*) c FROM cgm_whatsapp_links WHERE group_id = ? AND status IN ('active','disabled')", electionGroup).c === 0);
+const studentSetLink = await studentCall('POST', `/api/cgm/groups/${electionGroup}/whatsapp`, { url: 'https://chat.whatsapp.com/hackedit' }, freshSession);
+check('students can never manage WhatsApp links (separate auth realm)', studentSetLink.status === 401, `status ${studentSetLink.status}`);
+
+// --- Delegated approvals visibility -------------------------------------------
+const delegationS5 = await memberCall('POST', '/api/cgm/phantom/delegations', { memberId: Number(assistantProfileId), classId: Number(classBId), maxBatch: 2 }, phantomToken);
+check('PHANTOM grants a registration delegation to the assistant', delegationS5.status === 200, delegationS5.text?.slice(0, 160));
+const assistantStatus = await memberCall('GET', '/api/cgm/organizer/status', undefined, assistantToken);
+check('a delegated organizer sees the delegated class in their status',
+  (assistantStatus.json?.data?.delegatedClassIds || []).map(Number).includes(Number(classBId)), JSON.stringify(assistantStatus.json?.data || {}).slice(0, 240));
+const delegationsS5 = await memberCall('GET', '/api/cgm/phantom/delegations', undefined, phantomToken);
+const delegationS5Row = (delegationsS5.json?.data || []).find((d) => Number(d.classId) === Number(classBId) && Number(d.maxBatch) === 2);
+const revokeDelegationS5 = await memberCall('POST', `/api/cgm/phantom/delegations/${delegationS5Row?.id}/revoke`, {}, phantomToken);
+const assistantStatusAfter = await memberCall('GET', '/api/cgm/organizer/status', undefined, assistantToken);
+check('revoking the delegation clears it from the status immediately',
+  revokeDelegationS5.status === 200 && !(assistantStatusAfter.json?.data?.delegatedClassIds || []).map(Number).includes(Number(classBId)));
+
+// --- Organizer application with email verification ------------------------------
+sqlite.prepare("INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, 'member')").run('apply.cgm@example.com', 'Adwoa Applicant', memberHash('ApplyPass1'));
+const applyUser = q1('SELECT id FROM users WHERE email = ?', 'apply.cgm@example.com');
+sqlite.prepare("INSERT INTO members (name, email, phone, role, joined_date, points, level, is_active) VALUES ('Adwoa Applicant', ?, NULL, 'member', '2026-10-30', 0, 'Member', 1)").run('apply.cgm@example.com');
+const applyMember = q1('SELECT id FROM members WHERE email = ?', 'apply.cgm@example.com');
+sqlite.prepare("INSERT INTO member_profiles (user_id, member_record_id, member_code, status, codename_path, created_by_user_id) VALUES (?, ?, 'CRX-APPLY-1', 'active', 'member', ?)").run(applyUser.id, applyMember.id, applyUser.id);
+const applyLogin = await call('POST', '/api/auth/login', { identifier: 'apply.cgm@example.com', password: 'ApplyPass1' });
+const applyToken = applyLogin.json?.token || applyLogin.json?.data?.token;
+check('the applicant can sign in', Boolean(applyToken), `status ${applyLogin.status}`);
+const applyStep5 = await memberCall('POST', '/api/cgm/organizer/apply', { institution: 'University of Cape Coast', motivation: 'I coordinate the lab groups.' }, applyToken);
+check('applying returns the email delivery state and a verification token',
+  applyStep5.status === 200 && typeof applyStep5.json?.data?.emailSent === 'boolean' && Boolean(applyStep5.json?.data?.verifyToken),
+  JSON.stringify(applyStep5.json?.data || {}).slice(0, 240));
+const verifyStep5 = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(applyStep5.json?.data?.verifyToken)}`);
+check('the verification link marks the application email-verified',
+  verifyStep5.status === 200 && q1("SELECT status FROM cgm_organizer_applications WHERE institution = 'University of Cape Coast' ORDER BY id DESC LIMIT 1")?.status === 'email_verified',
+  `status ${verifyStep5.status}`);
+const verifyReuseStep5 = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(applyStep5.json?.data?.verifyToken)}`);
+check('a verification link is single-use', verifyReuseStep5.status === 404, `status ${verifyReuseStep5.status}`);
+
+// --- Report file formats ---------------------------------------------------------
+const xlsxReport = await rawMember('GET', `/api/cgm/classes/${classAId}/reports/roster?format=xlsx`, amaToken);
+check('the roster report exports as a real xlsx workbook',
+  xlsxReport.status === 200 && xlsxReport.bytes[0] === 0x50 && xlsxReport.bytes[1] === 0x4b && /spreadsheetml/.test(xlsxReport.contentType),
+  `status ${xlsxReport.status} type=${xlsxReport.contentType}`);
+const pdfReport = await rawMember('GET', `/api/cgm/classes/${classAId}/reports/roster?format=pdf`, amaToken);
+check('the roster report exports as a real PDF',
+  pdfReport.status === 200 && pdfReport.text.startsWith('%PDF-') && /application\/pdf/.test(pdfReport.contentType),
+  `status ${pdfReport.status} type=${pdfReport.contentType}`);
+check('the PDF report never contains raw passkeys', !/rx30[a-z]{1,2}\b/.test(pdfReport.text));
+const fallbackFormat = await rawMember('GET', `/api/cgm/classes/${classAId}/reports/roster?format=docx`, amaToken);
+check('an unknown format falls back to a safe CSV download', fallbackFormat.status === 200 && /text\/csv/.test(fallbackFormat.contentType), `status ${fallbackFormat.status} type=${fallbackFormat.contentType}`);
+const studentReportTry = await rawStudent(`/api/cgm/classes/${classAId}/reports/roster`, freshSession);
+check('a student session cannot download organizer reports', studentReportTry.status === 401, `status ${studentReportTry.status}`);
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

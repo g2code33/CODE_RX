@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ClipboardList, FileText, RefreshCw, ShieldCheck, Users } from 'lucide-react';
 import { cgm } from '../../lib/cgm';
+import { ConnectionBanner } from './ConnectionBanner';
 import { appDialog } from '../AppDialog';
 
 /**
@@ -267,6 +268,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
 
   return (
     <div className="cgm-shell">
+      <ConnectionBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white"><ShieldCheck className="h-5 w-5" /></span>

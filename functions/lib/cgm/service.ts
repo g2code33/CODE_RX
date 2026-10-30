@@ -82,9 +82,23 @@ export const notifyStudent = async (
   title: string,
   body: string,
   link?: string | null,
+  dedupeKey?: string | null,
 ) => {
   if (!studentId) return;
   try {
+    // A dedupe key makes a notification once-per-student-per-event (deadline
+    // reminders, for example): the unique partial index silently drops the
+    // second copy instead of spamming the student.
+    if (dedupeKey) {
+      await db.prepare(
+        `INSERT INTO cgm_student_notifications (student_id, category, title, body, link, dedupe_key)
+         SELECT ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (SELECT 1 FROM cgm_student_notifications WHERE student_id = ? AND dedupe_key = ?)`
+      ).bind(studentId, category.slice(0, 60), title.slice(0, 180), body.slice(0, 2000),
+        link ? String(link).slice(0, 320) : null, String(dedupeKey).slice(0, 160),
+        studentId, String(dedupeKey).slice(0, 160)).run();
+      return;
+    }
     await db.prepare(
       'INSERT INTO cgm_student_notifications (student_id, category, title, body, link) VALUES (?, ?, ?, ?, ?)'
     ).bind(studentId, category.slice(0, 60), title.slice(0, 180), body.slice(0, 2000), link ? String(link).slice(0, 320) : null).run();

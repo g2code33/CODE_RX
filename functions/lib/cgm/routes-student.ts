@@ -351,13 +351,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const groupIds = myGroups.map((row) => Number(row.group_id));
     const announcements = groupIds.length
       ? await asRows<any>(c.env.DB.prepare(
-        `SELECT id, title, body, author_label, pinned, created_at, activity_id, group_id FROM cgm_announcements
+        `SELECT id, title, body, author_label, pinned, created_at, activity_id, group_id, attachment_name, attachment_size FROM cgm_announcements
          WHERE class_id = ? AND status = 'published'
            AND (group_id IS NULL OR group_id IN (${groupIds.map(() => '?').join(',')}))
          ORDER BY pinned DESC, created_at DESC LIMIT 30`
       ).bind(classId, ...groupIds))
       : await asRows<any>(c.env.DB.prepare(
-        `SELECT id, title, body, author_label, pinned, created_at, activity_id, group_id FROM cgm_announcements
+        `SELECT id, title, body, author_label, pinned, created_at, activity_id, group_id, attachment_name, attachment_size FROM cgm_announcements
          WHERE class_id = ? AND status = 'published' AND group_id IS NULL
          ORDER BY pinned DESC, created_at DESC LIMIT 30`
       ).bind(classId));
@@ -375,6 +375,14 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
        JOIN cgm_activities a ON a.id = sess.activity_id
        WHERE r.student_id = ? AND a.class_id = ? GROUP BY r.status`
     ).bind(student.id, classId));
+
+    // §12 read tracking: opening the class dashboard counts as reading the
+    // announcements it shows. One row per student per announcement, ever.
+    if (announcements.length) {
+      await c.env.DB.batch(announcements.map((row) => c.env.DB.prepare(
+        'INSERT OR IGNORE INTO cgm_announcement_reads (announcement_id, student_id) VALUES (?, ?)'
+      ).bind(Number(row.id), student.id)));
+    }
 
     return c.json({
       success: true,
@@ -394,7 +402,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
           openedAt: row.opened_at, publishedAt: row.published_at, completedAt: row.completed_at,
         })),
         myGroups,
-        announcements,
+        announcements: announcements.map((row) => ({
+          id: Number(row.id), title: row.title, body: row.body, authorLabel: row.author_label,
+          pinned: Number(row.pinned) === 1, createdAt: row.created_at,
+          attachmentName: row.attachment_name || null,
+          attachmentSize: row.attachment_size === null || row.attachment_size === undefined ? null : Number(row.attachment_size),
+          attachmentUrl: row.attachment_name ? `/api/cgm/announcements/${Number(row.id)}/attachment` : null,
+        })),
         leaders,
         attendanceSummary: attendance,
       },

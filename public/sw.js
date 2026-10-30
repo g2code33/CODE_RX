@@ -4,7 +4,7 @@
 
 // BUMP THIS on every release. The shell is served from the cache first, so a
 // stale value here is what makes a deploy invisible for one page load.
-const CACHE = 'code-rx-v6';
+const CACHE = 'code-rx-v7';
 const CORE = [
   '/',
   '/index.html',

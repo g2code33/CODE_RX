@@ -31,6 +31,7 @@ import { randomToken, sha256Hex, audit as memberAudit } from '../vault';
 import { cleanEmail } from '../validate';
 import { createNotification } from '../notifications';
 import { recordPhantomInboxItem } from '../phantom-inbox';
+import { generalEmailNotification, notificationTemplateId, sendEmail } from '../email';
 import {
   allocateClassCode,
   CO_ORGANIZER_DEFAULT_PERMISSIONS,
@@ -112,6 +113,24 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     ).bind(member.userId, member.profileId, member.name, member.email, institution, motivation,
       await sha256Hex(`cgm-organizer-verify:${token}`)).run();
 
+    // §5 email verification: the link goes out through the platform's EmailJS
+    // pathway. Without configured email credentials the token is still
+    // returned so preview environments can complete the flow.
+    const verifyUrl = `${new URL(c.req.url).origin}/api/cgm/organizer/verify?token=${encodeURIComponent(token)}`;
+    const emailSent = await sendEmail(c.env, notificationTemplateId(c.env, c.env.EMAILJS_TEMPLATE_ID_GENERAL), {
+      member_name: member.name,
+      verification_link: verifyUrl,
+      ...generalEmailNotification({
+        toEmail: member.email,
+        replyTo: String(c.env.ADMIN_EMAIL || '').trim() || member.email,
+        title: 'Verify your organizer application',
+        greeting: `Hello ${member.name},`,
+        body: `Confirm your email to move your organizer application for ${institution} into PHANTOM review.`,
+        actionLabel: 'Verify email',
+        actionLink: verifyUrl,
+        sentAt: new Date().toISOString(),
+      }),
+    });
     await memberAudit(c.env.DB, null, 'cgm.organizer.applied', 'cgm_organizer_application', member.userId, { institution });
     await recordPhantomInboxItem(c.env.DB, {
       channel: 'class_groups',
@@ -127,7 +146,10 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     return c.json({
       success: true,
       data: {
-        message: 'Application received. Verify your email, then PHANTOM will review it.',
+        message: emailSent
+          ? 'Application received. We emailed you a verification link — verify, then PHANTOM reviews.'
+          : 'Application received. Email delivery is not configured for this preview, so use the returned token to verify.',
+        emailSent,
         verifyToken: token,
       },
     });
@@ -164,6 +186,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
        FROM cgm_class_organizers o JOIN cgm_classes cl ON cl.id = o.class_id
        WHERE o.member_profile_id = ? AND o.status = 'active' ORDER BY cl.name`
     ).bind(member.profileId)) : [];
+    // PHANTOM-granted registration-approval delegations: the Approvals area
+    // opens for these classes even without the class permission.
+    const delegations = member.profileId ? await asRows<{ class_id: number }>(c.env.DB.prepare(
+      `SELECT class_id FROM cgm_approval_delegations WHERE member_profile_id = ? AND status = 'active'`
+    ).bind(member.profileId)) : [];
     return c.json({
       success: true,
       data: {
@@ -177,6 +204,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
           permissions: sanitizeClassPermissions(JSON.parse(row.permissions_json || '[]')),
           name: row.name, code: row.code, status: row.status,
         })),
+        delegatedClassIds: delegations.map((row) => Number(row.class_id)),
       },
     });
   });
