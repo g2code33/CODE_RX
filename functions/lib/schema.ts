@@ -6,8 +6,9 @@ import type { Env } from '../env';
 import { hashPassword } from './auth';
 import { allocateMemberCode, FOUNDING_CODENAMES, VAULT_SECTION_SEEDS } from './vault';
 import { DEFAULT_CAL_LEVELS, SCORE_RULE_SEEDS, readCalLevels, resolveCalcitoninLevel } from './score';
+import { CGM_INDEXES, CGM_SCHEMA } from './cgm/schema';
 
-const SCHEMA = `
+const SCHEMA = `${CGM_SCHEMA}
 CREATE TABLE IF NOT EXISTS applications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -1160,6 +1161,7 @@ CREATE INDEX IF NOT EXISTS idx_client_sessions_link ON client_sessions(client_li
 -- Client activity is written to the existing audit_logs table, so this index
 -- supports both the PHANTOM audit view and the client activity view.
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action, created_at DESC);
+${CGM_INDEXES}
 `;
 
 // These are intentionally separate from CREATE TABLE so live D1 databases
@@ -1225,7 +1227,10 @@ const SAFE_MIGRATIONS = [
 // Bumped so the additive client-portal tables, indexes and feature flags above
 // are applied once on an existing live database. The migration path only ever
 // adds objects; it never alters or drops an existing table, column, or row.
-const VAULT_SCHEMA_VERSION = '2026-09-24-code-rx15-client-document-presentation-customization';
+// 2026-10-30: adds the Class & Group Management module (CGM) — student
+// identities, classes, roster, invitations, activities, groups, elections,
+// leadership, attendance, announcements and audit tables. Additive only.
+const VAULT_SCHEMA_VERSION = '2026-10-30-code-rx16-class-group-management';
 
 
 // Role codes stay stable for member history and permissions. Their visible
@@ -1464,6 +1469,9 @@ const seedFeatureSettings = async (db: D1Database) => {
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('client_portal_enabled', '0', CURRENT_TIMESTAMP)"),
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('client_downloads_enabled', '0', CURRENT_TIMESTAMP)"),
     db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('client_all_links_enabled', '1', CURRENT_TIMESTAMP)"),
+    // The Class & Group Management module ships enabled; PHANTOM can pause the
+    // whole module from Settings without touching any class record.
+    db.prepare("INSERT OR IGNORE INTO system_settings (setting_key, setting_value, updated_at) VALUES ('class_groups_enabled', '1', CURRENT_TIMESTAMP)"),
   ]);
 };
 

@@ -761,7 +761,7 @@ const main = async () => {
   check('document lifecycle is constrained to the six named states',
     lifecycleSql.includes('published') && lifecycleSql.includes('in_review') && lifecycleSql.includes('unpublished'));
   check('schema version marker was advanced',
-    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('client-portal'));
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('class-group-management'));
   // Phase 20 adds the review section's own table: one row per answer, so a
   // client who changes their mind leaves a trail instead of overwriting.
   // Phase 20 adds the review table, the signature table and the message table:
@@ -769,8 +769,12 @@ const main = async () => {
   // client, the project or the document it belongs to.
   // Phase 22 adds the three phantom_inbox tables, holding every event in the
   // unified PHANTOM Community inbox without touching any record of record.
-  check('the 63 pre-existing tables are untouched and 11 portal tables were added',
-    allTables.length === 63 + 11 + 3, `${allTables.length} user tables`);
+  // 2026-10-30 adds the 38 Class & Group Management tables (student
+  // identities, classes, roster, invitations, activities, groups, elections,
+  // leadership, attendance, announcements, notifications and audit), all
+  // additive and all hanging off the records they belong to.
+  check('the 63 pre-existing tables are untouched and the later modules were added',
+    allTables.length === 63 + 11 + 3 + 38, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',
@@ -784,7 +788,7 @@ const main = async () => {
       db.query("SELECT sql FROM sqlite_master WHERE name = 'client_document_reviews'")[0].sql));
 
   const preExistingIndexes = db.query(
-    `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'idx_client%' AND name NOT LIKE 'sqlite_%'`,
+    `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'idx_client%' AND name NOT LIKE 'idx_cgm%' AND name NOT LIKE 'sqlite_%'`,
   )[0].c;
   check('the 38 pre-existing indexes are preserved beside the new audit index',
     Number(preExistingIndexes) === 39 + 4, `${preExistingIndexes} non-portal indexes`);
