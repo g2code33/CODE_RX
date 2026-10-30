@@ -38,8 +38,14 @@ const css = src('src/index.css');
 section('1. The dedicated navigation entry exists exactly once');
 check('the navbar carries the dedicated Class & Groups door to #class-groups',
   /href="#class-groups"/.test(navbar) && /Classes &amp; Groups|Classes & Groups/.test(navbar));
-check('the door appears on desktop and in the mobile dropdown',
-  (navbar.match(/href="#class-groups"/g) || []).length === 2);
+const classGroupsEntry = src('src/components/ClassGroupsEntry.tsx');
+check('the Class & Groups door is a pill with a group icon beside the client access door',
+  /href="#class-groups"/.test(classGroupsEntry) && /Users className/.test(classGroupsEntry)
+  && /<ClassGroupsEntry variant="chip" \/>/.test(navbar) && /<ClassGroupsEntry variant="icon" \/>/.test(navbar)
+  && navbar.indexOf('<ClassGroupsEntry') < navbar.indexOf('<ClientPortalEntry'));
+check('the door appears on desktop (chip), narrow screens (icon) and the mobile dropdown',
+  (navbar.match(/href="#class-groups"/g) || []).length === 1
+  && /<ClassGroupsEntry variant="chip" \/>/.test(navbar) && /<ClassGroupsEntry variant="icon" \/>/.test(navbar));
 check('the door is titled with the full module name',
   /title="CODE Rx — Class & Group Management"/.test(navbar));
 
