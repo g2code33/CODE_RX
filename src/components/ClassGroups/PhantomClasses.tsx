@@ -81,6 +81,23 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
     <>
           {message && <p role="status" className="rounded-xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">{message}</p>}
 
+          {/* The module flag is the master switch for everything below — keep
+              it visible from every sub-section, not only the overview. */}
+          {overview && (
+            <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 ${overview.moduleEnabled ? 'border-emerald-200 bg-emerald-50/60' : 'border-amber-300 bg-amber-50'}`}>
+              <div className="flex items-center gap-2.5">
+                <span aria-hidden="true" className={`h-2.5 w-2.5 rounded-full ${overview.moduleEnabled ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                <p className="text-sm font-black text-slate-900">
+                  Module {overview.moduleEnabled ? 'ENABLED' : 'DISABLED'}
+                  <span className="ml-2 text-xs font-semibold text-slate-500">{overview.moduleEnabled ? 'routes are live for organizers and students.' : 'every class & group route answers 404 until you enable it.'}</span>
+                </p>
+              </div>
+              <button type="button" disabled={busy} className={overview.moduleEnabled ? 'mini-button text-red-600' : 'cgm-primary-button'} onClick={() => void act(() => cgm.phantomModule(!overview.moduleEnabled), overview.moduleEnabled ? 'Module disabled.' : 'Module enabled.')}>
+                {overview.moduleEnabled ? 'Disable module' : 'Enable module'}
+              </button>
+            </div>
+          )}
+
           {tab === 'overview' && overview && (
             <>
               <div className={card}>
