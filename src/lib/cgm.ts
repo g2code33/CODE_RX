@@ -462,4 +462,45 @@ export const cgmStudent = {
   claimInvitation: (code: string) => studentCall(`/api/cgm/student/invitations/${encodeURIComponent(code)}/claim`, { method: 'POST', body: {} }),
   whatsappClick: (linkId: number) =>
     studentCall(`/api/cgm/whatsapp/${linkId}/click`, { method: 'POST', body: {} }),
+  // §31 — per-category notification preferences (security categories pinned server-side)
+  notificationPrefs: () => studentCall('/api/cgm/student/notification-prefs'),
+  saveNotificationPrefs: (prefs: Array<{ category: string; muted: boolean }>) =>
+    studentCall('/api/cgm/student/notification-prefs', { method: 'PUT', body: { prefs } }),
 };
+
+/** §16 — a student downloads their own attendance, group and leadership records (CSV). */
+export async function downloadMyRecords() {
+  const headers = new Headers({ Accept: 'text/csv' });
+  const session = studentSession.read();
+  if (session?.token) headers.set(STUDENT_SESSION_HEADER, session.token);
+  const response = await fetch(`${API_BASE}/api/cgm/student/records/export`, { headers, credentials: 'omit' });
+  if (!response.ok) throw new CgmError('Your records could not be exported.', response.status);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'code-rx-my-records.csv';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** §7 — organizer downloads a sample roster template (csv / xlsx / json). */
+export async function downloadRosterTemplate(format: 'csv' | 'xlsx' | 'json' = 'csv') {
+  const { getToken } = await import('./cloudflare');
+  const headers = new Headers({ Accept: '*/*' });
+  const token = getToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}/api/cgm/roster/template?format=${format}`, { headers, credentials: 'omit' });
+  if (!response.ok) throw new CgmError('The sample template could not be generated.', response.status);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `code-rx-roster-template.${format}`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}

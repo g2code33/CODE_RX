@@ -63,6 +63,11 @@ import {
 import { sha256Hex } from '../vault';
 import { createNotification } from '../notifications';
 
+// §31 — categories a student may mute. Security- and registration-relevant
+// notices are always delivered regardless of preferences.
+const MUTABLE_NOTIFICATION_CATEGORIES = ['activity', 'groups', 'leadership', 'election', 'attendance', 'profile'] as const;
+
+
 type CgmApp = Hono<any>;
 
 const GENERIC_REGISTER_FAILURE = 'Registration could not be accepted. Check your index number and the class entry password.';
@@ -465,9 +470,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     ).bind(activity.id));
 
     const groupIds = groups.map((row) => Number(row.id));
-    const memberFields = ['full_name'];
+    // Privacy-first (§35): classmates see each other's names only. Contact
+    // fields (phone, email) are appended per row ONLY when the activity's
+    // contact visibility allows it — 'class' for everyone here, 'group' for
+    // the viewer's own group, 'none' for nobody. Index numbers, university
+    // IDs and gender never reach a classmate, whatever the setting says.
     const members = groupIds.length ? await asRows<any>(c.env.DB.prepare(
-      `SELECT ga.group_id, s.id AS student_id, ${memberFields.map((f) => `s.${f}`).join(', ')},
+      `SELECT ga.group_id, s.id AS student_id, s.full_name,
               CASE WHEN l.role = 'leader' THEN 'leader' WHEN l.role = 'assistant' THEN 'assistant' ELSE NULL END AS leader_role
        FROM cgm_group_assignments ga
        JOIN cgm_students s ON s.id = ga.student_id
@@ -475,6 +484,22 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
        WHERE ga.activity_id = ? AND ga.status = 'active'
        ORDER BY g_position_index, s.full_name`.replace('g_position_index', '(SELECT position FROM cgm_groups WHERE id = ga.group_id)')
     ).bind(activity.id)) : [];
+    if (members.length && (config.contactVisibility === 'class' || (config.contactVisibility === 'group' && myAssignment[0]))) {
+      const visibleScope: number[] = config.contactVisibility === 'class'
+        ? members.map((row) => Number(row.student_id))
+        : members.filter((row) => Number(row.group_id) === Number(myAssignment[0].group_id)).map((row) => Number(row.student_id));
+      const contacts = visibleScope.length ? await asRows<{ id: number; phone: string | null; email: string | null }>(c.env.DB.prepare(
+        `SELECT id, phone, email FROM cgm_students WHERE id IN (${visibleScope.map(() => '?').join(',')})`
+      ).bind(...visibleScope)) : [];
+      const byId = new Map(contacts.map((row) => [Number(row.id), row]));
+      for (const row of members) {
+        const contact = byId.get(Number(row.student_id));
+        if (contact && Number(row.student_id) !== Number(student.id)) {
+          if (contact.phone) row.phone = contact.phone;
+          if (contact.email) row.email = contact.email;
+        }
+      }
+    }
 
     const leadership = groupIds.length ? await asRows<any>(c.env.DB.prepare(
       `SELECT l.group_id, l.role, l.student_id, s.full_name, l.started_at
@@ -960,6 +985,109 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       }
     }
     return c.json({ success: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // §31 — Per-category notification preferences (security categories pinned)
+  // -------------------------------------------------------------------------
+  app.get('/api/cgm/student/notification-prefs', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    const rows = await asRows<{ category: string; muted: number }>(c.env.DB.prepare(
+      'SELECT category, muted FROM cgm_notification_prefs WHERE student_id = ?'
+    ).bind(student.id));
+    const muted = new Map(rows.map((row) => [row.category, Number(row.muted) === 1]));
+    return c.json({
+      success: true,
+      data: {
+        // Everyday categories can be muted; the critical set is decided here,
+        // on the server, and is never accepted from the client.
+        mutable: MUTABLE_NOTIFICATION_CATEGORIES,
+        critical: ['security', 'registration'],
+        prefs: MUTABLE_NOTIFICATION_CATEGORIES.map((category) => ({ category, muted: Boolean(muted.get(category)) })),
+      },
+    });
+  });
+
+  app.put('/api/cgm/student/notification-prefs', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    const body = await readBody(c);
+    const updates = (Array.isArray(body.prefs) ? body.prefs : [body]).map((entry: any) => ({
+      category: String(entry?.category || ''),
+      muted: entry?.muted === true || entry?.muted === 1,
+    })).filter((entry: { category: string }) => (MUTABLE_NOTIFICATION_CATEGORIES as readonly string[]).includes(entry.category));
+    if (!updates.length) return bad(c, 'That category cannot be changed.');
+    for (const entry of updates) {
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_notification_prefs (student_id, category, muted, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(student_id, category) DO UPDATE SET muted = excluded.muted, updated_at = CURRENT_TIMESTAMP`
+      ).bind(student.id, entry.category, entry.muted ? 1 : 0).run();
+      await auditCgm(c.env.DB, {
+        actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+        action: 'cgm.notification.pref', entityType: 'student', entityId: student.id,
+        context: { category: entry.category, muted: entry.muted },
+      });
+    }
+    return c.json({ success: true, data: { updated: updates.length } });
+  });
+
+  // -------------------------------------------------------------------------
+  // §16 — A student downloads their OWN permitted records (CSV)
+  // -------------------------------------------------------------------------
+  app.get('/api/cgm/student/records/export', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    const attendance = await asRows<any>(c.env.DB.prepare(
+      `SELECT a.name AS activity, sess.title AS session, sess.session_date, r.status,
+              r.original_status, r.correction_reason
+       FROM cgm_attendance_records r
+       JOIN cgm_attendance_sessions sess ON sess.id = r.session_id
+       JOIN cgm_activities a ON a.id = sess.activity_id
+       WHERE r.student_id = ? ORDER BY sess.session_date DESC LIMIT 1000`
+    ).bind(student.id));
+    const assignments = await asRows<any>(c.env.DB.prepare(
+      `SELECT a.name AS activity, g.name AS group_name, ga.status, ga.assigned_at, ga.removed_at
+       FROM cgm_group_assignments ga
+       JOIN cgm_activities a ON a.id = ga.activity_id
+       JOIN cgm_groups g ON g.id = ga.group_id
+       WHERE ga.student_id = ? ORDER BY ga.id DESC LIMIT 1000`
+    ).bind(student.id));
+    const leadership = await asRows<any>(c.env.DB.prepare(
+      `SELECT a.name AS activity, g.name AS group_name, l.role, l.status, l.method, l.started_at, l.ended_at, l.end_reason
+       FROM cgm_leadership_appointments l
+       JOIN cgm_activities a ON a.id = l.activity_id
+       JOIN cgm_groups g ON g.id = l.group_id
+       WHERE l.student_id = ? ORDER BY l.id DESC LIMIT 1000`
+    ).bind(student.id));
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+      action: 'cgm.student.records_export', entityType: 'student', entityId: student.id,
+    });
+    const esc = (value: unknown) => {
+      const text = value === null || value === undefined ? '' : String(value);
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const block = (title: string, header: string[], rows: unknown[][]) =>
+      rows.length ? [title, header.join(','), ...rows.map((row) => row.map(esc).join(',')), ''].join('\n') : `${title}\n(no records)\n`;
+    const csv = [
+      `Code Rx Society — my records (${student.full_name})`,
+      `exported,,`,
+      '',
+      block('ATTENDANCE', ['activity', 'session', 'date', 'status', 'original_status', 'correction_reason'],
+        attendance.map((row) => [row.activity, row.session, row.session_date, row.status, row.original_status, row.correction_reason])),
+      block('GROUPS', ['activity', 'group', 'status', 'assigned_at', 'released_at'],
+        assignments.map((row) => [row.activity, row.group_name, row.status, row.assigned_at, row.removed_at])),
+      block('LEADERSHIP', ['activity', 'group', 'role', 'status', 'method', 'started_at', 'ended_at', 'end_reason'],
+        leadership.map((row) => [row.activity, row.group_name, row.role, row.status, row.method, row.started_at, row.ended_at, row.end_reason])),
+    ].join('\n');
+    return new Response(csv, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="code-rx-my-records.csv"`,
+      },
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -568,6 +568,19 @@ CREATE TABLE IF NOT EXISTS cgm_student_notifications (
 );
 
 
+-- §31: per-category notification preferences. Critical categories (security,
+-- registration) are enforced server-side and can never be muted.
+CREATE TABLE IF NOT EXISTS cgm_notification_prefs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  category TEXT NOT NULL,
+  muted INTEGER NOT NULL DEFAULT 0,
+  updated_at DATETIME,
+  UNIQUE (student_id, category),
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
+
 CREATE TABLE IF NOT EXISTS cgm_approval_delegations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   member_profile_id INTEGER NOT NULL,

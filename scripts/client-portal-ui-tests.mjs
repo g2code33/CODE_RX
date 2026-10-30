@@ -1884,7 +1884,7 @@ const main = async () => {
 
   // --- a release invalidates the cached shell ------------------------------
   check('the service worker cache name is versioned and current',
-    /const CACHE = 'code-rx-v6'/.test(readSrc('public/sw.js')));
+    /const CACHE = 'code-rx-v7'/.test(readSrc('public/sw.js')));
   check('the service worker still refuses to cache API responses',
     /if \(url\.pathname\.startsWith\('\/api\/'\)\) return;/.test(readSrc('public/sw.js')));
 
@@ -2531,7 +2531,7 @@ const main = async () => {
   check('nothing may store a retired logo address again',
     /normalizeBrandLogosInContent\(body\)/.test(fs.readFileSync(path.join(ROOT, 'functions/[[path]].ts'), 'utf8')));
   check('the cached app shell is replaced, so the old addresses stop being served',
-    /const CACHE = 'code-rx-v6'/.test(fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8')));
+    /const CACHE = 'code-rx-v7'/.test(fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8')));
   check('no client-facing source still names a retired logo',
     !p20Retired.test(fs.readFileSync(path.join(ROOT, 'src/components/ClientSiteSign.tsx'), 'utf8')
       + fs.readFileSync(path.join(ROOT, 'src/components/ClientAccessScreen.tsx'), 'utf8')

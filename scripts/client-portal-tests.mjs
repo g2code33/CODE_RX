@@ -769,13 +769,13 @@ const main = async () => {
   // client, the project or the document it belongs to.
   // Phase 22 adds the three phantom_inbox tables, holding every event in the
   // unified PHANTOM Community inbox without touching any record of record.
-  // 2026-10-30 adds the 39 Class & Group Management tables (student
-  // identities, classes, roster, invitations, activities, groups, elections,
-  // leadership, attendance, announcements, notifications, PHANTOM approval
+  // 2026-10-30 adds the Class & Group Management tables (student identities,
+  // classes, roster, invitations, activities, groups, elections, leadership,
+  // attendance, announcements, notification preferences, PHANTOM approval
   // delegations and audit), all additive and all hanging off the records they
   // belong to.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 39, `${allTables.length} user tables`);
+    allTables.length === 63 + 11 + 3 + 40, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',

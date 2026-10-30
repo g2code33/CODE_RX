@@ -212,6 +212,51 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
   // -------------------------------------------------------------------------
   // Classes
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // §7 — Downloadable sample roster templates (csv / xlsx / json)
+  // -------------------------------------------------------------------------
+  app.get('/api/cgm/roster/template', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    // The canonical columns the import mapper suggests; gender stays optional
+    // and defaults to unknown — the engine never infers it.
+    const header = ['full_name', 'index_number', 'university_id', 'email', 'phone', 'gender'];
+    const rows = [
+      ['Ama Boakye', 'BIO-201-001', '10850001', 'ama.boakye@example.com', '+233201234567', 'female'],
+      ['Kofi Mensah', 'BIO-201-002', '10850002', 'kofi.mensah@example.com', '+233202234567', 'male'],
+      ['Akosua Owusu', 'CHM-105-010', '10850010', 'akosua.owusu@example.com', '+233209234567', 'unknown'],
+    ];
+    const format = String(c.req.query('format') || 'csv');
+    const fileBase = 'code-rx-roster-template';
+    if (format === 'json') {
+      return new Response(JSON.stringify(rows.map((row) => Object.fromEntries(row.map((value, index) => [header[index], value]))), null, 2), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="${fileBase}.json"` },
+      });
+    }
+    if (format === 'xlsx') {
+      // @ts-ignore -- xlsx/xlsx.mjs has no bundled declaration file.
+      const XLSXLib = (await import('xlsx/xlsx.mjs')) as unknown as typeof import('xlsx');
+      const sheet = XLSXLib.utils.aoa_to_sheet([header, ...rows]);
+      const book = XLSXLib.utils.book_new();
+      XLSXLib.utils.book_append_sheet(book, sheet, 'Roster');
+      const buffer = XLSXLib.write(book, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+      return new Response(buffer as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="${fileBase}.xlsx"`,
+        },
+      });
+    }
+    const esc = (value: string) => (/[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+    const csv = [header.join(','), ...rows.map((row) => row.map(esc).join(','))].join('\n');
+    return new Response(csv, {
+      status: 200,
+      headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${fileBase}.csv"` },
+    });
+  });
+
   app.post('/api/cgm/classes', async (c: any) => {
     const dark = await requireModuleEnabled(c);
     if (dark) return dark;

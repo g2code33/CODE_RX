@@ -3,7 +3,7 @@ import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, GraduationCap,
   LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
 } from 'lucide-react';
-import { cgmStudent, CgmError, studentSession, type CgmStudentSession } from '../../lib/cgm';
+import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
 import { ConnectionBanner } from './ConnectionBanner';
 
 /**
@@ -599,7 +599,14 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
           <div className="mt-3 space-y-1.5">
             {(data.members || []).filter((member: any) => Number(member.group_id) === Number(myGroup.group_id)).map((member: any) => (
               <div key={member.student_id} className="flex items-center justify-between rounded-xl bg-white px-4 py-2.5 text-sm">
-                <span className="font-bold text-slate-700">{member.full_name}{Number(member.student_id) === Number(me.student.id) ? ' (you)' : ''}</span>
+                <span className="font-bold text-slate-700">
+                  {member.full_name}{Number(member.student_id) === Number(me.student.id) ? ' (you)' : ''}
+                  {(member.phone || member.email) && Number(member.student_id) !== Number(me.student.id) && (
+                    <span className="ml-2 text-[11px] font-semibold text-slate-400">
+                      {[member.phone, member.email].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                </span>
                 {member.leader_role && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black uppercase text-white">{member.leader_role}</span>}
               </div>
             ))}
@@ -895,13 +902,55 @@ const CalendarView = () => {
 
 const NotificationsView = ({ onChanged }: { onChanged: () => void }) => {
   const [rows, setRows] = useState<any[] | null>(null);
+  const [prefs, setPrefs] = useState<any | null>(null);
+  const [prefBusy, setPrefBusy] = useState<string | null>(null);
   const load = useCallback(async () => { setRows(await cgmStudent.notifications().catch(() => [])); }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); void cgmStudent.notificationPrefs().then((next) => setPrefs(next?.data || null)).catch(() => setPrefs(null)); }, [load]);
+  const togglePref = async (category: string, muted: boolean) => {
+    setPrefBusy(category);
+    try {
+      await cgmStudent.saveNotificationPrefs([{ category, muted }]);
+      setPrefs((current: any) => current ? ({
+        ...current,
+        prefs: current.prefs.map((entry: any) => (entry.category === category ? { ...entry, muted } : entry)),
+      }) : current);
+    } finally { setPrefBusy(null); }
+  };
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className={card + ' flex-1'}><p className={label}>Notifications</p></div>
         <button type="button" className="mini-button ml-3" onClick={async () => { await cgmStudent.markRead({ all: true }); await load(); onChanged(); }}>Mark all read</button>
+      </div>
+      {prefs && (
+        <div className={card}>
+          <p className={label}>Email & notice preferences</p>
+          <p className="mt-1 text-xs font-medium text-slate-500">Choose which everyday notices you receive. Security and registration decisions always arrive — they cannot be turned off.</p>
+          <ul className="mt-3 space-y-1.5">
+            {prefs.prefs.map((entry: any) => (
+              <li key={entry.category} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-2.5">
+                <span className="text-sm font-bold capitalize text-slate-700">{entry.category}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={entry.muted}
+                  disabled={prefBusy === entry.category}
+                  onClick={() => void togglePref(entry.category, !entry.muted)}
+                  className={`relative h-5 w-9 rounded-full transition ${entry.muted ? 'bg-slate-300' : 'bg-emerald-600'}`}
+                  aria-label={`${entry.muted ? 'Unmute' : 'Mute'} ${entry.category} notifications`}
+                >
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${entry.muted ? 'left-0.5' : 'left-[18px]'}`} />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-[11px] font-semibold text-slate-400">Always on: {(prefs.critical || []).join(', ')}.</p>
+        </div>
+      )}
+      <div className={card}>
+        <p className={label}>My records</p>
+        <p className="mt-1 text-xs font-medium text-slate-500">Download your own attendance, group and leadership history as a spreadsheet-ready CSV. Your records survive leaving a class or an activity being archived.</p>
+        <button type="button" className="mini-button mt-3" onClick={() => void downloadMyRecords().catch(() => {})}>Download my records (CSV)</button>
       </div>
       {rows === null && <p className="text-sm font-semibold text-slate-400">Loading…</p>}
       {rows?.length === 0 && <Empty icon={Bell} title="No notifications" text="Approvals, assignments and election news arrive here." />}

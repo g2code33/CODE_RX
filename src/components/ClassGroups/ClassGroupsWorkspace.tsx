@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import * as QRCode from 'qrcode';
 import {
-  cgm, downloadReport, importRosterFile,
+  cgm, downloadReport, downloadRosterTemplate, importRosterFile,
 } from '../../lib/cgm';
 import { appDialog } from '../AppDialog';
 import { ConnectionBanner } from './ConnectionBanner';
@@ -556,7 +556,23 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
 
   return (
     <div className={card}>
-      <p className={label}>Import roster</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className={label}>Import roster</p>
+        <span className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500">
+          Sample template:
+          {(['csv', 'xlsx', 'json'] as const).map((format) => (
+            <button
+              key={format}
+              type="button"
+              className="mini-button"
+              onClick={() => void downloadRosterTemplate(format).catch(() => {})}
+              aria-label={`Download sample roster template (${format.toUpperCase()})`}
+            >
+              {format.toUpperCase()}
+            </button>
+          ))}
+        </span>
+      </div>
       <p className="mt-1 text-xs font-medium text-slate-500">Excel .xlsx, CSV .csv or JSON .json — every format runs the same validation and duplicate checks.</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <input type="file" accept=".xlsx,.xls,.csv,.json" onChange={(event) => { setFile(event.target.files?.[0] || null); setPreview(null); }} className="text-xs" aria-label="Roster file" />

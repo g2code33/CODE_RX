@@ -75,6 +75,10 @@ export const auditCgm = async (db: D1Database, input: CgmAuditInput) => {
 // Student notifications
 // ---------------------------------------------------------------------------
 
+// §31 — categories a student may mute. Passkeys, sign-in identity changes and
+// registration decisions are security-relevant and always delivered.
+const CRITICAL_NOTIFICATION_CATEGORIES = new Set(['security', 'registration']);
+
 export const notifyStudent = async (
   db: D1Database,
   studentId: number | null | undefined,
@@ -86,6 +90,14 @@ export const notifyStudent = async (
 ) => {
   if (!studentId) return;
   try {
+    // The student's per-category choice wins for everyday notices, but never
+    // for the critical set above.
+    if (!CRITICAL_NOTIFICATION_CATEGORIES.has(category)) {
+      const pref = await asRows<{ muted: number }>(db.prepare(
+        'SELECT muted FROM cgm_notification_prefs WHERE student_id = ? AND category = ?'
+      ).bind(studentId, category.slice(0, 60)));
+      if (Number(pref[0]?.muted || 0) === 1) return;
+    }
     // A dedupe key makes a notification once-per-student-per-event (deadline
     // reminders, for example): the unique partial index silently drops the
     // second copy instead of spamming the student.

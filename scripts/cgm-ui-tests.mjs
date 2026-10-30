@@ -279,6 +279,23 @@ for (const endpoint of [
   check(`${endpoint} is registered server-side`, backend.includes(`'${endpoint}'`));
 }
 
+// ===========================================================================
+section('12. Step-6 additions: preferences, contact privacy, own records, sample templates');
+check('students read and save per-category notification preferences',
+  /notificationPrefs:/.test(client) && /cgmStudent\.saveNotificationPrefs/.test(studentPortal) && /notification-prefs/.test(backend));
+check('the preferences UI is a real switch with security categories pinned server-side',
+  /role="switch"/.test(studentPortal) && /aria-checked=\{entry\.muted\}/.test(studentPortal) && /cannot be turned off/.test(studentPortal));
+check('the client exposes the records export and the roster template download',
+  /downloadMyRecords/.test(client) && /downloadRosterTemplate/.test(client) && /records\/export/.test(backend) && /roster\/template/.test(backend));
+check('the student portal offers the own-records CSV download',
+  /Download my records \(CSV\)/.test(studentPortal) && /records survive leaving a class/.test(studentPortal));
+check('contact details appear on group-mates only when the server allowed them',
+  /member\.phone \|\| member\.email/.test(studentPortal));
+check('the import card offers sample roster templates in all three formats',
+  /Sample template:/.test(workspace) && /downloadRosterTemplate\(format\)/.test(workspace));
+check('notification preferences live in their own table with a unique per-category row',
+  /cgm_notification_prefs/.test(schemaCgm) && /UNIQUE \(student_id, category\)/.test(schemaCgm));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

@@ -186,7 +186,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 39);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 40);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -1162,6 +1162,109 @@ const fallbackFormat = await rawMember('GET', `/api/cgm/classes/${classAId}/repo
 check('an unknown format falls back to a safe CSV download', fallbackFormat.status === 200 && /text\/csv/.test(fallbackFormat.contentType), `status ${fallbackFormat.status} type=${fallbackFormat.contentType}`);
 const studentReportTry = await rawStudent(`/api/cgm/classes/${classAId}/reports/roster`, freshSession);
 check('a student session cannot download organizer reports', studentReportTry.status === 401, `status ${studentReportTry.status}`);
+
+// --- §31 Notification preferences -------------------------------------------
+const meRow = q1('SELECT id, full_name FROM cgm_students WHERE index_number_key = ?', 'bio-201-001');
+const attendanceBefore = q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND category = 'attendance'", meRow.id).c;
+const prefsGet = await studentCall('GET', '/api/cgm/student/notification-prefs', undefined, freshSession);
+check('the preference list separates mutable categories from the pinned critical set',
+  prefsGet.status === 200 && (prefsGet.json?.data?.mutable || []).includes('attendance')
+  && (prefsGet.json?.data?.critical || []).includes('security') && (prefsGet.json?.data?.critical || []).includes('registration'),
+  JSON.stringify(prefsGet.json?.data || {}).slice(0, 200));
+const muteCritical = await studentCall('PUT', '/api/cgm/student/notification-prefs', { category: 'security', muted: true }, freshSession);
+check('security-critical categories cannot be muted', muteCritical.status === 400, `status ${muteCritical.status}`);
+const muteAttendance = await studentCall('PUT', '/api/cgm/student/notification-prefs', { prefs: [{ category: 'attendance', muted: true }] }, freshSession);
+check('a student can mute an everyday category', muteAttendance.status === 200, `status ${muteAttendance.status} ${muteAttendance.text?.slice(0, 140)}`);
+const sessionS6 = await memberCall('POST', `/api/cgm/activities/${activityAId}/attendance-sessions`, { title: 'Week 2 practical', sessionDate: '2026-11-02' }, amaToken);
+const sessionIdS6 = Number(sessionS6.json?.data?.sessionId);
+await memberCall('POST', `/api/cgm/attendance-sessions/${sessionIdS6}/records`, { records: [{ studentId: Number(meRow.id), status: 'present' }] }, amaToken);
+const attendanceMuted = q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND category = 'attendance'", meRow.id).c;
+check('muted categories stop receiving notifications (server-enforced)', Number(attendanceMuted) === Number(attendanceBefore), `before=${attendanceBefore} after=${attendanceMuted}`);
+await studentCall('PUT', '/api/cgm/student/notification-prefs', { prefs: [{ category: 'attendance', muted: false }] }, freshSession);
+const sessionS6b = await memberCall('POST', `/api/cgm/activities/${activityAId}/attendance-sessions`, { title: 'Week 3 practical', sessionDate: '2026-11-09' }, amaToken);
+await memberCall('POST', `/api/cgm/attendance-sessions/${Number(sessionS6b.json?.data?.sessionId)}/records`, { records: [{ studentId: Number(meRow.id), status: 'late' }] }, amaToken);
+const attendanceUnmuted = q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND category = 'attendance'", meRow.id).c;
+check('unmuting restores the notifications', Number(attendanceUnmuted) === Number(attendanceMuted) + 1, `muted=${attendanceMuted} unmuted=${attendanceUnmuted}`);
+
+// --- §35 Contact visibility ---------------------------------------------------
+// Fixture shaping: the roster gave these students contact details.
+sqlite.prepare("UPDATE cgm_students SET phone = '+233201111111', email = 'ama.boakye@example.com' WHERE index_number_key = 'bio-201-001'").run();
+sqlite.prepare("UPDATE cgm_students SET phone = '+233202222222', email = 'kofi.mensah@example.com' WHERE index_number_key = 'bio-201-002'").run();
+sqlite.prepare("UPDATE cgm_students SET phone = '+233203333333', email = 'akosua.owusu@example.com' WHERE index_number_key = 'bio-201-003'").run();
+const makeContactActivity = async (name, visibility) => {
+  const created = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+    name, type: 'tutorial',
+    config: { method: 'automatic', groupCount: 1, capacity: 30, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', contactVisibility: visibility, announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, amaToken);
+  const id = created.json?.data?.activityId ?? created.json?.data?.activity?.id ?? created.json?.data?.id;
+  await memberCall('POST', `/api/cgm/activities/${id}/lifecycle`, { action: 'publish' }, amaToken);
+  await memberCall('POST', `/api/cgm/activities/${id}/groups`, { count: 1 }, amaToken);
+  await memberCall('POST', `/api/cgm/activities/${id}/assign-remaining`, {}, amaToken);
+  return id;
+};
+const classScopeActivity = await makeContactActivity('Contact Sharing Class', 'class');
+const noneScopeActivity = await makeContactActivity('Contact Free Zone', 'none');
+const classScopeView = await studentCall('GET', `/api/cgm/student/activities/${classScopeActivity}`, undefined, sessionsToUse[1]);
+const classScopeMembers = classScopeView.json?.data?.members || [];
+check('contactVisibility "class" shares phone and email with classmates',
+  classScopeMembers.length >= 2 && classScopeMembers.some((m) => m.phone === '+233203333333') && classScopeMembers.some((m) => m.email),
+  JSON.stringify(classScopeMembers.slice(0, 2)));
+check('a classmate never sees index numbers, university IDs or gender',
+  classScopeMembers.every((m) => m.index_number === undefined && m.university_id === undefined && m.gender === undefined));
+const noneScopeView = await studentCall('GET', `/api/cgm/student/activities/${noneScopeActivity}`, undefined, sessionsToUse[1]);
+const noneScopeMembers = noneScopeView.json?.data?.members || [];
+check('contactVisibility "none" keeps every contact field out of the payload',
+  noneScopeMembers.length >= 2 && noneScopeMembers.every((m) => !m.phone && !m.email),
+  JSON.stringify(noneScopeMembers.slice(0, 2)));
+check('the activity config still reports the visibility setting to the client',
+  ['none', 'group', 'class'].includes(noneScopeView.json?.data?.activity?.config?.contactVisibility), String(noneScopeView.json?.data?.activity?.config?.contactVisibility));
+sqlite.prepare("UPDATE cgm_students SET phone = '+233204444444', email = 'akua.mensah@example.com' WHERE index_number_key = 'bio-201-004'").run();
+sqlite.prepare("UPDATE cgm_students SET phone = '+233205555555', email = 'yaa.owusu@example.com' WHERE index_number_key = 'bio-201-005'").run();
+const podActivity = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Contact Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 2, capacity: 2, genderRule: 'none', overflow: 'waitlist', leaderMethod: 'appointment', contactVisibility: 'group', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const podActivityId = podActivity.json?.data?.activityId ?? podActivity.json?.data?.activity?.id ?? podActivity.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${podActivityId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${podActivityId}/groups`, { count: 2, capacity: 2 }, amaToken);
+const podDetail = await memberCall('GET', `/api/cgm/activities/${podActivityId}`, undefined, amaToken);
+const podIdsS6 = (podDetail.json?.data?.groups || []).map((g) => Number(g.id));
+const login004 = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-004', passkey: 'rx30d' });
+const login005 = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-005', passkey: 'rx30e' });
+const session004 = login004.json?.data?.session?.token;
+await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[0] }, session004);
+await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[0] }, login005.json?.data?.session?.token);
+await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[1] }, sessionsToUse[1]);
+const groupScopeView = await studentCall('GET', `/api/cgm/student/activities/${podActivityId}`, undefined, session004);
+const groupScopeMembers = groupScopeView.json?.data?.members || [];
+check('contactVisibility "group" shares contacts inside the viewer’s group only',
+  groupScopeMembers.some((m) => m.phone === '+233205555555')
+  && groupScopeMembers.every((m) => m.phone !== '+233202222222'),
+  JSON.stringify(groupScopeMembers.map((m) => ({ g: m.group_id, phone: m.phone || null }))));
+
+// --- §16 Student own-records export -------------------------------------------
+const recordsExport = await rawStudent('/api/cgm/student/records/export', freshSession);
+check('a student can download their own records as CSV',
+  recordsExport.status === 200 && /text\/csv/.test(recordsExport.contentType) && /ATTENDANCE/.test(recordsExport.text) && /GROUPS/.test(recordsExport.text) && /LEADERSHIP/.test(recordsExport.text),
+  `status ${recordsExport.status} type=${recordsExport.contentType}`);
+check('the records export contains only the caller’s rows',
+  !/Akosua Owusu/i.test(recordsExport.text) && /Week 3 practical/.test(recordsExport.text),
+  recordsExport.text.slice(0, 220).replace(/\n/g, ' | '));
+const exportAudit = q1("SELECT id FROM cgm_audit WHERE action = 'cgm.student.records_export' ORDER BY id DESC LIMIT 1");
+check('the export is audited', Boolean(exportAudit?.id));
+
+// --- §7 Sample roster templates -------------------------------------------------
+const templateJson = await memberCall('GET', '/api/cgm/roster/template?format=json', undefined, amaToken);
+check('the sample roster template downloads as JSON with canonical columns',
+  templateJson.status === 200 && Array.isArray(templateJson.json) && templateJson.json[0]?.full_name && templateJson.json[0]?.index_number,
+  templateJson.text?.slice(0, 140));
+const templateCsv = await rawMember('GET', '/api/cgm/roster/template', amaToken);
+check('the sample roster template defaults to CSV', templateCsv.status === 200 && templateCsv.text.startsWith('full_name,index_number'), templateCsv.text.slice(0, 80));
+const templateXlsx = await rawMember('GET', '/api/cgm/roster/template?format=xlsx', amaToken);
+check('the sample roster template downloads as a real workbook',
+  templateXlsx.status === 200 && templateXlsx.bytes[0] === 0x50 && templateXlsx.bytes[1] === 0x4b, `status ${templateXlsx.status}`);
+const templateNoAuth = await rawMember('GET', '/api/cgm/roster/template', '');
+check('roster templates need a member sign-in', templateNoAuth.status === 401, `status ${templateNoAuth.status}`);
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
