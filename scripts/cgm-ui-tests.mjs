@@ -328,6 +328,19 @@ check('the vote ledger commits participation and ballot together with a clean 40
   && /You have already voted in this election\.', 409/.test(studentRoutes));
 check('the service worker keeps caching the shell only', /CACHE = 'code-rx-v7'/.test(src('public/sw.js')));
 
+// ===========================================================================
+section('15. Step-9 security sweep: verifiable credential rotation, lockout model');
+check('passkey changes verify against a freshly-read verifier and rotate verifier + sequence + suffix together',
+  /SELECT passkey_verifier FROM cgm_students WHERE id = \?/.test(studentRoutes)
+  && /passkey_sequence = \?, passkey_suffix = \?/.test(studentRoutes)
+  && /That passkey is already in use/.test(studentRoutes));
+check('a passkey change revokes every live session and issues exactly one fresh one',
+  /revokeStudentSessions/.test(studentRoutes) && /passkey was changed/.test(studentRoutes));
+check('lockout guards the confirming half: the audit marks the lock without counting anonymous wrong passkeys',
+  /cgm\.student\.locked/.test(studentRoutes) && /failed_attempts = failed_attempts \+ 1 WHERE id = \?/.test(studentRoutes));
+check('the audit trail scan is part of the suite contract (no raw passkeys or entry passwords)',
+  /never contains a raw passkey/.test(readFileSync(path.join(ROOT, 'scripts/cgm-tests.mjs'), 'utf8')));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

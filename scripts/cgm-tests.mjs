@@ -34,6 +34,10 @@
  *       promotion, move approvals, double votes) never overfill a group or
  *       duplicate a ballot; attachment size limits and missing files fail
  *       cleanly
+ *   20. step-9 security sweep: rate limits, lockouts, session revocation on
+ *       passkey change and logout, and an audit-table scan that must never
+ *       contain raw passkeys, entry passwords, invitation tokens or vote
+ *       choices
  *
  * Usage: node --experimental-sqlite scripts/cgm-tests.mjs
  */
@@ -1474,6 +1478,91 @@ hugeAttachment.append('body', 'This attachment is over the limit.');
 hugeAttachment.append('attachment', new File([new Uint8Array(5 * 1024 * 1024 + 1)], 'huge.bin', { type: 'application/octet-stream' }));
 const hugeTry = await formCall('POST', `/api/cgm/classes/${classAId}/announcements`, hugeAttachment, amaToken);
 check('attachments over 5 MB are refused with 413', hugeTry.status === 413, `status ${hugeTry.status}`);
+
+// ===========================================================================
+// 20. Security sweep (step 9, spec §37)
+// ===========================================================================
+section('20. Security sweep: rate limits, lockouts, session revocation, audit hygiene');
+
+// --- Rate limits fire per IP (join: 20 per 10 min) ----------------------------
+const pinnedIp = { 'CF-Connecting-IP': '10.99.99.99' };
+let sawThrottle = false;
+for (let i = 0; i < 22; i += 1) {
+  const attempt = await call('POST', '/api/cgm/student/join', { code: 'NOT-A-CODE' }, pinnedIp);
+  if (attempt.status === 429) { sawThrottle = true; break; }
+}
+check('a burst of joins from one address hits the rate limit', sawThrottle);
+const otherIpJoin = await call('POST', '/api/cgm/student/join', { code: 'NOT-A-CODE' }, { 'CF-Connecting-IP': '10.99.99.98' });
+check('the limit is per address, not global', otherIpJoin.status !== 429, `status ${otherIpJoin.status}`);
+
+// --- Lockout: 8 failures lock the account even for the right passkey ----------
+const lockStudentId = Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'bio-201-006'")?.id || 0);
+const lockKnownLogin = await loginForStudent(lockStudentId);
+const lockKnownPasskey = racePairs.find((pair) => pair.studentId === lockStudentId)?.passkey || 'rx30f';
+check('the lockout target can sign in before the test', Boolean(lockKnownLogin.json?.data?.session?.token), `status ${lockKnownLogin.status}`);
+// Fixture reset: earlier sections may have left attempts on this account.
+sqlite.prepare('UPDATE cgm_students SET failed_attempts = 0, locked_until = NULL WHERE id = ?').run(lockStudentId);
+// The passkey half is the secret — a wrong passkey is an anonymous failure
+// and cannot count per account. The lockout guards the confirming half:
+// eight correct-passkey, wrong-identifier attempts.
+for (let i = 0; i < 8; i += 1) {
+  await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-999', passkey: lockKnownPasskey });
+}
+const lockedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-006', passkey: lockKnownPasskey });
+check('after eight failures even the correct passkey is refused while locked', lockedLogin.status === 423, `status ${lockedLogin.status}`);
+check('the lockout is recorded with an expiry',
+  Boolean(q1('SELECT locked_until FROM cgm_students WHERE id = ?', lockStudentId)?.locked_until));
+
+// --- Passkey change revokes every existing session -----------------------------
+const preChangeLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const sessionBeforeChange = preChangeLogin.json?.data?.session?.token;
+check('the passkey-change target signed in with the original passkey', Boolean(sessionBeforeChange), `status ${preChangeLogin.status}`);
+const enableSelfChange = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, {
+  studentVisibleFields: ['full_name', 'phone', 'email'],
+  loginFormat: { identifiers: ['index_number'], allowStudentPasskeyChange: true },
+}, amaToken);
+check('the class enables self-service passkey change', enableSelfChange.status === 200, `status ${enableSelfChange.status}`);
+const passkeyChange = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: 'rx30a', newPasskey: 'rx30qz' }, sessionBeforeChange);
+const sessionAfterChange = passkeyChange.json?.data?.session?.token;
+check('the passkey change returns exactly one fresh session', passkeyChange.status === 200 && Boolean(sessionAfterChange), `status ${passkeyChange.status}`);
+const oldSessionTry = await studentCall('GET', '/api/cgm/student/me', undefined, sessionBeforeChange);
+check('the pre-change session is dead immediately', oldSessionTry.status === 401, `status ${oldSessionTry.status}`);
+const newSessionTry = await studentCall('GET', '/api/cgm/student/me', undefined, sessionAfterChange);
+check('the fresh session works', newSessionTry.status === 200, `status ${newSessionTry.status}`);
+const newPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+check('sign-in works with the new passkey', Boolean(newPasskeyLogin.json?.data?.session?.token), `status ${newPasskeyLogin.status}`);
+const oldPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+check('the old passkey is gone for good', oldPasskeyLogin.status >= 400, `status ${oldPasskeyLogin.status}`);
+
+// --- Logout revokes the session -------------------------------------------------
+const logoutSession = newPasskeyLogin.json?.data?.session?.token;
+const logoutTry = await studentCall('POST', '/api/cgm/student/logout', {}, logoutSession);
+const afterLogout = await studentCall('GET', '/api/cgm/student/me', undefined, logoutSession);
+check('logout revokes the session immediately', logoutTry.status === 200 && afterLogout.status === 401,
+  `logout=${logoutTry.status} after=${afterLogout.status}`);
+
+// --- Anti-enumeration parity on register ----------------------------------------
+const enumA = await call('POST', '/api/cgm/student/register', { classCode: 'CRX-CLS-0001', indexNumber: 'BIO-999-999', entryPassword: 'wrong-guess' });
+const enumB = await call('POST', '/api/cgm/student/register', { classCode: 'CRX-CLS-0001', indexNumber: 'BIO-999-998', entryPassword: 'bio-201-entry' });
+check('a wrong password and an unknown index give the identical generic failure',
+  enumA.status === enumB.status && enumA.json?.error === enumB.json?.error,
+  `${enumA.status}/${enumB.status} "${enumA.json?.error}" vs "${enumB.json?.error}"`);
+
+// --- Audit hygiene: the whole trail must be free of secrets ----------------------
+const auditRowsAll = q('SELECT action, context_json FROM cgm_audit');
+const auditBlob = auditRowsAll.map((row) => `${row.action} ${row.context_json || ''}`).join('\n');
+check(`the audit trail never contains a raw passkey (${auditRowsAll.length} rows scanned)`,
+  !/rx30[a-z]{1,2}\b/.test(auditBlob), auditBlob.match(/rx30[a-z]{1,2}\b/)?.[0] || '');
+check('the audit trail never contains a class entry password',
+  !/bio-201-entry|chm-105-entry/.test(auditBlob));
+check('the audit trail never contains a raw invitation token (64-hex)',
+  !/[0-9a-f]{64}/.test(auditBlob));
+const voteAuditRows = auditRowsAll.filter((row) => row.action === 'cgm.election.vote');
+check('vote audit rows record anonymity, never the candidate or the choice',
+  voteAuditRows.length > 0 && voteAuditRows.every((row) => !/candidate/i.test(row.context_json || '')),
+  `rows=${voteAuditRows.length}`);
+const passkeyChangeAudit = auditRowsAll.filter((row) => row.action === 'cgm.passkey.self_change');
+check('the passkey change is audited without the new value', passkeyChangeAudit.length === 1, `rows=${passkeyChangeAudit.length}`);
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

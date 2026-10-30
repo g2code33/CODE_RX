@@ -1217,12 +1217,30 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!Number(allowed[0]?.c || 0)) {
       return bad(c, 'Self-service passkey changes are not enabled for your classes. Ask your organizer for a reset.', 403);
     }
-    if (!student.passkey_verifier || !await verifyPassword(currentPasskey, student.passkey_verifier)) {
+    // The session projection deliberately omits the verifier; read it
+    // directly for this one check so the comparison actually happens.
+    const verifierRows = await asRows<{ passkey_verifier: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_verifier FROM cgm_students WHERE id = ?'
+    ).bind(student.id));
+    const storedVerifier = verifierRows[0]?.passkey_verifier;
+    if (!storedVerifier || !await verifyPassword(currentPasskey, storedVerifier)) {
       return bad(c, 'Your current passkey did not match.', 400);
     }
-    await c.env.DB.prepare(
-      `UPDATE cgm_students SET passkey_verifier = ?, passkey_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).bind(await hashPassword(newPasskey), student.id).run();
+    // The passkey IS the lookup key (login resolves the student by its
+    // sequence), so a change must rotate the verifier, the sequence and the
+    // suffix together — otherwise the student could never sign in again.
+    const newSequence = sequenceForPasskey(newPasskey);
+    try {
+      await c.env.DB.prepare(
+        `UPDATE cgm_students SET passkey_verifier = ?, passkey_sequence = ?, passkey_suffix = ?,
+           passkey_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(await hashPassword(newPasskey), newSequence, newPasskey.slice(4).toLowerCase(), student.id).run();
+    } catch (error) {
+      if (String((error as any)?.errcode || '') === '2067' || /UNIQUE/i.test(String((error as any)?.message || error))) {
+        return bad(c, 'That passkey is already in use by another student — the format is valid but taken.', 409);
+      }
+      throw error;
+    }
     await revokeStudentSessions(c.env.DB, student.id);
     const session = await createStudentSession(c.env.DB, student.id, {
       ip: c.req.header('cf-connecting-ip'), userAgent: c.req.header('user-agent'),
