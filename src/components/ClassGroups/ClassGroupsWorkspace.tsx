@@ -66,11 +66,14 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
   const refresh = useCallback(async () => {
     try {
       const [organizerStatus, myClasses] = await Promise.all([cgm.organizerStatus(), cgm.myClasses()]);
+      // The client unwraps `data`, so myClasses() resolves to the row array
+      // itself (older wrapped shape tolerated defensively).
+      const myClassRows: any[] = Array.isArray(myClasses) ? myClasses : (myClasses?.classes || []);
       setStatus(organizerStatus);
-      setClasses(myClasses.classes || []);
+      setClasses(myClassRows);
       setActiveClassId((current) => {
-        if (current && myClasses.classes?.some((entry: any) => Number(entry.id) === current)) return current;
-        return myClasses.classes?.[0] ? Number(myClasses.classes[0].id) : null;
+        if (current && myClassRows.some((entry: any) => Number(entry.id) === current)) return current;
+        return myClassRows[0] ? Number(myClassRows[0].id) : null;
       });
     } catch {
       setStatus(null);
@@ -181,7 +184,9 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
             <NoClassView classes={classes} onCreated={() => void refresh()} />
           )}
           {!activeClass && !showApplication && area === 'classes' && (
-            <ClassesArea classes={classes} activeClassId={activeClassId} onSwitch={setActiveClassId} onCreated={() => void refresh()} />
+            classes.length
+              ? <ClassesArea classes={classes} activeClassId={activeClassId} onSwitch={setActiveClassId} onCreated={() => void refresh()} />
+              : <NoClassView classes={classes} onCreated={() => void refresh()} />
           )}
           {!activeClass && !showApplication && area !== 'overview' && area !== 'classes' && (
             <NoClassPane area={area} onOverview={() => setArea('overview')} />

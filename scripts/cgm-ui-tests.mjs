@@ -387,6 +387,12 @@ check('the register form no longer claims every registration waits for a person'
   !studentPortal.includes('Your organizer reviews every registration.')
   && studentPortal.includes('approved automatically'));
 
+check('the workspace reads the classes list as the unwrapped array the client returns (My Classes never blank)',
+  /Array\.isArray\(myClasses\) \? myClasses : \(myClasses\?\.classes \|\| \[\]\)/.test(workspace)
+  && !/setClasses\(myClasses\.classes/.test(workspace));
+check('My Classes with zero classes opens the create-first-class guidance instead of an empty pane',
+  (workspace.match(/<NoClassView/g) || []).length === 2 && /classes\.length\s*\n?\s*\?\s*<ClassesArea/.test(workspace));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');
