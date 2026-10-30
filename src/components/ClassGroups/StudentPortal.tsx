@@ -139,7 +139,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
           </div>
         )}
 
-        <div className="mt-5 flex gap-2" role="tablist" aria-label="Choose an action">
+        <div className="mt-5 flex flex-wrap gap-2" role="tablist" aria-label="Choose an action">
           {([['login', 'Sign in'], ['register', 'Register'], ['join', 'Join a class']] as const).map(([key, text]) => (
             <button
               key={key}

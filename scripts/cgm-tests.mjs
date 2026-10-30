@@ -2068,6 +2068,81 @@ check('replayed simultaneous claims stay sane and single',
   && q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'inv-101-002')", autoClassId).c === 1,
   ivanRace.map((r) => `${r.status}:${r.json?.data?.state}`).join(' '));
 
+
+// ===========================================================================
+// 25. Policy transitions with pending rows + data retention. Changing a
+//     mode must never silently approve, delete or corrupt what is already
+//     in a queue, and closed must only close NEW requests.
+// ===========================================================================
+section('25. Policy transitions & data retention');
+
+// -- Pending registration survives mode flips ---------------------------------
+const trClass = await memberCall('POST', '/api/cgm/classes', { name: 'TR 201 Transitions', institution: 'Accra Technical University' }, phantomToken);
+const trClassId = trClass.json?.data?.classId ?? trClass.json?.data?.id;
+const trClassCode = trClass.json?.data?.code;
+await memberCall('POST', `/api/cgm/classes/${trClassId}/entry-password`, { entryPassword: 'tr-201-entry' }, phantomToken);
+await memberCall('POST', `/api/cgm/classes/${trClassId}/submit`, {}, phantomToken);
+await memberCall('POST', `/api/cgm/phantom/classes/${trClassId}/approve`, {}, phantomToken);
+const trCsv = ['Full Name,Index Number', 'Trans One,TR-201-001'].join('\n');
+const trForm = new FormData();
+trForm.append('file', new File([trCsv], 'roster.csv', { type: 'text/csv' }));
+trForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number' }));
+trForm.append('policy', 'skip');
+await formCall('POST', `/api/cgm/classes/${trClassId}/roster/import`, trForm, phantomToken);
+const trPendingReg = await call('POST', '/api/cgm/student/register', { classCode: trClassCode, indexNumber: 'TR-201-001', entryPassword: 'tr-201-entry' });
+check('the transition fixture starts pending (approval default)', trPendingReg.json?.data?.state === 'received');
+
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'auto' }, phantomToken);
+const trRowAfterAuto = q1("SELECT status, student_id FROM cgm_registration_requests WHERE roster_entry_id = (SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'tr-201-001')", trClassId);
+check('switching to automatic does NOT silently approve an existing pending registration',
+  trRowAfterAuto?.status === 'pending' && trRowAfterAuto?.student_id === null, JSON.stringify(trRowAfterAuto || {}));
+check('the pending student was NOT given an identity or passkey by the flip',
+  !q1("SELECT id FROM cgm_students WHERE index_number_key = 'tr-201-001'"));
+
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'closed' }, phantomToken);
+const trClosedRegister = await call('POST', '/api/cgm/student/register', { classCode: trClassCode, indexNumber: 'TR-201-001', entryPassword: 'tr-201-entry' });
+void trClosedRegister;
+const trQueueClosed = await memberCall('GET', `/api/cgm/classes/${trClassId}/registrations?status=pending`, undefined, phantomToken);
+const trPendingRow = (trQueueClosed.json?.data || [])[0];
+const trApprove = await memberCall('POST', `/api/cgm/classes/${trClassId}/registrations/${trPendingRow.id}/approve`, {}, phantomToken);
+check('closed only closes NEW registrations — the organizer can still approve the queued one',
+  trApprove.status === 200 && Boolean(trApprove.json?.data?.passkey), `status ${trApprove.status}`);
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'approval' }, phantomToken);
+
+// -- Pending membership survives mode flips -----------------------------------
+await memberCall('POST', `/api/cgm/classes/${trClassId}/settings`, { membershipApprovalRequired: true }, phantomToken);
+const trInvite = await memberCall('POST', `/api/cgm/classes/${trClassId}/invitations`, { kind: 'general', maxUses: 3 }, phantomToken);
+const adjoaSession2 = (await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'AUTO-101-001', passkey: String(expectedPasskey || '') })).json?.data?.session?.token;
+const trJoin = await studentCall('POST', '/api/cgm/student/join', { code: trInvite.json?.data?.code }, adjoaSession2);
+check('the membership fixture starts pending', trJoin.json?.data?.state === 'requested', trJoin.text?.slice(0, 100));
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'membership_request_mode', value: 'auto' }, phantomToken);
+const trPendingMember = q1("SELECT status FROM cgm_membership_requests WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'auto-101-001')", trClassId);
+check('switching membership to automatic leaves the queued request untouched', trPendingMember?.status === 'pending', JSON.stringify(trPendingMember || {}));
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'membership_request_mode', value: 'closed' }, phantomToken);
+const trMemberRow = q1("SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'auto-101-001')", trClassId);
+const trMemberApprove = await memberCall('POST', `/api/cgm/classes/${trClassId}/membership-requests/${trMemberRow.id}/approve`, {}, phantomToken);
+check('closed mode still allows deciding the already-queued request', trMemberApprove.status === 200, `status ${trMemberApprove.status}`);
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'membership_request_mode', value: 'approval' }, phantomToken);
+
+// -- Pending profile change survives the flip ---------------------------------
+const trProfileLogin = (await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'TR-201-001', passkey: String(trApprove.json?.data?.passkey || '') })).json?.data?.session?.token;
+const trChange = await studentCall('POST', '/api/cgm/student/profile/change', { field: 'phone', newValue: '0207770001', reason: 'Transition probe' }, trProfileLogin);
+check('the profile fixture starts pending', Boolean(q1("SELECT id FROM cgm_profile_change_requests WHERE student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'tr-201-001') AND status = 'pending'")), trChange.text?.slice(0, 100));
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'profile_change_mode', value: 'auto' }, phantomToken);
+const trPendingChange = q1("SELECT status FROM cgm_profile_change_requests WHERE student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'tr-201-001')");
+check('switching profile changes to automatic leaves the queued request pending', trPendingChange?.status === 'pending', JSON.stringify(trPendingChange || {}));
+const trNewPhone = q1("SELECT phone FROM cgm_students WHERE index_number_key = 'tr-201-001'")?.phone;
+check('the flip did not apply the queued value silently', trNewPhone !== '0207770001', String(trNewPhone));
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'profile_change_mode', value: 'approval' }, phantomToken);
+
+// -- Data retention: removal never deletes the identity -----------------------
+const trMembershipId = Number(q1('SELECT id FROM cgm_class_members WHERE class_id = ? ORDER BY id DESC LIMIT 1', trClassId)?.id);
+await memberCall('POST', `/api/cgm/classes/${trClassId}/members/${trMembershipId}/remove`, { reason: 'Retention probe' }, phantomToken);
+check('removing a membership keeps the permanent identity intact',
+  Boolean(q1("SELECT id, passkey_suffix FROM cgm_students WHERE index_number_key = 'tr-201-001' AND passkey_suffix IS NOT NULL")));
+check('the removed membership keeps its history row with a reason',
+  q1('SELECT status, removal_reason FROM cgm_class_members WHERE id = ?', trMembershipId)?.status === 'removed');
+
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

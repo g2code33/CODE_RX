@@ -437,6 +437,11 @@ check('a just-issued passkey blocks the handoff until the student confirms savin
 check('the claim result is shown on the dashboard and can be dismissed',
   /inviteNotice/.test(studentPortal) && /Dismiss/.test(studentPortal));
 
+check('policy transitions never touch queued rows and closed only closes new requests (§25 contract)',
+  /does NOT silently approve/.test(readFileSync(path.join(ROOT, 'scripts/cgm-tests.mjs'), 'utf8')));
+check('auth tabs and policy toggles wrap on narrow screens',
+  /mt-5 flex flex-wrap gap-2" role="tablist"/.test(studentPortal) && /flex flex-wrap gap-1\.5" role="radiogroup"/.test(phantom));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');
