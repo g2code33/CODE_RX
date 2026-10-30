@@ -393,7 +393,14 @@ export const sanitizeClassSettings = (value: unknown): ClassSettings => {
     registrationApprovals: raw.registrationApprovals === 'phantom' ? 'phantom' : 'organizers',
     loginFormat: sanitizeLoginFormat(raw.loginFormat),
     pendingLoginFormat: raw.pendingLoginFormat && typeof raw.pendingLoginFormat === 'object'
-      ? { ...sanitizeLoginFormat(raw.pendingLoginFormat), proposedByLabel: String(raw.pendingLoginFormat.proposedByLabel || ''), proposedAt: String(raw.pendingLoginFormat.proposedAt || '') }
+      ? (() => {
+          const pending = raw.pendingLoginFormat as Record<string, unknown>;
+          return {
+            ...sanitizeLoginFormat(pending),
+            proposedByLabel: String(pending.proposedByLabel || ''),
+            proposedAt: String(pending.proposedAt || ''),
+          };
+        })()
       : null,
     customFields: (Array.isArray(raw.customFields) ? raw.customFields : []).slice(0, 12).map((entry: any) => ({
       key: lookupKey(entry?.key || entry?.label).replace(/[^a-z0-9_]+/g, '_').slice(0, 40),

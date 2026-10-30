@@ -31,6 +31,7 @@ import {
   FOUNDING_MEMBER_SQL,
 } from './lib/phantom-inbox';
 import { registerClientRoutes } from './client-routes';
+import { registerClassGroupRoutes } from './class-group-routes';
 import { moveToRecycleBin } from './lib/recycle';
 import { CLIENT_ARTIFACT_PREFIX } from './lib/client-document-delivery';
 import {
@@ -1163,6 +1164,8 @@ app.use('/api/*', async (c, next) => {
 // Registered once, before the remaining route groups, exactly like any other
 // route block. No existing handler, guard, or helper is modified.
 registerClientRoutes(app);
+// Class & Group Management module (additive).
+registerClassGroupRoutes(app);
 
 // ---------- Health ----------
 app.get('/api/health', (c) => {
