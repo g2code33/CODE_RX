@@ -237,6 +237,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
   };
 
   app.get('/api/cgm/organizer/classes', async (c: any) => {
+    const dark = await requireModuleEnabled(c);
+    if (dark) return dark;
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const rows = member.profileId ? await asRows<any>(c.env.DB.prepare(
@@ -283,10 +285,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     ).bind(classId, classId, classId, classId, classId, classId));
 
     const team = await asRows<any>(c.env.DB.prepare(
-      `SELECT o.id, o.role, o.permissions_json, o.status, o.created_at, mp.name, u.email
+      `SELECT o.id, o.role, o.permissions_json, o.status, o.created_at, COALESCE(u.name, mu.name, 'Member') AS name, u.email
        FROM cgm_class_organizers o
        LEFT JOIN member_profiles mp ON mp.id = o.member_profile_id
-       LEFT JOIN users u ON u.id = o.user_id
+       LEFT JOIN users u ON COALESCE(o.user_id, mp.user_id) = u.id
+       LEFT JOIN members mu ON mu.id = mp.member_record_id
        WHERE o.class_id = ? ORDER BY CASE o.role WHEN 'primary' THEN 0 WHEN 'co_organizer' THEN 1 ELSE 2 END, o.id`
     ).bind(classId));
 
@@ -530,7 +533,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const targetProfileId = Number(body.toProfileId);
     if (!targetProfileId) return bad(c, 'Choose the successor.');
     const target = await asRows<any>(c.env.DB.prepare(
-      `SELECT o.id, mp.name FROM cgm_class_organizers o LEFT JOIN member_profiles mp ON mp.id = o.member_profile_id
+      `SELECT o.id, COALESCE(u.name, mu.name, 'Member') AS name
+       FROM cgm_class_organizers o
+       LEFT JOIN member_profiles mp ON mp.id = o.member_profile_id
+       LEFT JOIN users u ON u.id = mp.user_id
+       LEFT JOIN members mu ON mu.id = mp.member_record_id
        WHERE o.class_id = ? AND o.member_profile_id = ? AND o.status = 'active'`
     ).bind(classId, targetProfileId));
     if (!target[0]) return bad(c, 'The successor must already be a co-organizer or assistant of this class.', 400);
@@ -1024,7 +1031,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const classId = Number(c.req.param('id'));
-    const guard = await requireClassPermission(c, member, classId, 'approve_registrations');
+    const guard = await registrationQueueAccess(c, member, classId);
     if (!guard.ok) return guard.response;
     const status = clean(c.req.query('status') || 'pending', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
@@ -1042,19 +1049,43 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     });
   });
 
+  // Registration approvals accept either the class permission or an active
+  // PHANTOM delegation for this exact class (used down to its batch cap).
+  const registrationQueueAccess = async (
+    c: any,
+    member: { profileId: number | null; isPhantom?: boolean },
+    classId: number,
+  ): Promise<{ ok: true; viaDelegation: boolean } | { ok: false; response: Response }> => {
+    const guard = await requireClassPermission(c, member as any, classId, 'approve_registrations');
+    if (guard.ok) {
+      if (!member.isPhantom) {
+        // Delegated approval is only real when PHANTOM allowed organizers to
+        // approve registrations for this class.
+        const settings = await readClassSettings(c.env.DB, classId);
+        if (settings.registrationApprovals === 'phantom') {
+          return { ok: false, response: bad(c, 'Only PHANTOM approves registrations for this class.', 403) };
+        }
+      }
+      return { ok: true, viaDelegation: false };
+    }
+    if (member.profileId === null) return { ok: false, response: guard.response };
+    const delegation = await asRows<{ id: number; max_batch: number | null; approvals_used: number }>(c.env.DB.prepare(
+      `SELECT id, max_batch, approvals_used FROM cgm_approval_delegations
+       WHERE member_profile_id = ? AND class_id = ? AND status = 'active'`
+    ).bind(member.profileId, classId));
+    const row = delegation[0];
+    if (!row) return { ok: false, response: guard.response };
+    if (row.max_batch !== null && Number(row.approvals_used) >= Number(row.max_batch)) {
+      return { ok: false, response: bad(c, 'This delegated approval batch is used up. PHANTOM can extend it.', 403) };
+    }
+    return { ok: true, viaDelegation: true };
+  };
+
   const approveRegistration = async (c: any, classId: number, requestId: number, approve: boolean, reason: string | null) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
-    const guard = await requireClassPermission(c, member, classId, 'approve_registrations');
-    if (!guard.ok) return guard.response;
-    if (!member.isPhantom) {
-      // Delegated approval is only real when PHANTOM allowed organizers to
-      // approve registrations for this class.
-      const settings = await readClassSettings(c.env.DB, classId);
-      if (settings.registrationApprovals === 'phantom') {
-        return bad(c, 'Only PHANTOM approves registrations for this class.', 403);
-      }
-    }
+    const access = await registrationQueueAccess(c, member, classId);
+    if (!access.ok) return access.response;
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT r.*, re.full_name, re.index_number, re.gender, re.email, re.phone, re.university_id,
               re.university_id_key, re.phone_key, re.custom_fields_json, cl.institution, cl.institution_key, cl.name AS class_name
@@ -1145,10 +1176,15 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       await notifyStudent(c.env.DB, studentId, 'registration', 'Your permanent student passkey',
         `Your registration for ${request.class_name} was approved. Your permanent passkey is ${issuedPasskey}. It is shown only here — save it now; sign-in also needs your index number.`);
     }
+    if (access.viaDelegation && member.profileId !== null) {
+      await c.env.DB.prepare(
+        "UPDATE cgm_approval_delegations SET approvals_used = approvals_used + 1 WHERE member_profile_id = ? AND class_id = ? AND status = 'active'"
+      ).bind(member.profileId, classId).run();
+    }
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.registration.approved', entityType: 'registration', entityId: requestId, classId,
-      context: { studentId, passkeyIssued: Boolean(issuedPasskey), sequenceIssued: Boolean(issuedPasskey) },
+      context: { studentId, passkeyIssued: Boolean(issuedPasskey), sequenceIssued: Boolean(issuedPasskey), viaDelegation: access.viaDelegation },
     });
     return c.json({
       success: true,
@@ -1505,7 +1541,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         id: Number(result.meta.last_row_id), kind, code,
         // The raw token is returned exactly once, at creation. Only its hash is stored.
         token,
-        link: `${c.req.url.origin.replace(/\/$/, '')}/#class-invite/${encodeURIComponent(code || token)}`,
+        link: `${new URL(c.req.url).origin}/#class-invite/${encodeURIComponent(code || token)}`,
       },
     });
   });
@@ -1528,15 +1564,27 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       await c.env.DB.prepare('UPDATE cgm_invitations SET disabled_at = NULL WHERE id = ?').bind(invitationId).run();
     } else {
       const token = randomToken();
+      // A leaked code must die with regeneration, so general invitations get a
+      // fresh code as well as a fresh token; individual ones keep no code.
+      const classRow = await asRows<{ code: string }>(c.env.DB.prepare('SELECT code FROM cgm_classes WHERE id = ?').bind(Number(rows[0].class_id)));
+      const freshCode = classRow[0]
+        ? `${(classRow[0].code || 'CRX').replace(/[^A-Z0-9]/gi, '').slice(-6).toUpperCase()}-${randomToken().slice(0, 6).toUpperCase()}`
+        : null;
       await c.env.DB.prepare(
-        'UPDATE cgm_invitations SET token_hash = ?, revoked_at = NULL, disabled_at = NULL, use_count = 0 WHERE id = ?'
-      ).bind(await sha256Hex(`cgm-invite:${token}`), invitationId).run();
+        'UPDATE cgm_invitations SET token_hash = ?, code = COALESCE(?, code), revoked_at = NULL, disabled_at = NULL, use_count = 0 WHERE id = ?'
+      ).bind(await sha256Hex(`cgm-invite:${token}`), freshCode, invitationId).run();
       await auditCgm(c.env.DB, {
         actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
         action: 'cgm.invitation.regenerated', entityType: 'invitation', entityId: invitationId,
         classId: Number(rows[0].class_id),
       });
-      return c.json({ success: true, data: { token, link: `${c.req.url.origin.replace(/\/$/, '')}/#class-invite/${encodeURIComponent(token)}` } });
+      return c.json({
+        success: true,
+        data: {
+          token, ...(freshCode ? { code: freshCode } : {}),
+          link: `${new URL(c.req.url).origin}/#class-invite/${encodeURIComponent(freshCode || token)}`,
+        },
+      });
     }
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,

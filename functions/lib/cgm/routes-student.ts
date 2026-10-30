@@ -32,6 +32,7 @@
 import type { Hono } from 'hono';
 import {
   LOGIN_IDENTIFIER_KEYS,
+  phoneKey,
   sequenceForPasskey,
   STUDENT_PROFILE_FIELDS,
   sanitizeActivityConfig,
@@ -193,7 +194,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (student.status !== 'active') return c.json({ success: false, error: GENERIC_LOGIN_FAILURE }, 403);
 
     const normalizedIdentifier = identifierType === 'phone'
-      ? (String(identifier).replace(/\D/g, '') || null)
+      ? phoneKey(identifier)
       : String(identifier).trim().replace(/\s+/g, ' ').toLowerCase();
     const storedIdentifier = identifierType === 'phone'
       ? student.phone_key
@@ -325,13 +326,15 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!membership) return bad(c, 'You are not a member of this class.', 403);
 
     const organizers = await asRows<any>(c.env.DB.prepare(
-      `SELECT o.role, mp.name FROM cgm_class_organizers o
+      `SELECT o.role, COALESCE(u.name, mu.name, 'Member') AS name FROM cgm_class_organizers o
        LEFT JOIN member_profiles mp ON mp.id = o.member_profile_id
+       LEFT JOIN users u ON u.id = mp.user_id
+       LEFT JOIN members mu ON mu.id = mp.member_record_id
        WHERE o.class_id = ? AND o.status = 'active' ORDER BY CASE o.role WHEN 'primary' THEN 0 WHEN 'co_organizer' THEN 1 ELSE 2 END`
     ).bind(classId));
 
     const activities = await asRows<any>(c.env.DB.prepare(
-      `SELECT id, name, type, description, status, config_json, opens_at, closes_at, published_at
+      `SELECT id, name, type, description, status, config_json, opened_at, published_at, completed_at
        FROM cgm_activities WHERE class_id = ? AND status IN ('open','published','active','completed')
        ORDER BY created_at DESC LIMIT 50`
     ).bind(classId));
@@ -388,7 +391,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         activities: activities.map((row) => ({
           id: Number(row.id), name: row.name, type: row.type, description: row.description,
           status: row.status, config: sanitizeActivityConfig(JSON.parse(row.config_json || '{}')),
-          opensAt: row.opens_at, closesAt: row.closes_at, publishedAt: row.published_at,
+          openedAt: row.opened_at, publishedAt: row.published_at, completedAt: row.completed_at,
         })),
         myGroups,
         announcements,
@@ -491,8 +494,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       data: {
         activity: {
           id: Number(activity.id), name: activity.name, type: activity.type, description: activity.description,
-          status: activity.status, opensAt: activity.opens_at, closesAt: activity.closes_at,
-          publishedAt: activity.published_at,
+          status: activity.status, openedAt: activity.opened_at, publishedAt: activity.published_at,
           config: {
             method: config.method, capacity: config.capacity, selfDeadline: config.selfDeadline,
             contactVisibility: config.contactVisibility, whatsappEnabled: config.whatsappEnabled,
@@ -823,13 +825,14 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
        WHERE ga.group_id = ? AND ga.student_id = ? AND ga.status = 'active'`
     ).bind(groupId, student.id));
     if (!mine[0]) return bad(c, 'You are not a member of this group.', 403);
-    if (!['published', 'active'].includes(mine[0].activity_status)) return bad(c, 'This activity no longer accepts group changes.', 409);
+    if (!['open', 'published', 'active'].includes(mine[0].activity_status)) return bad(c, 'This activity no longer accepts group changes.', 409);
     const destination = await asRows<any>(c.env.DB.prepare(
       `SELECT g.id, g.capacity, g.activity_id,
               (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
        FROM cgm_groups g WHERE g.id = ? AND g.activity_id = ?`
     ).bind(toGroupId, Number(mine[0].activity_id)));
     if (!destination[0]) return bad(c, 'That group is not part of this activity.', 400);
+    if (Number(destination[0].id) === groupId) return bad(c, 'You are already in that group.', 400);
     if (destination[0].capacity !== null && Number(destination[0].size) >= Number(destination[0].capacity)) {
       return bad(c, 'That group is full.', 409);
     }
@@ -877,17 +880,18 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!classIds.length) return c.json({ success: true, data: [] });
 
     const activities = await asRows<any>(c.env.DB.prepare(
-      `SELECT a.id, a.name, a.status, a.config_json, a.opens_at, a.closes_at, a.published_at, a.class_id
+      `SELECT a.id, a.name, a.status, a.config_json, a.opened_at, a.published_at, a.completed_at, a.class_id
        FROM cgm_activities a WHERE a.class_id IN (${classIds.map(() => '?').join(',')})
          AND a.status IN ('open','published','active','completed')`
     ).bind(...classIds));
     for (const activity of activities) {
       const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
       const base = { classId: Number(activity.class_id), type: 'activity', activityId: Number(activity.id) };
-      if (activity.opens_at) events.push({ ...base, kind: 'activity_open', title: `${activity.name} opens`, at: activity.opens_at });
+      if (activity.opened_at) events.push({ ...base, kind: 'activity_open', title: `${activity.name} opened`, at: activity.opened_at });
       if (config.assignmentDeadline) events.push({ ...base, kind: 'deadline', title: `${activity.name} assignment deadline`, at: config.assignmentDeadline });
       if (config.selfDeadline) events.push({ ...base, kind: 'self_deadline', title: `${activity.name} self-assignment deadline`, at: config.selfDeadline });
-      if (activity.closes_at) events.push({ ...base, kind: 'activity_close', title: `${activity.name} closes`, at: activity.closes_at });
+      const activityConfig = (() => { try { return JSON.parse(activity.config_json || '{}'); } catch { return {}; } })();
+      if (activityConfig.selfDeadline) events.push({ ...base, kind: 'deadline', title: `${activity.name} — self-assignment deadline`, at: activityConfig.selfDeadline });
     }
     const elections = await asRows<any>(c.env.DB.prepare(
       `SELECT e.id, e.title, e.voting_open_at, e.voting_close_at, e.activity_id, a.class_id
@@ -1072,10 +1076,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
   const membershipFromInvitation = async (c: any, code: string) => {
     const student = await requireStudent(c);
     if (!student) return { status: 401 as const, response: c.json({ success: false, error: 'Sign in first to use this invitation.' }, 401) };
+    // A general invitation is claimed by its public code; an individual one is
+    // claimed by the raw token that was shown exactly once at creation.
+    const tokenHash = await sha256Hex(`cgm-invite:${code}`);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT i.*, cl.status AS class_status, cl.settings_json FROM cgm_invitations i
-       JOIN cgm_classes cl ON cl.id = i.class_id WHERE i.code = ?`
-    ).bind(code));
+       JOIN cgm_classes cl ON cl.id = i.class_id WHERE i.code = ? OR i.token_hash = ?`
+    ).bind(code, tokenHash));
     const invitation = rows[0];
     if (!invitation || invitation.revoked_at || invitation.disabled_at) {
       return { status: 404 as const, response: bad(c, 'This invitation is no longer available.', 404) };
@@ -1086,6 +1093,10 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     }
     if (invitation.max_uses !== null && Number(invitation.use_count) >= Number(invitation.max_uses)) {
       return { status: 410 as const, response: bad(c, 'This invitation has reached its usage limit.', 410) };
+    }
+    // An individual invitation is single-use by definition.
+    if (invitation.kind === 'individual' && Number(invitation.use_count) >= 1) {
+      return { status: 410 as const, response: bad(c, 'This invitation has already been used.', 410) };
     }
 
     if (invitation.kind === 'individual') {
@@ -1171,8 +1182,41 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
 
   app.post('/api/cgm/student/invitations/:code/claim', async (c: any) => {
     if (!throttle(c, 20, 600)) return bad(c, 'Too many attempts. Try again later.', 429);
-    const result = await membershipFromInvitation(c, clean(c.req.param('code'), 40));
+    // The raw invitation token is 64 hex characters — keep it whole.
+    const result = await membershipFromInvitation(c, clean(c.req.param('code'), 80));
     return result.response;
+  });
+
+  // -------------------------------------------------------------------------
+  // Reporting an announcement (moderation starts with the class organizer)
+  // -------------------------------------------------------------------------
+  app.post('/api/cgm/announcements/:id/report', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    if (!throttle(c, 10, 3600)) return bad(c, 'Too many reports. Try again later.', 429);
+    const announcementId = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 400);
+    if (!reason) return bad(c, 'Tell the organizer what is wrong with this announcement.', 400);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT a.id, a.class_id FROM cgm_announcements a
+       WHERE a.id = ? AND a.status IN ('published','pending')
+         AND EXISTS (SELECT 1 FROM cgm_class_members cm WHERE cm.class_id = a.class_id AND cm.student_id = ? AND cm.status = 'active')`
+    ).bind(announcementId, student.id));
+    if (!rows[0]) return bad(c, 'Announcement not found in your classes.', 404);
+    const open = await asRows<{ id: number }>(c.env.DB.prepare(
+      `SELECT id FROM cgm_announcement_reports WHERE announcement_id = ? AND reporter_student_id = ? AND status = 'open'`
+    ).bind(announcementId, student.id));
+    if (open[0]) return bad(c, 'You already reported this announcement.', 409);
+    await c.env.DB.prepare(
+      'INSERT INTO cgm_announcement_reports (announcement_id, reporter_student_id, reason) VALUES (?, ?, ?)'
+    ).bind(announcementId, student.id, reason).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+      action: 'cgm.announcement.reported', entityType: 'announcement', entityId: announcementId,
+      classId: Number(rows[0].class_id), context: { reason },
+    });
+    return c.json({ success: true, message: 'Thank you — the organizers will review this announcement.' });
   });
 
   // -------------------------------------------------------------------------

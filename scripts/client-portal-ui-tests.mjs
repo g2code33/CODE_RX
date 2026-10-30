@@ -1257,8 +1257,10 @@ const main = async () => {
   check('the client door never replaces or renames the member portal button',
     /nav\.portal\.enter/.test(navbarSource) && /Member Portal/.test(navbarSource)
     && /brand-button brand-button--small ml-2/.test(navbarSource));
+  // The Class & Groups door joins the public navigation alongside the client
+  // door; both stay out of the dashboard and PHANTOM shells.
   check('the member dashboard and PHANTOM shell do not advertise the client door',
-    (navbarSource.match(/\{!isDashboard && \(/g) || []).length === 1
+    (navbarSource.match(/\{!isDashboard && \(/g) || []).length === 2
     && (navbarSource.match(/!isDashboard && <ClientPortalEntry/g) || []).length === 1
     && (navbarSource.match(/ClientPortalEntry variant=/g) || []).length >= 3);
 

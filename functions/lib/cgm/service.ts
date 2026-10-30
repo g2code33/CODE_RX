@@ -180,7 +180,8 @@ export const studentFromRequest = async (c: Context<{ Bindings: Env }>): Promise
   const token = c.req.header(STUDENT_SESSION_HEADER) || '';
   if (!token || token.length < 32) return null;
   const rows = await asRows<CgmStudentRow & { session_id: number }>(c.env.DB.prepare(
-    `SELECT s.id, s.full_name, s.index_number, s.institution, s.institution_key, s.university_id, s.phone,
+    `SELECT s.id, s.full_name, s.index_number, s.index_number_key, s.institution, s.institution_key,
+            s.university_id, s.university_id_key, s.phone, s.phone_key,
             s.email, s.gender, s.custom_fields_json, s.status, s.passkey_suffix, s.failed_attempts, s.locked_until,
             sess.id AS session_id
      FROM cgm_student_sessions sess

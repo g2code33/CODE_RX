@@ -80,7 +80,11 @@ export const parseJsonRows = (text: string): Record<string, unknown>[] => {
 // ---------------------------------------------------------------------------
 
 export const parseXlsxRows = async (bytes: ArrayBuffer): Promise<Record<string, unknown>[]> => {
-  const XLSX = await import('xlsx');
+  // The ESM build runs on Workers (no node built-ins). It ships without its
+  // own declaration file; the package's main types describe the same API and
+  // the result is asserted once here.
+  // @ts-ignore -- xlsx/xlsx.mjs has no bundled declaration file.
+  const XLSX = (await import('xlsx/xlsx.mjs')) as unknown as typeof import('xlsx');
   const workbook = XLSX.read(new Uint8Array(bytes), { type: 'array' });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) throw new Error('The workbook has no sheets.');

@@ -567,6 +567,22 @@ CREATE TABLE IF NOT EXISTS cgm_student_notifications (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+
+CREATE TABLE IF NOT EXISTS cgm_approval_delegations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_profile_id INTEGER NOT NULL,
+  class_id INTEGER NOT NULL,
+  granted_by_profile_id INTEGER,
+  granted_by_label TEXT,
+  max_batch INTEGER,
+  approvals_used INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  revoked_at DATETIME,
+  revoked_by_label TEXT,
+  FOREIGN KEY(class_id) REFERENCES cgm_classes(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_type TEXT NOT NULL DEFAULT 'system' CHECK (actor_type IN ('phantom','organizer','student','system')),
@@ -638,4 +654,6 @@ CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_student ON cgm_profile_change
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_status ON cgm_profile_change_requests(status);
 CREATE INDEX IF NOT EXISTS idx_cgm_organizer_apps_status ON cgm_organizer_applications(status);
 CREATE INDEX IF NOT EXISTS idx_cgm_organizer_apps_user ON cgm_organizer_applications(user_id);
+CREATE INDEX IF NOT EXISTS idx_cgm_delegations_member ON cgm_approval_delegations(member_profile_id);
+CREATE INDEX IF NOT EXISTS idx_cgm_delegations_class ON cgm_approval_delegations(class_id);
 `;

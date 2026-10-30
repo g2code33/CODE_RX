@@ -21,6 +21,8 @@ import {
 import {
   ACTIVITY_LIFECYCLE_LABELS,
   ATTENDANCE_STATUSES,
+  lookupKey,
+  phoneKey,
   sanitizeActivityConfig,
   sanitizeLeaderPermissions,
   sanitizeClassPermissions,
@@ -1644,8 +1646,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const recordId = Number(c.req.param('id'));
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT r.*, sess.class_id FROM cgm_attendance_records r
-       JOIN cgm_attendance_sessions sess ON sess.id = r.session_id WHERE r.id = ?`
+      `SELECT r.*, a.class_id FROM cgm_attendance_records r
+       JOIN cgm_attendance_sessions sess ON sess.id = r.session_id
+       JOIN cgm_activities a ON a.id = sess.activity_id WHERE r.id = ?`
     ).bind(recordId));
     const record = rows[0];
     if (!record) return bad(c, 'Record not found.', 404);
@@ -1877,9 +1880,27 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         (SELECT COUNT(*) FROM cgm_classes WHERE status IN ('suspended','rejected')) AS classes_blocked,
         (SELECT COUNT(*) FROM cgm_students WHERE status = 'active') AS students_active,
         (SELECT COUNT(*) FROM cgm_activities WHERE status IN ('open','published','active')) AS activities_live,
-        (SELECT COUNT(*) FROM cgm_audit WHERE created_at > datetime('now', '-7 days')) AS audit_week`
+        (SELECT COUNT(*) FROM cgm_audit WHERE created_at > datetime('now', '-7 days')) AS audit_week`,
     ));
-    return c.json({ success: true, data: counts[0] || {} });
+    const queues = await asRows<any>(c.env.DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM cgm_organizer_applications WHERE status IN ('pending','email_verified')) AS applications,
+        (SELECT COUNT(*) FROM cgm_classes WHERE status = 'pending') AS classes,
+        (SELECT COUNT(*) FROM cgm_profile_change_requests pcr JOIN cgm_students s ON s.id = pcr.student_id
+           WHERE pcr.status = 'pending' AND pcr.field IN ('gender','index_number','university_id','phone')) AS sensitiveChanges,
+        (SELECT COUNT(*) FROM cgm_announcement_reports WHERE status = 'open') AS disputes`
+    ));
+    const flag = await asRows<{ setting_value: string }>(c.env.DB.prepare(
+      "SELECT setting_value FROM system_settings WHERE setting_key = 'class_groups_enabled'"
+    ));
+    return c.json({
+      success: true,
+      data: {
+        counters: counts[0] || {},
+        queues: queues[0] || {},
+        moduleEnabled: String(flag[0]?.setting_value ?? '1') === '1',
+      },
+    });
   });
 
   app.get('/api/cgm/phantom/organizer-applications', async (c: any) => {
@@ -1887,7 +1908,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (check.error) return check.error;
     const status = clean(c.req.query('status') || '', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT a.*, mp.name AS member_name, u.email FROM cgm_organizer_applications a
+      `SELECT a.*, u.name AS member_name, u.email FROM cgm_organizer_applications a
        LEFT JOIN member_profiles mp ON mp.id = a.member_profile_id
        LEFT JOIN users u ON u.id = a.user_id
        ${status ? 'WHERE a.status = ?' : ''} ORDER BY a.created_at DESC LIMIT 200`
@@ -2011,9 +2032,13 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     await c.env.DB.prepare(
       `UPDATE cgm_classes SET status = ?, reviewed_by_profile_id = ?, reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
     ).bind(status, member.profileId, member.name, reason, classId).run();
+    const historyAction: Record<string, string> = {
+      approve: 'approved', reject: 'rejected', correction: 'correction_requested',
+      suspend: 'suspended', reinstate: 'reinstated', archive: 'archived',
+    };
     await c.env.DB.prepare(
       `INSERT INTO cgm_class_approvals (class_id, action, actor_type, actor_label, reason) VALUES (?, ?, 'phantom', ?, ?)`
-    ).bind(classId, action, member.name, reason).run();
+    ).bind(classId, historyAction[action] || action, member.name, reason).run();
     await auditCgm(c.env.DB, {
       actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
       action: `cgm.class.${action}`, entityType: 'class', entityId: classId, classId, context: { reason },
@@ -2054,8 +2079,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const klass = rows[0];
     if (!klass) return bad(c, 'Class not found.', 404);
     const team = await asRows<any>(c.env.DB.prepare(
-      `SELECT o.id, o.role, o.status, mp.name FROM cgm_class_organizers o
+      `SELECT o.id, o.role, o.status, COALESCE(u.name, mu.name, 'Member') AS name FROM cgm_class_organizers o
        LEFT JOIN member_profiles mp ON mp.id = o.member_profile_id
+       LEFT JOIN users u ON u.id = mp.user_id
+       LEFT JOIN members mu ON mu.id = mp.member_record_id
        WHERE o.class_id = ? ORDER BY CASE o.role WHEN 'primary' THEN 0 ELSE 1 END`
     ).bind(classId));
     const approvals = await asRows<any>(c.env.DB.prepare(
@@ -2152,6 +2179,263 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.class.transfer_forced', entityType: 'class', entityId: classId, classId,
       context: { toProfileId: targetProfileId, fromProfileId: currentPrimary[0]?.member_profile_id || null },
+    });
+    return c.json({ success: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // §30 — Sensitive profile changes (PHANTOM queue)
+  // -------------------------------------------------------------------------
+
+  app.get('/api/cgm/phantom/sensitive-changes', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const status = clean(c.req.query('status') || 'pending', 20);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT pcr.*, s.full_name AS student_name, s.index_number
+       FROM cgm_profile_change_requests pcr JOIN cgm_students s ON s.id = pcr.student_id
+       WHERE pcr.status = ? AND pcr.field IN ('gender','index_number','university_id','phone')
+       ORDER BY pcr.created_at DESC LIMIT 200`
+    ).bind(status));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), studentName: row.student_name, indexNumber: row.index_number,
+        field: row.field, oldValue: row.old_value, newValue: row.new_value, reason: row.reason,
+        status: row.status, createdAt: row.created_at, reviewedAt: row.reviewed_at,
+        reviewerLabel: row.reviewer_label, reviewReason: row.review_reason,
+      })),
+    });
+  });
+
+  const decideSensitiveChange = async (c: any, approve: boolean): Promise<Response> => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    const id = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 400);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT pcr.*, s.full_name AS student_name FROM cgm_profile_change_requests pcr
+       JOIN cgm_students s ON s.id = pcr.student_id
+       WHERE pcr.id = ? AND pcr.status = 'pending'
+         AND pcr.field IN ('gender','index_number','university_id','phone')`
+    ).bind(id));
+    const request = rows[0];
+    if (!request) return bad(c, 'Sensitive change request not found or already reviewed.', 404);
+    if (!approve) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_profile_change_requests SET status = 'rejected', reviewed_by_profile_id = ?, reviewer_label = ?,
+         review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(member.profileId, `PHANTOM · ${member.name}`, reason, id).run();
+      await notifyStudent(c.env.DB, Number(request.student_id), 'profile',
+        'Profile change not approved', reason || `Your ${String(request.field).replace(/_/g, ' ')} change was not approved.`);
+      await auditCgm(c.env.DB, {
+        actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.profile_change.phantom_rejected', entityType: 'profile_change', entityId: id,
+        context: { field: request.field },
+      });
+      return c.json({ success: true });
+    }
+    // Apply the reviewed value to the permanent identity.
+    const field = String(request.field);
+    const newValue = String(request.new_value ?? '');
+    if (field === 'gender') {
+      await c.env.DB.prepare('UPDATE cgm_students SET gender = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(['male', 'female', 'unknown'].includes(newValue) ? newValue : 'unknown', Number(request.student_id)).run();
+    } else if (field === 'index_number') {
+      await c.env.DB.prepare(
+        'UPDATE cgm_students SET index_number = ?, index_number_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+      ).bind(newValue, lookupKey(newValue), Number(request.student_id)).run();
+    } else if (field === 'university_id') {
+      await c.env.DB.prepare(
+        'UPDATE cgm_students SET university_id = ?, university_id_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+      ).bind(newValue, lookupKey(newValue), Number(request.student_id)).run();
+    } else if (field === 'phone') {
+      await c.env.DB.prepare(
+        'UPDATE cgm_students SET phone = ?, phone_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+      ).bind(newValue, phoneKey(newValue), Number(request.student_id)).run();
+    }
+    await c.env.DB.prepare(
+      `UPDATE cgm_profile_change_requests SET status = 'approved', reviewed_by_profile_id = ?, reviewer_label = ?,
+       review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(member.profileId, `PHANTOM · ${member.name}`, reason, id).run();
+    await notifyStudent(c.env.DB, Number(request.student_id), 'profile', 'Profile updated',
+      `Your ${field.replace(/_/g, ' ')} change was approved and applied.`);
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.profile_change.phantom_approved', entityType: 'profile_change', entityId: id,
+      context: { field, studentId: Number(request.student_id) },
+    });
+    return c.json({ success: true });
+  };
+
+  app.post('/api/cgm/phantom/sensitive-changes/:id/approve', (c: any) => decideSensitiveChange(c, true));
+
+  app.post('/api/cgm/phantom/sensitive-changes/:id/reject', (c: any) => decideSensitiveChange(c, false));
+
+  // -------------------------------------------------------------------------
+  // §30 — Registration approval delegation
+  // -------------------------------------------------------------------------
+
+  app.get('/api/cgm/phantom/delegations', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT d.*, COALESCE(u.name, mu.name, 'Member') AS member_name, cl.name AS class_name, cl.code AS class_code
+       FROM cgm_approval_delegations d
+       LEFT JOIN member_profiles mp ON mp.id = d.member_profile_id
+       LEFT JOIN users u ON u.id = mp.user_id
+       LEFT JOIN members mu ON mu.id = mp.member_record_id
+       LEFT JOIN cgm_classes cl ON cl.id = d.class_id
+       ORDER BY d.created_at DESC LIMIT 200`
+    ));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), memberId: Number(row.member_profile_id), memberName: row.member_name,
+        classId: Number(row.class_id), className: row.class_name, classCode: row.class_code,
+        maxBatch: row.max_batch === null ? null : Number(row.max_batch),
+        approvalsUsed: Number(row.approvals_used || 0), status: row.status,
+        grantedBy: row.granted_by_label, createdAt: row.created_at, revokedAt: row.revoked_at,
+      })),
+    });
+  });
+
+  app.post('/api/cgm/phantom/delegations', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    const body = await readBody(c);
+    const memberId = Number(body.memberId);
+    const classId = Number(body.classId);
+    const maxBatch = body.maxBatch === undefined || body.maxBatch === null || body.maxBatch === '' ? null : Number(body.maxBatch);
+    if (!memberId) return bad(c, 'Choose the member who may approve registrations.', 400);
+    if (!classId) return bad(c, 'Choose the class.', 400);
+    if (maxBatch !== null && (!Number.isFinite(maxBatch) || maxBatch < 1)) return bad(c, 'The approval cap must be at least 1.', 400);
+    const target = await asRows<{ id: number }>(c.env.DB.prepare('SELECT id FROM member_profiles WHERE id = ?').bind(memberId));
+    if (!target[0]) return bad(c, 'That member does not exist.', 404);
+    const klass = await asRows<{ id: number }>(c.env.DB.prepare('SELECT id FROM cgm_classes WHERE id = ?').bind(classId));
+    if (!klass[0]) return bad(c, 'That class does not exist.', 404);
+    const existing = await asRows<{ id: number }>(c.env.DB.prepare(
+      `SELECT id FROM cgm_approval_delegations WHERE member_profile_id = ? AND class_id = ? AND status = 'active'`
+    ).bind(memberId, classId));
+    if (existing[0]) return bad(c, 'This member already holds an active delegation for the class.', 409);
+    const inserted = await c.env.DB.prepare(
+      `INSERT INTO cgm_approval_delegations (member_profile_id, class_id, granted_by_profile_id, granted_by_label, max_batch)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(memberId, classId, member.profileId, member.name, maxBatch).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.delegation.granted', entityType: 'delegation',
+      entityId: Number(inserted.meta.last_row_id), classId,
+      context: { memberId, maxBatch },
+    });
+    return c.json({ success: true, data: { id: Number(inserted.meta.last_row_id) } });
+  });
+
+  app.post('/api/cgm/phantom/delegations/:id/revoke', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    const id = Number(c.req.param('id'));
+    const row = await asRows<{ id: number; status: string }>(c.env.DB.prepare(
+      'SELECT id, status FROM cgm_approval_delegations WHERE id = ?'
+    ).bind(id));
+    if (!row[0]) return bad(c, 'Delegation not found.', 404);
+    if (row[0].status !== 'active') return bad(c, 'This delegation is already revoked.', 409);
+    await c.env.DB.prepare(
+      `UPDATE cgm_approval_delegations SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP, revoked_by_label = ? WHERE id = ?`
+    ).bind(member.name, id).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.delegation.revoked', entityType: 'delegation', entityId: id,
+    });
+    return c.json({ success: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // §30 — Organizer activity overview
+  // -------------------------------------------------------------------------
+
+  app.get('/api/cgm/phantom/organizer-activity', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT mp.id, COALESCE(u.name, '') AS name, u.email,
+        (SELECT COUNT(DISTINCT co.class_id) FROM cgm_class_organizers co WHERE co.member_profile_id = mp.id AND co.status = 'active') AS classes_organized,
+        (SELECT COUNT(*) FROM cgm_class_members cm JOIN cgm_class_organizers co2 ON co2.class_id = cm.class_id
+           WHERE co2.member_profile_id = mp.id AND co2.status = 'active' AND cm.status = 'active') AS students_managed,
+        (SELECT MAX(a.created_at) FROM cgm_audit a WHERE a.actor_profile_id = mp.id) AS last_action_at
+       FROM member_profiles mp JOIN users u ON u.id = mp.user_id
+       WHERE EXISTS (SELECT 1 FROM cgm_class_organizers co3 WHERE co3.member_profile_id = mp.id)
+          OR EXISTS (SELECT 1 FROM cgm_organizer_applications oa WHERE oa.member_profile_id = mp.id AND oa.status = 'approved')
+       ORDER BY last_action_at DESC NULLS LAST LIMIT 200`
+    ));
+    const statusRows = await asRows<{ member_profile_id: number; status: string }>(c.env.DB.prepare(
+      `SELECT member_profile_id, status FROM cgm_organizer_applications
+       WHERE status IN ('approved','suspended','revoked','correction') ORDER BY created_at DESC`
+    ));
+    const statuses = new Map<number, string>();
+    for (const row of statusRows) if (!statuses.has(Number(row.member_profile_id))) statuses.set(Number(row.member_profile_id), row.status);
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), name: row.name, email: row.email,
+        classesOrganized: Number(row.classes_organized || 0),
+        studentsManaged: Number(row.students_managed || 0),
+        lastActionAt: row.last_action_at,
+        status: statuses.get(Number(row.id)) || 'active',
+      })),
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // §30 — Disputes (reported announcements)
+  // -------------------------------------------------------------------------
+
+  app.get('/api/cgm/phantom/disputes', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, a.title, a.body, a.class_id, cl.name AS class_name
+       FROM cgm_announcement_reports r JOIN cgm_announcements a ON a.id = r.announcement_id
+       JOIN cgm_classes cl ON cl.id = a.class_id
+       ORDER BY r.created_at DESC LIMIT 200`
+    ));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), announcementId: Number(row.announcement_id), title: row.title,
+        excerpt: String(row.body || '').slice(0, 160), className: row.class_name,
+        reason: row.reason, status: row.status, createdAt: row.created_at,
+      })),
+    });
+  });
+
+  app.post('/api/cgm/phantom/disputes/:id/resolve', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    const id = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const action = String(body.action || 'dismiss');
+    const rows = await asRows<{ id: number; announcement_id: number; status: string }>(c.env.DB.prepare(
+      'SELECT id, announcement_id, status FROM cgm_announcement_reports WHERE id = ?'
+    ).bind(id));
+    const report = rows[0];
+    if (!report) return bad(c, 'Report not found.', 404);
+    if (report.status !== 'open') return bad(c, 'This report is already resolved.', 409);
+    if (action === 'remove') {
+      await c.env.DB.prepare(`UPDATE cgm_announcements SET status = 'removed', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(Number(report.announcement_id)).run();
+    }
+    await c.env.DB.prepare(`UPDATE cgm_announcement_reports SET status = 'resolved' WHERE id = ?`).bind(id).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: action === 'remove' ? 'cgm.dispute.resolved_removed' : 'cgm.dispute.resolved',
+      entityType: 'announcement_report', entityId: id,
+      classId: null,
+      context: { announcementId: Number(report.announcement_id) },
     });
     return c.json({ success: true });
   });

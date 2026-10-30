@@ -8,6 +8,9 @@ import { CodenameBallot } from './components/CodenameBallot';
 import { Vault } from './components/Vault';
 import { VaultSharedDocument } from './components/VaultSharedDocument';
 import { ClientPortal } from './components/ClientPortal';
+import { StudentPortal } from './components/ClassGroups/StudentPortal';
+import { ClassGroupsWorkspace } from './components/ClassGroups/ClassGroupsWorkspace';
+import { PhantomClassGroups } from './components/ClassGroups/PhantomClasses';
 import { ResetPassword } from './components/ResetPassword';
 import { ActivateAccount } from './components/ActivateAccount';
 import { SiteFlow } from './components/SiteFlow';
@@ -57,6 +60,21 @@ function App() {
   const [isClientPortalView, setIsClientPortalView] = useState(
     () => window.location.hash.startsWith('#client-portal') || isLinkAddress(window.location.pathname),
   );
+  // Class & Group Management is a family of standalone workspaces: the member
+  // organizer workspace, the student portal (also the invitation landing page)
+  // and the PHANTOM oversight area — each reachable by hash, never rendered
+  // inside the member shell.
+  const [classGroupsView, setClassGroupsView] = useState<null | 'workspace' | 'student' | 'phantom'>(() => {
+    const hash = window.location.hash;
+    if (hash.startsWith('#class-groups/phantom')) return 'phantom';
+    if (hash.startsWith('#class-groups/student') || hash.startsWith('#class-invite/')) return 'student';
+    if (hash.startsWith('#class-groups')) return 'workspace';
+    return null;
+  });
+  const [classInviteCode, setClassInviteCode] = useState<string | null>(() => {
+    const hash = window.location.hash;
+    return hash.startsWith('#class-invite/') ? decodeURIComponent(hash.replace('#class-invite/', '').trim()) || null : null;
+  });
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
   useEffect(() => {
@@ -170,6 +188,45 @@ function App() {
         }
         return;
       }
+      if (window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/')) {
+        setIsCommunityWorkspace(false);
+        setIsCodenameBallotView(false);
+        setIsSharedVaultView(false);
+        setIsClientPortalView(false);
+        setIsActivationView(false);
+        setIsResetView(false);
+        setIsMemberVault(false);
+        setActiveTab('home');
+        const hash = window.location.hash;
+        if (hash.startsWith('#class-invite/')) {
+          setClassInviteCode(decodeURIComponent(hash.replace('#class-invite/', '').trim()) || null);
+          setClassGroupsView('student');
+          return;
+        }
+        if (hash.startsWith('#class-groups/student')) {
+          setClassInviteCode(null);
+          setClassGroupsView('student');
+          return;
+        }
+        if (hash.startsWith('#class-groups/phantom')) {
+          const current = userRef.current;
+          if (current?.isPhantom || current?.role === 'phantom') {
+            setClassInviteCode(null);
+            setClassGroupsView('phantom');
+            return;
+          }
+          setClassGroupsView(null);
+          setAuthMode('login');
+          setIsAuthOpen(true);
+          return;
+        }
+        // The organizer workspace needs a member session; everyone else gets
+        // the student portal, which is where class life actually happens.
+        setClassInviteCode(null);
+        setClassGroupsView(userRef.current ? 'workspace' : 'student');
+        return;
+      }
+      setClassGroupsView(null);
       if (window.location.hash.startsWith('#codename-ballot')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(true);
@@ -416,6 +473,17 @@ function App() {
       setTimeout(() => document.getElementById(tabId)?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 80);
     }
   };
+
+  // Class & Group Management workspaces: standalone, like the client portal.
+  if (classGroupsView === 'student') {
+    return <StudentPortal inviteCode={classInviteCode} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); }} />;
+  }
+  if (classGroupsView === 'phantom') {
+    return <PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />;
+  }
+  if (classGroupsView === 'workspace' && user) {
+    return <ClassGroupsWorkspace onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />;
+  }
 
   // The client portal is a standalone workspace: no public navbar, no member
   // session, no dashboard chrome. A client is not a member of Code Rx Society.

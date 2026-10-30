@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, ArrowUpRight, Home, Menu, X } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, GraduationCap, Home, Menu, X } from 'lucide-react';
 import { NAV_LINKS } from '../data/mockData';
 import { MediaAsset } from '../data/editorSchema';
 import { getCopy, getMedia } from '../data/editorSchema';
@@ -72,6 +72,19 @@ export const Navbar = ({
               <EditableText elementKey={`nav.link.${link.id}`} copyKey={`nav.${link.id}`} label={`${link.label} navigation label`}>{navLabel(link.id, link.label)}</EditableText>
             </a>
           ))}
+          {/* The dedicated Class & Group Management door: organizers land in
+              their workspace, students in their portal. */}
+          {!isDashboard && (
+            <a
+              href="#class-groups"
+              className="brand-nav-link ml-1 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2.5 xl:px-3"
+              title="CODE Rx — Class & Group Management"
+            >
+              <GraduationCap className="h-3.5 w-3.5" />
+              <span className="hidden xl:inline">Classes &amp; Groups</span>
+              <span className="xl:hidden">Classes</span>
+            </a>
+          )}
           {/* The client door. A client who was sent an access key has one
               question — where do I type it — so on wide screens the header says
               the words, and the key icon stays on narrow ones. */}
@@ -136,6 +149,15 @@ export const Navbar = ({
                 <EditableText elementKey={`nav.mobile.${link.id}`} copyKey={`nav.${link.id}`} label={`${link.label} mobile navigation label`}>{navLabel(link.id, link.label)}</EditableText>
               </a>
             ))}
+            <a
+              href="#class-groups"
+              onClick={() => setIsOpen(false)}
+              className="brand-nav-link mt-1 flex items-center gap-2 rounded-xl px-4 py-3.5"
+              title="CODE Rx — Class & Group Management"
+            >
+              <GraduationCap className="h-4 w-4" />
+              Classes &amp; Groups
+            </a>
             <button
               type="button"
               onClick={() => {

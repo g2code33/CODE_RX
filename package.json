@@ -10,7 +10,9 @@
     "test:client-portal": "node --experimental-sqlite scripts/client-portal-tests.mjs",
     "test:client-portal-ui": "node scripts/client-portal-ui-tests.mjs",
     "test:raw-delivery": "node scripts/raw-delivery-tests.mjs",
-    "test:client-portal-all": "npm run test:client-portal && npm run test:client-portal-ui"
+    "test:client-portal-all": "npm run test:client-portal && npm run test:client-portal-ui",
+    "test:cgm": "node --experimental-sqlite scripts/cgm-tests.mjs",
+    "test:cgm-ui": "node scripts/cgm-ui-tests.mjs"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",
@@ -19,6 +21,7 @@
     "framer-motion": "^12.43.0",
     "hono": "^4.12.33",
     "lucide-react": "^1.28.0",
+    "qrcode": "^1.5.4",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "tailwind-merge": "^3.4.0",
@@ -28,6 +31,7 @@
     "@cloudflare/workers-types": "^5.20260801.1",
     "@tailwindcss/vite": "4.1.17",
     "@types/node": "22.19.17",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
