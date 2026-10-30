@@ -158,6 +158,54 @@ export const notifyStudent = async (
   }
 };
 
+/** Standard guard for PHANTOM-only routes. */
+export const requireCgmPhantom = async (c: any): Promise<{ error: Response; member?: undefined } | { error?: undefined; member: any }> => {
+  const member = await memberFromRequest(c);
+  if (!member) return { error: c.json({ success: false, error: 'Sign in first.' }, 401) };
+  if (!member.isPhantom) return { error: c.json({ success: false, error: 'PHANTOM authorization required.' }, 403) };
+  return { member };
+};
+
+// ---------------------------------------------------------------------------
+// Module policies (§30 — PHANTOM's global allow / automatic / closed switches)
+// ---------------------------------------------------------------------------
+
+export type CgmModulePolicyKey =
+  | 'organizer_application_mode'
+  | 'class_creation_mode'
+  | 'student_registration_mode'
+  | 'membership_request_mode'
+  | 'profile_change_mode';
+
+/** The value each policy accepts; 'approval' is always the spec default. */
+export const MODULE_POLICY_VALUES: Record<CgmModulePolicyKey, string[]> = {
+  organizer_application_mode: ['approval', 'auto', 'closed'],
+  class_creation_mode: ['approval', 'auto', 'closed'],
+  student_registration_mode: ['approval', 'auto', 'closed'],
+  membership_request_mode: ['approval', 'auto', 'closed'],
+  profile_change_mode: ['approval', 'auto'],
+};
+
+const MODULE_POLICY_DEFAULTS: Record<CgmModulePolicyKey, string> = {
+  organizer_application_mode: 'approval',
+  class_creation_mode: 'approval',
+  student_registration_mode: 'approval',
+  membership_request_mode: 'approval',
+  profile_change_mode: 'approval',
+};
+
+export const isModulePolicyKey = (key: string): key is CgmModulePolicyKey =>
+  Object.prototype.hasOwnProperty.call(MODULE_POLICY_VALUES, key);
+
+/** Reads one policy; a missing row always means the spec-default flow. */
+export const modulePolicy = async (db: D1Database, key: CgmModulePolicyKey): Promise<string> => {
+  const rows = await asRows<{ value: string }>(db.prepare(
+    'SELECT value FROM cgm_module_policies WHERE key = ?'
+  ).bind(key));
+  const value = String(rows[0]?.value || '');
+  return MODULE_POLICY_VALUES[key].includes(value) ? value : MODULE_POLICY_DEFAULTS[key];
+};
+
 // ---------------------------------------------------------------------------
 // Feature flag
 // ---------------------------------------------------------------------------

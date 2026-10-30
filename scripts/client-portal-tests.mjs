@@ -775,7 +775,7 @@ const main = async () => {
   // delegations and audit), all additive and all hanging off the records they
   // belong to.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 40, `${allTables.length} user tables`);
+    allTables.length === 63 + 11 + 3 + 41, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',

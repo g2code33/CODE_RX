@@ -28,10 +28,11 @@ const formatWhen = (value: unknown) => {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
-type Tab = 'overview' | 'applications' | 'classes' | 'sensitive' | 'delegation' | 'disputes' | 'organizers' | 'audit';
+type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'delegation' | 'disputes' | 'organizers' | 'audit';
 
 const TABS: Array<[Tab, string]> = [
   ['overview', 'Overview'],
+  ['policies', 'Module settings'],
   ['applications', 'Organizer applications'],
   ['classes', 'Class approvals'],
   ['sensitive', 'Sensitive changes'],
@@ -43,6 +44,98 @@ const TABS: Array<[Tab, string]> = [
 
 type PhantomRows = Record<Tab, any[] | undefined>;
 
+const POLICY_META: Array<{ key: string; title: string; description: string; valueLabels: Record<string, string> }> = [
+  {
+    key: 'organizer_application_mode', title: 'Organizer applications',
+    description: 'How Society members apply to become organizers.',
+    valueLabels: { approval: 'Wait for PHANTOM approval', auto: 'Automatic after email verification', closed: 'Closed — PHANTOM invites only' },
+  },
+  {
+    key: 'class_creation_mode', title: 'Class creation',
+    description: 'What happens when an organizer creates a class.',
+    valueLabels: { approval: 'Draft, then wait for PHANTOM approval', auto: 'Automatic — active immediately', closed: 'Closed — PHANTOM creates classes' },
+  },
+  {
+    key: 'student_registration_mode', title: 'Student registration',
+    description: 'Index number + class entry password sign-ups.',
+    valueLabels: { approval: 'Wait for organizer approval', auto: 'Automatic — passkey issued at once', closed: 'Closed — organizers add or import students' },
+  },
+  {
+    key: 'membership_request_mode', title: 'Join &amp; membership requests',
+    description: 'Students joining an extra class with an invitation code.',
+    valueLabels: { approval: 'Wait for organizer approval', auto: 'Automatic — join instantly', closed: 'Closed — no join requests' },
+  },
+  {
+    key: 'profile_change_mode', title: 'Profile changes',
+    description: 'Student-submitted name, contact and gender corrections.',
+    valueLabels: { approval: 'Wait for organizer approval', auto: 'Automatic — applied immediately' },
+  },
+];
+
+const PoliciesPanel = ({ rows, busy, onSave }: {
+  rows: any[];
+  busy: boolean;
+  onSave: (policies: Array<{ key: string; value: string }>) => Promise<void>;
+}) => {
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [note, setNote] = useState<string | null>(null);
+  const valueFor = (key: string) => draft[key] || String((rows.find((row) => row.key === key) || {}).value || 'approval');
+  return (
+    <div className="space-y-3">
+      <div className={card}>
+        <p className="text-xs font-black uppercase tracking-wider text-emerald-700">Module settings</p>
+        <p className="mt-1 text-xs font-medium text-slate-500">Every process below normally waits for an approval — the spec default. Flip any of them to run automatically, or close it entirely. Choices apply module-wide, instantly, and every automatic decision is written to the audit trail.</p>
+      </div>
+      {POLICY_META.map((policy) => {
+        const current = valueFor(policy.key);
+        return (
+          <div key={policy.key} className={card}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-black text-slate-900">{policy.title}</p>
+                <p className="text-xs font-medium text-slate-500">{policy.description}</p>
+              </div>
+              <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={policy.title}>
+                {Object.entries(policy.valueLabels).map(([value, text]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={current === value}
+                    disabled={busy}
+                    onClick={() => setDraft((state) => ({ ...state, [policy.key]: value }))}
+                    className={`rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${current === value ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          disabled={busy || !rows.length || !Object.keys(draft).length}
+          className="cgm-primary-button"
+          onClick={async () => {
+            setNote(null);
+            try {
+              await onSave(Object.entries(draft).map(([key, value]) => ({ key, value })));
+              setDraft({});
+              setNote('Module settings saved — they apply immediately.');
+            } catch (failure: any) { setNote(failure?.message || 'Could not save the settings.'); }
+          }}
+        >
+          Save module settings
+        </button>
+        {note && <p role="status" className="text-xs font-bold text-emerald-700">{note}</p>}
+      </div>
+    </div>
+  );
+};
+
 export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; embedded?: boolean }) => {
   const [tab, setTab] = useState<Tab>('overview');
   const [overview, setOverview] = useState<any>(null);
@@ -53,6 +146,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
   const loadOverview = useCallback(async () => { setOverview(await cgm.phantomOverview().catch(() => null)); }, []);
   const loadTab = useCallback(async (which: Tab) => {
     const loaders: Partial<Record<Tab, () => Promise<unknown>>> = {
+      policies: () => cgm.phantomPolicies(),
       applications: () => cgm.phantomOrganizerApplications(),
       classes: () => cgm.phantomClasses(),
       sensitive: () => cgm.phantomSensitiveChanges(),
@@ -96,6 +190,17 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                 {overview.moduleEnabled ? 'Disable module' : 'Enable module'}
               </button>
             </div>
+          )}
+
+          {tab === 'policies' && (
+            <PoliciesPanel
+              rows={rows.policies || []}
+              busy={busy}
+              onSave={async (policies) => {
+                await cgm.phantomSavePolicies(policies);
+                await Promise.all([loadOverview(), loadTab('policies')]);
+              }}
+            />
           )}
 
           {tab === 'overview' && overview && (
@@ -188,6 +293,20 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   )}
                   {row.status === 'suspended' && (
                     <button type="button" disabled={busy} className="mini-button" onClick={() => void act(() => cgm.phantomClassAction(Number(row.id), 'reinstate'), 'Class reinstated.')}>Reinstate</button>
+                  )}
+                  {row.status === 'draft' && (
+                    <div>
+                      <p className="text-xs font-semibold text-slate-400">Still a draft — the organizer has not submitted it for approval yet. You can override.</p>
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void act(() => cgm.phantomClassAction(Number(row.id), 'approve'), `${row.name} approved (override) — invitations can go live.`)}>Submit &amp; approve (override)</button>
+                        <button type="button" disabled={busy} className="mini-button text-red-600" onClick={async () => { const reason = await appDialog.prompt({ title: 'Reject this draft class', label: 'Rejection reason', multiline: true, confirmLabel: 'Reject' }); if (reason) await act(() => cgm.phantomClassAction(Number(row.id), 'reject', reason), 'Draft class rejected.'); }}>Reject</button>
+                      </div>
+                    </div>
+                  )}
+                  {row.status === 'rejected' && (
+                    <div className="flex flex-wrap gap-1.5">
+                      <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void act(() => cgm.phantomClassAction(Number(row.id), 'approve'), `${row.name} approved — invitations can go live.`)}>Approve now</button>
+                    </div>
                   )}
                 </>
               )}

@@ -60,6 +60,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [issuedPasskey, setIssuedPasskey] = useState<string | null>(null);
 
   // register fields
   const [classCode, setClassCode] = useState('');
@@ -150,6 +151,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               event.preventDefault();
               void run(async () => {
                 const data = await cgmStudent.register({ classCode, indexNumber, entryPassword });
+                if ((data as any)?.passkey) setIssuedPasskey(String((data as any).passkey));
                 setMessage(String((data as any)?.message || 'Registration received.'));
               });
             }}
@@ -170,7 +172,14 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             <button type="submit" disabled={busy} className="cgm-primary-button w-full">
               {busy ? 'Submitting…' : 'Submit registration'}
             </button>
-            <p className="text-[11px] font-medium text-slate-400">Your organizer reviews every registration. Approved students receive a permanent passkey, shown once.</p>
+            <p className="text-[11px] font-medium text-slate-400">Depending on the class settings, your organizer reviews registrations or they are approved automatically. Approved students receive a permanent passkey, shown once.</p>
+            {issuedPasskey && (
+              <div role="status" className="rounded-xl border-2 border-amber-300 bg-amber-50 px-4 py-3">
+                <p className="text-xs font-black uppercase tracking-wider text-amber-700">Your permanent passkey — shown only now</p>
+                <p className="mt-1 font-mono text-lg font-black text-amber-900">{issuedPasskey}</p>
+                <p className="mt-1 text-[11px] font-semibold text-amber-700">Save it immediately. Sign-in needs this passkey plus your index number, and it cannot be re-issued.</p>
+              </div>
+            )}
           </form>
         )}
 

@@ -32,6 +32,7 @@ import {
 } from './core';
 import {
   insertAssignmentGuarded,
+  requireCgmPhantom,
   restoreAssignment,
   asRows,
   auditCgm,
@@ -2124,12 +2125,6 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
   // -------------------------------------------------------------------------
   // PHANTOM oversight
   // -------------------------------------------------------------------------
-  const requireCgmPhantom = async (c: any): Promise<{ error: Response; member?: undefined } | { error?: undefined; member: any }> => {
-    const member = await memberFromRequest(c);
-    if (!member) return { error: c.json({ success: false, error: 'Sign in first.' }, 401) };
-    if (!member.isPhantom) return { error: c.json({ success: false, error: 'PHANTOM authorization required.' }, 403) };
-    return { member };
-  };
 
   app.get('/api/cgm/phantom/overview', async (c: any) => {
     const check = await requireCgmPhantom(c);

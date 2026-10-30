@@ -200,7 +200,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 40);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 41);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -1626,6 +1626,198 @@ const amaEditAfterTransfer = await memberCall('PATCH', `/api/cgm/classes/${class
 check('the former primary can no longer edit the class record (primary-only guard)', amaEditAfterTransfer.status === 403, `status ${amaEditAfterTransfer.status}`);
 const newPrimaryEdit = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'phone', 'email'] }, assistantToken);
 check('the new primary can manage class settings', newPrimaryEdit.status === 200, `status ${newPrimaryEdit.status}`);
+
+
+// ===========================================================================
+// 22. §30 module policy console: every process → approval / automatic /
+//     closed, decided by PHANTOM in one place and enforced by the server.
+//     Runs last: flipping module-wide switches would disturb other sections.
+// ===========================================================================
+section('22. Module policy console (§30)');
+const setPolicy = (key, value) => memberCall('PUT', '/api/cgm/phantom/policies', { key, value }, phantomToken);
+
+const policiesAnon = await call('GET', '/api/cgm/phantom/policies');
+check('the policy console is hidden without a session', policiesAnon.status === 401, `status ${policiesAnon.status}`);
+const policiesOrganizer = await memberCall('GET', '/api/cgm/phantom/policies', undefined, amaToken);
+check('a non-PHANTOM organizer cannot read the policy console', policiesOrganizer.status === 403, `status ${policiesOrganizer.status}`);
+const policiesOrganizerPut = await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'class_creation_mode', value: 'auto' }, amaToken);
+check('a non-PHANTOM organizer cannot change policies', policiesOrganizerPut.status === 403, `status ${policiesOrganizerPut.status}`);
+check('the denied write stored nothing', !q1("SELECT value FROM cgm_module_policies WHERE key = 'class_creation_mode'"));
+
+const policies = await memberCall('GET', '/api/cgm/phantom/policies', undefined, phantomToken);
+check('PHANTOM reads the policy console', policies.status === 200, `status ${policies.status}`);
+const policyKeys = (policies.json?.data || []).map((row) => row.key);
+check('all five processes are manageable from the console', JSON.stringify(policyKeys) === JSON.stringify([
+  'organizer_application_mode', 'class_creation_mode', 'student_registration_mode', 'membership_request_mode', 'profile_change_mode',
+]), JSON.stringify(policyKeys));
+check('unset policies read as the spec default — wait for approval', (policies.json?.data || []).every((row) => row.value === 'approval'));
+check('the console reports the allowed modes per process', (policies.json?.data || []).every((row) => Array.isArray(row.allowedValues) && row.allowedValues.length >= 2));
+
+const badMode = await setPolicy('class_creation_mode', 'sometimes');
+check('an unknown mode is refused', badMode.status === 400, `status ${badMode.status}`);
+const unknownProcess = await setPolicy('election_mode', 'auto');
+check('an unknown process is refused', unknownProcess.status === 400, `status ${unknownProcess.status}`);
+const saveTwo = await memberCall('PUT', '/api/cgm/phantom/policies', { policies: [
+  { key: 'student_registration_mode', value: 'auto' }, { key: 'profile_change_mode', value: 'auto' },
+] }, phantomToken);
+check('PHANTOM can save several settings in one go', saveTwo.status === 200 && saveTwo.json?.data?.updated === 2, `status ${saveTwo.status}`);
+const policyRow = q1("SELECT value, updated_by_label FROM cgm_module_policies WHERE key = 'student_registration_mode'");
+check('saved settings persist with who changed them', policyRow?.value === 'auto' && Boolean(policyRow?.updated_by_label), JSON.stringify(policyRow || {}));
+check('every policy change lands in the audit trail', Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.module.policy' AND context_json LIKE '%student_registration_mode%'")));
+await setPolicy('student_registration_mode', 'approval');
+await setPolicy('profile_change_mode', 'approval');
+
+// -- A third member for the application-mode subsection ----------------------
+const kwameSeq = q1('SELECT next_value FROM member_sequences WHERE id = 1');
+sqlite.prepare("UPDATE member_sequences SET next_value = next_value + 1 WHERE id = 1").run();
+sqlite.prepare("INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, 'member')")
+  .run('kwame.apps@example.com', 'Kwame Apps', memberHash('KwamePass1'));
+const kwameUser = q1("SELECT id FROM users WHERE email = 'kwame.apps@example.com'");
+sqlite.prepare("INSERT INTO members (name, email, phone, role, joined_date, points, level, is_active) VALUES (?, ?, NULL, 'member', '2026-10-30', 0, 'Member', 1)")
+  .run('Kwame Apps', 'kwame.apps@example.com');
+const kwameMember = q1("SELECT id FROM members WHERE email = 'kwame.apps@example.com'");
+sqlite.prepare(
+  "INSERT INTO member_profiles (user_id, member_record_id, member_code, status, codename_path, created_by_user_id) VALUES (?, ?, ?, 'active', 'member', ?)"
+).run(kwameUser.id, kwameMember.id, `CRX-${String(kwameSeq.next_value).padStart(4, '0')}`, kwameUser.id);
+const kwameLogin = await call('POST', '/api/auth/login', { identifier: 'kwame.apps@example.com', password: 'KwamePass1' });
+const kwameToken = kwameLogin.json?.token || kwameLogin.json?.data?.token;
+check('the third member can sign in', Boolean(kwameToken), `status ${kwameLogin.status}`);
+
+// -- organizer_application_mode: closed refuses; auto approves on verify ------
+await setPolicy('organizer_application_mode', 'closed');
+const closedApply = await memberCall('POST', '/api/cgm/organizer/apply', { institution: 'Accra Technical University', motivation: 'Wants to organize labs.' }, kwameToken);
+check('closed: organizer applications are refused outright', closedApply.status === 403, `status ${closedApply.status}`);
+check('closed: the refusal wrote no application row',
+  !q1('SELECT id FROM cgm_organizer_applications WHERE user_id = ?', kwameUser.id));
+
+await setPolicy('organizer_application_mode', 'auto');
+const autoApply = await memberCall('POST', '/api/cgm/organizer/apply', { institution: 'Accra Technical University', motivation: 'Automatic approval path.' }, kwameToken);
+check('auto: the member can still apply', autoApply.status === 200 || autoApply.status === 201, `status ${autoApply.status} ${autoApply.text?.slice(0, 120)}`);
+const kwameAppRow = q1('SELECT id FROM cgm_organizer_applications WHERE user_id = ? ORDER BY id DESC LIMIT 1', kwameUser.id);
+const autoVerifyToken = autoApply.json?.data?.verifyToken || autoApply.json?.verifyToken || null;
+const autoVerified = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(String(autoVerifyToken || ''))}`);
+check('auto: email verification approves on the spot', autoVerified.status === 200, `status ${autoVerified.status}`);
+const kwameApproved = q1('SELECT status, reviewer_label FROM cgm_organizer_applications WHERE id = ?', kwameAppRow.id);
+check('auto: the application is approved by the policy, not a person', kwameApproved?.status === 'approved' && kwameApproved?.reviewer_label === 'Policy (automatic)', JSON.stringify(kwameApproved || {}));
+check('auto: the decision is audited as automatic', Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.organizer.auto_approved' AND entity_id = ?", String(kwameAppRow.id))));
+await setPolicy('organizer_application_mode', 'approval');
+
+// -- class_creation_mode: closed refuses before writing; auto activates -------
+const kwameCreates = await memberCall('POST', '/api/cgm/classes', { name: 'Kwame should not have this', institution: 'Accra Technical University' }, kwameToken);
+check('a freshly auto-approved organizer may create classes again after the reset', kwameCreates.status === 200, `status ${kwameCreates.status}`);
+const classesBeforeClosed = q1('SELECT COUNT(*) c FROM cgm_classes').c;
+await setPolicy('class_creation_mode', 'closed');
+const closedCreate = await memberCall('POST', '/api/cgm/classes', { name: 'Closed-mode class', institution: 'Accra Technical University' }, kwameToken);
+check('closed: class creation is refused for organizers', closedCreate.status === 403, `status ${closedCreate.status}`);
+check('closed: the refusal wrote nothing — no class row, no code burned',
+  q1('SELECT COUNT(*) c FROM cgm_classes').c === classesBeforeClosed);
+
+await setPolicy('class_creation_mode', 'auto');
+const autoCreate = await memberCall('POST', '/api/cgm/classes', { name: 'PHY 201 Policy Auto', institution: 'Accra Technical University' }, kwameToken);
+const autoClassId = autoCreate.json?.data?.classId ?? autoCreate.json?.data?.class?.id ?? autoCreate.json?.data?.id;
+const autoClassCode = autoCreate.json?.data?.code;
+check('auto: the class is created with a permanent code', autoCreate.status === 200 && /^CRX-CLS-/.test(String(autoClassCode)), `status ${autoCreate.status}`);
+check('auto: the class is active immediately — no PHANTOM wait',
+  q1('SELECT status, reviewer_label FROM cgm_classes WHERE id = ?', autoClassId)?.status === 'active'
+  && q1('SELECT reviewer_label FROM cgm_classes WHERE id = ?', autoClassId)?.reviewer_label === 'Policy (automatic)');
+check('auto: the approval trail records the automatic decision',
+  Boolean(q1("SELECT id FROM cgm_class_approvals WHERE class_id = ? AND action = 'approved' AND reason LIKE 'Automatically active%'", autoClassId)));
+await setPolicy('class_creation_mode', 'approval');
+
+// -- student_registration_mode: closed refuses; auto issues the passkey -------
+await memberCall('POST', `/api/cgm/classes/${autoClassId}/entry-password`, { entryPassword: 'phy-201-entry' }, kwameToken);
+const autoRosterCsv = [
+  'Full Name,Index Number',
+  'Adjoa Mensah,AUTO-101-001',
+  'Bio Returnee,BIO-201-001',
+].join('\n');
+const autoRosterForm = new FormData();
+autoRosterForm.append('file', new File([autoRosterCsv], 'roster.csv', { type: 'text/csv' }));
+autoRosterForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number' }));
+autoRosterForm.append('policy', 'skip');
+const autoRosterImport = await formCall('POST', `/api/cgm/classes/${autoClassId}/roster/import`, autoRosterForm, kwameToken);
+check('the auto class can import its roster', autoRosterImport.status === 200, `status ${autoRosterImport.status} ${autoRosterImport.text?.slice(0, 140)}`);
+
+await setPolicy('student_registration_mode', 'closed');
+const closedRegister = await call('POST', '/api/cgm/student/register', { classCode: autoClassCode, indexNumber: 'AUTO-101-001', entryPassword: 'phy-201-entry' });
+check('closed: student registration is refused outright', closedRegister.status === 403, `status ${closedRegister.status}`);
+check('closed: no identity or request row was written',
+  !q1("SELECT id FROM cgm_students WHERE index_number_key = 'auto-101-001'")
+  && !q1("SELECT r.id FROM cgm_registration_requests r JOIN cgm_roster_entries e ON e.id = r.roster_entry_id WHERE e.index_number_key = 'auto-101-001'"));
+
+await setPolicy('student_registration_mode', 'auto');
+const passkeyCounterBefore = Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value);
+const bijective = (n) => { let key = ''; while (n > 0) { const rem = (n - 1) % 26; key = String.fromCharCode(97 + rem) + key; n = Math.floor((n - 1) / 26); } return key; };
+const autoRegister = await call('POST', '/api/cgm/student/register', { classCode: autoClassCode, indexNumber: 'AUTO-101-001', entryPassword: 'phy-201-entry' });
+const expectedPasskey = `rx30${bijective(passkeyCounterBefore)}`;
+check('auto: registration approves inline and is active at once',
+  autoRegister.status === 200 && autoRegister.json?.data?.state === 'active', `status ${autoRegister.status} ${autoRegister.text?.slice(0, 160)}`);
+check(`auto: the permanent passkey continues the global sequence (${expectedPasskey})`,
+  autoRegister.json?.data?.passkey === expectedPasskey, String(autoRegister.json?.data?.passkey));
+const autoStudent = q1("SELECT id, status, passkey_sequence FROM cgm_students WHERE index_number_key = 'auto-101-001'");
+check('auto: the new identity is active with its passkey recorded', autoStudent?.status === 'active' && Number(autoStudent?.passkey_sequence) === passkeyCounterBefore, JSON.stringify(autoStudent || {}));
+check('auto: the passkey is stored only as a verifier', !String(q1('SELECT passkey_verifier FROM cgm_students WHERE id = ?', autoStudent.id)?.passkey_verifier || '').includes('rx30'));
+check('auto: the roster entry flips to registered',
+  q1("SELECT status FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'auto-101-001'", autoClassId)?.status === 'registered');
+check('auto: the membership is added by the policy', q1("SELECT added_by_label FROM cgm_class_members WHERE class_id = ? AND student_id = ?", autoClassId, autoStudent.id)?.added_by_label === 'Policy (automatic)');
+check('auto: the decision is audited as automatic', Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.registration.auto_approved' AND class_id = ?", autoClassId)));
+
+// An existing identity re-registers into a second class: approved instantly,
+// no second passkey, sequence untouched.
+const sequenceBeforeReturnee = Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value);
+const returneeRegister = await call('POST', '/api/cgm/student/register', { classCode: autoClassCode, indexNumber: 'BIO-201-001', entryPassword: 'phy-201-entry' });
+check('auto: an existing identity is approved without a second passkey',
+  returneeRegister.status === 200 && returneeRegister.json?.data?.state === 'active' && returneeRegister.json?.data?.passkey == null, returneeRegister.text?.slice(0, 160));
+check('auto: the sequence was not consumed by a returning identity',
+  Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value) === sequenceBeforeReturnee);
+check('auto: the returning student gains the second membership',
+  Boolean(q1('SELECT id FROM cgm_class_members WHERE class_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = ?)', autoClassId, 'bio-201-001')));
+await setPolicy('student_registration_mode', 'approval');
+
+// -- membership_request_mode: closed refuses; auto joins instantly ------------
+const autoInvite = await memberCall('POST', `/api/cgm/classes/${autoClassId}/invitations`, { kind: 'general', maxUses: 5 }, kwameToken);
+const autoInviteCode = autoInvite.json?.data?.code;
+check('the auto class can issue an invitation', Boolean(autoInviteCode), autoInvite.text?.slice(0, 140));
+const chmJoinerLogin = await loginForStudent(chmStudentId);
+const chmJoinerToken = chmJoinerLogin.json?.data?.session?.token;
+check('the class-B joiner can sign in fresh', Boolean(chmJoinerToken), `status ${chmJoinerLogin.status}`);
+
+await setPolicy('membership_request_mode', 'closed');
+const closedJoin = await studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, chmJoinerToken);
+check('closed: membership requests are refused outright', closedJoin.status === 403, `status ${closedJoin.status}`);
+check('closed: no request or membership row was written',
+  !q1('SELECT id FROM cgm_class_members WHERE class_id = ? AND student_id = ?', autoClassId, chmStudentId)
+  && !q1('SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = ?', autoClassId, chmStudentId));
+
+await setPolicy('membership_request_mode', 'auto');
+const autoJoin = await studentCall('POST', '/api/cgm/student/join', { code: autoInviteCode }, chmJoinerToken);
+check('auto: the join is approved on the spot', autoJoin.status === 200, `status ${autoJoin.status} ${autoJoin.text?.slice(0, 160)}`);
+check('auto: the membership exists with no pending queue row',
+  Boolean(q1('SELECT id FROM cgm_class_members WHERE class_id = ? AND student_id = ?', autoClassId, chmStudentId))
+  && !q1("SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = ? AND status = 'pending'", autoClassId, chmStudentId));
+await setPolicy('membership_request_mode', 'approval');
+
+// -- profile_change_mode: auto applies immediately with normalized keys -------
+await setPolicy('profile_change_mode', 'auto');
+const governanceFresh = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+const governanceToken = governanceFresh.json?.data?.session?.token || governanceSession;
+const autoProfileChange = await studentCall('POST', '/api/cgm/student/profile/change', { field: 'phone', newValue: '0209000042', reason: 'New number' }, governanceToken);
+check('auto: the profile change is applied immediately', autoProfileChange.status === 200, `status ${autoProfileChange.status} ${autoProfileChange.text?.slice(0, 160)}`);
+const returneeRow = q1('SELECT phone, phone_key FROM cgm_students WHERE index_number_key = ?', 'bio-201-001');
+check('auto: the value and its lookup key are both updated', returneeRow?.phone === '0209000042' && Boolean(returneeRow?.phone_key), JSON.stringify(returneeRow || {}));
+check('auto: no pending request row lingers',
+  !q1("SELECT id FROM cgm_profile_change_requests WHERE student_id = ? AND status = 'pending'", Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'bio-201-001'").id)));
+check('auto: the change is audited as automatic',
+  Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.profile_change.auto_applied' AND actor_student_id = ?", Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'bio-201-001'").id))));
+
+// Index numbers stay locked even in automatic mode.
+const lockedIndex = await studentCall('POST', '/api/cgm/student/profile/change', { field: 'index_number', newValue: 'HACK-001', reason: 'Attempt' }, governanceToken);
+check('auto: index numbers stay locked', lockedIndex.status === 400, `status ${lockedIndex.status}`);
+await setPolicy('profile_change_mode', 'approval');
+
+// The console ends back at the spec default: every process waits for approval.
+const finalPolicies = await memberCall('GET', '/api/cgm/phantom/policies', undefined, phantomToken);
+check('the module ends at the spec default — approval everywhere', (finalPolicies.json?.data || []).every((row) => row.value === 'approval'), JSON.stringify(finalPolicies.json?.data));
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

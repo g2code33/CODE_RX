@@ -400,6 +400,9 @@ export const cgm = {
     const query = params.toString();
     return memberCall(`/api/cgm/phantom/audit${query ? `?${query}` : ''}`);
   },
+  phantomPolicies: () => memberCall('/api/cgm/phantom/policies'),
+  phantomSavePolicies: (policies: Array<{ key: string; value: string }>) =>
+    memberCall('/api/cgm/phantom/policies', { method: 'PUT', body: { policies } }),
   phantomModule: (enabled: boolean) => memberCall('/api/cgm/phantom/module', { method: 'POST', body: { enabled } }),
   phantomTransfer: (classId: number, toProfileId: number) =>
     memberCall(`/api/cgm/phantom/classes/${classId}/transfer`, { method: 'POST', body: { toProfileId } }),

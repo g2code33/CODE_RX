@@ -568,6 +568,17 @@ CREATE TABLE IF NOT EXISTS cgm_student_notifications (
 );
 
 
+-- §30: module-wide policy switches. PHANTOM decides per process whether the
+-- normal approval flow applies, whether it happens automatically, or whether
+-- the process is closed entirely. Defaults always preserve the spec flow.
+CREATE TABLE IF NOT EXISTS cgm_module_policies (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by_label TEXT,
+  updated_at DATETIME
+);
+
+
 -- §31: per-category notification preferences. Critical categories (security,
 -- registration) are enforced server-side and can never be muted.
 CREATE TABLE IF NOT EXISTS cgm_notification_prefs (

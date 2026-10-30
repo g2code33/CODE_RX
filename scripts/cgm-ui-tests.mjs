@@ -352,6 +352,41 @@ check('lockout guards the confirming half: the audit marks the lock without coun
 check('the audit trail scan is part of the suite contract (no raw passkeys or entry passwords)',
   /never contains a raw passkey/.test(readFileSync(path.join(ROOT, 'scripts/cgm-tests.mjs'), 'utf8')));
 
+// ---------------------------------------------------------------------------
+// 16. §30 module policy console, draft overrides, inline passkey reveal
+// ---------------------------------------------------------------------------
+section('16. Step-11: module settings console, draft overrides, auto-registration reveal');
+
+check('the PHANTOM area has a dedicated Module settings tab',
+  /\['policies', 'Module settings'\]/.test(phantom) && /type Tab = 'overview' \| 'policies'/.test(phantom));
+check('the console loads and saves through the policy endpoints',
+  /phantomPolicies\(\)/.test(phantom) && /phantomSavePolicies\(/.test(phantom)
+  && client.includes('/api/cgm/phantom/policies'));
+check('every process is manageable: applications, classes, registration, membership, profile',
+  ['organizer_application_mode', 'class_creation_mode', 'student_registration_mode', 'membership_request_mode', 'profile_change_mode']
+    .every((key) => phantom.includes(`'${key}'`)));
+check('each process offers approval, automatic and (where legal) closed modes',
+  /'Wait for PHANTOM approval'/.test(phantom) && /'Automatic after email verification'/.test(phantom)
+  && /'Closed — PHANTOM invites only'/.test(phantom) && /'Automatic — passkey issued at once'/.test(phantom)
+  && /'Closed — no join requests'/.test(phantom));
+check('the modes are real radio groups with a save button that reports success',
+  /role="radiogroup"/.test(phantom) && /aria-checked=/.test(phantom) && /Save module settings/.test(phantom)
+  && /role="status"/.test(phantom));
+check('the console explains that choices are module-wide and audited',
+  /module-wide/.test(phantom) && /audit trail/.test(phantom));
+
+check('a draft class is still actionable: PHANTOM can submit & approve it as an override',
+  phantom.includes('Submit &amp; approve (override)') && phantom.includes('Still a draft — the organizer has not submitted it for approval yet.'));
+check('a rejected class can be approved later without resubmission',
+  /status === 'rejected'/.test(phantom) && /Approve now/.test(phantom));
+
+check('automatic registration reveals the permanent passkey exactly once',
+  studentPortal.includes('shown only now') && /issuedPasskey/.test(studentPortal)
+  && /cannot be re-issued/.test(studentPortal));
+check('the register form no longer claims every registration waits for a person',
+  !studentPortal.includes('Your organizer reviews every registration.')
+  && studentPortal.includes('approved automatically'));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

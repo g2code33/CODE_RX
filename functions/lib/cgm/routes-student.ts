@@ -32,6 +32,8 @@
 import type { Hono } from 'hono';
 import {
   LOGIN_IDENTIFIER_KEYS,
+  allocateStudentPasskey,
+  lookupKey,
   phoneKey,
   sequenceForPasskey,
   STUDENT_PROFILE_FIELDS,
@@ -46,6 +48,7 @@ import {
   clean,
   cleanOrNull,
   insertAssignmentGuarded,
+  modulePolicy,
   createStudentSession,
   notifyStudent,
   readBody,
@@ -99,6 +102,9 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const dark = await requireModuleEnabled(c);
     if (dark) return dark;
     if (!throttle(c, 10, 3600)) return bad(c, 'Too many registration attempts. Try again later.', 429);
+    if (await modulePolicy(c.env.DB, 'student_registration_mode') === 'closed') {
+      return bad(c, 'Student registration is closed right now. Your organizer adds students directly.', 403);
+    }
     const body = await readBody(c);
     const classCode = clean(body.classCode, 40);
     const indexNumber = clean(body.indexNumber, 80);
@@ -106,7 +112,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!classCode || !indexNumber || !entryPassword) return bad(c, GENERIC_REGISTER_FAILURE, 400);
 
     const classRows = await asRows<any>(c.env.DB.prepare(
-      `SELECT id, name, code, entry_password_verifier FROM cgm_classes WHERE code = ? AND status = 'active'`
+      `SELECT id, name, code, institution, institution_key, entry_password_verifier FROM cgm_classes WHERE code = ? AND status = 'active'`
     ).bind(classCode));
     const klass = classRows[0];
     // Anti-enumeration: unknown class, unknown index and wrong password all
@@ -150,6 +156,84 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       action: 'cgm.registration.requested', entityType: 'class', entityId: klass.id, classId: klass.id,
       context: { classCode: klass.code },
     });
+
+    // Policy override: automatic registration approves on the spot — the
+    // identity, passkey and membership are created exactly as the organizer
+    // approval path would, and the passkey is shown once here.
+    if (await modulePolicy(c.env.DB, 'student_registration_mode') === 'auto') {
+      const fullEntry = (await asRows<any>(c.env.DB.prepare('SELECT * FROM cgm_roster_entries WHERE id = ?').bind(entry.id)))[0];
+      const fullClass = (await asRows<any>(c.env.DB.prepare('SELECT institution, institution_key, name FROM cgm_classes WHERE id = ?').bind(klass.id)))[0];
+      const requestId = Number(((await asRows<{ id: number }>(c.env.DB.prepare(
+        'SELECT id FROM cgm_registration_requests WHERE roster_entry_id = ? AND status = \'pending\' ORDER BY id DESC LIMIT 1'
+      ).bind(entry.id)))[0] || {}).id || 0);
+      let studentId = existingStudentId;
+      let issuedPasskey: string | null = null;
+      if (studentId) {
+        const row = (await asRows<{ passkey_sequence: number | null; status: string }>(c.env.DB.prepare(
+          'SELECT passkey_sequence, status FROM cgm_students WHERE id = ?'
+        ).bind(studentId)))[0];
+        if (row && row.passkey_sequence === null) {
+          const allocation = await allocateStudentPasskey(c.env.DB);
+          issuedPasskey = allocation.passkey;
+          await c.env.DB.prepare(
+            `UPDATE cgm_students SET passkey_suffix = ?, passkey_sequence = ?, passkey_verifier = ?,
+             passkey_issued_at = CURRENT_TIMESTAMP, status = 'active', full_name = COALESCE(NULLIF(?, ''), full_name),
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+          ).bind(allocation.suffix, allocation.sequence, await hashPassword(allocation.passkey), fullEntry.full_name, studentId).run();
+        } else if (row && row.status === 'pending') {
+          await c.env.DB.prepare(`UPDATE cgm_students SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(studentId).run();
+        }
+      } else {
+        const allocation = await allocateStudentPasskey(c.env.DB);
+        issuedPasskey = allocation.passkey;
+        const indexKey = String(fullEntry.index_number).trim().replace(/\s+/g, ' ').toLowerCase();
+        const inserted = await c.env.DB.prepare(
+          `INSERT INTO cgm_students
+           (full_name, index_number, index_number_key, institution, institution_key, university_id, university_id_key,
+            phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_sequence, passkey_verifier,
+            passkey_issued_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
+        ).bind(
+          fullEntry.full_name, fullEntry.index_number, indexKey,
+          fullClass.institution, fullClass.institution_key,
+          fullEntry.university_id, fullEntry.university_id_key || (fullEntry.university_id ? lookupKey(fullEntry.university_id) : null),
+          fullEntry.phone, fullEntry.phone_key || (fullEntry.phone ? phoneKey(fullEntry.phone) : null),
+          fullEntry.email, fullEntry.gender || 'unknown', fullEntry.custom_fields_json || '{}',
+          allocation.suffix, allocation.sequence, await hashPassword(allocation.passkey),
+        ).run();
+        studentId = Number(inserted.meta.last_row_id);
+      }
+      await c.env.DB.prepare(
+        `INSERT OR IGNORE INTO cgm_class_members (class_id, student_id, added_via, added_by_label)
+         VALUES (?, ?, 'registration', 'Policy (automatic)')`
+      ).bind(klass.id, studentId).run();
+      await c.env.DB.prepare(
+        'UPDATE cgm_roster_entries SET status = ?, student_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+      ).bind('registered', studentId, entry.id).run();
+      await c.env.DB.prepare(
+        `UPDATE cgm_registration_requests SET status = 'approved', student_id = ?,
+         reviewer_label = 'Policy (automatic)', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(studentId, requestId).run();
+      if (issuedPasskey) {
+        await notifyStudent(c.env.DB, studentId, 'registration', 'Your permanent student passkey',
+          `Your registration for ${fullClass.name} was approved automatically. Your permanent passkey is ${issuedPasskey}. It is shown only here — save it now; sign-in also needs your index number.`);
+      }
+      await auditCgm(c.env.DB, {
+        actorType: 'system', actorLabel: 'Policy (automatic)', actorStudentId: studentId,
+        action: 'cgm.registration.auto_approved', entityType: 'class', entityId: klass.id, classId: klass.id,
+        context: { classCode: klass.code },
+      });
+      return c.json({
+        success: true,
+        data: {
+          state: 'active',
+          passkey: issuedPasskey,
+          message: issuedPasskey
+            ? 'Automatic registration is on — you are approved. Your permanent passkey is shown once: save it now.'
+            : 'Automatic registration is on — you are approved and already have your passkey from your first class.',
+        },
+      }, 200, sessionCookieFree);
+    }
 
     // Tell the organizers who may approve registrations through the existing
     // member notification infrastructure.
@@ -1184,6 +1268,33 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       return bad(c, 'That is already your current value.');
     }
 
+    // §30 — with profile_change_mode = 'auto' the change applies immediately
+    // (keys normalized exactly as the organizer approval would) and the trail
+    // records the automatic decision. Identity index numbers stay locked.
+    if (await modulePolicy(c.env.DB, 'profile_change_mode') === 'auto') {
+      if (field === 'university_id') {
+        await c.env.DB.prepare(
+          'UPDATE cgm_students SET university_id = ?, university_id_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+        ).bind(newValue, newValue ? lookupKey(newValue) : null, student.id).run();
+      } else if (field === 'phone') {
+        await c.env.DB.prepare(
+          'UPDATE cgm_students SET phone = ?, phone_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+        ).bind(newValue, phoneKey(newValue), student.id).run();
+      } else {
+        await c.env.DB.prepare(
+          `UPDATE cgm_students SET ${field === 'full_name' ? 'full_name' : field} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+        ).bind(newValue, student.id).run();
+      }
+      await auditCgm(c.env.DB, {
+        actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+        action: 'cgm.profile_change.auto_applied', entityType: 'student', entityId: student.id,
+        context: { field },
+      });
+      await notifyStudent(c.env.DB, student.id, 'profile', 'Your profile was updated',
+        `Automatic mode is on — your ${field.replace('_', ' ')} was updated immediately.`);
+      return c.json({ success: true, data: { message: 'Automatic mode is on — your change was applied immediately.' } });
+    }
+
     const pending = await asRows<{ id: number }>(c.env.DB.prepare(
       `SELECT id FROM cgm_profile_change_requests WHERE student_id = ? AND field = ? AND status = 'pending'`
     ).bind(student.id, field));
@@ -1367,7 +1478,14 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     ).bind(classId, student.id));
     if (existingMember[0]) return { status: 200 as const, response: c.json({ success: true, data: { message: 'You are already a member of this class.' } }) };
 
-    if (settings.membershipApprovalRequired !== false) {
+    // §30 — the module-wide switch wins over the per-class default: 'closed'
+    // refuses the request, 'auto' walks straight through to the approval-free
+    // join below.
+    const membershipMode = await modulePolicy(c.env.DB, 'membership_request_mode');
+    if (membershipMode === 'closed') {
+      return { status: 403 as const, response: bad(c, 'Membership requests are closed right now. Ask your organizer to add you.', 403) };
+    }
+    if (settings.membershipApprovalRequired !== false && membershipMode !== 'auto') {
       const pending = await asRows<{ id: number }>(c.env.DB.prepare(
         `SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = ? AND status = 'pending'`
       ).bind(classId, student.id));

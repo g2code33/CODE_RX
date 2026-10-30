@@ -63,6 +63,10 @@ import {
   bad,
   clean,
   cleanOrNull,
+  isModulePolicyKey,
+  modulePolicy,
+  MODULE_POLICY_VALUES,
+  requireCgmPhantom,
   entryPasswordVerifier,
   memberFromRequest,
   notifyStudent,
@@ -92,6 +96,9 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in as a Society member first.' }, 401);
     if (!member.profileId || member.memberStatus !== 'active') return bad(c, 'Only active Society members can apply to organize classes.', 403);
+    if (await modulePolicy(c.env.DB, 'organizer_application_mode') === 'closed') {
+      return bad(c, 'Organizer applications are closed right now. PHANTOM invites organizers directly.', 403);
+    }
     const body = await readBody(c);
     const institution = cleanOrNull(body.institution, 160);
     const motivation = cleanOrNull(body.motivation, 2000);
@@ -171,6 +178,19 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       `UPDATE cgm_organizer_applications SET status = 'email_verified', email_verified_at = CURRENT_TIMESTAMP,
        verification_token_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
     ).bind(Number(application.id)).run();
+    // Policy override: with organizer_application_mode = 'auto' a verified
+    // applicant is approved on the spot instead of queueing for PHANTOM.
+    if (await modulePolicy(c.env.DB, 'organizer_application_mode') === 'auto') {
+      await c.env.DB.prepare(
+        `UPDATE cgm_organizer_applications SET status = 'approved', reviewer_label = 'Policy (automatic)',
+         review_reason = 'Automatically approved on email verification.', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(Number(application.id)).run();
+      await auditCgm(c.env.DB, {
+        actorType: 'system', actorLabel: 'Policy (automatic)',
+        action: 'cgm.organizer.auto_approved', entityType: 'organizer_application', entityId: Number(application.id),
+      });
+      return c.json({ success: true, data: { message: 'Email verified — and because automatic approval is on, your organizer application is approved. Create your class when ready.' } });
+    }
     return c.json({ success: true, data: { message: 'Email verified. PHANTOM can now review your application.' } });
   });
 
@@ -275,6 +295,12 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     if (!member.isPhantom && approval[0]?.status !== 'approved') {
       return bad(c, 'Your organizer application must be approved by PHANTOM first.', 403);
     }
+    // Policy: 'closed' means only PHANTOM creates classes — refuse before
+    // anything is written.
+    const creationMode = await modulePolicy(c.env.DB, 'class_creation_mode');
+    if (creationMode === 'closed' && !member.isPhantom) {
+      return bad(c, 'Class creation is closed right now. Ask PHANTOM to set up the class.', 403);
+    }
 
     const code = await allocateClassCode(c.env.DB);
     const result = await c.env.DB.prepare(
@@ -296,12 +322,77 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       `INSERT INTO cgm_class_approvals (class_id, action, actor_type, actor_label)
        VALUES (?, 'submitted', 'organizer', ?)`
     ).bind(classId, member.name).run();
+    // Policy override: with 'auto' a new class skips the queue and is active
+    // immediately (the trail still records the automatic decision).
+    if (creationMode === 'auto') {
+      await c.env.DB.prepare(
+        `UPDATE cgm_classes SET status = 'active', submitted_at = CURRENT_TIMESTAMP, reviewed_at = CURRENT_TIMESTAMP,
+         reviewer_label = 'Policy (automatic)', review_reason = 'Automatically active: class creation needs no approval.', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(classId).run();
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_class_approvals (class_id, action, actor_type, actor_label, reason)
+         VALUES (?, 'approved', 'phantom', 'Policy (automatic)', 'Automatically active: class creation needs no approval.')`
+      ).bind(classId).run();
+    }
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.class.created', entityType: 'class', entityId: classId, classId,
-      context: { code, name },
+      context: { code, name, activation: creationMode === 'auto' ? 'automatic' : 'pending_approval' },
     });
     return c.json({ success: true, data: { classId, code } });
+  });
+
+  // -------------------------------------------------------------------------
+  // §30 — Module policy console (PHANTOM only)
+  // -------------------------------------------------------------------------
+  app.get('/api/cgm/phantom/policies', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const rows = await asRows<{ key: string; value: string; updated_by_label: string | null; updated_at: string | null }>(c.env.DB.prepare(
+      'SELECT key, value, updated_by_label, updated_at FROM cgm_module_policies'
+    ));
+    const stored = new Map(rows.map((row) => [row.key, row]));
+    return c.json({
+      success: true,
+      data: (Object.keys(MODULE_POLICY_VALUES) as Array<keyof typeof MODULE_POLICY_VALUES>).map((key) => {
+        const raw = stored.get(key);
+        const value = raw && MODULE_POLICY_VALUES[key].includes(raw.value) ? raw.value : 'approval';
+        return {
+          key, value,
+          allowedValues: MODULE_POLICY_VALUES[key],
+          updatedAt: raw?.updated_at || null,
+          updatedBy: raw?.updated_by_label || null,
+        };
+      }),
+    });
+  });
+
+  app.put('/api/cgm/phantom/policies', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    const body = await readBody(c);
+    const updates = (Array.isArray(body.policies) ? body.policies : [body]).map((entry: any) => ({
+      key: String(entry?.key || ''), value: String(entry?.value || ''),
+    })).filter((entry: { key: string }) => isModulePolicyKey(entry.key));
+    if (!updates.length) return bad(c, 'No recognizable policy in the request.', 400);
+    for (const entry of updates) {
+      if (!(MODULE_POLICY_VALUES as Record<string, string[]>)[entry.key].includes(entry.value)) {
+        return bad(c, `${entry.key} does not accept "${entry.value}".`, 400);
+      }
+    }
+    for (const entry of updates) {
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_module_policies (key, value, updated_by_label, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by_label = excluded.updated_by_label, updated_at = CURRENT_TIMESTAMP`
+      ).bind(entry.key, entry.value, member.name).run();
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.module.policy', entityType: 'module', entityId: 0,
+      context: { policies: Object.fromEntries(updates.map((entry: { key: string; value: string }) => [entry.key, entry.value])) },
+    });
+    return c.json({ success: true, data: { updated: updates.length } });
   });
 
   const classCore = async (db: D1Database, classId: number) => {
