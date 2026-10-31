@@ -750,6 +750,102 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     return c.json({ success: true });
   });
 
+  /**
+   * Organizer direct swap: exchange two assigned members between their groups
+   * in one action. Group sizes never change, so hard capacities are preserved
+   * by construction. PHANTOM-regulated: guarded by the same `move_students`
+   * permission as every other membership change, PHANTOM overrides it in every
+   * class, and each swap writes two assignment-history events plus an audit
+   * row (`cgm.assignment.swapped`) the oversight browser can see. A leader who
+   * is swapped out of a group ends that leadership appointment, so the
+   * activity's succession rule resolves the vacancy exactly as a removal does.
+   */
+  app.post('/api/cgm/activities/:id/swap-students', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'move_students');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const studentAId = Number(body.studentIdA);
+    const studentBId = Number(body.studentIdB);
+    if (!studentAId || !studentBId) return bad(c, 'Choose two students to swap.');
+    if (studentAId === studentBId) return bad(c, 'Pick two different students.', 400);
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT ga.id, ga.group_id, ga.student_id, g.status AS group_status
+       FROM cgm_group_assignments ga JOIN cgm_groups g ON g.id = ga.group_id
+       WHERE ga.activity_id = ? AND ga.status = 'active' AND ga.student_id IN (?, ?)`
+    ).bind(activityId, studentAId, studentBId));
+    const a = rows.find((row: any) => Number(row.student_id) === studentAId);
+    const b = rows.find((row: any) => Number(row.student_id) === studentBId);
+    if (!a || !b) return bad(c, 'Both students must already be in a group for this activity.', 404);
+    if (Number(a.group_id) === Number(b.group_id)) return bad(c, 'Those students are in the same group — there is nothing to swap.', 409);
+    if (a.group_status !== 'active' || b.group_status !== 'active') return bad(c, 'One of those groups is no longer active.', 409);
+
+    // Gender-separate activities must stay single-gender after the swap. Every
+    // group is single-gender today, so the swap is safe exactly when both
+    // students share one gender.
+    if (config.genderRule === 'separate') {
+      const genders = await asRows<{ student_id: number; gender: string }>(c.env.DB.prepare(
+        `SELECT id AS student_id, gender FROM cgm_students WHERE id IN (?, ?)`
+      ).bind(studentAId, studentBId));
+      const genderOf = (id: number) => String(genders.find((row) => Number(row.student_id) === Number(id))?.gender || 'unknown');
+      if (genderOf(studentAId) !== genderOf(studentBId)) {
+        return bad(c, 'Gender-separate groups cannot exchange students of different genders.', 409);
+      }
+    }
+
+    // Two in-place group exchanges, each conditional on the assignment still
+    // being active; a lost race on the second write rolls the first back
+    // instead of leaving one student in limbo.
+    const moveA = await c.env.DB.prepare(
+      `UPDATE cgm_group_assignments SET group_id = ? WHERE id = ? AND status = 'active'`
+    ).bind(Number(b.group_id), Number(a.id)).run();
+    if (!moveA.meta?.changes) return bad(c, 'That assignment just changed — try again.', 409);
+    const moveB = await c.env.DB.prepare(
+      `UPDATE cgm_group_assignments SET group_id = ? WHERE id = ? AND status = 'active'`
+    ).bind(Number(a.group_id), Number(b.id)).run();
+    if (!moveB.meta?.changes) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_group_assignments SET group_id = ? WHERE id = ? AND status = 'active'`
+      ).bind(Number(a.group_id), Number(a.id)).run();
+      return bad(c, 'That assignment just changed — the swap was rolled back.', 409);
+    }
+
+    for (const [row, fromGroup, toGroup] of [[a, a.group_id, b.group_id], [b, b.group_id, a.group_id]] as const) {
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_assignment_events (activity_id, student_id, from_group_id, to_group_id, action, actor_label, reason)
+         VALUES (?, ?, ?, ?, 'moved', ?, 'organizer swap')`
+      ).bind(activityId, Number(row.student_id), Number(fromGroup), Number(toGroup), member.name).run();
+      const leadership = await asRows<any>(c.env.DB.prepare(
+        `SELECT id FROM cgm_leadership_appointments WHERE group_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(Number(fromGroup), Number(row.student_id)));
+      for (const seat of leadership) {
+        await c.env.DB.prepare(
+          `UPDATE cgm_leadership_appointments SET status = 'ended', ended_at = CURRENT_TIMESTAMP, end_reason = 'swapped to another group' WHERE id = ?`
+        ).bind(Number(seat.id)).run();
+      }
+    }
+
+    await notifyStudent(c.env.DB, studentAId, 'groups', 'Your group changed',
+      `Your organizer swapped you into a different group in ${activity.name}.`);
+    await notifyStudent(c.env.DB, studentBId, 'groups', 'Your group changed',
+      `Your organizer swapped you into a different group in ${activity.name}.`);
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.assignment.swapped', entityType: 'activity', entityId: activityId,
+      classId: Number(activity.class_id), activityId,
+      context: { studentAId, studentBId, groupA: Number(a.group_id), groupB: Number(b.group_id) },
+    });
+    return c.json({ success: true, data: {
+      studentA: { from: Number(a.group_id), to: Number(b.group_id) },
+      studentB: { from: Number(b.group_id), to: Number(a.group_id) },
+    } });
+  });
+
   app.post('/api/cgm/assignments/:id/remove', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);

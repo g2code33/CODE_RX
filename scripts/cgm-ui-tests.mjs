@@ -595,6 +595,34 @@ check('the carousel adapts to any group count with a recycled strip and measured
   /const passes = Math\.max\(2, Math\.ceil\(12 \/ safeGroups\.length\)\)/.test(reveal)
   && /Math\.min\(148, Math\.max\(96, window\.innerWidth \* 0\.235\)\)/.test(reveal));
 
+// ---------------------------------------------------------------------------
+// 20. Forced random mode, organizer finish, PHANTOM-regulated direct swaps
+// ---------------------------------------------------------------------------
+section('20. Forced random mode + organizer swaps');
+const forcedWorkspace = src('src/components/ClassGroups/ClassGroupsWorkspace.tsx');
+const forcedPortal = src('src/components/ClassGroups/StudentPortal.tsx');
+const forcedClient = src('src/lib/cgm.ts');
+
+check("the assignment-method dropdown offers 'Random selection — system picks for every student'",
+  /value="random">Random selection — system picks for every student</.test(forcedWorkspace));
+check('the organizer finish button names the random mode so stragglers can be swept in',
+  /Assign remaining \(random mode\)/.test(forcedWorkspace) && /assignRemaining/.test(forcedWorkspace));
+check('every group member row carries a Swap… control fed from the other groups\' members',
+  /aria-label=\{`Swap \$\{member\.full_name\} with a member of another group`\}/.test(forcedWorkspace)
+  && /cgm\.swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(forcedWorkspace)
+  && /Swap…<\/option>/.test(forcedWorkspace));
+check('the client library exposes the PHANTOM-regulated swap endpoint',
+  /swapStudents: \(activityId: number, studentIdA: number, studentIdB: number\)/.test(forcedClient)
+  && /swap-students/.test(forcedClient));
+check('forced random mode gives students ONLY the fair draw — no pick grid, no auto button',
+  /const forcedRandom = data\.activity\.config\?\.method === 'random'/.test(forcedPortal)
+  && /Your organizer set this activity to random selection — every group has an exactly equal chance/.test(forcedPortal)
+  && (forcedPortal.match(/!forcedRandom && /g) || []).length >= 2);
+check('the swap route enforces capacity-safe in-place exchange, gender-separate protection and audit',
+  /swap-students/.test(src('functions/lib/cgm/routes-activities.ts'))
+  && /Gender-separate groups cannot exchange students of different genders/.test(src('functions/lib/cgm/routes-activities.ts'))
+  && /cgm\.assignment\.swapped/.test(src('functions/lib/cgm/routes-activities.ts')));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

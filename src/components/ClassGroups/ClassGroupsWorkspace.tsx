@@ -1297,6 +1297,7 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
                 <option value="automatic">Organizer assigns automatically</option>
                 <option value="self">Students assign themselves</option>
                 <option value="hybrid">Hybrid (self first, organizer finishes)</option>
+                <option value="random">Random selection — system picks for every student</option>
               </select>
             </div>
             <div><label className={label} htmlFor="cgm-act-groups">Number of groups</label><input id="cgm-act-groups" type="number" min="2" max="50" className={`${inputClass} mt-1`} value={form.groupCount} onChange={(event) => setGroupCount(event.target.value)} /></div>
@@ -1537,7 +1538,7 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                 </button>
                 {data.config.method !== 'automatic' && (
                   <button type="button" disabled={busy} className="mini-button" onClick={() => void run(async () => { const result = await cgm.assignRemaining(Number(activityId)); setMessage(`Placed ${(result as any)?.placed} remaining, promoted ${(result as any)?.promoted} from the waiting list.`); return result; })}>
-                    Assign remaining (hybrid)
+                    {data.config.method === 'random' ? 'Assign remaining (random mode)' : 'Assign remaining (hybrid)'}
                   </button>
                 )}
               </div>
@@ -1568,6 +1569,19 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                             {(data.groups || []).filter((other: any) => Number(other.id) !== Number(group.id)).map((other: any) => (
                               <option key={other.id} value={other.id}>{other.name}</option>
                             ))}
+                          </select>
+                        )}
+                        {canMove && (
+                          <select
+                            className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700"
+                            value=""
+                            aria-label={`Swap ${member.full_name} with a member of another group`}
+                            onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(member.student_id), partner)); }}
+                          >
+                            <option value="">Swap…</option>
+                            {(data.groups || []).filter((other: any) => Number(other.id) !== Number(group.id)).flatMap((other: any) => (data.members || []).filter((partner: any) => Number(partner.group_id) === Number(other.id)).map((partner: any) => (
+                              <option key={partner.student_id} value={partner.student_id}>{partner.full_name} ({other.name})</option>
+                            )))}
                           </select>
                         )}
                         {canRemove && (

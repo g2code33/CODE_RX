@@ -376,6 +376,8 @@ export const cgm = {
     memberCall(`/api/cgm/activities/${activityId}/assign-remaining`, { method: 'POST', body: {} }),
   assignStudent: (activityId: number, studentId: number, groupId: number) =>
     memberCall(`/api/cgm/activities/${activityId}/assign-student`, { method: 'POST', body: { studentId, groupId } }),
+  swapStudents: (activityId: number, studentIdA: number, studentIdB: number) =>
+    memberCall(`/api/cgm/activities/${activityId}/swap-students`, { method: 'POST', body: { studentIdA, studentIdB } }),
   removeAssignment: (assignmentId: number, reason?: string) =>
     memberCall(`/api/cgm/assignments/${assignmentId}/remove`, { method: 'POST', body: { reason } }),
   reviewChangeRequest: (activityId: number, requestId: number, decision: 'approve' | 'reject', reviewReason?: string) =>

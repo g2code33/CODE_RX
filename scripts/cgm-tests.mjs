@@ -3098,6 +3098,129 @@ check('the premium overlay carries the reference composition without any gamblin
   && !/\b(casino|bets?|betting|jackpot|gambl\w*|wager\w*)\b/i.test(revealSrc.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ')));
 
 // ---------------------------------------------------------------------------
+// 33. Forced random mode + organizer finish + PHANTOM-regulated direct swaps
+// ---------------------------------------------------------------------------
+section('33. Forced random method, organizer finish, direct member swaps');
+
+// -- Forced random: the organizer picks the method, students can only draw ----
+const forcedDraw = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Forced Draw Lab', type: 'practical',
+  config: { method: 'random', groupCount: 2, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const forcedDrawId = forcedDraw.json?.data?.activityId ?? forcedDraw.json?.data?.activity?.id ?? forcedDraw.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/groups`, { count: 2, capacity: 10 }, amaToken);
+const forcedConfig = JSON.parse(q1('SELECT config_json FROM cgm_activities WHERE id = ?', forcedDrawId)?.config_json || '{}');
+check("the 'random' assignment method is accepted and survives the config sanitizer", forcedConfig.method === 'random', `method=${forcedConfig.method}`);
+
+const forcedStudent = await freshFmtRosterStudent(31, 'Forced Freya');
+const forcedManual = await studentCall('POST', `/api/cgm/student/activities/${forcedDrawId}/assign`, { groupId: (await memberCall('GET', `/api/cgm/activities/${forcedDrawId}`, undefined, amaToken)).json?.data?.groups?.[0]?.id }, forcedStudent.session);
+check('a student CANNOT manually pick a group when the organizer forced random mode',
+  forcedManual.status === 409 && /RANDOM/i.test(forcedManual.json?.error || ''), `status ${forcedManual.status} ${forcedManual.text?.slice(0, 100)}`);
+const forcedAuto = await studentCall('POST', `/api/cgm/student/activities/${forcedDrawId}/assign`, {}, forcedStudent.session);
+check('the automatic place-me button is refused in forced random mode too', forcedAuto.status === 409, `status ${forcedAuto.status}`);
+const forcedDrawResult = await studentCall('POST', `/api/cgm/student/activities/${forcedDrawId}/random-draw`, {}, forcedStudent.session);
+check('the random draw itself works perfectly in forced random mode',
+  forcedDrawResult.status === 200 && forcedDrawResult.json?.data?.draw === true, `status ${forcedDrawResult.status}`);
+const forcedStudentId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', forcedStudent.indexNumber.toLowerCase())?.id || 0);
+
+// -- The organizer finishes: assign-remaining sweeps students who never drew --
+const lazyStudent = await freshFmtRosterStudent(32, 'Lazy Laryea');
+const lazyId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', lazyStudent.indexNumber.toLowerCase())?.id || 0);
+const finishRun = await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/assign-remaining`, {}, amaToken);
+check('the organizer can auto-assign the rest in random mode (students who never drew)',
+  finishRun.status === 200 && Number(finishRun.json?.data?.placed) >= 1, `status ${finishRun.status} ${finishRun.text?.slice(0, 100)}`);
+check('after the organizer finish, both drawn and swept students sit in exactly one real group',
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id IN (?, ?) AND status = 'active'", forcedDrawId, forcedStudentId, lazyId).c === 2);
+
+// -- Direct swaps: organizer exchanges two members between their groups ------
+const swapLab = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Swap Lab', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 2, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const swapLabId = swapLab.json?.data?.activityId ?? swapLab.json?.data?.activity?.id ?? swapLab.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${swapLabId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${swapLabId}/groups`, { count: 2, capacity: 10 }, amaToken);
+const swapGroups = ((await memberCall('GET', `/api/cgm/activities/${swapLabId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => Number(g.id));
+const swapperA = await freshFmtRosterStudent(33, 'Swapper Abena');
+const swapperB = await freshFmtRosterStudent(34, 'Swapper Bufuo');
+const swapperAId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', swapperA.indexNumber.toLowerCase())?.id || 0);
+const swapperBId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', swapperB.indexNumber.toLowerCase())?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${swapLabId}/assign-student`, { studentId: swapperAId, groupId: swapGroups[0] }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${swapLabId}/assign-student`, { studentId: swapperBId, groupId: swapGroups[1] }, amaToken);
+
+const swapSame = await memberCall('POST', `/api/cgm/activities/${swapLabId}/swap-students`, { studentIdA: swapperAId, studentIdB: swapperAId }, amaToken);
+check('swapping a student with themselves is refused', swapSame.status === 400, `status ${swapSame.status}`);
+const swapMissing = await memberCall('POST', `/api/cgm/activities/${swapLabId}/swap-students`, { studentIdA: swapperAId, studentIdB: 999999 }, amaToken);
+check('swapping a student who has no group yet is refused', [400, 404].includes(swapMissing.status), `status ${swapMissing.status}`);
+const outsiderSwap = await studentCall('POST', `/api/cgm/activities/${swapLabId}/swap-students`, { studentIdA: swapperAId, studentIdB: swapperBId }, swapperA.session);
+check('students cannot swap each other — organizer power only', outsiderSwap.status === 401 || outsiderSwap.status === 403, `status ${outsiderSwap.status}`);
+
+const swapRun = await memberCall('POST', `/api/cgm/activities/${swapLabId}/swap-students`, { studentIdA: swapperAId, studentIdB: swapperBId }, amaToken);
+const groupOf = (studentId) => Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", swapLabId, studentId)?.group_id || 0);
+check('the organizer swap exchanges the two members between their groups',
+  swapRun.status === 200 && groupOf(swapperAId) === swapGroups[1] && groupOf(swapperBId) === swapGroups[0],
+  `status ${swapRun.status} A=${groupOf(swapperAId)} B=${groupOf(swapperBId)}`);
+check('the swap writes two history events with reason "organizer swap" and an audit row',
+  q1("SELECT COUNT(*) c FROM cgm_assignment_events WHERE activity_id = ? AND reason = 'organizer swap'", swapLabId).c === 2
+  && q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.assignment.swapped'").c >= 1);
+const swapBack = await memberCall('POST', `/api/cgm/activities/${swapLabId}/swap-students`, { studentIdA: swapperAId, studentIdB: swapperBId }, amaToken);
+check('swapping back restores the original arrangement (swap is idempotent-safe)',
+  swapBack.status === 200 && groupOf(swapperAId) === swapGroups[0] && groupOf(swapperBId) === swapGroups[1]);
+
+// -- PHANTOM regulation: PHANTOM overrides the swap power in every class -----
+const phantomSwap = await memberCall('POST', `/api/cgm/activities/${swapLabId}/swap-students`, { studentIdA: swapperAId, studentIdB: swapperBId }, phantomToken);
+check('PHANTOM can direct a swap regardless of class team (oversight override)',
+  phantomSwap.status === 200 && groupOf(swapperAId) === swapGroups[1],
+  `status ${phantomSwap.status}`);
+const swappedAudits = Number(q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.assignment.swapped'").c);
+check('every swap — organizer or PHANTOM — is visible in the audit trail', swappedAudits >= 3, `audit=${swappedAudits}`);
+
+// -- Gender-separate activities refuse mixed swaps ---------------------------
+const separateLab = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Separate Swap Lab', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 2, capacity: 10, genderRule: 'separate', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const separateLabId = separateLab.json?.data?.activityId ?? separateLab.json?.data?.activity?.id ?? separateLab.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${separateLabId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${separateLabId}/groups`, { count: 2, capacity: 10 }, amaToken);
+const separateGroups = ((await memberCall('GET', `/api/cgm/activities/${separateLabId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => Number(g.id));
+// Registration copies gender from the roster entry at register time, so the
+// roster row is gendered BEFORE the student registers.
+const genderedRosterStudent = async (n, fullName, gender) => {
+  const indexNumber = `PH/PHA/25/${String(n).padStart(4, '0')}`;
+  await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName, indexNumber, phone: `024511${String(n).padStart(4, '0')}` }, amaToken);
+  const entryId = Number(q1('SELECT id FROM cgm_roster_entries WHERE index_number_key = ?', indexNumber.toLowerCase())?.id || 0);
+  await memberCall('PATCH', `/api/cgm/classes/${fmtClassId}/roster/entries/${entryId}`, { gender }, amaToken);
+  const register = await call('POST', '/api/cgm/student/register', { classCode: fmtCode, indexNumber, entryPassword: 'fmt-101-entry' });
+  const passkey = String(register.json?.data?.passkey || '');
+  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: indexNumber, passkey });
+  return { indexNumber, session: login.json?.data?.session?.token };
+};
+const maleStudent = await genderedRosterStudent(35, 'Separate Kojo', 'male');
+const femaleStudent = await genderedRosterStudent(36, 'Separate Akua', 'female');
+const maleId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', maleStudent.indexNumber.toLowerCase())?.id || 0);
+const femaleId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', femaleStudent.indexNumber.toLowerCase())?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${separateLabId}/assign-student`, { studentId: maleId, groupId: separateGroups[0] }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${separateLabId}/assign-student`, { studentId: femaleId, groupId: separateGroups[1] }, amaToken);
+const mixedSwap = await memberCall('POST', `/api/cgm/activities/${separateLabId}/swap-students`, { studentIdA: maleId, studentIdB: femaleId }, amaToken);
+check('gender-separate groups refuse a swap that would mix genders',
+  mixedSwap.status === 409 && /gender/i.test(mixedSwap.json?.error || ''), `status ${mixedSwap.status} ${mixedSwap.json?.error || ''}`);
+
+// -- Source pins: the UI carries the three new controls ----------------------
+const workspaceSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+const portalSrc3 = readFileSync(path.join(ROOT, 'src/components/ClassGroups/StudentPortal.tsx'), 'utf8');
+const cgmClientSrc = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
+check("the organizer form offers 'Random selection — system picks for every student'", /value="random">Random selection — system picks for every student</.test(workspaceSrc));
+check("the organizer finish button names the random mode ('Assign remaining (random mode)')", /Assign remaining \(random mode\)/.test(workspaceSrc));
+check('every member row carries a Swap… control that calls the swap API', /Swap…<\/option>/.test(workspaceSrc) && /swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(workspaceSrc));
+check('the client library exposes the swap endpoint', /swapStudents: \(activityId: number, studentIdA: number, studentIdB: number\)/.test(cgmClientSrc) && /swap-students/.test(cgmClientSrc));
+check('the student portal hides manual picking in forced random mode and explains the fair draw',
+  /const forcedRandom = data\.activity\.config\?\.method === 'random'/.test(portalSrc3)
+  && /Your organizer set this activity to random selection/.test(portalSrc3));
+check('forced random mode removes the pick-grid and the auto button for students', (portalSrc3.match(/!forcedRandom && /g) || []).length >= 2);
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 

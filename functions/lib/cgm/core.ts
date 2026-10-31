@@ -524,7 +524,7 @@ export const ACTIVITY_STATUSES = [
   'draft', 'open', 'published', 'active', 'completed', 'archived', 'paused', 'cancelled',
 ] as const;
 
-export const ASSIGNMENT_METHODS = ['automatic', 'self', 'hybrid'] as const;
+export const ASSIGNMENT_METHODS = ['automatic', 'self', 'hybrid', 'random'] as const;
 export type AssignmentMethod = (typeof ASSIGNMENT_METHODS)[number];
 
 export const GENDER_RULES = ['balanced', 'separate', 'none'] as const;

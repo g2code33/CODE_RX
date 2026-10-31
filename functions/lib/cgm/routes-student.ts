@@ -742,6 +742,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
     if (!['open', 'published', 'active'].includes(activity.status)) return bad(c, 'This activity is not open for assignment.', 409);
     if (config.method === 'automatic') return bad(c, 'Assignments for this activity are made by your organizer.', 409);
+    if (config.method === 'random') return bad(c, 'This activity is set to RANDOM selection — tap the Random selection button and the system will pick your group.', 409);
     if (config.method === 'hybrid' && config.selfDeadline && new Date(config.selfDeadline).getTime() < Date.now()) {
       return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
     }

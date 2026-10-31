@@ -839,6 +839,9 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
 
   const myGroup = data.myAssignment;
   const canSelfAssign = ['open', 'published', 'active'].includes(data.activity.status) && data.activity.config.method !== 'automatic' && data.eligible && !myGroup;
+  // Forced random mode: the organizer has set this activity to 'random' —
+  // students cannot pick or auto-place; the fair server draw is the only way in.
+  const forcedRandom = data.activity.config?.method === 'random';
 
   return (
     <div className="space-y-5">
@@ -889,9 +892,13 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
         <div className={card}><p className="text-sm font-bold text-amber-700">You are on the waiting list for this activity.</p></div>
       ) : canSelfAssign ? (
         <div className={card}>
-          <p className={label}>Choose your group</p>
-          <p className="mt-1 text-xs font-medium text-slate-500">The server places you in a group with room — tap Assign me, or pick one.</p>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <p className={label}>{forcedRandom ? 'Random selection' : 'Choose your group'}</p>
+          {forcedRandom ? (
+            <p className="mt-1 text-xs font-medium text-slate-500">Your organizer set this activity to random selection — every group has an exactly equal chance. Tap the button and the system fairly picks your group.</p>
+          ) : (
+            <p className="mt-1 text-xs font-medium text-slate-500">The server places you in a group with room — tap Assign me, or pick one.</p>
+          )}
+          {!forcedRandom && <div className="mt-3 grid gap-2 sm:grid-cols-2">
             {(data.groups || []).map((group: any) => (
               <button
                 key={group.id}
@@ -907,11 +914,11 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
                 <span className="text-[11px] font-bold text-slate-400">{group.size}{group.capacity ? ` / ${group.capacity}` : ''}{group.full ? ' · full' : ''}</span>
               </button>
             ))}
-          </div>
+          </div>}
           <div className="mt-3 flex flex-wrap gap-2">
-            <button type="button" disabled={busy} onClick={() => void runAction(async () => { await cgmStudent.selfAssign(Number(data.activity.id)); return 'You have been placed in a group.'; })} className="cgm-primary-button">
+            {!forcedRandom && <button type="button" disabled={busy} onClick={() => void runAction(async () => { await cgmStudent.selfAssign(Number(data.activity.id)); return 'You have been placed in a group.'; })} className="cgm-primary-button">
               Assign me automatically
-            </button>
+            </button>}
             <button
               type="button"
               disabled={busy || drawBusy}
