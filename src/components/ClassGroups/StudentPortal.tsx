@@ -61,6 +61,9 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [issuedPasskey, setIssuedPasskey] = useState<string | null>(null);
+  // Everything on file for the just-registered student, shown together with
+  // the one-time passkey so they can confirm what the school recorded.
+  const [revealDetails, setRevealDetails] = useState<any>(null);
 
   // register fields
   const [classCode, setClassCode] = useState('');
@@ -110,6 +113,54 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
     catch (failure: any) { setError(failure?.message || 'Something went wrong. Try again.'); }
     finally { setBusy(false); }
   };
+
+  // The passkey reveal is its own page: it replaces the registration form
+  // completely, shows the permanent passkey once and lists every detail the
+  // school has on file for this student.
+  if (issuedPasskey) {
+    const details = revealDetails || {};
+    const detailRows: Array<[string, string]> = [
+      ['Full name', String(details.fullName || '').trim() || '—'],
+      ['Index number', String(details.indexNumber || indexNumber || '').trim() || '—'],
+      ['Telephone', details.phone ? String(details.phone) : 'Not provided'],
+      ['Email', details.email ? String(details.email) : 'Not provided'],
+      ['Gender', details.gender && details.gender !== 'unknown' ? String(details.gender) : 'Not set'],
+      ['Class', [details.className, details.institution].filter(Boolean).join(' · ') || classCode || '—'],
+    ];
+    return (
+      <div className="cgm-auth-wrap" data-testid="cgm-passkey-reveal">
+        <p className="text-center text-[10px] font-black uppercase tracking-[0.24em] text-emerald-700">CODE Rx Student Portal</p>
+        <div className={`${card} mt-4 border-2 border-amber-300 bg-amber-50/50`}>
+          <p className={label}>Passkey issued — shown only on this page</p>
+          <h1 className="mt-2 text-2xl font-black tracking-tight text-slate-900">Your permanent passkey</h1>
+          <p className="mt-1 text-sm font-medium text-slate-600">Write it down now. It is never shown again and it cannot be re-issued.</p>
+          <p className="mt-4 select-all rounded-2xl border-2 border-amber-400 bg-white px-4 py-5 text-center font-mono text-3xl font-black tracking-[0.16em] text-amber-900 sm:text-4xl">{issuedPasskey}</p>
+          <div className="mt-5 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+            <p className={label}>Your details on file</p>
+            <dl className="mt-2 divide-y divide-slate-100">
+              {detailRows.map(([key, value]) => (
+                <div key={key} className="flex items-baseline justify-between gap-3 py-1.5">
+                  <dt className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{key}</dt>
+                  <dd className="text-right text-sm font-bold text-slate-800">{value}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="mt-2 text-[11px] font-medium text-slate-400">If anything here is wrong, tell your organizer — index numbers can only be corrected by them.</p>
+          </div>
+          <p className="mt-3 text-[11px] font-semibold text-slate-500">Sign-in needs this passkey together with your index number{details.phone ? ' or telephone number' : ''}.</p>
+          {pendingSession ? (
+            <button type="button" className="cgm-primary-button mt-4 w-full" onClick={() => onAuthenticated(pendingSession)}>
+              I have saved my passkey — continue
+            </button>
+          ) : (
+            <button type="button" className="cgm-primary-button mt-4 w-full" onClick={() => { setIssuedPasskey(null); setMode('login'); }}>
+              Go to sign in
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="cgm-auth-wrap">
@@ -175,7 +226,18 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             </div>
             <div>
               <label className={label} htmlFor="cgm-identifier">{identifierLabels[identifierType]}</label>
-              <input id="cgm-identifier" required className={`${inputClass} mt-1`} value={identifier} onChange={(event) => setIdentifier(event.target.value)} autoComplete="username" />
+              <input
+                id="cgm-identifier"
+                required
+                className={`${inputClass} mt-1`}
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                placeholder={identifierType === 'index_number' ? 'PH/PHA/24/0292' : '024 000 0001'}
+                autoComplete="username"
+              />
+              {identifierType === 'index_number' && (
+                <p className="mt-1 text-[11px] font-medium text-slate-400">Format trend: <span className="font-mono font-bold text-slate-500">PH/PHA/24/0292</span> — capitals or small letters, with slashes, dashes, dots or spaces all work.</p>
+              )}
             </div>
             <div>
               <label className={label} htmlFor="cgm-passkey">Permanent passkey</label>
@@ -194,7 +256,10 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               event.preventDefault();
               void run(async () => {
                 const data = await cgmStudent.register({ classCode, indexNumber, entryPassword });
-                if ((data as any)?.passkey) setIssuedPasskey(String((data as any).passkey));
+                if ((data as any)?.passkey) {
+                  setIssuedPasskey(String((data as any).passkey));
+                  setRevealDetails((data as any)?.student || { indexNumber });
+                }
                 if ((data as any)?.session) {
                   // Automatic approval: authenticated at once. If a passkey was
                   // just issued we stay here until the student confirms they
@@ -215,7 +280,8 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             </div>
             <div>
               <label className={label} htmlFor="cgm-index">Your index number</label>
-              <input id="cgm-index" required className={`${inputClass} mt-1`} value={indexNumber} onChange={(event) => setIndexNumber(event.target.value)} />
+              <input id="cgm-index" required className={`${inputClass} mt-1`} value={indexNumber} onChange={(event) => setIndexNumber(event.target.value)} placeholder="PH/PHA/24/0292" />
+              <p className="mt-1 text-[11px] font-medium text-slate-400">Format trend: <span className="font-mono font-bold text-slate-500">PH/PHA/24/0292</span> — capitals or small letters, with slashes, dashes, dots or spaces all work.</p>
             </div>
             <div>
               <label className={label} htmlFor="cgm-entry">Shared class entry password</label>
@@ -225,23 +291,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             <button type="submit" disabled={busy} className="cgm-primary-button w-full">
               {busy ? 'Submitting…' : 'Submit registration'}
             </button>
-            <p className="text-[11px] font-medium text-slate-400">Depending on the class settings, your organizer reviews registrations or they are approved automatically. Approved students receive a permanent passkey, shown once.</p>
-            {issuedPasskey && (
-              <div role="status" className="rounded-xl border-2 border-amber-300 bg-amber-50 px-4 py-3">
-                <p className="text-xs font-black uppercase tracking-wider text-amber-700">Your permanent passkey — shown only now</p>
-                <p className="mt-1 font-mono text-lg font-black text-amber-900">{issuedPasskey}</p>
-                <p className="mt-1 text-[11px] font-semibold text-amber-700">Save it immediately. Sign-in needs this passkey plus your index number, and it cannot be re-issued.</p>
-                {pendingSession && (
-                  <button
-                    type="button"
-                    className="cgm-primary-button mt-3 w-full"
-                    onClick={() => onAuthenticated(pendingSession)}
-                  >
-                    I saved my passkey — continue
-                  </button>
-                )}
-              </div>
-            )}
+            <p className="text-[11px] font-medium text-slate-400">Depending on the class settings, your organizer reviews registrations or they are approved automatically. Approved students receive a permanent passkey on its own page, shown once.</p>
           </form>
         )}
 
@@ -307,7 +357,7 @@ const readContinuation = (): InviteContinuation | null => {
 };
 const clearContinuation = () => { try { sessionStorage.removeItem(INVITE_CONTINUATION_KEY); } catch { /* private mode */ } };
 
-export const StudentPortal = ({ inviteCode, voteTarget, onExit }: { inviteCode: string | null; voteTarget?: number | null; onExit: () => void }) => {
+export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: { inviteCode: string | null; voteTarget?: number | null; leaderTarget?: number | null; onExit: () => void }) => {
   const [session, setSession] = useState<CgmStudentSession | null>(() => studentSession.read());
   const [me, setMe] = useState<any>(null);
   const [section, setSection] = useState<Section>('home');
@@ -364,8 +414,11 @@ export const StudentPortal = ({ inviteCode, voteTarget, onExit }: { inviteCode: 
   // after sign-in.
   // The focus can be cleared locally without touching the link that opened us.
   const [voteFocus, setVoteFocus] = useState<number | 'cleared' | null>(null);
+  const [leaderFocus, setLeaderFocus] = useState<number | 'cleared' | null>(null);
   const effectiveVoteFocus = voteFocus === 'cleared' ? null : (voteFocus ?? voteTarget ?? null);
+  const effectiveLeaderFocus = leaderFocus === 'cleared' ? null : (leaderFocus ?? leaderTarget ?? null);
   useEffect(() => { if (voteTarget) setSection('elections'); }, [voteTarget]);
+  useEffect(() => { if (leaderTarget) setSection('elections'); }, [leaderTarget]);
 
   if (!session) {
     return <AuthScreen inviteCode={inviteCode} onAuthenticated={(next) => { setSession(next); void refreshMe(); void continueInvite(next); }} />;
@@ -425,10 +478,17 @@ export const StudentPortal = ({ inviteCode, voteTarget, onExit }: { inviteCode: 
           {loading && <p className="text-sm font-semibold text-slate-400">Loading your portal…</p>}
           {!loading && section === 'home' && <StudentHome me={me} onOpenClass={(id) => { setOpenClassId(id); setSection('classes'); }} />}
           {!loading && section === 'classes' && (openClassId
-            ? <ClassDetailView classId={openClassId} onBack={() => setOpenClassId(null)} onOpenActivity={(id) => { setOpenActivityId(id); setSection('groups'); }} />
+            ? <ClassDetailView classId={openClassId} onBack={() => setOpenClassId(null)} onOpenActivity={(id) => { setOpenActivityId(id); setSection('groups'); }} me={me} onGenderSet={refreshMe} />
             : <MyClassesView me={me} onOpen={(id) => setOpenClassId(id)} onRefresh={refreshMe} inviteCode={inviteCode} />)}
           {!loading && section === 'groups' && <MyGroupsView me={me} openActivityId={openActivityId} onOpenActivity={setOpenActivityId} onChanged={refreshMe} />}
-          {!loading && section === 'elections' && <MyElectionsView focusElectionId={effectiveVoteFocus} onClearFocus={() => setVoteFocus('cleared')} />}
+          {!loading && section === 'elections' && (
+            <MyElectionsView
+              focusElectionId={effectiveVoteFocus}
+              onClearFocus={() => setVoteFocus('cleared')}
+              leaderElectionId={effectiveLeaderFocus}
+              onClearLeader={() => setLeaderFocus('cleared')}
+            />
+          )}
           {!loading && section === 'attendance' && <AttendanceView />}
           {!loading && section === 'calendar' && <CalendarView />}
           {!loading && section === 'notifications' && <NotificationsView onChanged={refreshMe} />}
@@ -543,9 +603,11 @@ const MyClassesView = ({ me, onOpen, onRefresh, inviteCode }: { me: any; onOpen:
   );
 };
 
-const ClassDetailView = ({ classId, onBack, onOpenActivity }: { classId: number; onBack: () => void; onOpenActivity: (id: number) => void }) => {
+const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: { classId: number; onBack: () => void; onOpenActivity: (id: number) => void; me?: any; onGenderSet?: () => void }) => {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  const [genderBusy, setGenderBusy] = useState(false);
+  const [genderNote, setGenderNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try { setData(await cgmStudent.classDashboard(classId)); }
@@ -558,6 +620,22 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity }: { classId: number;
   if (!data) return <p className="text-sm font-semibold text-slate-400">Loading class…</p>;
 
   const attendance = (data.attendanceSummary || []).reduce((acc: any, row: any) => ({ ...acc, [row.status]: Number(row.c) }), {} as Record<string, number>);
+  // Gender self-service: gender-balanced activities need it, and only the
+  // organizer can set it once a value exists.
+  const genderNeeded = (data.activities || []).some((activity: any) => activity.config?.genderRule && activity.config.genderRule !== 'none');
+  const genderUnknown = String(me?.student?.gender || 'unknown') === 'unknown';
+
+  const setMyGender = async (gender: string) => {
+    setGenderBusy(true); setGenderNote(null);
+    try {
+      const result = await cgmStudent.setGender(gender);
+      setGenderNote(String(result?.message || 'Your gender was saved.'));
+      await load();
+      onGenderSet?.();
+    } catch (failure: any) {
+      setGenderNote(failure?.message || 'Could not save your gender.');
+    } finally { setGenderBusy(false); }
+  };
 
   return (
     <div className="space-y-5">
@@ -577,6 +655,18 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity }: { classId: number;
           ))}
         </div>
       </div>
+
+      {genderNeeded && genderUnknown && (
+        <div className={`${card} border-amber-200 bg-amber-50/40`} data-testid="cgm-gender-prompt">
+          <p className={label}>Set your gender</p>
+          <p className="mt-1 text-sm font-medium text-slate-600">A grouping activity in this class balances groups by gender, and your organizer has not recorded one for you. Choose below before you pick a group — you cannot change it afterwards.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" disabled={genderBusy} className="cgm-primary-button" onClick={() => void setMyGender('male')}>Male</button>
+            <button type="button" disabled={genderBusy} className="cgm-primary-button" onClick={() => void setMyGender('female')}>Female</button>
+          </div>
+          {genderNote && <p role="status" className="mt-3 rounded-xl bg-white px-3 py-2 text-xs font-bold text-emerald-700">{genderNote}</p>}
+        </div>
+      )}
 
       {(data.classmates || []).length > 0 && (
         <div className={card}>
@@ -925,6 +1015,69 @@ const ElectionRow = ({ election, candidates, voted, busy, onContest, onVote, onR
   );
 };
 
+// Leader self-nomination: a student who opened an organizer's "stand as
+// leader" link reads the election and volunteers as a candidate in one step.
+const LeaderApplyView = ({ electionId, onClear }: { electionId: number; onClear?: () => void }) => {
+  const [detail, setDetail] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [statement, setStatement] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try { setDetail(await cgmStudent.election(electionId)); setError(null); }
+    catch (failure: any) { setError(failure?.message || 'This leadership link could not be opened.'); }
+  }, [electionId]);
+  useEffect(() => { void load(); }, [load]);
+  if (error) {
+    return (
+      <div className={card}>
+        <p className="text-sm font-bold text-red-600">{error}</p>
+        {onClear && <button type="button" className="mini-button mt-3" onClick={onClear}>Back to all my elections</button>}
+      </div>
+    );
+  }
+  if (!detail) return <div className={card}><p className="text-sm font-semibold text-slate-400">Opening the leadership form…</p></div>;
+  const election = detail.election || {};
+  const stand = async () => {
+    setBusy(true); setMessage(null);
+    try {
+      const result = await cgmStudent.contest(Number(election.activityId), statement.trim() || undefined);
+      setMessage(String(result?.message || 'You are contesting for group leader.'));
+      await load();
+    } catch (failure: any) { setMessage(failure?.message || 'Could not record your candidacy.'); }
+    finally { setBusy(false); }
+  };
+  const isCandidate = (detail.candidates || []).length >= 0 && detail.myCandidate === true;
+  return (
+    <div className={`${card} border-emerald-300 ring-2 ring-emerald-100`} data-testid="cgm-leader-apply">
+      <p className="mb-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">You opened a stand-as-leader link — volunteer to lead your group here.</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-black text-slate-900">{election.title || 'Group leader election'}</p>
+        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-slate-500">{election.status}</span>
+      </div>
+      <p className="mt-1 text-[11px] font-semibold text-slate-400">{election.role === 'leader' ? 'Group leader' : election.role} · nominations {election.status === 'nominating' ? 'are open' : `are ${election.status === 'voting' || election.status === 'closed' ? 'closed' : 'not open yet'}`}</p>
+      {detail.canContest ? (
+        <div className="mt-3">
+          <label className={label} htmlFor="cgm-leader-statement">Why you? (optional)</label>
+          <textarea id="cgm-leader-statement" rows={2} className={`${inputClass} mt-1`} value={statement} onChange={(event) => setStatement(event.target.value)} placeholder="A short promise to your group…" maxLength={500} />
+          <button type="button" disabled={busy} className="cgm-primary-button mt-2" onClick={() => void stand()}>
+            {busy ? 'Recording…' : 'Stand for group leader'}
+          </button>
+          <p className="mt-1 text-[11px] font-medium text-slate-400">Standing twice is safe — your candidacy is recorded once and stays on the ballot.</p>
+        </div>
+      ) : (
+        <p className="mt-3 text-xs font-semibold text-slate-500">
+          {election.status !== 'nominating'
+            ? 'The nomination window for this election is not open right now. Check back when your organizer opens nominations.'
+            : 'Only students already placed in this election’s group can stand. Join the group for this activity first, then open this link again.'}
+        </p>
+      )}
+      {message && <p role="status" className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600">{message}</p>}
+      {onClear && <button type="button" className="mini-button mt-3" onClick={onClear}>Back to all my elections</button>}
+    </div>
+  );
+};
+
 const ElectionVoteCard = ({ electionId, focused }: { electionId: number; focused?: boolean }) => {
   const [detail, setDetail] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -981,12 +1134,15 @@ const ElectionVoteCard = ({ electionId, focused }: { electionId: number; focused
   );
 };
 
-const MyElectionsView = ({ focusElectionId, onClearFocus }: { focusElectionId?: number | null; onClearFocus?: () => void }) => {
+const MyElectionsView = ({ focusElectionId, onClearFocus, leaderElectionId, onClearLeader }: { focusElectionId?: number | null; onClearFocus?: () => void; leaderElectionId?: number | null; onClearLeader?: () => void }) => {
   const [rows, setRows] = useState<any[] | null>(null);
   const [openId, setOpenId] = useState<number | null>(focusElectionId || null);
   useEffect(() => { void cgmStudent.electionsList().then((data: any) => setRows((data.data || data) as any[])).catch(() => setRows([])); }, []);
   return (
     <div className="space-y-4">
+      {leaderElectionId ? (
+        <LeaderApplyView electionId={Number(leaderElectionId)} onClear={onClearLeader} />
+      ) : null}
       {focusElectionId ? (
         <div>
           <ElectionVoteCard electionId={Number(focusElectionId)} focused />

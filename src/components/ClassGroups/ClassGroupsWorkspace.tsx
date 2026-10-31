@@ -1137,6 +1137,9 @@ const InvitationsArea = ({ classId, className, classCode }: { classId: number; c
 const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: () => void }) => {
   const [rows, setRows] = useState<any[] | null>(null);
   const [open, setOpen] = useState(false);
+  // The activity being edited (null = creating a new one). Drafts and open
+  // activities stay fully editable; published ones only accept logistics.
+  const [editing, setEditing] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -1188,11 +1191,52 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
       ? `${plannedStudents} ${sizeSource} detected — type the number of groups and the sizes fill themselves in.`
       : null;
 
+  // Editing opens the same form, prefilled from the saved configuration.
+  const toLocalInput = (iso: unknown) => {
+    if (!iso) return '';
+    const date = new Date(String(iso));
+    if (Number.isNaN(date.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+  const startEdit = (row: any) => {
+    const config = row.config || {};
+    setEditing(row);
+    setForm({
+      name: String(row.name || ''),
+      type: String(row.type || 'custom'),
+      description: String(row.description || ''),
+      method: String(config.method || 'automatic'),
+      groupCount: config.groupCount != null ? String(config.groupCount) : '',
+      targetGroupSize: config.targetGroupSize != null ? String(config.targetGroupSize) : '',
+      capacity: config.capacity != null ? String(config.capacity) : '',
+      genderRule: String(config.genderRule || 'none'),
+      repeatRule: String(config.repeatRule || 'random'),
+      leaderMethod: String(config.leaderMethod || 'appointment'),
+      overflow: String(config.overflow || 'block'),
+      selfDeadline: toLocalInput(config.selfDeadline),
+      announcementMode: String(config.announcementMode || 'direct'),
+      whatsappEnabled: config.whatsappEnabled !== false,
+      attendanceEnabled: config.attendanceEnabled !== false,
+      electionAnonymity: String(config.electionAnonymity || 'anonymous'),
+      allowVoteChange: config.allowVoteChange === true,
+      tieBreak: String(config.tieBreak || 'random'),
+      eligibility: String(config.eligibility || 'all'),
+    });
+    setOpen(true);
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div className={card + ' flex-1'}><p className={label}>Grouping activities</p><p className="mt-1 text-xs font-medium text-slate-500">Each activity keeps its own groups, rules and history.</p></div>
-        <button type="button" className="cgm-primary-button ml-3" onClick={() => setOpen((value) => !value)}><Plus className="mr-1 inline h-4 w-4" /> {open ? 'Hide' : 'New activity'}</button>
+        <button
+          type="button"
+          className="cgm-primary-button ml-3"
+          onClick={() => { if (open && !editing) setOpen(false); else { setEditing(null); setOpen(true); } }}
+        >
+          <Plus className="mr-1 inline h-4 w-4" /> {open && !editing ? 'Hide' : 'New activity'}
+        </button>
       </div>
 
       {open && (
@@ -1213,7 +1257,13 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
               if (form.targetGroupSize) config.targetGroupSize = Number(form.targetGroupSize);
               if (form.capacity) config.capacity = Number(form.capacity);
               if (form.selfDeadline) config.selfDeadline = new Date(form.selfDeadline).toISOString();
-              await cgm.createActivity(classId, { name: form.name, type: form.type, description: form.description, config });
+              if (editing) {
+                await cgm.updateActivity(Number(editing.id), { name: form.name, type: form.type, description: form.description, config });
+                setMessage(`${form.name} was updated.`);
+                setEditing(null);
+              } else {
+                await cgm.createActivity(classId, { name: form.name, type: form.type, description: form.description, config });
+              }
               setOpen(false); await load(); onChanged();
             } catch (failure: any) { setError(failure?.message || 'The activity failed.'); }
             finally { setBusy(false); }
@@ -1281,7 +1331,11 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
             </div>
           </div>
           <div><label className={label} htmlFor="cgm-act-desc">Description</label><textarea id="cgm-act-desc" className={`${inputClass} mt-1 min-h-16`} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></div>
-          <button type="submit" disabled={busy} className="cgm-primary-button">{busy ? 'Creating…' : 'Create activity (draft)'}</button>
+          {editing && <p className="rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-800">Editing “{editing.name}” ({String(editing.status)}). Group structure can only change while the activity is a draft or open — published activities keep the structure students already see.</p>}
+          <div className="flex flex-wrap gap-2">
+            <button type="submit" disabled={busy} className="cgm-primary-button">{busy ? 'Saving…' : editing ? 'Save changes' : 'Create activity (draft)'}</button>
+            {editing && <button type="button" className="mini-button" onClick={() => { setEditing(null); setOpen(false); }}>Cancel</button>}
+          </div>
           {error && <Banner tone="error">{error}</Banner>}
         </form>
       )}
@@ -1299,6 +1353,9 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
                   <p className="text-[11px] font-semibold text-slate-400">{row.type} · {row.status} · {row.assignedCount} assigned in {row.groupCount} groups · {row.config.method}</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {['draft', 'open'].includes(String(row.status)) && (
+                    <button type="button" className="mini-button" title="Edit this activity" onClick={() => startEdit(row)}>Edit</button>
+                  )}
                   {['open', 'published', 'active'].includes(String(row.status)) && row.config?.selfDeadline && (
                     <button
                       type="button"
@@ -1694,11 +1751,15 @@ const ElectionManager = ({ data, onAction, busy }: { data: any; onAction: (actio
   const hasTie = Boolean(election.results?.outcome?.tie) && !election.results?.outcome?.resolved;
   const tiedIds: number[] = election.results?.outcome?.tiedCandidateIds || [];
   const [showVotingLink, setShowVotingLink] = useState(false);
+  const [showLeaderLink, setShowLeaderLink] = useState(false);
   const [copied, setCopied] = useState(false);
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   // The voting link signs the student in and drops them straight on this
   // ballot — share it as text or as the stamped QR image.
   const votingLink = `${origin}/#student-vote/${election.id}`;
+  // While nominations are open, organizers can also share a stand-for-leader
+  // link: students who open it volunteer themselves as candidates.
+  const leaderLink = `${origin}/#leader-apply/${election.id}`;
   const linkReady = ['nominating', 'voting'].includes(String(election.status));
   return (
     <div className={card}>
@@ -1724,6 +1785,11 @@ const ElectionManager = ({ data, onAction, busy }: { data: any; onAction: (actio
             <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void onAction('announce')}>Announce winner</button>
           )}
           {linkReady && <button type="button" className="mini-button" onClick={() => setShowVotingLink((value) => !value)}>{showVotingLink ? 'Hide voting link' : 'Voting link'}</button>}
+          {election.status === 'nominating' && (
+            <button type="button" className="mini-button" onClick={() => setShowLeaderLink((value) => !value)}>
+              {showLeaderLink ? 'Hide leader link' : 'Leader sign-up link'}
+            </button>
+          )}
           {['nominating', 'voting'].includes(election.status) && (
             <button type="button" disabled={busy} className="mini-button text-red-600" onClick={async () => {
               const reason = await appDialog.prompt({ title: 'Cancel this election?', label: 'Reason for cancelling', multiline: true, confirmLabel: 'Cancel election' });
@@ -1763,6 +1829,30 @@ const ElectionManager = ({ data, onAction, busy }: { data: any; onAction: (actio
             />
           </div>
           <p className="mt-2 text-[11px] font-medium text-slate-400">Students follow the link, sign in with their passkey, and land directly on this election to vote.</p>
+        </div>
+      )}
+      {showLeaderLink && election.status === 'nominating' && (
+        <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/40 p-3" data-testid="cgm-leader-link">
+          <p className="text-xs font-black uppercase tracking-wider text-sky-700">Leader sign-up link — volunteers stand as candidates</p>
+          <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{leaderLink}</p>
+          <div className="mt-2 flex flex-wrap items-start gap-3">
+            <button
+              type="button"
+              className="mini-button"
+              onClick={async () => { setCopied(await copyToClipboard(leaderLink)); }}
+            >
+              {copied ? 'Copied ✓' : 'Copy link'}
+            </button>
+            <QrBlock
+              url={leaderLink}
+              headerText={String(election.title || 'Group leader election')}
+              footerText="Scan → sign in → stand for leader"
+              downloadName={`election-${election.id}-leader-qr.png`}
+              downloadable
+              small
+            />
+          </div>
+          <p className="mt-2 text-[11px] font-medium text-slate-400">Share this while nominations are open: students open it, sign in, and volunteer to lead their group. Every volunteer is recorded as a candidate and appears on the ballot.</p>
         </div>
       )}
     </div>

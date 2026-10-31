@@ -35,6 +35,7 @@ import {
   allocateStudentPasskey,
   sequenceForSuffix,
   lookupKey,
+  indexKeyVariants,
   phoneKey,
   STUDENT_PROFILE_FIELDS,
   sanitizeActivityConfig,
@@ -121,10 +122,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       return c.json({ success: false, error: GENERIC_REGISTER_FAILURE }, 400);
     }
 
+    // Typed index numbers vary wildly in case and separators; every variant
+    // of what the student typed must find the roster row.
+    const indexVariants = indexKeyVariants(indexNumber);
     const rosterRows = await asRows<any>(c.env.DB.prepare(
       `SELECT id, full_name, index_number, status, student_id FROM cgm_roster_entries
-       WHERE class_id = ? AND index_number_key = ?`
-    ).bind(klass.id, String(indexNumber).trim().replace(/\s+/g, ' ').toLowerCase()));
+       WHERE class_id = ? AND index_number_key IN (${indexVariants.map(() => '?').join(', ')})`
+    ).bind(klass.id, ...indexVariants));
     const entry = rosterRows[0];
     if (!entry) return c.json({ success: false, error: GENERIC_REGISTER_FAILURE }, 400);
 
@@ -133,8 +137,8 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     let existingStudentId: number | null = entry.student_id ? Number(entry.student_id) : null;
     if (!existingStudentId) {
       const found = await asRows<{ id: number }>(c.env.DB.prepare(
-        `SELECT id FROM cgm_students WHERE institution_key = ? AND index_number_key = ?`
-      ).bind(String(klass.institution_key || ''), String(indexNumber).trim().replace(/\s+/g, ' ').toLowerCase()));
+        `SELECT id FROM cgm_students WHERE institution_key = ? AND index_number_key IN (${indexVariants.map(() => '?').join(', ')})`
+      ).bind(String(klass.institution_key || ''), ...indexVariants));
       existingStudentId = found[0] ? Number(found[0].id) : null;
     }
 
@@ -234,12 +238,24 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         ip: c.req.header('cf-connecting-ip'),
         userAgent: c.req.header('user-agent'),
       });
+      const shown = (await asRows<any>(c.env.DB.prepare(
+        'SELECT full_name, index_number, phone, email, gender FROM cgm_students WHERE id = ?'
+      ).bind(studentId)))[0];
       return c.json({
         success: true,
         data: {
           state: 'active',
           session,
           passkey: issuedPasskey,
+          student: {
+            fullName: shown?.full_name ?? '',
+            indexNumber: shown?.index_number ?? fullEntry.index_number,
+            phone: shown?.phone ?? null,
+            email: shown?.email ?? null,
+            gender: shown?.gender ?? 'unknown',
+            className: fullClass.name,
+            institution: fullClass.institution,
+          },
           message: issuedPasskey
             ? 'Automatic registration is on — you are approved. Your permanent passkey is shown once: save it now.'
             : 'Automatic registration is on — you are approved and already have your passkey from your first class.',
@@ -322,7 +338,10 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       }
     };
 
-    if (!storedIdentifier || storedIdentifier !== normalizedIdentifier) {
+    const presentedIdentifiers = identifierType === 'index_number'
+      ? indexKeyVariants(normalizedIdentifier)
+      : [normalizedIdentifier];
+    if (!storedIdentifier || !presentedIdentifiers.includes(storedIdentifier)) {
       await registerFailedAttempt();
       return c.json({ success: false, error: GENERIC_LOGIN_FAILURE }, 400);
     }
@@ -726,6 +745,12 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
     }
     if (!await isEligible(c.env.DB, activity.id, student.id, config.eligibility)) return bad(c, 'You are not eligible for this activity.', 403);
+    // Gender-balanced sampling needs the student's gender. If the organizer
+    // has not set one (default 'unknown'), the student must set it before
+    // choosing a group — organizer-set values are never overwritten here.
+    if (config.genderRule && config.genderRule !== 'none' && (student as any).gender === 'unknown') {
+      return bad(c, 'This activity balances groups by gender. Set your gender in your class page first, then choose a group.', 428);
+    }
 
     const existing = await asRows<{ id: number }>(c.env.DB.prepare(
       `SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'`
@@ -995,6 +1020,10 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         candidates,
         voted: Boolean(participation[0]),
         canVote: Boolean(inGroup[0]) && election.status === 'voting',
+        activityId: Number(election.activity_id),
+        canContest: Boolean(inGroup[0]) && election.status === 'nominating'
+          && (!election.nomination_open_at || new Date(String(election.nomination_open_at).replace(' ', 'T')).getTime() <= Date.now())
+          && (!election.nomination_close_at || new Date(String(election.nomination_close_at).replace(' ', 'T')).getTime() >= Date.now()),
         results,
       },
     });
@@ -1334,6 +1363,31 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
   // -------------------------------------------------------------------------
   // Profile change requests (approval required before anything official)
   // -------------------------------------------------------------------------
+  // Gender self-service: some activities balance groups by gender. If the
+  // organizer has not recorded a gender for this student (default 'unknown'),
+  // the student may set it themselves before choosing a group. An organizer
+  // value is never overwritten through this endpoint.
+  app.post('/api/cgm/student/profile/gender', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    if (!throttle(c, 10, 3600)) return bad(c, 'Too many requests. Try again later.', 429);
+    const body = await readBody(c);
+    const gender = String(body.gender || '');
+    if (!['male', 'female'].includes(gender)) return bad(c, 'Choose male or female.');
+    if (student.gender !== 'unknown') {
+      return bad(c, 'Your gender is already on file. Ask your organizer to correct it.', 409);
+    }
+    await c.env.DB.prepare(
+      "UPDATE cgm_students SET gender = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND gender = 'unknown'"
+    ).bind(gender, student.id).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+      action: 'cgm.student.gender_set', entityType: 'student', entityId: student.id,
+      context: { gender, source: 'self_service' },
+    });
+    return c.json({ success: true, data: { gender, message: 'Your gender was saved. You can now choose your group.' } });
+  });
+
   app.post('/api/cgm/student/profile/change', async (c: any) => {
     const student = await requireStudent(c);
     if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
@@ -1532,17 +1586,24 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     }
 
     if (invitation.kind === 'individual') {
-      // Identity-bound: another student can never claim it.
+      // Identity-bound: another student can never claim it. A phone-first
+      // student (no index number on file yet) matches through the bound
+      // roster entry's own keys — that is exactly the organizer flow of
+      // adding a phone to the roster and sending the personal invitation.
       const boundStudent = invitation.bound_student_id ? Number(invitation.bound_student_id) : null;
       const boundKey = invitation.bound_identifier_key ? String(invitation.bound_identifier_key) : null;
+      const boundEntry = invitation.bound_roster_entry_id ? (await asRows<any>(c.env.DB.prepare(
+        'SELECT id, class_id, student_id, full_name, index_number, index_number_key, phone_key FROM cgm_roster_entries WHERE id = ?'
+      ).bind(Number(invitation.bound_roster_entry_id))))[0] : null;
+      const boundIdentityKeys = [boundKey, boundEntry?.index_number_key, boundEntry?.phone_key]
+        .filter(Boolean).map(String);
+      const studentKeys = [student.index_number_key, student.phone_key].filter(Boolean).map(String);
       const matches = boundStudent === student.id
-        || (boundKey && [student.index_number_key, student.phone_key].includes(boundKey));
+        || studentKeys.some((key) => boundIdentityKeys.includes(key));
       if (!matches) return { status: 403 as const, response: bad(c, 'This invitation was issued to a different student.', 403) };
       // Roster-bound invitations carry the registration with them.
       if (invitation.bound_roster_entry_id) {
-        const entry = await asRows<{ id: number; class_id: number; student_id: number | null }>(c.env.DB.prepare(
-          'SELECT id, class_id, student_id FROM cgm_roster_entries WHERE id = ?'
-        ).bind(Number(invitation.bound_roster_entry_id)));
+        const entry = [boundEntry];
         if (entry[0]) {
           const pendingReq = await asRows<{ id: number }>(c.env.DB.prepare(
             `SELECT id FROM cgm_registration_requests WHERE roster_entry_id = ? AND status = 'pending'`
@@ -1551,7 +1612,26 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
             await c.env.DB.prepare(
               `INSERT INTO cgm_registration_requests (class_id, roster_entry_id, student_id, identifier_hint)
                VALUES (?, ?, ?, ?)`
-            ).bind(Number(entry[0].class_id), Number(entry[0].id), student.id, `${student.index_number.slice(0, 3)}…`).run();
+            ).bind(Number(entry[0].class_id), Number(entry[0].id), student.id,
+              (String(student.index_number || '').trim() || String((entry[0] as any).index_number || '')).slice(0, 3) + '…').run();
+          }
+          // The claim may have matched by phone alone: fill in the roster
+          // identity (name, index number) so the student's profile, reveal
+          // page and passkey display carry the full record.
+          const wantsName = !String(student.full_name || '').trim();
+          const wantsIndex = !String(student.index_number || '').trim();
+          const rosterName = wantsName ? String((entry[0] as any).full_name || '').trim() : '';
+          const rosterIndex = wantsIndex ? String((entry[0] as any).index_number || '').trim() : '';
+          if (rosterName || rosterIndex) {
+            await c.env.DB.prepare(
+              `UPDATE cgm_students SET
+                 full_name = CASE WHEN ? != '' THEN ? ELSE full_name END,
+                 index_number = COALESCE(NULLIF(index_number, ''), CASE WHEN ? != '' THEN ? ELSE index_number END),
+                 index_number_key = COALESCE(NULLIF(index_number_key, ''), CASE WHEN ? != '' THEN ? ELSE index_number_key END),
+                 updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`
+            ).bind(rosterName, rosterName, rosterIndex, rosterIndex,
+              rosterIndex, rosterIndex.toLowerCase(), student.id).run();
           }
           await c.env.DB.prepare(
             'UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?'

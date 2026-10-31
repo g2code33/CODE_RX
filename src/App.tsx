@@ -68,7 +68,7 @@ function App() {
     const hash = window.location.hash;
     if (hash.startsWith('#class-groups/phantom')) return 'phantom';
     if (hash.startsWith('#class-groups/student') || hash.startsWith('#class-invite/')) return 'student';
-    if (hash.startsWith('#student-vote/')) return 'student';
+    if (hash.startsWith('#student-vote/') || hash.startsWith('#leader-apply/')) return 'student';
     if (hash.startsWith('#class-groups')) return 'workspace';
     return null;
   });
@@ -81,6 +81,12 @@ function App() {
   const [studentVoteTarget, setStudentVoteTarget] = useState<number | null>(() => {
     const hash = window.location.hash;
     return hash.startsWith('#student-vote/') ? Number(decodeURIComponent(hash.replace('#student-vote/', '').trim())) || null : null;
+  });
+  // A organizer-generated leader link (#leader-apply/<electionId>) opens the
+  // stand-for-leader form for that election in the student portal.
+  const [studentLeaderTarget, setStudentLeaderTarget] = useState<number | null>(() => {
+    const hash = window.location.hash;
+    return hash.startsWith('#leader-apply/') ? Number(decodeURIComponent(hash.replace('#leader-apply/', '').trim())) || null : null;
   });
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
@@ -195,7 +201,7 @@ function App() {
         }
         return;
       }
-      if (window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/') || window.location.hash.startsWith('#student-vote/')) {
+      if (window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/') || window.location.hash.startsWith('#student-vote/') || window.location.hash.startsWith('#leader-apply/')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(false);
         setIsSharedVaultView(false);
@@ -490,7 +496,7 @@ function App() {
 
   // Class & Group Management workspaces: standalone, like the client portal.
   if (classGroupsView === 'student') {
-    return <StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); }} />;
+    return <StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} leaderTarget={studentLeaderTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); setStudentLeaderTarget(null); }} />;
   }
   if (classGroupsView === 'phantom') {
     return <PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />;

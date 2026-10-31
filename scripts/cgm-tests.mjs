@@ -378,6 +378,25 @@ check('a wrong entry password gives the generic register failure', badPassword.s
 const unknownIndex = await call('POST', '/api/cgm/student/register', { classCode: classACode, indexNumber: 'NOT-ON-ROSTER', entryPassword: 'bio-201-entry' });
 check('an index that is not on the roster gives the same generic failure', unknownIndex.status === 400 && unknownIndex.json?.error === badPassword.json?.error, 'anti-enumeration');
 
+// Passkey ledger: with scattered issuance the suffix is no longer a formula
+// of the roster position, so every issued key is recorded here by index
+// number and later sections sign in with the real value.
+const passkeyByIndex = new Map();
+// Mirror of the server-side scatter: same tier scheme (a–z, then aa–az, then
+// ba–bz, …), but the position inside each tier follows the permutation
+// ((17·p + 11) mod tier) — issuance never runs in alphabetical order while
+// staying bijective and omission-free. Tests predict exact suffixes from it.
+const scatterSuffix = (n) => {
+  let remaining = Math.floor(Number(n));
+  if (!(remaining >= 1)) return 'a';
+  let tierStart = 1; let tierCount = 26; let tier = 1;
+  while (remaining >= tierStart + tierCount) { tierStart += tierCount; tierCount *= 26; tier += 1; }
+  const v = (((remaining - tierStart) % tierCount) * 17 + 11) % tierCount;
+  let key = ''; let x = v;
+  for (let i = 0; i < tier; i += 1) { key = String.fromCharCode(97 + (x % 26)) + key; x = Math.floor(x / 26); }
+  return key;
+};
+
 // One pre-registration for the pending-state test.
 const pendingReg = await call('POST', '/api/cgm/student/register', { classCode: classACode, indexNumber: 'BIO-201-001', entryPassword: 'bio-201-entry' });
 check('a roster student can register', pendingReg.status === 200, `status ${pendingReg.status} ${pendingReg.text?.slice(0, 160)}`);
@@ -390,11 +409,13 @@ const pendingRows = registrations.json?.data || [];
 check('the pending queue lists the registration', pendingRows.length === 1, `got ${pendingRows.length}`);
 const firstApproval = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${pendingRows[0].id}/approve`, {}, amaToken);
 const firstPasskey = firstApproval.json?.data?.passkey;
-check('approval issues the permanent passkey rx30a to the first student', firstPasskey === 'rx30a', String(firstPasskey));
+check('approval issues the first student a single-letter scattered rx30 passkey',
+  typeof firstPasskey === 'string' && /^rx30[a-z]$/.test(firstPasskey), String(firstPasskey));
+passkeyByIndex.set('bio-201-001', firstPasskey);
 
 const studentLogins = [];
 sqlite.prepare("UPDATE cgm_students SET status = 'pending' WHERE index_number_key = ?").run('bio-201-001');
-const pendingRetry = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const pendingRetry = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: passkeyByIndex.get('bio-201-001') || 'rx30a' });
 check('a pending student cannot sign in even with the real passkey', pendingRetry.status === 403 && /not.*approved/i.test(String(pendingRetry.json?.error)), `status ${pendingRetry.status} ${pendingRetry.text?.slice(0, 100)}`);
 sqlite.prepare("UPDATE cgm_students SET status = 'active' WHERE index_number_key = ?").run('bio-201-001');
 const registerAndApprove = async (indexNumber) => {
@@ -404,10 +425,13 @@ const registerAndApprove = async (indexNumber) => {
   const row = (queue.json?.data || []).find((entry) => entry.indexNumber === indexNumber);
   if (!row) return { error: 'not in queue' };
   const approval = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${row.id}/approve`, {}, amaToken);
-  return { passkey: approval.json?.data?.passkey };
+  const passkey = approval.json?.data?.passkey;
+  if (passkey) passkeyByIndex.set(String(indexNumber).toLowerCase(), passkey);
+  return { passkey };
 };
 
-// 25 sequential approvals: rx30b … rx30z (a was taken by the first student).
+// Approvals 2–26 finish the first a–z tier in the scattered order: exactly
+// the letters not yet used, each once, in the documented permutation.
 const sequentialPasskeys = [];
 for (let i = 2; i <= 26; i += 1) {
   const indexNumber = `BIO-201-${String(i).padStart(3, '0')}`;
@@ -416,11 +440,18 @@ for (let i = 2; i <= 26; i += 1) {
   sequentialPasskeys.push(outcome.passkey);
   studentLogins.push({ indexNumber, passkey: outcome.passkey });
 }
-const expected25 = ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'].map((s) => `rx30${s}`);
-check('passkeys continue rx30b through rx30z without omission', JSON.stringify(sequentialPasskeys) === JSON.stringify(expected25),
+const expected25 = Array.from({ length: 25 }, (_, i) => `rx30${scatterSuffix(i + 2)}`);
+check('passkeys 2–26 follow the scattered a–z tier exactly (deterministic permutation)',
+  JSON.stringify(sequentialPasskeys) === JSON.stringify(expected25),
   sequentialPasskeys.slice(0, 3).join(',') + ' … ' + sequentialPasskeys.slice(-1));
+check('assignment is scattered, not alphabetical (rx30b,c,d… is gone)',
+  sequentialPasskeys.slice(0, 8).map((p) => p.slice(4)).join('') !== 'bcdefghi',
+  sequentialPasskeys.slice(0, 8).map((p) => p.slice(4)).join(''));
+check('the scattered tier still uses every letter a–z exactly once',
+  JSON.stringify([firstPasskey, ...sequentialPasskeys].map((p) => p.slice(4)).sort()) === JSON.stringify([...Array(26).keys()].map((i) => String.fromCharCode(97 + i))));
 
-// The 27th…52nd approvals must be rx30aa … rx30az (bijective base-26).
+// Approvals 27–52: the aa–az tier in the same scattered order (every suffix
+// two letters long, no omissions).
 const doublePasskeys = [];
 for (let i = 27; i <= 52; i += 1) {
   const indexNumber = `BIO-201-${String(i).padStart(3, '0')}`;
@@ -428,15 +459,16 @@ for (let i = 27; i <= 52; i += 1) {
   if (!outcome.passkey) { check(`sequential approval ${i} issues a passkey`, false, outcome.error); continue; }
   doublePasskeys.push(outcome.passkey);
 }
-const expected26d = Array.from({ length: 26 }, (_, i) => `rx30a${String.fromCharCode(97 + i)}`);
-check('the sequence reaches rx30aa, rx30bb … rx30az in order', JSON.stringify(doublePasskeys) === JSON.stringify(expected26d),
+const expected26d = Array.from({ length: 26 }, (_, i) => `rx30${scatterSuffix(i + 27)}`);
+check('passkeys 27–52 follow the scattered aa–az tier exactly', JSON.stringify(doublePasskeys) === JSON.stringify(expected26d),
   `${doublePasskeys[0]} … ${doublePasskeys[doublePasskeys.length - 1]}`);
+check('every suffix in the second tier is two letters long', doublePasskeys.every((p) => /^rx30[a-z]{2}$/.test(p)), doublePasskeys.join(','));
 
-// 53rd approval must be rx30ba.
+// 53rd/54th approvals continue into ba… territory, still scattered.
 const outcome53 = await registerAndApprove('BIO-201-053');
-check('the 53rd passkey is rx30ba', outcome53.passkey === 'rx30ba', String(outcome53.passkey));
+check('the 53rd passkey lands in the ba–bz tier at the scattered position', outcome53.passkey === `rx30${scatterSuffix(53)}`, String(outcome53.passkey));
 const outcome54 = await registerAndApprove('BIO-201-054');
-check('the 54th passkey is rx30bb', outcome54.passkey === 'rx30bb', String(outcome54.passkey));
+check('the 54th passkey follows the same scattered tier', outcome54.passkey === `rx30${scatterSuffix(54)}`, String(outcome54.passkey));
 
 check('every issued passkey is globally unique in the database',
   new Set(q('SELECT passkey_suffix FROM cgm_students WHERE passkey_suffix IS NOT NULL').map((r) => r.passkey_suffix)).size
@@ -461,17 +493,9 @@ const indexByStudent = new Map(q('SELECT id, index_number_key FROM cgm_students'
 const loginForStudent = async (studentId) => {
   const indexNumber = String(indexByStudent.get(studentId) || '').toUpperCase();
   const passkey = racePairs.find((p) => p.studentId === studentId)?.passkey
-    // Imported students get passkeys in registration order: rx30a, rx30b, …
-    // (bijective base-26 over a–z), so the n-th BIO-201-0nn student can sign
-    // in deterministically without a server-issued token.
-    || (() => {
-      const match = /-(\d+)$/.exec(indexNumber);
-      if (!match) return '';
-      let n = Number(match[1]);
-      let key = '';
-      while (n > 0) { const rem = (n - 1) % 26; key = String.fromCharCode(97 + rem) + key; n = Math.floor((n - 1) / 26); }
-      return `rx30${key}`;
-    })();
+    // Scattered issuance means the n-th student's suffix is not a formula of
+    // n — later sections sign in with the passkey recorded at approval time.
+    || passkeyByIndex.get(String(indexNumber).toLowerCase()) || '';
   return studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: indexNumber, passkey });
 };
 check('eight concurrent approvals all succeed', raceApprovals.every((r) => r.status === 200), raceApprovals.map((r) => r.status).join(','));
@@ -483,16 +507,17 @@ check('the raced class continues the global sequence without collisions',
 // 5. Student login variants, lockouts, anti-enumeration
 // ===========================================================================
 section('5. Student sign-in');
-const loginOk = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const bio001Passkey = () => passkeyByIndex.get('bio-201-001');
+const loginOk = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 const studentSessionA = loginOk.json?.data?.session?.token;
 check('sign-in works with passkey + index number', Boolean(studentSessionA), `status ${loginOk.status}`);
-const wrongId = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: 'rx30a' });
+const wrongId = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: bio001Passkey() });
 check('passkey + wrong index number is rejected with the generic failure', wrongId.status === 400, `status ${wrongId.status}`);
-const wrongPasskey = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30b' });
+const wrongPasskey = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: passkeyByIndex.get('bio-201-002') || 'rx30' + 'z'.repeat(4) });
 check('right index + someone else’s passkey is rejected', wrongPasskey.status === 400, `status ${wrongPasskey.status}`);
-const universityLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'university_id', identifier: 'ATU/2024/001', passkey: 'rx30a' });
+const universityLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'university_id', identifier: 'ATU/2024/001', passkey: bio001Passkey() });
 check('university ID was removed as a sign-in half (index number + phone only)', universityLogin.status === 400, `status ${universityLogin.status}`);
-const phoneLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244000001', passkey: 'rx30a' });
+const phoneLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244000001', passkey: bio001Passkey() });
 check('sign-in also works with passkey + phone number', Boolean(phoneLogin.json?.data?.session?.token), `status ${phoneLogin.status}`);
 const junkPasskey = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'hello-world' });
 check('a non-rx30 string is rejected before any lookup', junkPasskey.status === 400);
@@ -501,11 +526,11 @@ check('a non-rx30 string is rejected before any lookup', junkPasskey.status === 
 // passkey is refused until the lock expires.
 let locked = false;
 for (let attempt = 0; attempt < 10; attempt += 1) {
-  const attemptLogin = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'WRONG-ID', passkey: 'rx30a' });
+  const attemptLogin = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'WRONG-ID', passkey: bio001Passkey() });
   if (attemptLogin.status === 423) { locked = true; break; }
   if (attemptLogin.status === 429) break;
 }
-const afterLock = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const afterLock = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 check('failed attempts lock the account temporarily (423)', locked, 'no 423 observed in 10 attempts');
 check('a locked account refuses even the correct credentials', afterLock.status === 423, `status ${afterLock.status}`);
 const lockedRow = q1('SELECT locked_until, failed_attempts FROM cgm_students WHERE index_number_key = ?', 'bio-201-001');
@@ -513,7 +538,7 @@ check('reaching the failure threshold set a temporary lock and cleared the count
   lockedRow.locked_until !== null && Number(lockedRow.failed_attempts) === 0,
   `locked_until=${lockedRow.locked_until} failed_attempts=${lockedRow.failed_attempts}`);
 sqlite.prepare('UPDATE cgm_students SET failed_attempts = 0, locked_until = NULL WHERE index_number_key = ?').run('bio-201-001');
-const unlockedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const unlockedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 check('clearing the lock restores sign-in (secure reset path)', Boolean(unlockedLogin.json?.data?.session?.token), `status ${unlockedLogin.status}`);
 const freshSession = unlockedLogin.json?.data?.session?.token || studentSessionA;
 
@@ -641,7 +666,7 @@ const sessionsToUse = [];
   const podIds = (detailB.json?.data?.groups || []).map((g) => Number(g.id));
   let placed = 0; let waitlisted = 0;
   for (let i = 0; i < 5; i += 1) {
-    const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: `BIO-201-${String(i + 1).padStart(3, '0')}`, passkey: `rx30${['a', 'b', 'c', 'd', 'e'][i]}` });
+    const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: `BIO-201-${String(i + 1).padStart(3, '0')}`, passkey: passkeyByIndex.get(`bio-201-${String(i + 1).padStart(3, '0')}`) });
     const session = login.json?.data?.session?.token;
     sessionsToUse.push(session);
     const assign = await studentCall('POST', `/api/cgm/student/activities/${activityBId}/assign`, { groupId: podIds[0] }, session);
@@ -665,7 +690,7 @@ const activityC = await memberCall('POST', `/api/cgm/classes/${classAId}/activit
 const activityCId = activityC.json?.data?.activityId ?? activityC.json?.data?.activity?.id ?? activityC.json?.data?.id;
 await memberCall('POST', `/api/cgm/activities/${activityCId}/lifecycle`, { action: 'open' }, amaToken);
 await memberCall('POST', `/api/cgm/activities/${activityCId}/groups`, { count: 2 }, amaToken);
-const lateLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-004', passkey: 'rx30d' });
+const lateLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-004', passkey: passkeyByIndex.get('bio-201-004') });
 const lateSession = lateLogin.json?.data?.session?.token;
 const detailC = await memberCall('GET', `/api/cgm/activities/${activityCId}`, undefined, amaToken);
 const podC = Number((detailC.json?.data?.groups || [])[0]?.id);
@@ -956,13 +981,13 @@ check('PHANTOM revokes the delegation immediately', revokeDelegation.status === 
 section('15. Module flag');
 const disableModule = await memberCall('POST', '/api/cgm/phantom/module', { enabled: false }, phantomToken);
 check('PHANTOM can disable the module', disableModule.status === 200, `status ${disableModule.status}`);
-const disabledStudentLogin = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: 'rx30b' });
+const disabledStudentLogin = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: passkeyByIndex.get('bio-201-002') });
 check('student endpoints answer 404 while disabled', disabledStudentLogin.status === 404, `status ${disabledStudentLogin.status}`);
 const disabledClasses = await memberCall('GET', '/api/cgm/organizer/classes', undefined, amaToken);
 check('organizer endpoints answer 404 while disabled', disabledClasses.status === 404, `status ${disabledClasses.status}`);
 const enableModule = await memberCall('POST', '/api/cgm/phantom/module', { enabled: true }, phantomToken);
 check('PHANTOM re-enables the module', enableModule.status === 200);
-const enabledStudentLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: 'rx30b' });
+const enabledStudentLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: passkeyByIndex.get('bio-201-002') });
 check('student sign-in works again after re-enabling', Boolean(enabledStudentLogin.json?.data?.session?.token), `status ${enabledStudentLogin.status}`);
 
 // ===========================================================================
@@ -1258,8 +1283,8 @@ await memberCall('POST', `/api/cgm/activities/${podActivityId}/lifecycle`, { act
 await memberCall('POST', `/api/cgm/activities/${podActivityId}/groups`, { count: 2, capacity: 2 }, amaToken);
 const podDetail = await memberCall('GET', `/api/cgm/activities/${podActivityId}`, undefined, amaToken);
 const podIdsS6 = (podDetail.json?.data?.groups || []).map((g) => Number(g.id));
-const login004 = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-004', passkey: 'rx30d' });
-const login005 = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-005', passkey: 'rx30e' });
+const login004 = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-004', passkey: passkeyByIndex.get('bio-201-004') });
+const login005 = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-005', passkey: passkeyByIndex.get('bio-201-005') });
 const session004 = login004.json?.data?.session?.token;
 await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[0] }, session004);
 await studentCall('POST', `/api/cgm/student/activities/${podActivityId}/assign`, { groupId: podIdsS6[0] }, login005.json?.data?.session?.token);
@@ -1369,7 +1394,7 @@ const scaffoldRace = await memberCall('POST', `/api/cgm/activities/${raceActivit
 check('the one-seat race pod exists', scaffoldRace.status === 200, `status ${scaffoldRace.status}`);
 const raceSessions = [];
 for (let i = 0; i < 3; i += 1) {
-  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: `BIO-201-${String(i + 1).padStart(3, '0')}`, passkey: `rx30${['a', 'b', 'c'][i]}` });
+  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: `BIO-201-${String(i + 1).padStart(3, '0')}`, passkey: passkeyByIndex.get(`bio-201-${String(i + 1).padStart(3, '0')}`) });
   raceSessions.push(login.json?.data?.session?.token);
 }
 const raceAttempts = await Promise.all(raceSessions.map((token) =>
@@ -1501,7 +1526,7 @@ check('the limit is per address, not global', otherIpJoin.status !== 429, `statu
 // --- Lockout: 8 failures lock the account even for the right passkey ----------
 const lockStudentId = Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'bio-201-006'")?.id || 0);
 const lockKnownLogin = await loginForStudent(lockStudentId);
-const lockKnownPasskey = racePairs.find((pair) => pair.studentId === lockStudentId)?.passkey || 'rx30f';
+const lockKnownPasskey = passkeyByIndex.get('bio-201-006') || racePairs.find((pair) => pair.studentId === lockStudentId)?.passkey || '';
 check('the lockout target can sign in before the test', Boolean(lockKnownLogin.json?.data?.session?.token), `status ${lockKnownLogin.status}`);
 // Fixture reset: earlier sections may have left attempts on this account.
 sqlite.prepare('UPDATE cgm_students SET failed_attempts = 0, locked_until = NULL WHERE id = ?').run(lockStudentId);
@@ -1517,7 +1542,7 @@ check('the lockout is recorded with an expiry',
   Boolean(q1('SELECT locked_until FROM cgm_students WHERE id = ?', lockStudentId)?.locked_until));
 
 // --- Passkey change revokes every existing session -----------------------------
-const preChangeLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const preChangeLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 const sessionBeforeChange = preChangeLogin.json?.data?.session?.token;
 check('the passkey-change target signed in with the original passkey', Boolean(sessionBeforeChange), `status ${preChangeLogin.status}`);
 const enableSelfChange = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, {
@@ -1525,7 +1550,7 @@ const enableSelfChange = await memberCall('POST', `/api/cgm/classes/${classAId}/
   loginFormat: { identifiers: ['index_number'], allowStudentPasskeyChange: true },
 }, amaToken);
 check('the class enables self-service passkey change', enableSelfChange.status === 200, `status ${enableSelfChange.status}`);
-const passkeyChange = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: 'rx30a', newPasskey: 'rx30qz' }, sessionBeforeChange);
+const passkeyChange = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: bio001Passkey(), newPasskey: 'rx30qz' }, sessionBeforeChange);
 const sessionAfterChange = passkeyChange.json?.data?.session?.token;
 check('the passkey change returns exactly one fresh session', passkeyChange.status === 200 && Boolean(sessionAfterChange), `status ${passkeyChange.status}`);
 const oldSessionTry = await studentCall('GET', '/api/cgm/student/me', undefined, sessionBeforeChange);
@@ -1534,7 +1559,7 @@ const newSessionTry = await studentCall('GET', '/api/cgm/student/me', undefined,
 check('the fresh session works', newSessionTry.status === 200, `status ${newSessionTry.status}`);
 const newPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
 check('sign-in works with the new passkey', Boolean(newPasskeyLogin.json?.data?.session?.token), `status ${newPasskeyLogin.status}`);
-const oldPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30a' });
+const oldPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 check('the old passkey is gone for good', oldPasskeyLogin.status >= 400, `status ${oldPasskeyLogin.status}`);
 
 // --- Logout revokes the session -------------------------------------------------
@@ -1747,9 +1772,8 @@ check('closed: no identity or request row was written',
 
 await setPolicy('student_registration_mode', 'auto');
 const passkeyCounterBefore = Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value);
-const bijective = (n) => { let key = ''; while (n > 0) { const rem = (n - 1) % 26; key = String.fromCharCode(97 + rem) + key; n = Math.floor((n - 1) / 26); } return key; };
 const autoRegister = await call('POST', '/api/cgm/student/register', { classCode: autoClassCode, indexNumber: 'AUTO-101-001', entryPassword: 'phy-201-entry' });
-const expectedPasskey = `rx30${bijective(passkeyCounterBefore)}`;
+const expectedPasskey = `rx30${scatterSuffix(passkeyCounterBefore)}`;
 check('auto: registration approves inline and is active at once',
   autoRegister.status === 200 && autoRegister.json?.data?.state === 'active', `status ${autoRegister.status} ${autoRegister.text?.slice(0, 160)}`);
 check(`auto: the permanent passkey continues the global sequence (${expectedPasskey})`,
@@ -2257,7 +2281,7 @@ const markRegister = await call('POST', '/api/cgm/student/register', { classCode
 const markQueue = await memberCall('GET', `/api/cgm/classes/${classAId}/registrations?status=pending`, undefined, amaToken);
 const markRow = (markQueue.json?.data || []).find((row) => row.indexNumber === 'MRK-27-001');
 const markApprove = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${markRow.id}/approve`, {}, amaToken);
-const expectedMark = `bio1${bijective(Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value) - 1)}`;
+const expectedMark = `bio1${scatterSuffix(Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value) - 1)}`;
 check('an approval under a custom mark issues a marked passkey', markApprove.json?.data?.passkey === expectedMark,
   `got ${markApprove.json?.data?.passkey} expected ${expectedMark}`);
 check('the sequence after the mark still continues the global counter',
@@ -2555,8 +2579,176 @@ check('the student session is persisted in localStorage (login status survives a
   && !/sessionStorage\.setItem\(STUDENT_SESSION_KEY/.test(portalSource));
 
 // ---------------------------------------------------------------------------
+// 30. Task-12: scattered passkeys (skip rule), tolerant index formats,
+//     gender self-service, roster-backed claims, activity editing, leader links
+// ---------------------------------------------------------------------------
+section('30. Scattered passkey skips, tolerant index formats, gender gate, activity editing, leader links');
+
+// -- A fresh class whose roster uses the slashed index trend -------------------
+const fmtClass = await memberCall('POST', '/api/cgm/classes', { name: 'FMT 101 Formats', institution: 'Accra Technical University' }, amaToken);
+const fmtClassId = fmtClass.json?.data?.classId ?? fmtClass.json?.data?.class?.id ?? fmtClass.json?.data?.id;
+const fmtCode = fmtClass.json?.data?.code ?? fmtClass.json?.data?.class?.code;
+await memberCall('POST', `/api/cgm/classes/${fmtClassId}/entry-password`, { entryPassword: 'fmt-101-entry' }, amaToken);
+await memberCall('POST', `/api/cgm/phantom/classes/${fmtClassId}/approve`, {}, phantomToken);
+await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName: 'Philippa Ami', indexNumber: 'PH/PHA/24/0292', phone: '0244117292' }, amaToken);
+await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName: 'Kwame Botchway', indexNumber: 'PH/PHA/24/0293', phone: '0244117293' }, amaToken);
+check('the fmt roster holds the canonical slashed index',
+  q1("SELECT index_number FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'ph/pha/24/0292'", fmtClassId)?.index_number === 'PH/PHA/24/0292');
+
+// Register with lower-case dashes: the roster row must still be found.
+const fmtReg = await call('POST', '/api/cgm/student/register', { classCode: fmtCode, indexNumber: 'ph-pha-24-0292', entryPassword: 'fmt-101-entry' });
+check('registration accepts any case/separator format of the roster index (trend PH/PHA/24/0292)',
+  fmtReg.status === 200 && fmtReg.json?.data?.state === 'received', `status ${fmtReg.status} ${fmtReg.text?.slice(0, 140)}`);
+
+// -- Scatter skip rule: a suffix already held by a legacy key is never reused ---
+const fmtQueue = await memberCall('GET', `/api/cgm/classes/${fmtClassId}/registrations?status=pending`, undefined, amaToken);
+const fmtRow = (fmtQueue.json?.data || []).find((entry) => entry.indexNumber === 'PH/PHA/24/0292');
+check('the fmt registration waits in the approval queue', Boolean(fmtRow), fmtQueue.text?.slice(0, 140));
+const seqBeforeSkip = Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value);
+const decoySuffix = scatterSuffix(seqBeforeSkip);
+sqlite.prepare(
+  "INSERT INTO cgm_students (full_name, index_number, index_number_key, institution, institution_key, passkey_suffix, passkey_prefix, status) " +
+  "SELECT 'Legacy Holder', 'LEG-001', 'leg-001', institution, institution_key, ?, 'rx30', 'active' FROM cgm_students LIMIT 1"
+).run(decoySuffix);
+const fmtApprove = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/registrations/${fmtRow.id}/approve`, {}, amaToken);
+const fmtPasskey = String(fmtApprove.json?.data?.passkey || '');
+check(`a scattered suffix already held by a legacy key is skipped (decoy ${decoySuffix} not re-issued)`,
+  fmtApprove.status === 200 && fmtPasskey && !fmtPasskey.endsWith(decoySuffix) && /^rx30[a-z]{1,2}$/.test(fmtPasskey),
+  `status ${fmtApprove.status} passkey=${fmtPasskey || 'none'}`);
+check('the skipped sequence is consumed — the counter moved twice',
+  Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value) === seqBeforeSkip + 2,
+  String(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'")?.next_value));
+check('passkey suffixes stay globally unique after the skip',
+  q('SELECT passkey_suffix FROM cgm_students WHERE passkey_suffix IS NOT NULL').length
+  === new Set(q('SELECT passkey_suffix FROM cgm_students WHERE passkey_suffix IS NOT NULL').map((r) => r.passkey_suffix)).size);
+passkeyByIndex.set('ph/pha/24/0292', fmtPasskey);
+
+// -- Login accepts every format and case of the same index number --------------
+const fmtLoginSpaces = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'PH PHA 24 0292', passkey: fmtPasskey });
+const fmtLoginDots = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'ph.pha.24.0292', passkey: fmtPasskey });
+const fmtLoginCanonical = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'PH/PHA/24/0292', passkey: fmtPasskey });
+const fmtStudentId = Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'ph/pha/24/0292'")?.id || 0);
+check('login accepts spaces instead of slashes', fmtLoginSpaces.json?.data?.student?.id === fmtStudentId, `status ${fmtLoginSpaces.status}`);
+check('login accepts dots and lower case', fmtLoginDots.json?.data?.student?.id === fmtStudentId, `status ${fmtLoginDots.status}`);
+check('login accepts the canonical trend format', fmtLoginCanonical.json?.data?.student?.id === fmtStudentId, `status ${fmtLoginCanonical.status}`);
+const fmtWrongOwner = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'PH/PHA/24/0293', passkey: fmtPasskey });
+check('a format twin of another student still needs their own passkey', fmtWrongOwner.status === 400, `status ${fmtWrongOwner.status}`);
+const fmtSession = fmtLoginCanonical.json?.data?.session?.token;
+
+// -- Gender self-service gates gender-balanced self-assignment ------------------
+check('the roster import left the gender unknown', q1('SELECT gender FROM cgm_students WHERE id = ?', fmtStudentId)?.gender === 'unknown');
+const fmtActivity = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Seminar Pods', type: 'seminar',
+  config: { method: 'self', groupCount: 2, capacity: 5, genderRule: 'balanced', repeatRule: 'random', leaderMethod: 'election', overflow: 'block', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const fmtActivityId = fmtActivity.json?.data?.activityId ?? fmtActivity.json?.data?.activity?.id ?? fmtActivity.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${fmtActivityId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${fmtActivityId}/groups`, { count: 2, capacity: 5 }, amaToken);
+const fmtDetailForPods = await memberCall('GET', `/api/cgm/activities/${fmtActivityId}`, undefined, amaToken);
+const fmtPods = (fmtDetailForPods.json?.data?.groups || []).map((g) => Number(g.id));
+check('the gender-balanced activity opened with its pods', fmtPods.length === 2, `pods=${fmtPods.join(',')}`);
+const fmtAssignBlocked = await studentCall('POST', `/api/cgm/student/activities/${fmtActivityId}/assign`, { groupId: fmtPods[0] }, fmtSession);
+check('a student without a recorded gender cannot choose a group in a gender-balanced activity (428)',
+  fmtAssignBlocked.status === 428 && /gender/i.test(String(fmtAssignBlocked.json?.error || '')), `status ${fmtAssignBlocked.status} ${fmtAssignBlocked.text?.slice(0, 120)}`);
+const bogusGender = await studentCall('POST', '/api/cgm/student/profile/gender', { gender: 'banana' }, fmtSession);
+check('the gender endpoint refuses anything but male/female', bogusGender.status === 400, `status ${bogusGender.status}`);
+const genderSet = await studentCall('POST', '/api/cgm/student/profile/gender', { gender: 'female' }, fmtSession);
+check('the student sets their own gender once, before choosing a class group', genderSet.status === 200, `status ${genderSet.status} ${genderSet.text?.slice(0, 120)}`);
+check('the self-set gender is on the profile', q1('SELECT gender FROM cgm_students WHERE id = ?', fmtStudentId)?.gender === 'female');
+const genderTwice = await studentCall('POST', '/api/cgm/student/profile/gender', { gender: 'male' }, fmtSession);
+check('an already-set gender is locked — only the organizer can correct it', genderTwice.status === 409, `status ${genderTwice.status}`);
+const fmtAssignOk = await studentCall('POST', `/api/cgm/student/activities/${fmtActivityId}/assign`, { groupId: fmtPods[0] }, fmtSession);
+check('after setting gender the student can choose their group', fmtAssignOk.status === 200, `status ${fmtAssignOk.status} ${fmtAssignOk.text?.slice(0, 120)}`);
+
+// -- Leader sign-up link: election detail exposes activityId + canContest -------
+const fmtGroupId = Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", fmtActivityId, fmtStudentId)?.group_id);
+const fmtElection = await memberCall('POST', `/api/cgm/groups/${fmtGroupId}/elections`, { title: 'Pod lead', role: 'leader', anonymity: 'anonymous', visibility: 'class', allowVoteChange: false, tieBreak: 'random' }, amaToken);
+const fmtElectionId = fmtElection.json?.data?.electionId ?? fmtElection.json?.data?.election?.id ?? fmtElection.json?.data?.id;
+check('the pod election exists for the leader link', Boolean(fmtElectionId), fmtElection.text?.slice(0, 120));
+const linkDetail = await studentCall('GET', `/api/cgm/student/elections/${fmtElectionId}`, undefined, fmtSession);
+check('the leader-link landing resolves the election with activityId and canContest',
+  linkDetail.status === 200 && Number(linkDetail.json?.data?.activityId) === Number(fmtActivityId) && linkDetail.json?.data?.canContest === true,
+  `status ${linkDetail.status} ${linkDetail.text?.slice(0, 160)}`);
+const linkStand = await studentCall('POST', `/api/cgm/student/activities/${fmtActivityId}/contest`, { statement: 'I will keep the pod on schedule.' }, fmtSession);
+check('a student who opens the leader link is recorded as a candidate', linkStand.status === 200, `status ${linkStand.status} ${linkStand.text?.slice(0, 120)}`);
+const linkStandAgain = await studentCall('POST', `/api/cgm/student/activities/${fmtActivityId}/contest`, { statement: 'Still keen.' }, fmtSession);
+check('standing twice is idempotent — the candidacy stays single', linkStandAgain.status === 200
+  && q1('SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ?', fmtElectionId).c === 1, `status ${linkStandAgain.status}`);
+const linkCandidates = await studentCall('GET', `/api/cgm/student/elections/${fmtElectionId}`, undefined, fmtSession);
+check('the volunteer appears on the ballot for the coming vote',
+  (linkCandidates.json?.data?.candidates || []).some((row) => /Philippa/i.test(String(row.fullName || row.full_name))), JSON.stringify(linkCandidates.json?.data?.candidates || []).slice(0, 140));
+
+// -- Roster-bound claims backfill a phone-first student's identity --------------
+await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName: 'Efua Sutherland', indexNumber: 'PH/PHA/24/0294', phone: '0244117294' }, amaToken);
+const efuaEntry = q1("SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'ph/pha/24/0294'", fmtClassId);
+const backfillInvite = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/invitations`, { kind: 'individual', rosterEntryId: Number(efuaEntry.id) }, amaToken);
+const backfillToken = backfillInvite.json?.data?.token;
+check('the roster-bound individual invitation exists', Boolean(backfillToken), `status ${backfillInvite.status}`);
+// The phone-first student: identity on file is a phone only (empty name/index).
+sqlite.prepare(
+  "UPDATE cgm_students SET full_name = '', index_number = '', index_number_key = '', phone = '0244117294', phone_key = '233244117294' WHERE index_number_key = 'bio-201-001'"
+).run();
+const phoneFirstLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244117294', passkey: 'rx30qz' });
+const phoneFirstSession = phoneFirstLogin.json?.data?.session?.token;
+check('the phone-first student signs in with their phone and passkey', Boolean(phoneFirstSession), `status ${phoneFirstLogin.status} ${phoneFirstLogin.text?.slice(0, 120)}`);
+const backfillClaim = await studentCall('POST', `/api/cgm/student/invitations/${backfillToken}/claim`, {}, phoneFirstSession);
+check('the phone-first student can claim the personal invitation', backfillClaim.status === 200, `status ${backfillClaim.status} ${backfillClaim.text?.slice(0, 140)}`);
+const backfilledMe = await studentCall('GET', '/api/cgm/student/me', undefined, phoneFirstSession);
+check('the claim filled in the roster name and index number (everything on file)',
+  backfilledMe.json?.data?.student?.fullName === 'Efua Sutherland' && backfilledMe.json?.data?.student?.indexNumber === 'PH/PHA/24/0294',
+  JSON.stringify(backfilledMe.json?.data?.student || {}).slice(0, 200));
+
+// -- Activities stay editable after creation ------------------------------------
+const editActivity = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Lab Rotation', type: 'practical', description: 'Original description',
+  config: { method: 'automatic', groupCount: 3, capacity: 4, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'block', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const editActivityId = editActivity.json?.data?.activityId ?? editActivity.json?.data?.activity?.id ?? editActivity.json?.data?.id;
+const editDraft = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, {
+  name: 'Lab Rotation v2', description: 'Renamed draft',
+  config: { method: 'hybrid', repeatRule: 'avoid', selfDeadline: '2030-06-01T00:00:00.000Z' },
+}, amaToken);
+check('a draft activity is fully editable after creation', editDraft.status === 200, `status ${editDraft.status} ${editDraft.text?.slice(0, 140)}`);
+const draftDetail = await memberCall('GET', `/api/cgm/activities/${editActivityId}`, undefined, amaToken);
+check('the draft edits persisted (name, method, repeat rule, deadline)',
+  draftDetail.json?.data?.activity?.name === 'Lab Rotation v2' && draftDetail.json?.data?.config?.method === 'hybrid'
+  && draftDetail.json?.data?.config?.repeatRule === 'avoid' && Boolean(draftDetail.json?.data?.config?.selfDeadline),
+  JSON.stringify(draftDetail.json?.data?.config || {}).slice(0, 200));
+await memberCall('POST', `/api/cgm/activities/${editActivityId}/lifecycle`, { action: 'open' }, amaToken);
+const editOpen = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { config: { groupCount: 4 } }, amaToken);
+check('an open activity can still restructure its groups before publishing', editOpen.status === 200, `status ${editOpen.status}`);
+await memberCall('POST', `/api/cgm/activities/${editActivityId}/lifecycle`, { action: 'publish' }, amaToken);
+const editStructure = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { config: { groupCount: 6 } }, amaToken);
+check('a published activity refuses structural edits that would silently change assignments', editStructure.status === 409, `status ${editStructure.status}`);
+const editLogistics = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { description: 'Logistics copy edit' }, amaToken);
+check('a published activity still accepts everyday edits (description)', editLogistics.status === 200, `status ${editLogistics.status}`);
+
+// -- The reveal payload carries everything on file ------------------------------
+await memberCall('POST', `/api/cgm/classes/${fmtClassId}/settings`, { registrationMode: 'auto' }, amaToken);
+const autoFmtReg = await call('POST', '/api/cgm/student/register', { classCode: fmtCode, indexNumber: 'PH/PHA/24/0293', entryPassword: 'fmt-101-entry' });
+check('the fmt class also flips to automatic registration', autoFmtReg.status === 200 && autoFmtReg.json?.data?.state === 'active', autoFmtReg.text?.slice(0, 140));
+check('the registration response carries the passkey AND the full recorded details for the reveal page',
+  Boolean(autoFmtReg.json?.data?.passkey)
+  && autoFmtReg.json?.data?.student?.fullName === 'Kwame Botchway'
+  && autoFmtReg.json?.data?.student?.indexNumber === 'PH/PHA/24/0293'
+  && autoFmtReg.json?.data?.student?.phone === '0244117293'
+  && autoFmtReg.json?.data?.student?.className === 'FMT 101 Formats',
+  JSON.stringify(autoFmtReg.json?.data?.student || {}).slice(0, 220));
+
+// The student portal shows the reveal as its own page (source pins).
+const revealSource = readFileSync(path.join(ROOT, 'src/components/ClassGroups/StudentPortal.tsx'), 'utf8');
+check('the passkey reveal is a dedicated page, not an inline box under the form',
+  /data-testid="cgm-passkey-reveal"/.test(revealSource) && /if \(issuedPasskey\) \{/.test(revealSource)
+  && !revealSource.includes('I saved my passkey — continue'));
+check('the reveal page lists the details on file beside the one-time passkey',
+  /Your details on file/.test(revealSource) && /detailRows/.test(revealSource));
+check('the organizer workspace can share a leader sign-up link (#leader-apply/)',
+  /#leader-apply\//.test(readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8')));
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
+
 if (failures.length) {
   console.log('Failures:');
   for (const failure of failures) console.log(`  - ${failure}`);

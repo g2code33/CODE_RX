@@ -490,6 +490,8 @@ export const cgmStudent = {
     studentCall(`/api/cgm/student/activities/${activityId}/contest`, { method: 'POST', body: { statement } }),
   withdrawCandidate: (candidateId: number) =>
     studentCall(`/api/cgm/student/candidates/${candidateId}/withdraw`, { method: 'POST', body: {} }),
+  setGender: (gender: string) =>
+    studentCall('/api/cgm/student/profile/gender', { method: 'POST', body: { gender } }),
   electionsList: () => studentCall('/api/cgm/student/elections'),
   election: (electionId: number) => studentCall(`/api/cgm/student/elections/${electionId}`),
   vote: (electionId: number, candidateId: number) =>

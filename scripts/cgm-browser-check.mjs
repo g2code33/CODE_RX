@@ -264,10 +264,12 @@ let savedPasskey = '';
     const at = text.indexOf('Shared class entry password');
     return `${page.window.document.querySelector('[role="alert"]')?.textContent || 'no-alert'} | form=${at >= 0 ? text.slice(at, at + 220) : 'gone'}`;
   };
-  check('the permanent passkey is revealed exactly once, with the save confirmation gate',
-    await page.waitForFor('shown only now', 40_000) && await page.waitForFor(/rx30[a-z]+/, 5_000), registerDebug());
-  const revealCandidates = [...page.window.document.querySelectorAll('div')]
-    .filter((el) => el.textContent.includes('shown only now') && el.textContent.includes('cannot be re-issued'))
+  check('the permanent passkey opens its own reveal page (not an inline box under the form)',
+    await page.waitForFor('shown only on this page', 40_000) && await page.waitForFor(/rx30[a-z]+/, 5_000), registerDebug());
+  check('the register form is gone while the passkey page is up',
+    !page.body().includes('Shared class entry password'), 'form still visible?');
+  const revealCandidates = [...page.window.document.querySelectorAll('[data-testid="cgm-passkey-reveal"], div')]
+    .filter((el) => el.textContent.includes('shown only on this page') && el.textContent.includes('cannot be re-issued'))
     .sort((a, b) => a.textContent.length - b.textContent.length);
   const revealBox = revealCandidates[0];
   savedPasskey = (revealBox?.textContent.match(/rx30[a-z]+/) || [''])[0];
@@ -275,10 +277,12 @@ let savedPasskey = '';
   // "looks like rx30a, rx30b" example text) and must be a well-formed key.
   check('the captured passkey is the real issued key from the reveal box',
     Boolean(revealBox) && /^rx30[a-z]+$/.test(savedPasskey), `captured=${savedPasskey} boxFound=${Boolean(revealBox)}`);
+  check('the reveal page lists the details on file for the student',
+    page.body().includes('Your details on file') && page.body().includes('Full name'), 'details missing');
   check('the student is not handed the dashboard before confirming the passkey was saved',
-    Boolean(page.buttonByText('I saved my passkey — continue')));
-  const continueButton = page.buttonByText('I saved my passkey — continue');
-  page.buttonByText('I saved my passkey — continue')?.click();
+    Boolean(page.buttonByText('I have saved my passkey — continue')));
+  const continueButton = page.buttonByText('I have saved my passkey — continue');
+  page.buttonByText('I have saved my passkey — continue')?.click();
   check('the student dashboard opens after the confirmation',
     await page.waitForFor('CODE Rx Student Portal', 30_000), `errs=${page.jsdomErrors.slice(0, 3).join(' | ') || 'none'} body=${page.body().slice(0, 160)}`);
   check('the dashboard lists the joined class', await page.waitForFor('Browser Check Pharmacy Lab', 20_000));

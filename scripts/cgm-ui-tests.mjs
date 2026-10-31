@@ -384,9 +384,10 @@ check('a draft class is still actionable: PHANTOM can submit & approve it as an 
 check('a rejected class can be approved later without resubmission',
   /status === 'rejected'/.test(phantom) && /Approve now/.test(phantom));
 
-check('automatic registration reveals the permanent passkey exactly once',
-  studentPortal.includes('shown only now') && /issuedPasskey/.test(studentPortal)
-  && /cannot be re-issued/.test(studentPortal));
+check('automatic registration reveals the permanent passkey on its own dedicated page',
+  studentPortal.includes('data-testid="cgm-passkey-reveal"') && /if \(issuedPasskey\) \{/.test(studentPortal)
+  && /cannot be re-issued/.test(studentPortal)
+  && !studentPortal.includes('I saved my passkey — continue'));
 check('the register form no longer claims every registration waits for a person',
   !studentPortal.includes('Your organizer reviews every registration.')
   && studentPortal.includes('approved automatically'));
@@ -435,7 +436,9 @@ check('the invitation landing shows the class and guides registration with the c
 check('the dead-end "tap Join again" flow is gone',
   !studentPortal.includes('tap Join again'));
 check('a just-issued passkey blocks the handoff until the student confirms saving it',
-  /I saved my passkey — continue/.test(studentPortal));
+  /I have saved my passkey — continue/.test(studentPortal));
+check('the reveal page shows the details on file (name, index, phone, email, class)',
+  /Your details on file/.test(studentPortal) && /detailRows/.test(studentPortal));
 check('the claim result is shown on the dashboard and can be dismissed',
   /inviteNotice/.test(studentPortal) && /Dismiss/.test(studentPortal));
 

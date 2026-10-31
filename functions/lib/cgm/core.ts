@@ -48,6 +48,35 @@ export const passkeySuffixForSequence = (sequence: number): string => {
   return suffix;
 };
 
+/**
+ * Scattered position of a sequence inside its tier: (17·p + 11) mod tier.
+ * 17 is coprime to every 26^k, so each tier maps its positions onto all of
+ * its suffixes exactly once — the assignment order is scrambled (student 2
+ * does not get `b` after student 1 got `a`), while nothing is ever reused
+ * and the tiers still fill a–z, then aa–az, then ba–bz, …
+ */
+export const scatteredSuffixForSequence = (sequence: number): string => {
+  let remaining = Math.floor(Number(sequence));
+  if (!Number.isFinite(remaining) || remaining < 1) return 'a';
+  let tier = 1;
+  let tierStart = 1;
+  let tierCount = 26;
+  while (remaining >= tierStart + tierCount) {
+    tierStart += tierCount;
+    tierCount *= 26;
+    tier += 1;
+  }
+  const position = remaining - tierStart;
+  const scattered = ((position % tierCount) * 17 + 11) % tierCount;
+  let suffix = '';
+  let value = scattered;
+  for (let i = 0; i < tier; i++) {
+    suffix = String.fromCharCode(97 + (value % 26)) + suffix;
+    value = Math.floor(value / 26);
+  }
+  return suffix;
+};
+
 /** The full passkey (for example `rx30aa`) for a 1-based sequence position. */
 export const passkeyForSequence = (sequence: number): string =>
   `${STUDENT_PASSKEY_PREFIX}${passkeySuffixForSequence(sequence)}`;
@@ -117,8 +146,24 @@ export const nextPasskeySequence = async (db: D1Database): Promise<number> => {
 export const allocateStudentPasskey = async (
   db: D1Database,
 ): Promise<{ passkey: string; sequence: number; suffix: string }> => {
+  // The scatter never collides with itself (it is a permutation per tier),
+  // but passkeys issued by the earlier in-order scheme may already hold the
+  // suffix a later scattered position lands on — those sequence numbers are
+  // consumed and skipped, never re-issued (the counter only moves forward).
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const sequence = await nextPasskeySequence(db);
+    const suffix = scatteredSuffixForSequence(sequence);
+    const taken = await asRows<{ id: number }>(db.prepare(
+      'SELECT id FROM cgm_students WHERE passkey_suffix = ? LIMIT 1'
+    ).bind(suffix));
+    if (!taken[0]) {
+      return { passkey: `${STUDENT_PASSKEY_PREFIX}${suffix}`, sequence, suffix };
+    }
+  }
+  // Practically unreachable; never reuse in any case.
   const sequence = await nextPasskeySequence(db);
-  return { passkey: passkeyForSequence(sequence), sequence, suffix: passkeySuffixForSequence(sequence) };
+  const suffix = passkeySuffixForSequence(sequence);
+  return { passkey: `${STUDENT_PASSKEY_PREFIX}${suffix}`, sequence, suffix };
 };
 
 // ---------------------------------------------------------------------------
@@ -161,6 +206,21 @@ export const allocateClassCode = async (db: D1Database): Promise<string> => {
 /** Lowercase lookup key: trims, collapses spaces, lowercases. */
 export const lookupKey = (value: unknown): string =>
   String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/**
+ * Index numbers are typed by hand: PH/PHA/24/0292, ph-pha-24-0292,
+ * "ph pha 24 0292" are the same student. The stored key keeps the original
+ * separators (lower-cased), so matching tries the stored form first and then
+ * the fully folded form (every separator becomes /) — caps, dashes, dots and
+ * spaces all resolve to one student.
+ */
+export const indexKeyVariants = (value: unknown): string[] => {
+  const base = lookupKey(value);
+  if (!base) return [];
+  const folded = base.replace(/[\s\-_.]+/g, '/');
+  return folded === base ? [base] : [base, folded];
+};
+
 
 /** Phone lookup key: digits only, Ghana local/00 forms raised to 233. */
 export const phoneKey = (value: unknown): string | null => {
