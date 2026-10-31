@@ -120,11 +120,12 @@ the three test harnesses. **147 API routes** (75 activities/groups/elections/ann
 - Legacy suites are kept green by construction: `client-portal-tests.mjs` counts
   tables (`63 + 11 + 3 + 41`) and excludes `idx_cgm%` from its legacy index count.
 - Migration safety: every CGM addition is additive (`CREATE TABLE IF NOT EXISTS`
-  / guarded ALTERs); **no destructive migration exists**; verify production state
-  after deploy with `npx wrangler d1 execute code-rx-db --remote --command
-  "SELECT name FROM sqlite_master WHERE name LIKE 'cgm_%'"` (expect the 41 cgm_
-  tables) — the agent cannot verify the live D1 from the sandbox, so run this
-  once after the deploy.
+  / guarded ALTERs); **no destructive migration exists**. **Production D1
+  verified 2026-10-31 by the maintainer** via `npx wrangler d1 execute
+  code-rx-db --remote --command "SELECT name FROM sqlite_master WHERE name LIKE
+  'cgm_%'"`: all 41 `cgm_` tables present, including `cgm_module_policies` —
+  the cold-start migration completed against the live database with no
+  destructive step.
 
 ---
 
@@ -219,10 +220,15 @@ revoked; suspended classes still accepted student actions.
    future Android client without change.
 9. **Verified where:** implemented + verified by automated tests = everything
    in §5; implemented + manually verified in the local preview stack = the
-   browser journeys and the wrangler dev flows; **requires production
-   verification after deploy** = real EmailJS delivery, remote D1 cold-start
-   table creation, the Cloudflare Pages deploy itself (see the D1 check in §4).
-   Live production email/deployment was NOT verified from the sandbox.
+   browser journeys and the wrangler dev flows; verified IN PRODUCTION =
+   remote D1 cold-start table creation (maintainer, 2026-10-31, see §4);
+   **still requires production verification** = real EmailJS delivery and the
+   Cloudflare Pages deploy itself. Live production email was NOT verified from
+   the sandbox. CI note: the test-gate's first run on `main` (run 41135881444)
+   passed all six suites and the build and correctly blocked the deploy; the
+   only red step was the browser gate's own passkey sanity check rejecting
+   `rx30a` — the legitimate FIRST passkey of a fresh CI database — fixed in
+   `143da18` and verified twice locally against a fresh D1 (19/19, exit 0).
 
 ---
 
