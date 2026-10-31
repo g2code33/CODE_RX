@@ -11,7 +11,10 @@ classless-workspace panes, My Classes list fix, §30 module-policy console +
 draft overrides) and the post-implementation hardening pass
 (`88f11b7` → `37907aa`: verification-token gating, passkey notification
 scrub, lockout completion, invitation continuation, browser-level journey
-gate, CI deploy gate). **Everything below is verified against the code and the
+gate, CI deploy gate), and the batch-2 + follow-up series (`7e74623`…`ae64c5c`:
+WhatsApp deep links, sheet topic toggle, passkey request flow, nav collapse +
+sections drawer, student wayfinding, group topic & agenda for students, the
+CGP.jpg brand mark on every Class & Group surface and the section zoom lock). **Everything below is verified against the code and the
 test suites — nothing is aspirational.**
 
 ---
@@ -34,6 +37,8 @@ test suites — nothing is aspirational.**
 | Member sheet | **print or download every member of a group** from its workspace: the **Member sheet** panel lets the organizer pick the columns (Full name always; Index number, Role, Joined via optional; **Phone / Email / Gender appear only when the viewer holds `view_sensitive_profiles`** — the dossier itself strips those columns otherwise), type a **group agenda** (saved on the group via `PATCH`, re-shown every visit) and **AOB** (per-sheet only), insert **blank columns at any position** (optional header, splices a write-in cell into every member row) and **blank write-in row batches at any position** (ruled lines in all three outputs, never counted as members), then **Print** (hidden-iframe), **Download PNG** (1240-px canvas) or **Download PDF** (genuine multi-page A4 document, agenda preamble on page one, table header repeated on continuation pages) — all dependency-free (`src/lib/groupSheet.ts`, byte-level unit-tested through an esbuild bundle); every sheet carries the CODE Rx header band, class · activity · date line, big title with the member count, the saved topic and agenda, the striped member table and an AOB block |
 | Workspace hub | **the group workspace is a hub**: the overview shows all nine section cards at a glance, a **hamburger (☰ All sections)** opens a slide-in drawer — **from the left edge, overlaying the page, only inside a group** — listing overview + nine sections with hints, and every section — Members, Member sheet, Leadership, Elections, Announcements, Notify, WhatsApp, Settings, History — **opens as a full page of its own** with a back-to-overview escape and the most detailed view of that part: Members with search, seats/leaders/joined-via stats and per-member index + via chips; Elections with the lifecycle explained plus anonymity and opened dates; Announcements as a full feed with authors and dates; Settings with the identity facts grid + topic + agenda + capacity; History as a full timestamped list (dossier events cap raised 15 → 40). The **main nav (Overview, My Classes, …) is itself a collapsible hamburger** on desktop now: opening a group auto-collapses it so the group's sections drawer leads, and Back to groups restores it |
 | Group topic & agenda for students | **every member sees their group's topic and agenda on their own group page** — the activity dashboard payload carries `g.topic` + `g.agenda` on `myAssignment`, and an **Our topic & agenda** card (amber topic block + green agenda block, honest empty states) sits directly **before Request a group change**, so whatever the organizer saves in the workspace is what the whole group lives by |
+| CGP brand mark | **every Class & Group surface now wears the society's own CGP.jpg emblem** — the navbar door beside Client Access (both the 36-px icon door and the labelled chip variant render the artwork instead of a generic glyph), the organizer workspace topbar tile and the student portal header tile (each a rounded 36-px crop of the emblem with a soft emerald ring). The asset ships from `public/CGP.jpg` (single copy, byte-identical when served), loads lazy + async like every other image, and carries no alt text where it is purely decorative |
+| No zoom in Class & Group | **pinch-zoom and double-tap zoom are disabled inside the section**: while any Class & Group surface is mounted a guard hook tightens the viewport meta to `maximum-scale=1.0, user-scalable=no` and swallows double-taps, `touch-action: pan-y` covers the gestures some Android browsers reach past the meta, and **unmounting restores the exact previous viewport** — the rest of the site zooms exactly as before |
 | Student wayfinding | **class doors are unique navigation buttons**: every class card (on the welcome board AND My Classes) carries its own stable accent colour — colour rail, monogram tile, coloured status pill and an always-visible **Open →** affordance derived from the class code, so students navigate by sight; the welcome board adds a one-tap **Continue to choose group** gradient CTA (the only one on the board) that opens My Groups directly |
 | Student WhatsApp join | **the moment a student gets a group** — by choosing it, auto-placement, or closing the random-draw reveal — they land on a dedicated **join page**: the group's QR code (downloadable PNG), a **Copy link** button (clipboard API with textarea fallback), an **Open chat** link and the one-tap **Join WhatsApp group** button (click recorded, never treated as join-proof); before the organizer saves a link the page says so honestly; the group card's button opens the same page. The Groups-page **per-card WhatsApp editor is gone** (it never worked and duplicated the workspace) — all link management lives in the workspace's WhatsApp section |
 | Passkey requests | **passkeys are always system-generated — students never invent one**: a student proves the CURRENT passkey and sends a change request; the organizer sees it in the Students area, **Approve & notify** (opening a Generate button for exactly that student, announced by a direct notification) or **Decline** (they are told too); Generate allocates the next unique passkey from the same atomic global sequence registration uses — the class mark is kept, the suffix is never user-chosen so it can never clash — shown once with sessions revoked and a fresh session issued. The old choose-your-own self-change route is gone (404). Table `cgm_passkey_requests`; audits `cgm.passkey.change_requested / request_approved / request_declined / generated`, never carrying a passkey value |
@@ -176,8 +181,8 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 | Suite | Command | Result |
 |---|---|---|
 | Module API (38 sections) | `npm run test:cgm` | **715/715** |
-| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **260/260** |
-| Browser journeys (jsdom + wrangler pages dev, 41 checks) | `npm run test:cgm-browser` | **41/41** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **262/262** |
+| Browser journeys (jsdom + wrangler pages dev, 43 checks) | `npm run test:cgm-browser` | **43/43** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
 | Raw delivery pipeline | `npm run test:raw-delivery` | 27/27 |
@@ -379,6 +384,6 @@ src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), Studen
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
 scripts/cgm-tests.mjs                  # 715 API-level checks, 38 sections
-scripts/cgm-ui-tests.mjs               # 260 markup-level checks, 21 sections
-scripts/cgm-browser-check.mjs          # 34 jsdom browser journeys vs wrangler dev
+scripts/cgm-ui-tests.mjs               # 262 markup-level checks, 21 sections
+scripts/cgm-browser-check.mjs          # 43 jsdom browser checks vs wrangler dev
 ```
