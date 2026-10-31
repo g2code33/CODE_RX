@@ -623,6 +623,27 @@ check('the swap route enforces capacity-safe in-place exchange, gender-separate 
   && /Gender-separate groups cannot exchange students of different genders/.test(src('functions/lib/cgm/routes-activities.ts'))
   && /cgm\.assignment\.swapped/.test(src('functions/lib/cgm/routes-activities.ts')));
 
+// ---------------------------------------------------------------------------
+// 21. Student continue-cards + honest profile identity fields
+// ---------------------------------------------------------------------------
+section('21. Student continue-cards + profile identity');
+const ccPortal = src('src/components/ClassGroups/StudentPortal.tsx');
+
+check('each grouping activity is a state-aware continue card, visually distinct from plain lists',
+  /cgm-student-activity-card/.test(ccPortal)
+  && /border-emerald-300 bg-gradient-to-r from-emerald-50 via-white to-amber-50\/70/.test(ccPortal)
+  && /Continue — you are in \$\{mine\.group_name\}/.test(ccPortal)
+  && /Random selection — tap to draw your group/.test(ccPortal)
+  && /Continue — choose your group/.test(ccPortal));
+check('live activities carry a Continue pill and forced-random ones a gold Random badge',
+  /text-white">Continue<\/span>/.test(ccPortal)
+  && /bg-amber-200 px-2 py-0\.5 text-\[9px\] font-black uppercase tracking-wider text-amber-800">Random<\/span>/.test(ccPortal));
+check('the profile shows every identity field with its real value — fixed index number included, read-only',
+  /\['index_number', 'Index number \(fixed\)', 'indexNumber', false\]/.test(ccPortal)
+  && /\['full_name', 'Full name', 'fullName', true\]/.test(ccPortal)
+  && /Not set yet/.test(ccPortal) && /Not provided/.test(ccPortal)
+  && /const currentValue = \(displayKey: string\)/.test(ccPortal));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

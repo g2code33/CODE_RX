@@ -21,6 +21,7 @@ test suites — nothing is aspirational.**
 | Surface | Implementation |
 |---|---|
 | Student identities | Separate from Society members; identified by **index number only** (university ID was removed entirely — roster, members, sign-in, register, profile fields, reports); register = index number + shared class entry password → pending → organizer approval → **permanent passkey shown once** (tiers run `a–z → aa–az → ba–bz → …` but the order **inside each tier is scattered** — a fixed permutation, `(17·p + 11) mod tier` — so keys are never guessable alphabetically; bijective per tier, no omissions, never reset or reused, `UNIQUE(passkey_sequence)`, and a suffix already held by a legacy sequential key is skipped, never reissued); the organizer may set a **per-class passkey mark** (the letters in front, e.g. `bio1`) in Settings — default stays `rx30`, issued passkeys are `<mark><suffix>` while the ONE global suffix sequence continues, and **existing passkeys are never rewritten** |
+| Student portal UX | grouping activities in the class page render as **state-aware continue cards** (emerald→gold gradient, icon tile, a green **Continue** pill on live activities, a gold **Random** badge in forced-random mode, and a hint that says exactly where the student stands — "choose your group", "tap to draw your group", or "you are in {group}"); **My Profile shows every identity field with its real value** — the fixed index number included, read-only — instead of blanks, with "Not set yet"/"Not provided" where a value is genuinely missing (the projection is camelCase and the card previously read snake_case, showing "—" for fields the student obviously had) |
 | Task-12 student surface | **Index numbers accept every format** — register and login normalise case and separators (`PH/PHA/24/0292` ≡ `ph-pha-24-0292` ≡ `ph pha 24 0292` ≡ `ph.pha.24.0292`), with the expected pattern shown as a hint under the inputs; the **passkey reveal is its own page** (the registration form disappears) showing the one-time key plus **every detail on file** (name, index, phone, email, gender, class); **gender self-service** — a student with no recorded gender sets it in the class page before choosing a group in a gender-balanced activity (server returns 428 until set; organizer-set values are locked); a phone-first student who claims a roster-bound personal invitation gets the **roster identity backfilled** (name + index) |
 | Student sign-in | **Passkey is the lookup key** (login resolves the student by its sequence); the organizer-controlled identifier (index number — in any case/separator format — or phone) is the confirming half. University ID is NOT a sign-in or identity field anywhere. 8 identifier failures → 20-minute lockout. Wrong passkey is an *anonymous* failure and can never count per account (anti-enumeration) |
 | Organizer lifecycle | Member applies → EmailJS verification link → PHANTOM approve / reject / correction / **suspend / reinstate / revoke** (with reason). No self-approval anywhere. Suspension revokes every team seat; reinstatement restores exactly what it revoked |
@@ -161,8 +162,8 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (34 sections) | `npm run test:cgm` | **654/654** |
-| Module UI (markup-level, 20 sections) | `npm run test:cgm-ui` | **239/239** |
+| Module API (34 sections) | `npm run test:cgm` | **656/656** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **242/242** |
 | Browser journeys (jsdom + wrangler pages dev, 25 checks) | `npm run test:cgm-browser` | **25/25** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
@@ -327,7 +328,7 @@ src/lib/cgm.ts                         # typed client, duplicate guard, offline 
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 654 API-level checks, 34 sections
-scripts/cgm-ui-tests.mjs               # 239 markup-level checks, 20 sections
+scripts/cgm-tests.mjs                  # 656 API-level checks, 34 sections
+scripts/cgm-ui-tests.mjs               # 242 markup-level checks, 21 sections
 scripts/cgm-browser-check.mjs          # 25 jsdom browser journeys vs wrangler dev
 ```

@@ -3219,6 +3219,14 @@ check('the student portal hides manual picking in forced random mode and explain
   /const forcedRandom = data\.activity\.config\?\.method === 'random'/.test(portalSrc3)
   && /Your organizer set this activity to random selection/.test(portalSrc3));
 check('forced random mode removes the pick-grid and the auto button for students', (portalSrc3.match(/!forcedRandom && /g) || []).length >= 2);
+check('grouping activities render as distinctive state-aware continue cards (icon tile, Continue pill, random badge, drawn-group hint)',
+  /cgm-student-activity-card/.test(portalSrc3) && /Continue — you are in \$\{mine\.group_name\}/.test(portalSrc3)
+  && /Random selection — tap to draw your group/.test(portalSrc3)
+  && /bg-emerald-600 px-2 py-0\.5 text-\[9px\] font-black uppercase tracking-wider text-white">Continue</.test(portalSrc3));
+check('the profile shows fixed identity fields with their real values (camelCase /student/me keys, never blank)',
+  /\['full_name', 'Full name', 'fullName', true\]/.test(portalSrc3)
+  && /\['index_number', 'Index number \(fixed\)', 'indexNumber', false\]/.test(portalSrc3)
+  && /const currentValue = \(displayKey: string\)/.test(portalSrc3));
 
 // ---------------------------------------------------------------------------
 

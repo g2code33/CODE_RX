@@ -690,15 +690,31 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
         <div className={card}>
           <p className={label}>Grouping activities</p>
           <div className="mt-3 space-y-2">
-            {data.activities.map((activity: any) => (
-              <button key={activity.id} type="button" onClick={() => onOpenActivity(Number(activity.id))} className="flex w-full items-center justify-between rounded-xl border border-slate-100 px-4 py-3 text-left transition hover:border-emerald-200">
-                <div>
-                  <p className="text-sm font-black text-slate-800">{activity.name}</p>
-                  <p className="text-[11px] font-semibold text-slate-400">{activity.type} · {activity.status}</p>
-                </div>
-                <ChevronRight className="h-4 w-4 text-emerald-500" />
-              </button>
-            ))}
+            {data.activities.map((activity: any) => {
+              const live = ['open', 'published', 'active'].includes(String(activity.status));
+              const forced = activity.config?.method === 'random';
+              const mine = (data.myGroups || []).find((row: any) => Number(row.activity_id) === Number(activity.id));
+              const hint = mine
+                ? `Continue — you are in ${mine.group_name}`
+                : !live ? 'Not open right now'
+                : forced ? 'Random selection — tap to draw your group'
+                : 'Continue — choose your group';
+              return (
+                <button key={activity.id} type="button" data-testid="cgm-student-activity-card" onClick={() => onOpenActivity(Number(activity.id))} className={`group flex w-full items-center gap-3 rounded-2xl border-2 px-4 py-3.5 text-left transition ${live ? 'border-emerald-300 bg-gradient-to-r from-emerald-50 via-white to-amber-50/70 hover:border-emerald-400 hover:shadow-[0_10px_24px_-12px_rgba(16,185,129,0.5)]' : 'border-slate-100 bg-slate-50/60'}`}>
+                  <span aria-hidden="true" className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg ${live ? 'bg-emerald-600 text-white shadow-[0_6px_14px_-6px_rgba(5,150,105,0.7)]' : 'bg-slate-200 text-slate-500'}`}>{live ? (forced ? '✨' : '👥') : '🗂'}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="truncate text-sm font-black text-slate-900">{activity.name}</span>
+                      {live && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-white">Continue</span>}
+                      {live && forced && <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-amber-800">Random</span>}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[11px] font-bold text-slate-500">{hint}</span>
+                    <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">{activity.type} · {activity.status}</span>
+                  </span>
+                  <ChevronRight className="h-5 w-5 shrink-0 text-emerald-600 transition group-hover:translate-x-0.5" />
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1439,12 +1455,14 @@ const NotificationsView = ({ onChanged }: { onChanged: () => void }) => {
   );
 };
 
-const PROFILE_FIELDS: Array<[string, string, boolean]> = [
-  ['full_name', 'Full name', true],
-  ['phone', 'Telephone number', true],
-  ['gender', 'Gender', true],
-  ['email', 'Email address', true],
-  ['index_number', 'Index number (fixed)', false],
+// [change-request field (server vocabulary), label, key on /student/me
+// (camelCase — publicStudent projects fullName/indexNumber), changeable]
+const PROFILE_FIELDS: Array<[string, string, string, boolean]> = [
+  ['full_name', 'Full name', 'fullName', true],
+  ['phone', 'Telephone number', 'phone', true],
+  ['gender', 'Gender', 'gender', true],
+  ['email', 'Email address', 'email', true],
+  ['index_number', 'Index number (fixed)', 'indexNumber', false],
 ];
 
 const ProfileView = ({ me, onChanged }: { me: any; onChanged: () => void }) => {
@@ -1458,9 +1476,12 @@ const ProfileView = ({ me, onChanged }: { me: any; onChanged: () => void }) => {
   const [newPw, setNewPw] = useState('');
 
   const student = me?.student || {};
-  const currentValue = (key: string) => {
-    if (key === 'gender') return student.gender || 'unknown';
-    return (student as any)[key] || '—';
+  // Fixed identity fields are SHOWN (read-only) so students always know what
+  // is on file — only the change-request form treats them as locked.
+  const currentValue = (displayKey: string) => {
+    if (displayKey === 'gender') return student.gender && student.gender !== 'unknown' ? student.gender : 'Not set yet';
+    const value = (student as any)[displayKey];
+    return value ? String(value) : 'Not provided';
   };
 
   return (
@@ -1469,10 +1490,10 @@ const ProfileView = ({ me, onChanged }: { me: any; onChanged: () => void }) => {
         <p className={label}>My profile</p>
         <h2 className="mt-1 text-xl font-black text-slate-900">{student.fullName}</h2>
         <dl className="mt-4 grid gap-2 sm:grid-cols-2">
-          {PROFILE_FIELDS.map(([key, text]) => (
+          {PROFILE_FIELDS.map(([key, text, displayKey]) => (
             <div key={key} className="rounded-xl bg-slate-50 px-4 py-3">
               <dt className={label}>{text}</dt>
-              <dd className="mt-0.5 text-sm font-bold text-slate-800">{currentValue(key)}</dd>
+              <dd className="mt-0.5 text-sm font-bold text-slate-800">{currentValue(displayKey)}</dd>
             </div>
           ))}
         </dl>
