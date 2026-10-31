@@ -34,6 +34,7 @@ test suites — nothing is aspirational.**
 | Member sheet | **print or download every member of a group** from its workspace: the **Member sheet** panel lets the organizer pick the columns (Full name always; Index number, Role, Joined via optional; **Phone / Email / Gender appear only when the viewer holds `view_sensitive_profiles`** — the dossier itself strips those columns otherwise), type a **group agenda** (saved on the group via `PATCH`, re-shown every visit) and **AOB** (per-sheet only), insert **blank columns at any position** (optional header, splices a write-in cell into every member row) and **blank write-in row batches at any position** (ruled lines in all three outputs, never counted as members), then **Print** (hidden-iframe), **Download PNG** (1240-px canvas) or **Download PDF** (genuine multi-page A4 document, agenda preamble on page one, table header repeated on continuation pages) — all dependency-free (`src/lib/groupSheet.ts`, byte-level unit-tested through an esbuild bundle); every sheet carries the CODE Rx header band, class · activity · date line, big title with the member count, the saved topic and agenda, the striped member table and an AOB block |
 | Workspace hub | **the group workspace is a hub**: the overview shows all nine section cards at a glance, a **hamburger (☰ All sections)** opens a slide-in drawer (overview + nine sections with hints), and every section — Members, Member sheet, Leadership, Elections, Announcements, Notify, WhatsApp, Settings, History — **opens as a full page of its own** with a back-to-overview escape and the most detailed view of that part: Members with search, seats/leaders/joined-via stats and per-member index + via chips; Elections with the lifecycle explained plus anonymity and opened dates; Announcements as a full feed with authors and dates; Settings with the identity facts grid + topic + agenda + capacity; History as a full timestamped list (dossier events cap raised 15 → 40) |
 | Student WhatsApp join | **the moment a student gets a group** — by choosing it, auto-placement, or closing the random-draw reveal — they land on a dedicated **join page**: the group's QR code (downloadable PNG), a **Copy link** button (clipboard API with textarea fallback), an **Open chat** link and the one-tap **Join WhatsApp group** button (click recorded, never treated as join-proof); before the organizer saves a link the page says so honestly; the group card's button opens the same page. The Groups-page **per-card WhatsApp editor is gone** (it never worked and duplicated the workspace) — all link management lives in the workspace's WhatsApp section |
+| Passkey requests | **passkeys are always system-generated — students never invent one**: a student proves the CURRENT passkey and sends a change request; the organizer sees it in the Students area, **Approve & notify** (opening a Generate button for exactly that student, announced by a direct notification) or **Decline** (they are told too); Generate allocates the next unique passkey from the same atomic global sequence registration uses — the class mark is kept, the suffix is never user-chosen so it can never clash — shown once with sessions revoked and a fresh session issued. The old choose-your-own self-change route is gone (404). Table `cgm_passkey_requests`; audits `cgm.passkey.change_requested / request_approved / request_declined / generated`, never carrying a passkey value |
 | Random selection | **Random Group Selection** — a per-student "let the system pick" button in My Groups, available in self/hybrid activities and FORCED everywhere when the organizer sets the assignment method to **Random selection (system picks for every student)**: in forced mode students cannot pick a group or auto-place (server refuses both with a pointed explanation) — the fair draw is the only way in, and the organizer's **Assign remaining (random mode)** sweeps any student who never drew onto balanced groups afterwards; the SERVER draws the winner with `secureUniformIndex` (cryptographic rejection sampling over 32-bit words — zero modulo bias, exactly uniform across every open group), and **the assignment is persisted BEFORE any animation plays** — the reveal only replays what the database already decided, so skipping it, closing it, or reloading lands on the identical group; recorded with event reason "random draw" + audit `cgm.assignment.random_draw` (stored as `via='self'` — the schema's CHECK makes a dedicated value a destructive rebuild); the reveal is a premium full-screen overlay in the module's emerald + gold + ivory language (blurred blue-white atmosphere with gold/green sparkles, white title panel with green border, golden orbital carousel of group cards easing to a stop dead-centre with glow + rays + confetti, dark-emerald "Selecting your group…" status pill, white "Congratulations! You are assigned to …" panel, 3-stage progress Processing… / Random Selection… / Complete!); group names are fully DYNAMIC from the database (2 to 20+ groups via a recycled strip, the winner's full name never truncated); Skip animation, `prefers-reduced-motion`, sound **off by default**, Escape closes, navigation never blocked; equal-probability draw is deliberately SEPARATE from the balanced class-assignment engine |
 | Assignment | methods A (organizer-auto) / B (self-service) / C (hybrid with deadline) / **D (forced random)**; balanced sizes, hard capacity, randomized tie-breaks, idempotent regenerate, **capacity races closed by an atomic guarded INSERT**; gender balanced/separate/none with never-infer semantics; overflow waitlist/block/organizer; moves with approval + capacity re-check + seat restoration; late students placed without reshuffle; **planned groups with real names** — the activity form decides the naming scheme (Numbered `Group 1, Group 2…` / Lettered `Group A, Group B…` / custom comma-separated names), every creation path names groups from that scheme, **going live (publish/open/resume/reopen) DEFINES the planned groups automatically** — created named and ready, so a random activity needs no manual staging — the plan stays **editable until the first student is placed** (then it locks to protect what students see), and every plan save re-syncs the real groups (creates the shortfall, renames positionally, archives emptied surplus); the **Groups page cannot change the plan**: it shows a read-only planned strip (planned count, created so far, naming, capacity) and a **Change in activity settings** jump, so counts and target sizes live only in the activity editor and everything stays uniform; the card is **mode-aware** — organizer-auto activities show the balanced place-all, self/hybrid show the finisher, and a random activity shows ONLY the fair finisher (no place-all that could bypass the draw, no staging button — the live sync already created the groups); **direct organizer swaps** — exchange any two assigned members between their groups in one action (sizes unchanged so capacities hold by construction, gender-separate activities refuse mixed swaps, a swapped leader's vacancy resolves through the activity's succession rule, both students notified, history events + audit `cgm.assignment.swapped`, guarded by the same `move_students` permission as every membership change with **PHANTOM able to swap in any class**) |
 | Elections | group-level, members only; **the organizer generates a voting link (copy + downloadable stamped QR) that signs the student in and lands straight on the ballot**; students get a real My Elections list and persistent sign-in; anonymous (salted pseudonym ballots) or public; one vote per voter **enforced by a unique index and an atomic participation+ballot batch**; optional vote change (default off); configurable nomination/voting windows; tie-break chosen upfront (runoff / appointment / secure random / manual); results hidden until close; official announcement; cancel/restart with reason |
@@ -153,7 +154,13 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 - Legacy suites are kept green by construction: `client-portal-tests.mjs` counts
   tables (`63 + 11 + 3 + 41`) and excludes `idx_cgm%` from its legacy index count.
 - Migration safety: every CGM addition is additive (`CREATE TABLE IF NOT EXISTS`
-  / guarded ALTERs); **no destructive migration exists**. **Production D1
+  / guarded ALTERs); **no destructive migration exists**. **DISCIPLINE
+  (learned 2026-10-31): `runSafeMigrations` only executes when
+  `VAULT_SCHEMA_VERSION` changes, and a live production database keeps its
+  old stamp — the `agenda` column shipped once WITHOUT a bump and production
+  500'd on the dossier until the version was bumped to code-rx23. Every new
+  SAFE_MIGRATIONS entry MUST bump the version in the same commit (pinned by
+  the suites).** **Production D1
   verified 2026-10-31 by the maintainer** via `npx wrangler d1 execute
   code-rx-db --remote --command "SELECT name FROM sqlite_master WHERE name LIKE
   'cgm_%'"`: all 41 `cgm_` tables present, including `cgm_module_policies` —
@@ -166,8 +173,8 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (38 sections) | `npm run test:cgm` | **701/701** |
-| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **252/252** |
+| Module API (38 sections) | `npm run test:cgm` | **714/714** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **257/257** |
 | Browser journeys (jsdom + wrangler pages dev, 34 checks) | `npm run test:cgm-browser` | **34/34** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
@@ -226,6 +233,13 @@ student join-page pins, and a fixture fix that killed a real flake: the
 §33 organizer-finish sweep raced a 20-seat cap against the whole fmt roster's
 random order and sometimes waitlisted the swept student (six consecutive
 green runs at 701 after seating the full roster);
+§20 the passkey-request battery (wrong proof 400, one open request per
+student, generating before approval 403, organizer list → approve → the
+student notified directly → generate → unique class-marked passkey shown
+once, sessions rotated, the old passkey dead, re-request after completion,
+decline blocks generation, the legacy choose-your-own route 404, and the
+class mark kept on generated keys — with downstream logins re-wired to the
+generated passkeys);
 §24 the invitation continuation journey (all twelve acceptance scenarios);
 §25 policy transitions with pending rows + data retention; §30 the Task-12
 batch (scattered passkey tiers with the legacy-suffix skip rule, tolerant
@@ -362,7 +376,7 @@ src/lib/cgm.ts                         # typed client, duplicate guard, offline 
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 701 API-level checks, 38 sections
-scripts/cgm-ui-tests.mjs               # 252 markup-level checks, 21 sections
+scripts/cgm-tests.mjs                  # 714 API-level checks, 38 sections
+scripts/cgm-ui-tests.mjs               # 257 markup-level checks, 21 sections
 scripts/cgm-browser-check.mjs          # 34 jsdom browser journeys vs wrangler dev
 ```
