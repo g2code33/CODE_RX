@@ -1511,7 +1511,6 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   const [showQr, setShowQr] = useState(false);
   // The member sheet: choose the columns, save the group agenda, add AOB,
   // then print it or download it as PNG / PDF.
-  const [showSheet, setShowSheet] = useState(false);
   const [agenda, setAgenda] = useState<string | null>(null);
   const [sheetAob, setSheetAob] = useState('');
   const [sheetFields, setSheetFields] = useState({ indexNumber: true, role: true, phone: false, email: false, gender: false, via: false });
@@ -1522,6 +1521,11 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   const [blankRows, setBlankRows] = useState<Array<{ position: number; count: number }>>([]);
   const [blankRowPos, setBlankRowPos] = useState('');
   const [blankRowCount, setBlankRowCount] = useState('1');
+  // Hub-and-sections navigation: the hamburger opens the drawer, a section id
+  // renders that section as a full page of its own.
+  const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [memberSearch, setMemberSearch] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -1601,13 +1605,439 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   const others = allGroups.filter((entry: any) => Number(entry.id) !== Number(groupId));
   const rolesOf = (raw: any) => String(raw || '').split(',').filter(Boolean).map((pair) => pair.split(':')[0]);
 
+  // The workspace is a HUB: the overview shows every section at a glance and
+  // the hamburger (or any card's Open) opens that section as a full page of
+  // its own, with the most detailed view of that part of the group.
+  const SECTIONS: Array<{ id: string; title: string; emoji: string; hint: string }> = [
+    { id: 'members', title: 'Members', emoji: '👥', hint: 'Full member list — search, move, swap, add, remove' },
+    { id: 'sheet', title: 'Member sheet', emoji: '🖨', hint: 'Print / download the sheet — columns, agenda, AOB, blanks' },
+    { id: 'leadership', title: 'Leadership', emoji: '⭐', hint: 'Leaders and assistants — appoint, end, review' },
+    { id: 'elections', title: 'Elections', emoji: '🗳️', hint: 'Group elections — nominations, voting, results' },
+    { id: 'announcements', title: 'Announcements', emoji: '📣', hint: 'Posts to this group — compose, pin, read' },
+    { id: 'notify', title: 'Notify members', emoji: '🔔', hint: 'Direct message into every member\u2019s notification tray' },
+    { id: 'whatsapp', title: 'WhatsApp', emoji: '💬', hint: 'Invite link, QR code, member clicks' },
+    { id: 'settings', title: 'Settings', emoji: '⚙️', hint: 'Topic, agenda, capacity and this group\u2019s identity' },
+    { id: 'history', title: 'History', emoji: '🕑', hint: 'Every recorded change for this group' },
+  ];
+  const openSection = (id: string | null) => { setActiveSection(id); setMenuOpen(false); };
+  const sectionMeta = (id: string) => SECTIONS.find((entry) => entry.id === id);
+  const search = memberSearch.trim().toLowerCase();
+  const visibleMembers = search
+    ? detail.members.filter((row: any) => `${row.full_name} ${row.index_number || ''}`.toLowerCase().includes(search))
+    : detail.members;
+  const leaderCount = detail.members.filter((row: any) => rolesOf(row.roles).includes('leader')).length;
+  const viaCounts: Record<string, number> = {};
+  detail.members.forEach((row: any) => { const key = String(row.assigned_via || 'unknown'); viaCounts[key] = (viaCounts[key] || 0) + 1; });
+
+  // ---- Members -------------------------------------------------------------
+  const membersBlock = (detailed: boolean) => (
+    <>
+      {detailed && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-slate-500">Everyone currently in {group.name}. Move reassigns a member to another group, Swap exchanges two members across groups (sizes stay valid), ✕ removes the member from the activity, and unassigned students can be added below.</p>
+          <input className={inputClass} placeholder="Search members by name or index number…" aria-label="Search members" value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} />
+          <p className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            <span>{group.size}{group.capacity ? ` of ${group.capacity}` : ''} seats filled</span>
+            <span>{leaderCount} leader(s)</span>
+            <span>{(detail.unassigned || []).length} unassigned in the activity</span>
+            {Object.entries(viaCounts).map(([key, count]) => <span key={key}>{count} via {key.replace(/_/g, ' ')}</span>)}
+          </p>
+        </div>
+      )}
+      <ul className="mt-3 space-y-1.5">
+        {visibleMembers.map((row: any) => {
+          const roles = rolesOf(row.roles);
+          return (
+            <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate font-black text-slate-700">{row.full_name}</span>
+                  {roles.includes('leader') && <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Leader</span>}
+                  {roles.includes('assistant') && <span className="rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Assistant</span>}
+                </span>
+                <span className="flex shrink-0 gap-1">
+                  {canMove && others.length > 0 && (
+                    <select className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Move ${row.full_name}`} onChange={(event) => { const target = Number(event.target.value); if (target) void run(() => cgm.assignStudent(Number(activityId), Number(row.id), target), 'Member moved.'); }}>
+                      <option value="">Move…</option>
+                      {others.map((other: any) => <option key={other.id} value={other.id}>{other.name}</option>)}
+                    </select>
+                  )}
+                  {canMove && (detail.otherMembers || []).length > 0 && (
+                    <select className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700" value="" aria-label={`Swap ${row.full_name}`} onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(row.id), partner), 'Members swapped.'); }}>
+                      <option value="">Swap…</option>
+                      {detail.otherMembers.map((partner: any) => <option key={partner.id} value={partner.id}>{partner.full_name} ({partner.group_name})</option>)}
+                    </select>
+                  )}
+                  {canRemove && (
+                    <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.removeAssignment(Number(row.assignment_id)), 'Member removed.')} title="Remove from group">✕</button>
+                  )}
+                </span>
+              </div>
+              <p className="mt-0.5 flex flex-wrap gap-x-3 text-[10px] font-semibold text-slate-400">
+                {row.index_number && <span>Index {row.index_number}</span>}
+                {row.assigned_via && <span>joined via {String(row.assigned_via).replace(/_/g, ' ')}</span>}
+                {detail.viewer?.canSeeSensitive && row.gender && <span>{String(row.gender).replace(/_/g, ' ')}</span>}
+              </p>
+            </li>
+          );
+        })}
+        {!visibleMembers.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">{search ? 'No member matches that search.' : 'No members yet.'}</li>}
+      </ul>
+      {canMove && (detail.unassigned || []).length > 0 && (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a student ({(detail.unassigned || []).length} waiting)</p>
+          <select className={`${inputClass} mt-1.5`} value="" aria-label="Add a student to this group" onChange={(event) => { const studentId = Number(event.target.value); if (studentId) void run(() => cgm.assignStudent(Number(activityId), studentId, groupId), 'Student added to the group.'); }}>
+            <option value="">Choose an unassigned student…</option>
+            {detail.unassigned.map((student: any) => <option key={student.id} value={student.id}>{student.full_name}</option>)}
+          </select>
+        </div>
+      )}
+    </>
+  );
+
+  // ---- Member sheet --------------------------------------------------------
+  const sheetBlock = () => (
+    <div className="space-y-2" data-testid="cgm-member-sheet-panel">
+      <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Member sheet — choose what to include</p>
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] font-bold text-slate-600">
+        <label className="flex items-center gap-1.5"><input type="checkbox" checked disabled /> Full name</label>
+        <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.indexNumber} onChange={(event) => setSheetFields({ ...sheetFields, indexNumber: event.target.checked })} /> Index number</label>
+        <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.role} onChange={(event) => setSheetFields({ ...sheetFields, role: event.target.checked })} /> Role</label>
+        {detail.viewer?.canSeeSensitive ? (
+          <>
+            <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.phone} onChange={(event) => setSheetFields({ ...sheetFields, phone: event.target.checked })} /> Phone</label>
+            <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.email} onChange={(event) => setSheetFields({ ...sheetFields, email: event.target.checked })} /> Email</label>
+            <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.gender} onChange={(event) => setSheetFields({ ...sheetFields, gender: event.target.checked })} /> Gender</label>
+          </>
+        ) : <span className="text-slate-400">Phone / email / gender need the view-sensitive permission</span>}
+        <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.via} onChange={(event) => setSheetFields({ ...sheetFields, via: event.target.checked })} /> Joined via</label>
+      </div>
+      <div>
+        <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-agenda">Group agenda (saved with the group, printed on the sheet)</label>
+        <textarea id="cgm-agenda" className={`${inputClass} mt-1 min-h-16`} placeholder="e.g. 1. Review last week's titration data · 2. Assign write-up sections · 3. Deadline check" value={agenda ?? ''} onChange={(event) => setAgenda(event.target.value)} />
+        <button type="button" disabled={busy} className="mini-button mt-1" onClick={() => void run(() => cgm.updateGroup(groupId, { agenda: agenda ?? '' }), 'Agenda saved.')}>Save agenda</button>
+      </div>
+      <div>
+        <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-aob">AOB / other business (this sheet only)</label>
+        <textarea id="cgm-aob" className={`${inputClass} mt-1 min-h-12`} placeholder="Anything else to appear under AOB on this printout…" value={sheetAob} onChange={(event) => setSheetAob(event.target.value)} />
+      </div>
+      <div className="grid gap-3 border-t border-emerald-100 pt-2 sm:grid-cols-2">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a blank column (write-in)</p>
+          <div className="mt-1 flex gap-1.5">
+            <input className={`${inputClass} w-28`} placeholder="Header (e.g. Sign)" aria-label="Blank column header" value={blankColLabel} onChange={(event) => setBlankColLabel(event.target.value)} />
+            <input className={`${inputClass} w-20`} type="number" min="1" placeholder="Position" aria-label="Blank column position" value={blankColPos} onChange={(event) => setBlankColPos(event.target.value)} />
+            <button type="button" className="mini-button" data-testid="cgm-blank-col-add" onClick={() => {
+              const totalColumns = 1 /* full name */ + (sheetFields.indexNumber ? 1 : 0) + (sheetFields.role ? 1 : 0)
+                + (detail.viewer?.canSeeSensitive ? ((sheetFields.phone ? 1 : 0) + (sheetFields.email ? 1 : 0) + (sheetFields.gender ? 1 : 0)) : 0)
+                + (sheetFields.via ? 1 : 0);
+              const position = Math.min(Math.max(1, Number(blankColPos) || totalColumns + blankCols.length + 1), totalColumns + blankCols.length + 1);
+              setBlankCols([...blankCols, { label: blankColLabel.trim(), position }]);
+              setBlankColLabel(''); setBlankColPos('');
+            }}>+ Add column</button>
+          </div>
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add blank row(s) for handwriting</p>
+          <div className="mt-1 flex gap-1.5">
+            <input className={`${inputClass} w-20`} type="number" min="1" placeholder="How many" aria-label="Blank row count" value={blankRowCount} onChange={(event) => setBlankRowCount(event.target.value)} />
+            <input className={`${inputClass} w-24`} type="number" min="1" placeholder="At row" aria-label="Blank row position" value={blankRowPos} onChange={(event) => setBlankRowPos(event.target.value)} />
+            <button type="button" className="mini-button" data-testid="cgm-blank-row-add" onClick={() => {
+              const memberCount = (detail.members || []).length;
+              const position = Math.min(Math.max(1, Number(blankRowPos) || memberCount + 1), memberCount + 1);
+              setBlankRows([...blankRows, { position, count: Math.max(1, Number(blankRowCount) || 1) }]);
+              setBlankRowPos(''); setBlankRowCount('1');
+            }}>+ Add row(s)</button>
+          </div>
+        </div>
+      </div>
+      {(blankCols.length > 0 || blankRows.length > 0) && (
+        <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-bold text-slate-500">
+          {blankCols.map((blank, index) => (
+            <span key={`col-${index}-${blank.position}`} className="rounded-full bg-white px-2 py-0.5" data-testid="cgm-blank-col-list">
+              blank column @ {blank.position}{blank.label ? ` “${blank.label}”` : ''}
+              <button type="button" className="ml-1 font-black text-red-500" aria-label="Remove blank column" onClick={() => setBlankCols(blankCols.filter((_, i) => i !== index))}>✕</button>
+            </span>
+          ))}
+          {blankRows.map((band, index) => (
+            <span key={`row-${index}-${band.position}`} className="rounded-full bg-white px-2 py-0.5" data-testid="cgm-blank-row-list">
+              {band.count} blank row(s) @ {band.position}
+              <button type="button" className="ml-1 font-black text-red-500" aria-label="Remove blank rows" onClick={() => setBlankRows(blankRows.filter((_, i) => i !== index))}>✕</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="text-[10px] font-medium text-slate-400">
+        Sheet preview: {(() => { const sheet = buildSheet(); return sheet ? `${sheet.columns.length} column(s) · ${sheet.rows.length} member row(s)${blankRows.length ? ` + ${blankRows.reduce((sum, band) => sum + band.count, 0)} blank row(s)` : ''}` : '0'; })()}
+      </p>
+      <div className="flex flex-wrap gap-1.5 pt-1">
+        <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPng(sheet); }}>Download PNG</button>
+        <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPdf(sheet); }}>Download PDF</button>
+        <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) printGroupSheet(sheet); }}>Print</button>
+      </div>
+    </div>
+  );
+
+  // ---- Leadership ------------------------------------------------------------
+  const leadershipBlock = (detailed: boolean) => (
+    <>
+      {detailed && <p className="text-xs font-medium text-slate-500">Leaders and assistants carry their badges everywhere students see the group — dashboards, ballots and attendance. Appoint from the current members below; End removes the seat without touching the member. Elections can also fill this role: create one in the Elections section and students vote.</p>}
+      <ul className="mt-3 space-y-1.5">
+        {detail.leadership.filter((seat: any) => seat.status === 'active').map((seat: any) => (
+          <li key={seat.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
+            <span className="font-bold text-slate-700">{seat.full_name} <span className="ml-1 rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">{seat.role}</span></span>
+            {canAppoint && <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.endLeadership(Number(seat.id)), 'Leadership ended.')}>End</button>}
+          </li>
+        ))}
+        {!detail.leadership.some((seat: any) => seat.status === 'active') && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No leader appointed yet.</li>}
+      </ul>
+      {detailed && detail.leadership.some((seat: any) => seat.status !== 'active') && (
+        <div className="mt-3">
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Leadership record (ended seats)</p>
+          <ul className="mt-1.5 space-y-1">
+            {detail.leadership.filter((seat: any) => seat.status !== 'active').map((seat: any) => (
+              <li key={seat.id} className="rounded-lg bg-white px-3 py-1.5 text-[11px] text-slate-400 line-through">{seat.full_name} — {seat.role} ({seat.status})</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {canAppoint && group.size > 0 && (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Appoint from members</p>
+          <div className="mt-1.5 flex gap-2">
+            <select className={inputClass} id="cgm-appoint-role" aria-label="Role to appoint" defaultValue="leader">
+              <option value="leader">Leader</option>
+              <option value="assistant">Assistant</option>
+            </select>
+            <select className={`${inputClass} flex-1`} id="cgm-appoint-member" aria-label="Member to appoint" value="" onChange={(event) => { const studentId = Number(event.target.value); const role = (window.document.getElementById('cgm-appoint-role') as HTMLSelectElement).value; if (studentId) void run(() => cgm.appointLeader(groupId, { studentId, role }), 'Appointed.'); }}>
+              <option value="">Choose member…</option>
+              {detail.members.map((row: any) => <option key={row.id} value={row.id}>{row.full_name}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+    </>
+  );
+
+  // ---- Elections -------------------------------------------------------------
+  const electionsBlock = (detailed: boolean) => (
+    <>
+      {detailed && <p className="text-xs font-medium text-slate-500">Lifecycle: nominations open on creation → you open voting → members of THIS group vote (scoped to the group) → close to finalise, or restart to begin again. Anonymous ballots never show who voted for whom.</p>}
+      <ul className="mt-3 space-y-1.5">
+        {detail.elections.map((election: any) => (
+          <li key={election.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate font-bold text-slate-700">{election.title}</span>
+              <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[9px] font-black uppercase text-slate-600">{election.status}</span>
+            </div>
+            <p className="mt-0.5 text-[10px] text-slate-400">
+              {election.candidates} candidate(s) · {election.ballots} ballot(s) · {election.role}
+              {detailed && election.anonymity ? ` · ${String(election.anonymity)}` : ''}
+              {detailed && election.created_at ? ` · opened ${new Date(election.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : ''}
+            </p>
+            {canManage && (
+              <div className="mt-1 flex gap-1">
+                {election.status === 'nominating' && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'open-voting'), 'Voting opened.')}>Open voting</button>}
+                {election.status === 'voting' && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'close'), 'Voting closed.')}>Close</button>}
+                {['completed', 'closed'].includes(String(election.status)) && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'restart'), 'Election restarted.')}>Restart</button>}
+              </div>
+            )}
+          </li>
+        ))}
+        {!detail.elections.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No elections yet.</li>}
+      </ul>
+      {canAppoint && (
+        <form className="mt-3 space-y-2 border-t border-slate-100 pt-3" onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgm.createElection(groupId, { title: electionTitle || `Group leadership election`, role: 'leader', anonymity: 'anonymous', visibility: 'group', allowVoteChange: false, tieBreak: 'runoff' }); setElectionTitle(''); }, 'Election created — nominations are open.'); }}>
+          <input className={inputClass} placeholder="Election title" aria-label="Election title" value={electionTitle} onChange={(event) => setElectionTitle(event.target.value)} />
+          <button type="submit" disabled={busy} className="mini-button">Create election (opens nominations)</button>
+        </form>
+      )}
+    </>
+  );
+
+  // ---- Announcements ----------------------------------------------------------
+  const announcementsBlock = (detailed: boolean) => (
+    <>
+      {canAnnounce && (
+        <form className="mt-3 space-y-2" onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgm.createAnnouncement(Number(classId), { title: announceTitle, body: announceBody, pinned: announcePinned, activityId: Number(activityId), groupId }); setAnnounceTitle(''); setAnnounceBody(''); setAnnouncePinned(false); }, 'Announcement posted to this group.'); }}>
+          <input className={inputClass} required placeholder="Title" aria-label="Announcement title" value={announceTitle} onChange={(event) => setAnnounceTitle(event.target.value)} />
+          <textarea className={`${inputClass} min-h-16`} required placeholder="Message to this group…" aria-label="Announcement body" value={announceBody} onChange={(event) => setAnnounceBody(event.target.value)} />
+          <label className="flex items-center gap-2 text-[11px] font-bold text-slate-500"><input type="checkbox" checked={announcePinned} onChange={(event) => setAnnouncePinned(event.target.checked)} /> Pin to the top</label>
+          <button type="submit" disabled={busy} className="mini-button">Post to {group.name}</button>
+        </form>
+      )}
+      {detailed && <p className="mt-2 text-[11px] font-medium text-slate-400">These posts reach ONLY this group’s members in their feed (activity-wide posts are marked Activity). Newest and pinned first — {(detail.announcements || []).length} visible.</p>}
+      <ul className="mt-3 space-y-1.5">
+        {(detailed ? detail.announcements : detail.announcements.slice(0, 5)).map((row: any) => (
+          <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate font-bold text-slate-700">{row.pinned ? '📌 ' : ''}{row.title}</span>
+              <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-emerald-700">{Number(row.group_id) === Number(groupId) ? 'This group' : 'Activity'}</span>
+            </div>
+            <p className={`mt-0.5 text-[11px] text-slate-500 ${detailed ? '' : 'line-clamp-2'}`}>{row.body}</p>
+            {detailed && (row.author_label || row.created_at) && <p className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">{row.author_label || ''}{row.author_label && row.created_at ? ' · ' : ''}{row.created_at ? new Date(row.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : ''}</p>}
+          </li>
+        ))}
+        {!detail.announcements.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Nothing announced yet.</li>}
+      </ul>
+    </>
+  );
+
+  // ---- Notify -------------------------------------------------------------------
+  const notifyBlock = (detailed: boolean) => (
+    <>
+      {detailed && <p className="text-xs font-medium text-slate-500">One tap, real messages: the note lands directly in every current member’s notification tray (not email, not WhatsApp), and the send is audited as cgm.group.notified. New members who join later do not retroactively receive it.</p>}
+      <form className="mt-3 space-y-2" onSubmit={(event) => { event.preventDefault(); void run(async () => { const result: any = await cgm.notifyGroup(groupId, { title: notifyTitle || undefined, message: notifyBody }); setNotifyTitle(''); setNotifyBody(''); return result; }, 'Notification sent to every member.'); }}>
+        <input className={inputClass} placeholder="Title (optional)" aria-label="Notification title" value={notifyTitle} onChange={(event) => setNotifyTitle(event.target.value)} />
+        <textarea className={`${inputClass} min-h-16`} required placeholder="Message — lands in every member's notifications" aria-label="Notification message" value={notifyBody} onChange={(event) => setNotifyBody(event.target.value)} />
+        <button type="submit" disabled={busy} className="mini-button">Send to {group.size} member(s)</button>
+      </form>
+    </>
+  );
+
+  // ---- WhatsApp --------------------------------------------------------------------
+  const whatsappBlock = (detailed: boolean) => (
+    <>
+      {detailed && <p className="text-xs font-medium text-slate-500">The link is private to this group: students see a Join WhatsApp page — with this QR code, a copy-link button and an open-chat button — the moment they get the group. Saving replaces the current link; Disable hides it from students without deleting it; Revoke deletes it entirely. Member clicks are counted but are never treated as proof of joining.</p>}
+      {canManageWhatsapp ? (
+        <div className="mt-3 space-y-2">
+          <input className={inputClass} placeholder="Paste the WhatsApp invite link…" value={waUrl ?? ''} onChange={(event) => setWaUrl(event.target.value)} aria-label="WhatsApp invite link" />
+          <div className="flex flex-wrap gap-1.5">
+            <button type="button" disabled={busy} className="mini-button" onClick={() => { if (waUrl) void run(() => cgm.setWhatsApp(groupId, waUrl), 'WhatsApp link saved.'); }}>Save link</button>
+            {waUrl && <a className="mini-button" href={waUrl} target="_blank" rel="noopener noreferrer">Open chat ↗</a>}
+            {waUrl && <button type="button" className="mini-button" onClick={() => setShowQr((current) => !current)}>{showQr ? 'Hide QR' : 'Show QR'}</button>}
+            {detail.whatsapp && ['disable', 'enable', 'revoke'].map((action) => (
+              <button key={action} type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.whatsappAction(groupId, action as any), `Link ${action}d.`)}>{action[0].toUpperCase() + action.slice(1)}</button>
+            ))}
+          </div>
+          {detail.whatsapp && <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{detail.whatsapp.status} · {detail.whatsapp.click_count} member click(s) — clicks are not proof of joining</p>}
+          {showQr && waUrl && <QrBlock url={waUrl} headerText={String(group.name)} footerText="WhatsApp group invite" downloadName={`${String(group.name || 'group').replace(/[^A-Za-z0-9-]+/g, '-')}-whatsapp-qr.png`} downloadable small />}
+        </div>
+      ) : detail.whatsapp ? (
+        <a className="break-all text-xs font-bold text-emerald-700 underline" href={detail.whatsapp.url} target="_blank" rel="noopener noreferrer">{detail.whatsapp.url}</a>
+      ) : <p className="mt-2 text-[11px] text-slate-400">No WhatsApp link yet.</p>}
+    </>
+  );
+
+  // ---- Settings -------------------------------------------------------------------------
+  const settingsBlock = (detailed: boolean) => (
+    <>
+      {detailed && (
+        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
+          {[['Group', String(group.name)], ['Position', `#${group.position || '—'}`], ['Status', String(group.status || activity?.status || '—')],
+            ['Class', String(activity?.className || '—')], ['Activity', String(activity?.name || '—')], ['Assignment method', String(activity?.method || '—')],
+            ['Capacity', group.capacity ? String(group.capacity) : '—'], ['Members', String(group.size)]].map(([key, value]) => (
+            <div key={key} className="contents"><dt className="font-black uppercase tracking-wider text-slate-400">{key}</dt><dd className="font-bold text-slate-700">{value}</dd></div>
+          ))}
+        </dl>
+      )}
+      {canManage && (
+        <div className="mt-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div>
+              <label className={label} htmlFor="cgm-group-capacity">Capacity for THIS group</label>
+              <input id="cgm-group-capacity" type="number" min="1" max="200" className={`${inputClass} mt-1 w-32`} value={capacity} onChange={(event) => setCapacity(event.target.value)} />
+            </div>
+            <button type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.updateGroup(groupId, { capacity: Number(capacity) }), 'Capacity saved.')}>Save capacity</button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-52 flex-1">
+              <label className={label} htmlFor="cgm-settings-topic">Group topic</label>
+              <input id="cgm-settings-topic" className={`${inputClass} mt-1 w-full`} placeholder="What this group is working on" value={topic ?? ''} onChange={(event) => setTopic(event.target.value)} />
+            </div>
+            <button type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.updateGroup(groupId, { topic: topic ?? '' }), 'Topic saved.')}>Save topic</button>
+          </div>
+          <div>
+            <label className={label} htmlFor="cgm-settings-agenda">Group agenda (printed on the member sheet)</label>
+            <textarea id="cgm-settings-agenda" className={`${inputClass} mt-1 min-h-16`} value={agenda ?? ''} onChange={(event) => setAgenda(event.target.value)} />
+            <button type="button" disabled={busy} className="mini-button mt-1" onClick={() => void run(() => cgm.updateGroup(groupId, { agenda: agenda ?? '' }), 'Agenda saved.')}>Save agenda</button>
+          </div>
+          <p className="text-[11px] font-medium text-slate-400">The plan in the activity settings creates and names the groups; this page only tunes THIS group (capacity can never drop below its current size).</p>
+        </div>
+      )}
+    </>
+  );
+
+  // ---- History -----------------------------------------------------------------------------
+  const historyBlock = (detailed: boolean) => (
+    <>
+      <ul className="mt-3 space-y-1">
+        {(detailed ? detail.events : detail.events.slice(0, 8)).map((row: any) => (
+          <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-1.5 text-[11px] text-slate-600">
+            <span className="font-bold text-slate-800">{row.full_name}</span> — {row.action}{row.reason ? ` · ${row.reason}` : ''}{row.actor_label ? ` · by ${row.actor_label}` : ''}
+            {detailed && row.created_at ? <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400">{new Date(row.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span> : ''}
+          </li>
+        ))}
+        {!detail.events.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Nothing recorded yet.</li>}
+      </ul>
+      {detailed && <p className="mt-2 text-[11px] font-medium text-slate-400">Moves, swaps, additions, removals and self-assignments that touched this group — newest first. The same events appear on the activity-wide report.</p>}
+    </>
+  );
+
+  const sectionBlocks: Record<string, () => any> = {
+    members: () => membersBlock(true),
+    sheet: () => sheetBlock(),
+    leadership: () => leadershipBlock(true),
+    elections: () => electionsBlock(true),
+    announcements: () => announcementsBlock(true),
+    notify: () => notifyBlock(true),
+    whatsapp: () => whatsappBlock(true),
+    settings: () => settingsBlock(true),
+    history: () => historyBlock(true),
+  };
+  const sectionExplainers: Record<string, string> = {
+    members: 'Everything about who is in this group right now.',
+    sheet: 'A printable working document for this group\u2019s meetings.',
+    leadership: 'Who leads this group and how the seats are managed.',
+    elections: 'Let the group elect its own leaders, fairly and auditably.',
+    announcements: 'Written posts that reach exactly this group\u2019s feed.',
+    notify: 'Push a note into every member\u2019s notification tray.',
+    whatsapp: 'The private invite to this group\u2019s WhatsApp.',
+    settings: 'Tune this one group — the plan still lives in the activity.',
+    history: 'The audit trail of everything that happened here.',
+  };
+
   return (
     <div className="space-y-5" data-testid="cgm-group-workspace">
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" className="mini-button" onClick={onBack}>← Back to groups</button>
+        <button type="button" className="mini-button" data-testid="cgm-workspace-menu" aria-label="Open the workspace sections menu" onClick={() => setMenuOpen(true)}>☰ All sections</button>
+        {activeSection && (
+          <span className="rounded-full bg-emerald-600 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-white" data-testid={`cgm-active-section-${activeSection}`}>
+            {sectionMeta(activeSection)?.emoji} {sectionMeta(activeSection)?.title}
+          </span>
+        )}
         {message && <Banner tone="success">{message}</Banner>}
         {error && <Banner tone="error">{error}</Banner>}
       </div>
+
+      {menuOpen && (
+        <>
+          <div className="fixed inset-0 z-40 bg-slate-900/40" aria-hidden="true" onClick={() => setMenuOpen(false)} />
+          <div className="fixed inset-y-0 right-0 z-50 w-80 max-w-[85vw] overflow-y-auto rounded-l-2xl bg-white p-5 shadow-2xl" data-testid="cgm-workspace-drawer" role="navigation" aria-label="Group workspace sections">
+            <div className="flex items-center justify-between">
+              <p className={label}>{group.name} — sections</p>
+              <button type="button" className="mini-button" aria-label="Close menu" onClick={() => setMenuOpen(false)}>✕</button>
+            </div>
+            <ul className="mt-3 space-y-1.5">
+              <li>
+                <button type="button" className="w-full rounded-xl px-3 py-2 text-left hover:bg-emerald-50" data-testid="cgm-section-jump-overview" onClick={() => openSection(null)}>
+                  <span className="text-sm font-black text-slate-800">🏠 Workspace overview</span>
+                  <span className="block text-[11px] text-slate-400">Every section at a glance</span>
+                </button>
+              </li>
+              {SECTIONS.map((entry) => (
+                <li key={entry.id}>
+                  <button type="button" className={`w-full rounded-xl px-3 py-2 text-left hover:bg-emerald-50 ${activeSection === entry.id ? 'bg-emerald-50' : ''}`} data-testid={`cgm-section-jump-${entry.id}`} onClick={() => openSection(entry.id)}>
+                    <span className="text-sm font-black text-slate-800">{entry.emoji} {entry.title}</span>
+                    <span className="block text-[11px] text-slate-400">{entry.hint}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
 
       {/* Header: identity + topic */}
       <div className="rounded-2xl border-2 border-emerald-200 bg-gradient-to-r from-emerald-50 via-white to-amber-50/60 p-5">
@@ -1627,287 +2057,90 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
         {group.topic && canManage && <p className="mt-1 text-[11px] font-medium text-emerald-700">Current topic: {group.topic}</p>}
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-2">
-        {/* Members */}
-        <div className={card}>
-          <div className="flex items-center justify-between gap-2">
-            <p className={label}>Members ({group.size})</p>
-            <button type="button" className="mini-button" data-testid="cgm-member-sheet" onClick={() => setShowSheet((current) => !current)}>
-              {showSheet ? 'Hide member sheet' : '🖨 Member sheet'}
-            </button>
+      {activeSection === null ? (
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className={card} data-testid="cgm-section-card-members">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>Members ({group.size})</p>
+              <button type="button" className="mini-button" onClick={() => openSection('members')}>Open ↗</button>
+            </div>
+            {membersBlock(false)}
           </div>
-          {showSheet && (
-            <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 space-y-2" data-testid="cgm-member-sheet-panel">
-              <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Member sheet — choose what to include</p>
-              <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] font-bold text-slate-600">
-                <label className="flex items-center gap-1.5"><input type="checkbox" checked disabled /> Full name</label>
-                <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.indexNumber} onChange={(event) => setSheetFields({ ...sheetFields, indexNumber: event.target.checked })} /> Index number</label>
-                <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.role} onChange={(event) => setSheetFields({ ...sheetFields, role: event.target.checked })} /> Role</label>
-                {detail.viewer?.canSeeSensitive ? (
-                  <>
-                    <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.phone} onChange={(event) => setSheetFields({ ...sheetFields, phone: event.target.checked })} /> Phone</label>
-                    <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.email} onChange={(event) => setSheetFields({ ...sheetFields, email: event.target.checked })} /> Email</label>
-                    <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.gender} onChange={(event) => setSheetFields({ ...sheetFields, gender: event.target.checked })} /> Gender</label>
-                  </>
-                ) : <span className="text-slate-400">Phone / email / gender need the view-sensitive permission</span>}
-                <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.via} onChange={(event) => setSheetFields({ ...sheetFields, via: event.target.checked })} /> Joined via</label>
-              </div>
-              <div>
-                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-agenda">Group agenda (saved with the group, printed on the sheet)</label>
-                <textarea id="cgm-agenda" className={`${inputClass} mt-1 min-h-16`} placeholder="e.g. 1. Review last week's titration data · 2. Assign write-up sections · 3. Deadline check" value={agenda ?? ''} onChange={(event) => setAgenda(event.target.value)} />
-                <button type="button" disabled={busy} className="mini-button mt-1" onClick={() => void run(() => cgm.updateGroup(groupId, { agenda: agenda ?? '' }), 'Agenda saved.')}>Save agenda</button>
-              </div>
-              <div>
-                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-aob">AOB / other business (this sheet only)</label>
-                <textarea id="cgm-aob" className={`${inputClass} mt-1 min-h-12`} placeholder="Anything else to appear under AOB on this printout…" value={sheetAob} onChange={(event) => setSheetAob(event.target.value)} />
-              </div>
-              <div className="grid gap-3 border-t border-emerald-100 pt-2 sm:grid-cols-2">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a blank column (write-in)</p>
-                  <div className="mt-1 flex gap-1.5">
-                    <input className={`${inputClass} w-28`} placeholder="Header (e.g. Sign)" aria-label="Blank column header" value={blankColLabel} onChange={(event) => setBlankColLabel(event.target.value)} />
-                    <input className={`${inputClass} w-20`} type="number" min="1" placeholder="Position" aria-label="Blank column position" value={blankColPos} onChange={(event) => setBlankColPos(event.target.value)} />
-                    <button type="button" className="mini-button" data-testid="cgm-blank-col-add" onClick={() => {
-                      const totalColumns = 1 /* full name */ + (sheetFields.indexNumber ? 1 : 0) + (sheetFields.role ? 1 : 0)
-                        + (detail.viewer?.canSeeSensitive ? ((sheetFields.phone ? 1 : 0) + (sheetFields.email ? 1 : 0) + (sheetFields.gender ? 1 : 0)) : 0)
-                        + (sheetFields.via ? 1 : 0);
-                      const position = Math.min(Math.max(1, Number(blankColPos) || totalColumns + blankCols.length + 1), totalColumns + blankCols.length + 1);
-                      setBlankCols([...blankCols, { label: blankColLabel.trim(), position }]);
-                      setBlankColLabel(''); setBlankColPos('');
-                    }}>+ Add column</button>
-                  </div>
-                </div>
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add blank row(s) for handwriting</p>
-                  <div className="mt-1 flex gap-1.5">
-                    <input className={`${inputClass} w-20`} type="number" min="1" placeholder="How many" aria-label="Blank row count" value={blankRowCount} onChange={(event) => setBlankRowCount(event.target.value)} />
-                    <input className={`${inputClass} w-24`} type="number" min="1" placeholder="At row" aria-label="Blank row position" value={blankRowPos} onChange={(event) => setBlankRowPos(event.target.value)} />
-                    <button type="button" className="mini-button" data-testid="cgm-blank-row-add" onClick={() => {
-                      const memberCount = (detail.members || []).length;
-                      const position = Math.min(Math.max(1, Number(blankRowPos) || memberCount + 1), memberCount + 1);
-                      setBlankRows([...blankRows, { position, count: Math.max(1, Number(blankRowCount) || 1) }]);
-                      setBlankRowPos(''); setBlankRowCount('1');
-                    }}>+ Add row(s)</button>
-                  </div>
-                </div>
-              </div>
-              {(blankCols.length > 0 || blankRows.length > 0) && (
-                <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-bold text-slate-500">
-                  {blankCols.map((blank, index) => (
-                    <span key={`col-${index}-${blank.position}`} className="rounded-full bg-white px-2 py-0.5" data-testid="cgm-blank-col-list">
-                      blank column @ {blank.position}{blank.label ? ` “${blank.label}”` : ''}
-                      <button type="button" className="ml-1 font-black text-red-500" aria-label="Remove blank column" onClick={() => setBlankCols(blankCols.filter((_, i) => i !== index))}>✕</button>
-                    </span>
-                  ))}
-                  {blankRows.map((band, index) => (
-                    <span key={`row-${index}-${band.position}`} className="rounded-full bg-white px-2 py-0.5" data-testid="cgm-blank-row-list">
-                      {band.count} blank row(s) @ {band.position}
-                      <button type="button" className="ml-1 font-black text-red-500" aria-label="Remove blank rows" onClick={() => setBlankRows(blankRows.filter((_, i) => i !== index))}>✕</button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              <p className="text-[10px] font-medium text-slate-400">
-                Sheet preview: {(() => { const sheet = buildSheet(); return sheet ? `${sheet.columns.length} column(s) · ${sheet.rows.length} member row(s)${blankRows.length ? ` + ${blankRows.reduce((sum, band) => sum + band.count, 0)} blank row(s)` : ''}` : '0'; })()}
-              </p>
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPng(sheet); }}>Download PNG</button>
-                <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPdf(sheet); }}>Download PDF</button>
-                <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) printGroupSheet(sheet); }}>Print</button>
-              </div>
+          <div className={card} data-testid="cgm-section-card-sheet">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>🖨 Member sheet</p>
+              <button type="button" className="mini-button" data-testid="cgm-member-sheet" onClick={() => openSection('sheet')}>Open ↗</button>
             </div>
-          )}
-          <ul className="mt-3 space-y-1.5">
-            {detail.members.map((row: any) => {
-              const roles = rolesOf(row.roles);
-              return (
-                <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="truncate font-black text-slate-700">{row.full_name}</span>
-                      {roles.includes('leader') && <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Leader</span>}
-                      {roles.includes('assistant') && <span className="rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Assistant</span>}
-                    </span>
-                    <span className="flex shrink-0 gap-1">
-                      {canMove && others.length > 0 && (
-                        <select className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Move ${row.full_name}`} onChange={(event) => { const target = Number(event.target.value); if (target) void run(() => cgm.assignStudent(Number(activityId), Number(row.id), target), 'Member moved.'); }}>
-                          <option value="">Move…</option>
-                          {others.map((other: any) => <option key={other.id} value={other.id}>{other.name}</option>)}
-                        </select>
-                      )}
-                      {canMove && (detail.otherMembers || []).length > 0 && (
-                        <select className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700" value="" aria-label={`Swap ${row.full_name}`} onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(row.id), partner), 'Members swapped.'); }}>
-                          <option value="">Swap…</option>
-                          {detail.otherMembers.map((partner: any) => <option key={partner.id} value={partner.id}>{partner.full_name} ({partner.group_name})</option>)}
-                        </select>
-                      )}
-                      {canRemove && (
-                        <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.removeAssignment(Number(row.assignment_id)), 'Member removed.')} title="Remove from group">✕</button>
-                      )}
-                    </span>
-                  </div>
-                </li>
-              );
-            })}
-            {!detail.members.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No members yet.</li>}
-          </ul>
-          {canMove && (detail.unassigned || []).length > 0 && (
-            <div className="mt-3 border-t border-slate-100 pt-3">
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a student</p>
-              <select className={`${inputClass} mt-1.5`} value="" aria-label="Add a student to this group" onChange={(event) => { const studentId = Number(event.target.value); if (studentId) void run(() => cgm.assignStudent(Number(activityId), studentId, groupId), 'Student added to the group.'); }}>
-                <option value="">Choose an unassigned student…</option>
-                {detail.unassigned.map((student: any) => <option key={student.id} value={student.id}>{student.full_name}</option>)}
-              </select>
+            <p className="mt-2 text-[11px] font-medium text-slate-400">Print or download all members — chosen columns, the saved agenda, AOB, blank write-in columns/rows. {(agenda ?? '').trim() ? 'Agenda saved ✓' : 'No agenda yet.'}{blankCols.length || blankRows.length ? ` · ${blankCols.length} blank column(s), ${blankRows.reduce((sum, band) => sum + band.count, 0)} blank row(s) queued` : ''}</p>
+          </div>
+          <div className={card} data-testid="cgm-section-card-leadership">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>Leadership</p>
+              <button type="button" className="mini-button" onClick={() => openSection('leadership')}>Open ↗</button>
             </div>
-          )}
-        </div>
-
-        {/* Leadership */}
-        <div className={card}>
-          <p className={label}>Leadership</p>
-          <ul className="mt-3 space-y-1.5">
-            {detail.leadership.filter((seat: any) => seat.status === 'active').map((seat: any) => (
-              <li key={seat.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                <span className="font-bold text-slate-700">{seat.full_name} <span className="ml-1 rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">{seat.role}</span></span>
-                {canAppoint && <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.endLeadership(Number(seat.id)), 'Leadership ended.')}>End</button>}
-              </li>
-            ))}
-            {!detail.leadership.some((seat: any) => seat.status === 'active') && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No leader appointed yet.</li>}
-          </ul>
-          {canAppoint && group.size > 0 && (
-            <div className="mt-3 border-t border-slate-100 pt-3">
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Appoint from members</p>
-              <div className="mt-1.5 flex gap-2">
-                <select className={inputClass} id="cgm-appoint-role" aria-label="Role to appoint" defaultValue="leader">
-                  <option value="leader">Leader</option>
-                  <option value="assistant">Assistant</option>
-                </select>
-                <select className={`${inputClass} flex-1`} id="cgm-appoint-member" aria-label="Member to appoint" value="" onChange={(event) => { const studentId = Number(event.target.value); const role = (window.document.getElementById('cgm-appoint-role') as HTMLSelectElement).value; if (studentId) void run(() => cgm.appointLeader(groupId, { studentId, role }), 'Appointed.'); }}>
-                  <option value="">Choose member…</option>
-                  {detail.members.map((row: any) => <option key={row.id} value={row.id}>{row.full_name}</option>)}
-                </select>
-              </div>
+            {leadershipBlock(false)}
+          </div>
+          <div className={card} data-testid="cgm-section-card-elections">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>Elections in this group</p>
+              <button type="button" className="mini-button" onClick={() => openSection('elections')}>Open ↗</button>
             </div>
-          )}
-        </div>
-
-        {/* Elections */}
-        <div className={card}>
-          <p className={label}>Elections in this group</p>
-          <ul className="mt-3 space-y-1.5">
-            {detail.elections.map((election: any) => (
-              <li key={election.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-bold text-slate-700">{election.title}</span>
-                  <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[9px] font-black uppercase text-slate-600">{election.status}</span>
-                </div>
-                <p className="mt-0.5 text-[10px] text-slate-400">{election.candidates} candidate(s) · {election.ballots} ballot(s) · {election.role}</p>
-                {canManage && (
-                  <div className="mt-1 flex gap-1">
-                    {election.status === 'nominating' && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'open-voting'), 'Voting opened.')}>Open voting</button>}
-                    {election.status === 'voting' && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'close'), 'Voting closed.')}>Close</button>}
-                    {['completed', 'closed'].includes(String(election.status)) && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'restart'), 'Election restarted.')}>Restart</button>}
-                  </div>
-                )}
-              </li>
-            ))}
-            {!detail.elections.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No elections yet.</li>}
-          </ul>
-          {canAppoint && (
-            <form className="mt-3 space-y-2 border-t border-slate-100 pt-3" onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgm.createElection(groupId, { title: electionTitle || `Group leadership election`, role: 'leader', anonymity: 'anonymous', visibility: 'group', allowVoteChange: false, tieBreak: 'runoff' }); setElectionTitle(''); }, 'Election created — nominations are open.'); }}>
-              <input className={inputClass} placeholder="Election title" aria-label="Election title" value={electionTitle} onChange={(event) => setElectionTitle(event.target.value)} />
-              <button type="submit" disabled={busy} className="mini-button">Create election (opens nominations)</button>
-            </form>
-          )}
-        </div>
-
-        {/* Announcements + notify */}
-        <div className={card}>
-          <p className={label}>Announcements</p>
+            {electionsBlock(false)}
+          </div>
+          <div className={card} data-testid="cgm-section-card-announcements">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>Announcements</p>
+              <button type="button" className="mini-button" onClick={() => openSection('announcements')}>Open ↗</button>
+            </div>
+            {announcementsBlock(false)}
+          </div>
           {canAnnounce && (
-            <form className="mt-3 space-y-2" onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgm.createAnnouncement(Number(classId), { title: announceTitle, body: announceBody, pinned: announcePinned, activityId: Number(activityId), groupId }); setAnnounceTitle(''); setAnnounceBody(''); setAnnouncePinned(false); }, 'Announcement posted to this group.'); }}>
-              <input className={inputClass} required placeholder="Title" aria-label="Announcement title" value={announceTitle} onChange={(event) => setAnnounceTitle(event.target.value)} />
-              <textarea className={`${inputClass} min-h-16`} required placeholder="Message to this group…" aria-label="Announcement body" value={announceBody} onChange={(event) => setAnnounceBody(event.target.value)} />
-              <label className="flex items-center gap-2 text-[11px] font-bold text-slate-500"><input type="checkbox" checked={announcePinned} onChange={(event) => setAnnouncePinned(event.target.checked)} /> Pin to the top</label>
-              <button type="submit" disabled={busy} className="mini-button">Post to {group.name}</button>
-            </form>
+            <div className={card} data-testid="cgm-section-card-notify">
+              <div className="flex items-center justify-between gap-2">
+                <p className={label}>Notify members directly</p>
+                <button type="button" className="mini-button" onClick={() => openSection('notify')}>Open ↗</button>
+              </div>
+              {notifyBlock(false)}
+            </div>
           )}
-          <ul className="mt-3 space-y-1.5">
-            {detail.announcements.slice(0, 5).map((row: any) => (
-              <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-bold text-slate-700">{row.pinned ? '📌 ' : ''}{row.title}</span>
-                  {Number(row.group_id) === Number(groupId) && <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-emerald-700">This group</span>}
-                </div>
-                <p className="mt-0.5 line-clamp-2 text-[11px] text-slate-500">{row.body}</p>
-              </li>
-            ))}
-            {!detail.announcements.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Nothing announced yet.</li>}
-          </ul>
-        </div>
-
-        {/* Direct notification */}
-        {canAnnounce && (
-          <div className={card}>
-            <p className={label}>Notify members directly</p>
-            <form className="mt-3 space-y-2" onSubmit={(event) => { event.preventDefault(); void run(async () => { const result: any = await cgm.notifyGroup(groupId, { title: notifyTitle || undefined, message: notifyBody }); setNotifyTitle(''); setNotifyBody(''); return result; }, 'Notification sent to every member.'); }}>
-              <input className={inputClass} placeholder="Title (optional)" aria-label="Notification title" value={notifyTitle} onChange={(event) => setNotifyTitle(event.target.value)} />
-              <textarea className={`${inputClass} min-h-16`} required placeholder="Message — lands in every member's notifications" aria-label="Notification message" value={notifyBody} onChange={(event) => setNotifyBody(event.target.value)} />
-              <button type="submit" disabled={busy} className="mini-button">Send to {group.size} member(s)</button>
-            </form>
-          </div>
-        )}
-
-        {/* WhatsApp */}
-        <div className={card}>
-          <p className={label}>WhatsApp group</p>
-          {canManageWhatsapp ? (
-            <div className="mt-3 space-y-2">
-              <input className={inputClass} placeholder="Paste the WhatsApp invite link…" value={waUrl ?? ''} onChange={(event) => setWaUrl(event.target.value)} aria-label="WhatsApp invite link" />
-              <div className="flex flex-wrap gap-1.5">
-                <button type="button" disabled={busy} className="mini-button" onClick={() => { if (waUrl) void run(() => cgm.setWhatsApp(groupId, waUrl), 'WhatsApp link saved.'); }}>Save link</button>
-                {waUrl && <a className="mini-button" href={waUrl} target="_blank" rel="noopener noreferrer">Open chat ↗</a>}
-                {waUrl && <button type="button" className="mini-button" onClick={() => setShowQr((current) => !current)}>{showQr ? 'Hide QR' : 'Show QR'}</button>}
-                {detail.whatsapp && ['disable', 'enable', 'revoke'].map((action) => (
-                  <button key={action} type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.whatsappAction(groupId, action as any), `Link ${action}d.`)}>{action[0].toUpperCase() + action.slice(1)}</button>
-                ))}
-              </div>
-              {detail.whatsapp && <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{detail.whatsapp.status} · {detail.whatsapp.click_count} member click(s) — clicks are not proof of joining</p>}
-              {showQr && waUrl && <QrBlock url={waUrl} headerText={String(group.name)} footerText="WhatsApp group invite" downloadName={`${String(group.name || 'group').replace(/[^A-Za-z0-9-]+/g, '-')}-whatsapp-qr.png`} downloadable small />}
+          <div className={card} data-testid="cgm-section-card-whatsapp">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>WhatsApp group</p>
+              <button type="button" className="mini-button" onClick={() => openSection('whatsapp')}>Open ↗</button>
             </div>
-          ) : detail.whatsapp ? (
-            <a className="break-all text-xs font-bold text-emerald-700 underline" href={detail.whatsapp.url} target="_blank" rel="noopener noreferrer">{detail.whatsapp.url}</a>
-          ) : <p className="mt-2 text-[11px] text-slate-400">No WhatsApp link yet.</p>}
+            {whatsappBlock(false)}
+          </div>
+          {canManage && (
+            <div className={card} data-testid="cgm-section-card-settings">
+              <div className="flex items-center justify-between gap-2">
+                <p className={label}>Group settings</p>
+                <button type="button" className="mini-button" onClick={() => openSection('settings')}>Open ↗</button>
+              </div>
+              {settingsBlock(false)}
+            </div>
+          )}
+          <div className={card} data-testid="cgm-section-card-history">
+            <div className="flex items-center justify-between gap-2">
+              <p className={label}>Recent history</p>
+              <button type="button" className="mini-button" onClick={() => openSection('history')}>Open ↗</button>
+            </div>
+            {historyBlock(false)}
+          </div>
         </div>
-
-        {/* Settings */}
-        {canManage && (
+      ) : (
+        <div className="space-y-3" data-testid={`cgm-section-page-${activeSection}`}>
           <div className={card}>
-            <p className={label}>Group settings</p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <label className={label} htmlFor="cgm-group-capacity">Capacity for THIS group</label>
-                <input id="cgm-group-capacity" type="number" min="1" max="200" className={`${inputClass} mt-1 w-32`} value={capacity} onChange={(event) => setCapacity(event.target.value)} />
+                <p className={label}>{sectionMeta(activeSection)?.emoji} {sectionMeta(activeSection)?.title}</p>
+                <p className="mt-1 text-xs font-medium text-slate-500">{sectionExplainers[activeSection] || sectionMeta(activeSection)?.hint}</p>
               </div>
-              <button type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.updateGroup(groupId, { capacity: Number(capacity) }), 'Capacity saved.')}>Save capacity</button>
+              <button type="button" className="mini-button" data-testid="cgm-section-back" onClick={() => openSection(null)}>← Workspace overview</button>
             </div>
-            <p className="mt-2 text-[11px] font-medium text-slate-400">The plan in the activity settings creates and names the groups; this only tunes this group's capacity (never below its current size).</p>
           </div>
-        )}
-
-        {/* History */}
-        <div className={card}>
-          <p className={label}>Recent history</p>
-          <ul className="mt-3 space-y-1">
-            {detail.events.slice(0, 8).map((row: any) => (
-              <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-1.5 text-[11px] text-slate-600">
-                <span className="font-bold text-slate-800">{row.full_name}</span> — {row.action}{row.reason ? ` · ${row.reason}` : ''}{row.actor_label ? ` · by ${row.actor_label}` : ''}
-              </li>
-            ))}
-            {!detail.events.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Nothing recorded yet.</li>}
-          </ul>
+          <div className={card}>{(sectionBlocks[activeSection] || (() => <p className="text-xs text-slate-400">This section does not exist.</p>))()}</div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

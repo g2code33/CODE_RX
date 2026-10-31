@@ -1111,7 +1111,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(groupId)))[0] || null;
     const events = await asRows<any>(c.env.DB.prepare(
       `SELECT e.*, s.full_name FROM cgm_assignment_events e JOIN cgm_students s ON s.id = e.student_id
-       WHERE e.activity_id = ? AND (e.to_group_id = ? OR e.from_group_id = ?) ORDER BY e.id DESC LIMIT 15`
+       WHERE e.activity_id = ? AND (e.to_group_id = ? OR e.from_group_id = ?) ORDER BY e.id DESC LIMIT 40`
     ).bind(Number(group.activity_id), groupId, groupId));
     const unassigned = await asRows<any>(c.env.DB.prepare(
       `SELECT s.id, s.full_name FROM cgm_activity_eligible e JOIN cgm_students s ON s.id = e.student_id

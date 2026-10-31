@@ -365,6 +365,23 @@ let savedPasskey = '';
     && await page.waitForFor('Leadership', 5_000)
     && await page.waitForFor('Notify members directly', 5_000),
     page.body().slice(0, 200));
+  const menuButton = page.window.document.querySelector('[data-testid="cgm-workspace-menu"]');
+  menuButton && menuButton.click();
+  check('the hamburger opens the workspace drawer listing all nine sections',
+    await page.waitForFor('Workspace overview', 10_000)
+    && await page.waitForFor('Every recorded change for this group', 5_000)
+    && await page.waitForFor('Direct message into every member', 5_000),
+    page.body().slice(0, 200));
+  const historyJump = page.window.document.querySelector('[data-testid="cgm-section-jump-history"]');
+  historyJump && historyJump.click();
+  check('a section opens as its own full page with a way back to the overview',
+    await page.waitForFor('The audit trail of everything that happened here', 10_000)
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-section-page-history"]'))
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-section-back"]')),
+    page.body().slice(0, 200));
+  const sectionBack = page.window.document.querySelector('[data-testid="cgm-section-back"]');
+  sectionBack && sectionBack.click();
+  await page.waitForFor('Members (', 10_000);
   const sheetToggle = page.window.document.querySelector('[data-testid="cgm-member-sheet"]');
   sheetToggle && sheetToggle.click();
   check('the member sheet panel opens with field choices, agenda, AOB and print/PNG/PDF outputs',
