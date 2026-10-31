@@ -3431,6 +3431,53 @@ check('the client library exposes the dossier, settings and notify calls',
   && /notifyGroup: \(groupId: number, body/.test(cgmClientGroup));
 
 // ---------------------------------------------------------------------------
+// 37. Blank-page guard: every JSX component/icon resolves to a real import
+// ---------------------------------------------------------------------------
+section('37. Blank-page guard: no undefined icons or components in the workspace');
+{
+  const wsGuard = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+  const portalGuard = readFileSync(path.join(ROOT, 'src/components/ClassGroups/StudentPortal.tsx'), 'utf8');
+  const resolveImports = (source) => {
+    const imported = new Set();
+    for (const match of source.matchAll(/import\s*{([^}]+)}\s*from\s*['"][^'"]+['"]/g)) {
+      for (const name of match[1].split(',')) {
+        const clean = name.trim().split(/\s+as\s+/).pop().trim();
+        if (clean) imported.add(clean);
+      }
+    }
+    for (const match of source.matchAll(/(?:const|function)\s+([A-Z][A-Za-z0-9]+)/g)) imported.add(match[1]);
+    return imported;
+  };
+  // A candidate counts as a JSX component only when at least one <Name
+  // occurrence sits in a real element position: <Name>, <Name/>, <Name attr.
+  // TypeScript generics (useState<Area>(, Record<Area,, Set<T>, File | null)
+  // are excluded by their following characters. A name that exists anywhere
+  // in the file as a binding (destructured props like (key, text, Icon),
+  // local components) resolves fine at runtime — the guard only fires for
+  // names NEVER declared, which is what blanked the workspace.
+  const jsxComponents = (source) => {
+    const candidates = new Set([...source.matchAll(/<([A-Z][A-Za-z0-9]*)/g)].map((match) => match[1]));
+    const real = new Set();
+    for (const candidate of candidates) {
+      const boundElsewhere = new RegExp(`[(,]\\s*${candidate}\\s*[,)\\]]`).test(source);
+      if (boundElsewhere) continue;
+      const jsxUse = [...source.matchAll(new RegExp('<' + candidate + '(?=[^A-Za-z0-9])', 'g'))].some((match) => {
+        const after = source.slice(match.index + candidate.length + 1, match.index + candidate.length + 3);
+        return !/^\s*[|;,)\]]/.test(after) && !/^>\s*\(/.test(after) && !/^</.test(after);
+      });
+      if (jsxUse) real.add(candidate);
+    }
+    return real;
+  };
+  for (const [name, source] of [['ClassGroupsWorkspace', wsGuard], ['StudentPortal', portalGuard]]) {
+    const imported = resolveImports(source);
+    const missing = [...jsxComponents(source)].filter((component) => !imported.has(component));
+    check(`${name} renders no component or icon that was never imported (blank-page guard)`,
+      missing.length === 0, `missing: ${missing.join(', ') || 'none'}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 

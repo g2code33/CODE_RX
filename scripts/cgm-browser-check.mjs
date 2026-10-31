@@ -334,6 +334,42 @@ let savedPasskey = '';
   check('the organizer workspace shows the Sign out button', await organizerPage.waitForFor('Sign out'), organizerPage.body().slice(0, 200));
 }
 
+// ---------------------------------------------------------------------------
+// 8. The per-group workspace: a group card click opens the full group page
+// ---------------------------------------------------------------------------
+{
+  const wsClass = await makeClass(`Browser Check Group WS ${stamp}`);
+  const wsActivity = await api('POST', `/api/cgm/classes/${wsClass.classId}/activities`, {
+    name: `Browser Check Pods ${stamp}`, type: 'tutorial',
+    config: { method: 'random', groupCount: 3, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, phantomToken);
+  const wsActivityId = wsActivity.json?.data?.activityId ?? wsActivity.json?.data?.id;
+  await api('POST', `/api/cgm/activities/${wsActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+
+  const page = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  const groupsNav = page.buttonByText('Groups');
+  groupsNav && groupsNav.click();
+  check('the organizer reaches the Groups page', await page.waitForFor('Choose an activity', 20_000));
+  const chooser = page.window.document.querySelector('select[aria-label="Choose activity"]');
+  const selectSetter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+  selectSetter.call(chooser, String(wsActivityId));
+  chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  check('the planned groups appear after publishing (defined at publish time)',
+    await page.waitForFor('Group 1', 20_000) && await page.waitForFor('Group 3', 5_000));
+  const groupCard = [...page.window.document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Group 1');
+  groupCard && groupCard.click();
+  check('clicking a group opens its dedicated workspace with every management section',
+    await page.waitForFor('Back to groups', 20_000)
+    && await page.waitForFor('WhatsApp group', 5_000)
+    && await page.waitForFor('Recent history', 5_000)
+    && await page.waitForFor('Leadership', 5_000)
+    && await page.waitForFor('Notify members directly', 5_000),
+    page.body().slice(0, 200));
+  const back = page.buttonByText('Back to groups');
+  back && back.click();
+  check('leaving the workspace returns to the group grid', await page.waitForFor('Create', 20_000) || await page.waitForFor('Choose an activity', 5_000));
+}
+
 // Restore the spec-default policies so the local database stays clean.
 await api('PUT', '/api/cgm/phantom/policies', { policies: [
   { key: 'student_registration_mode', value: 'approval' },
