@@ -468,10 +468,9 @@ export const STUDENT_PROFILE_FIELD_LABELS: Record<StudentProfileField, string> =
   email: 'Email address',
 };
 
-/** Privacy-first default: classmates see names only. Everything else needs a
- * deliberate organizer decision (or a sensitive-data permission). */
+/** Default: classmates see names + contact. Organiser can narrow further. */
 export const defaultClassSettings = (): ClassSettings => ({
-  studentVisibleFields: ['full_name'],
+  studentVisibleFields: ['full_name', 'phone', 'email'],
   sensitiveFields: ['index_number', 'phone', 'email'],
   membershipApprovalRequired: true,
   registrationMode: 'approval',

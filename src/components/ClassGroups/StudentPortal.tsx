@@ -8,6 +8,7 @@ import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { QrBlock } from './ClassGroupsWorkspace';
 import { useCgmNoZoom } from './noZoom';
+import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet, type GroupSheet } from '../../lib/groupSheet';
 
 /**
  * CODE Rx — Student Portal.
@@ -52,6 +53,152 @@ const formatWhen = (value: unknown) => {
   if (minutes < 60) return `${minutes}m ago`;
   if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`;
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
+
+// ---------------------------------------------------------------------------
+// Shared print helpers for student-facing member sheets
+// ---------------------------------------------------------------------------
+
+const buildClassmatesSheet = (className: string, classmates: any[]): GroupSheet => {
+  const dateLabel = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const hasPhone = classmates.some((m: any) => m.phone);
+  const hasEmail = classmates.some((m: any) => m.email);
+  const columns = ['#', 'Full name'];
+  if (hasPhone) columns.push('Phone');
+  if (hasEmail) columns.push('Email');
+  const rows = classmates.map((m: any, idx: number) => {
+    const cells: string[] = [String(idx + 1), String(m.fullName || m.full_name || '')];
+    if (hasPhone) cells.push(String(m.phone || '—'));
+    if (hasEmail) cells.push(String(m.email || '—'));
+    return cells;
+  });
+  return {
+    groupName: `${className} — Classmates`,
+    className,
+    activityName: className,
+    dateLabel,
+    columns,
+    rows,
+    footer: `Generated from CODE Rx on ${dateLabel} · ${className} · Classmates (${classmates.length})`,
+  };
+};
+
+const buildGroupMembersSheet = (groupName: string, className: string, activityName: string, members: any[]): GroupSheet => {
+  const dateLabel = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const hasPhone = members.some((m: any) => m.phone);
+  const hasEmail = members.some((m: any) => m.email);
+  const columns = ['#', 'Full name', 'Role'];
+  if (hasPhone) columns.push('Phone');
+  if (hasEmail) columns.push('Email');
+  const rows = members.map((m: any, idx: number) => {
+    const role = String(m.leader_role || m.leaderRole || '').trim() || 'Member';
+    const displayRole = role.charAt(0).toUpperCase() + role.slice(1);
+    const cells: string[] = [String(idx + 1), String(m.full_name || m.fullName || ''), displayRole];
+    if (hasPhone) cells.push(String(m.phone || '—'));
+    if (hasEmail) cells.push(String(m.email || '—'));
+    return cells;
+  });
+  return {
+    groupName,
+    topic: '',
+    includeTopic: false,
+    className,
+    activityName,
+    dateLabel,
+    columns,
+    rows,
+    footer: `Generated from CODE Rx on ${dateLabel} · ${className} · ${activityName} · ${groupName} (${members.length} members)`,
+  };
+};
+
+const ClassmatesFullPage = ({ className, classmates, onBack }: { className: string; classmates: any[]; onBack: () => void }) => {
+  const sheet = buildClassmatesSheet(className, classmates);
+  return (
+    <div className="space-y-5" data-testid="cgm-classmates-full-page">
+      <button type="button" onClick={onBack} className="mini-button" data-testid="cgm-classmates-back">
+        <ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Back to class
+      </button>
+      <div className={card}>
+        <p className={label}>Classmates — full list</p>
+        <h2 className="mt-1 text-xl font-black text-slate-900">{className}</h2>
+        <p className="mt-1 text-xs font-medium text-slate-500">
+          {classmates.length} classmate(s) · Contact details appear only for fields your organiser made visible.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" className="cgm-primary-button" data-testid="cgm-classmates-download-png" onClick={() => downloadGroupSheetPng(sheet)}>Download PNG</button>
+          <button type="button" className="mini-button" data-testid="cgm-classmates-download-pdf" onClick={() => downloadGroupSheetPdf(sheet)}>Download PDF</button>
+          <button type="button" className="mini-button" data-testid="cgm-classmates-print" onClick={() => printGroupSheet(sheet)}>Print</button>
+        </div>
+      </div>
+      <div className={card}>
+        <p className={label}>All classmates ({classmates.length})</p>
+        {classmates.length ? (
+          <ul className="mt-3 grid gap-1.5 sm:grid-cols-2" data-testid="cgm-classmates-full-list">
+            {classmates.map((member: any) => (
+              <li key={member.studentId ?? member.id ?? member.fullName} className="rounded-xl bg-slate-50 px-4 py-2.5">
+                <p className="text-sm font-bold text-slate-700">{member.fullName || member.full_name}</p>
+                {(member.phone || member.email) && (
+                  <p className="text-[11px] font-semibold text-slate-400">{[member.phone, member.email].filter(Boolean).join(' · ')}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-3 text-xs font-medium text-slate-400">No classmates yet.</p>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const GroupMembersFullPage = ({ groupName, className, activityName, members, currentStudentId, onBack }: { groupName: string; className: string; activityName: string; members: any[]; currentStudentId: number; onBack: () => void }) => {
+  const sheet = buildGroupMembersSheet(groupName, className, activityName, members);
+  return (
+    <div className="space-y-5" data-testid="cgm-group-members-full-page">
+      <button type="button" onClick={onBack} className="mini-button" data-testid="cgm-group-members-back">
+        <ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Back to my group
+      </button>
+      <div className={card}>
+        <p className={label}>Group members — full list</p>
+        <h2 className="mt-1 text-xl font-black text-slate-900">{groupName}</h2>
+        <p className="mt-1 text-xs font-medium text-slate-500">
+          {className} · {activityName} · {members.length} member(s) · Contact details regulated by your organiser.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" className="cgm-primary-button" data-testid="cgm-group-members-download-png" onClick={() => downloadGroupSheetPng(sheet)}>Download PNG</button>
+          <button type="button" className="mini-button" data-testid="cgm-group-members-download-pdf" onClick={() => downloadGroupSheetPdf(sheet)}>Download PDF</button>
+          <button type="button" className="mini-button" data-testid="cgm-group-members-print" onClick={() => printGroupSheet(sheet)}>Print</button>
+        </div>
+      </div>
+      <div className={card}>
+        <p className={label}>All members ({members.length})</p>
+        <ul className="mt-3 space-y-1.5" data-testid="cgm-group-members-full-list">
+          {members.map((member: any) => {
+            const isYou = Number(member.student_id ?? member.studentId) === Number(currentStudentId);
+            const role = String(member.leader_role || member.leaderRole || '').trim();
+            return (
+              <li key={member.student_id ?? member.studentId ?? member.full_name} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-2.5">
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2 text-sm font-bold text-slate-700">
+                    <span className="truncate">{member.full_name || member.fullName}{isYou ? ' (you)' : ''}</span>
+                    {role && (
+                      <span className="shrink-0 rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-white" data-testid="cgm-group-member-leader">
+                        {role}
+                      </span>
+                    )}
+                  </p>
+                  {(member.phone || member.email) && (
+                    <p className="text-[11px] font-semibold text-slate-400">{[member.phone, member.email].filter(Boolean).join(' · ')}</p>
+                  )}
+                </div>
+                {isYou && <span className="shrink-0 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-black uppercase text-sky-700">You</span>}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </div>
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -680,6 +827,7 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
   const [error, setError] = useState<string | null>(null);
   const [genderBusy, setGenderBusy] = useState(false);
   const [genderNote, setGenderNote] = useState<string | null>(null);
+  const [showClassmatesPage, setShowClassmatesPage] = useState(false);
 
   const load = useCallback(async () => {
     try { setData(await cgmStudent.classDashboard(classId)); }
@@ -708,6 +856,10 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
       setGenderNote(failure?.message || 'Could not save your gender.');
     } finally { setGenderBusy(false); }
   };
+
+  if (showClassmatesPage && data) {
+    return <ClassmatesFullPage className={String(data.class.name || 'Class')} classmates={(data.classmates || []) as any[]} onBack={() => setShowClassmatesPage(false)} />;
+  }
 
   return (
     <div className="space-y-5">
@@ -741,11 +893,11 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
       )}
 
       {(data.classmates || []).length > 0 && (
-        <div className={card}>
+        <div className={card} data-testid="cgm-classmates-preview-card">
           <p className={label}>Classmates ({(data.classmates || []).length})</p>
           <p className="mt-1 text-xs font-medium text-slate-500">Contact details appear only for fields your organizer made visible to classmates.</p>
           <ul className="mt-3 grid gap-1.5 sm:grid-cols-2">
-            {(data.classmates || []).map((member: any) => (
+            {(data.classmates || []).slice(0, 2).map((member: any) => (
               <li key={member.studentId} className="rounded-xl bg-slate-50 px-4 py-2.5">
                 <p className="text-sm font-bold text-slate-700">{member.fullName}</p>
                 {(member.phone || member.email) && (
@@ -754,6 +906,16 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
               </li>
             ))}
           </ul>
+          {(data.classmates || []).length > 2 && (
+            <button type="button" className="cgm-primary-button mt-3" data-testid="cgm-classmates-more" onClick={() => setShowClassmatesPage(true)}>
+              More — view all {(data.classmates || []).length} classmates
+            </button>
+          )}
+          {(data.classmates || []).length <= 2 && (data.classmates || []).length > 0 && (
+            <button type="button" className="mini-button mt-3" data-testid="cgm-classmates-view-all-small" onClick={() => setShowClassmatesPage(true)}>
+              View all classmates — print / download
+            </button>
+          )}
         </div>
       )}
 
@@ -861,6 +1023,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
   // auto-placed, or drawn — a full page offers the QR, copy link, open chat
   // and the one-tap Join WhatsApp group button.
   const [waPage, setWaPage] = useState(false);
+  const [showMembersPage, setShowMembersPage] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => { setActivityId(openActivityId); }, [openActivityId]);
@@ -1016,6 +1179,20 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
     );
   }
 
+  if (myGroup && showMembersPage) {
+    const groupMembers = (data.members || []).filter((m: any) => Number(m.group_id) === Number(myGroup.group_id));
+    return (
+      <GroupMembersFullPage
+        groupName={String(myGroup.group_name || `Group ${myGroup.position}`)}
+        className={String(data.class.name || '')}
+        activityName={String(data.activity.name || '')}
+        members={groupMembers}
+        currentStudentId={Number(me.student.id)}
+        onBack={() => setShowMembersPage(false)}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
       <button type="button" className="mini-button" onClick={() => onOpenActivity(null)}><ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Activities</button>
@@ -1141,6 +1318,26 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
             <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Agenda</p>
             <p className="mt-1 whitespace-pre-wrap text-sm font-semibold text-slate-700">{String(myGroup.agenda || '') || 'No agenda yet — it will appear here once your organizer saves one.'}</p>
           </div>
+        </div>
+      )}
+
+      {myGroup && (
+        <div className={card} data-testid="cgm-view-group-members-card">
+          <button
+            type="button"
+            data-testid="cgm-view-all-group-members"
+            onClick={() => setShowMembersPage(true)}
+            className="flex w-full items-center justify-between gap-3 rounded-2xl border-2 border-emerald-200 bg-emerald-50 px-4 py-3 text-left transition hover:border-emerald-300 hover:bg-emerald-100"
+          >
+            <span>
+              <span className="block text-sm font-black text-emerald-900">View all group members</span>
+              <span className="mt-0.5 block text-[11px] font-semibold text-emerald-700">
+                See everyone in {(String(myGroup.group_name || `Group ${myGroup.position}`))} — names, contacts (as allowed) & leaders indicated
+              </span>
+            </span>
+            <ChevronRight className="h-5 w-5 shrink-0 text-emerald-600" />
+          </button>
+          <p className="mt-2 text-[11px] font-medium text-slate-400">Your organiser controls which contact fields are visible — names and contacts are shown by default.</p>
         </div>
       )}
 
