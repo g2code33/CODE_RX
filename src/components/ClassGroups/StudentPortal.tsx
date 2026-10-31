@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, Compass, GraduationCap,
-  LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
+  LayoutDashboard, Lightbulb, LogOut, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
 import { RandomGroupReveal } from './RandomGroupReveal';
@@ -1146,7 +1146,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
 
       {myGroup && (
         <div className={card}>
-          <p className={label}>Request a group change</p>
+          <GroupChangeTip />
           <MoveRequestCard groups={(data.groups || []).filter((group: any) => Number(group.id) !== Number(myGroup.group_id))} busy={busy} onSubmit={(toGroupId, reason) => runAction(async () => { const result = await cgmStudent.requestMove(Number(myGroup.group_id), toGroupId, reason); return String((result as any)?.message || 'Request sent.'); })} />
         </div>
       )}
@@ -1161,6 +1161,46 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
         />
       )}
     </div>
+  );
+};
+
+/**
+ * The small idea icon on the Request-a-group-change card. Pressing it reveals
+ * one honest expectation-setting note; pressing the note (anywhere) folds it
+ * back to the icon.
+ */
+const GroupChangeTip = () => {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <p className={label}>Request a group change</p>
+        {!open && (
+          <button
+            type="button"
+            data-testid="cgm-group-change-tip-toggle"
+            aria-label="An important note about group change requests"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-600 transition hover:bg-amber-100"
+            onClick={() => setOpen(true)}
+          >
+            <Lightbulb className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+      {open && (
+        <button
+          type="button"
+          data-testid="cgm-group-change-tip"
+          className="mt-2 flex w-full items-start gap-2 rounded-xl bg-amber-50 px-3 py-2 text-left ring-1 ring-amber-200 transition hover:bg-amber-100"
+          onClick={() => setOpen(false)}
+        >
+          <Lightbulb className="mt-0.5 h-3 w-3 shrink-0 text-amber-500" />
+          <span className="text-[11px] font-semibold leading-snug text-amber-800">
+            A request does not guarantee a successful change of group — kindly accept your group and work in harmony.
+          </span>
+        </button>
+      )}
+    </>
   );
 };
 

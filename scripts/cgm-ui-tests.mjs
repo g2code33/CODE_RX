@@ -97,6 +97,12 @@ check('the student portal covers classes, groups, elections, attendance, calenda
     .every((label) => studentPortal.includes(label)));
 check('profile changes go through the approval workflow with a reason',
   /requestProfileChange/.test(studentPortal) && /reason/i.test(studentPortal));
+check('the Request-a-group-change card carries a SMALL idea icon that reveals the expectation note and folds back on any click',
+  /cgm-group-change-tip-toggle/.test(studentPortal) && /data-testid="cgm-group-change-tip"/.test(studentPortal)
+  && studentPortal.includes('kindly accept your group and work in harmony')
+  && studentPortal.includes("onClick={() => setOpen(true)}")
+  && studentPortal.includes("onClick={() => setOpen(false)}")
+  && /!open && \(/.test(studentPortal));
 check('the student group page shows the group topic + agenda BEFORE Request a group change',
   /cgm-student-topic-agenda/.test(studentPortal) && /Our topic &amp; agenda/.test(studentPortal)
   && studentPortal.indexOf('cgm-student-topic-agenda') < studentPortal.indexOf('Request a group change')

@@ -41,6 +41,7 @@ test suites — nothing is aspirational.**
 | Production-readiness audit | **all 163 module routes re-audited for guards** (student / organizer / PHANTOM / public-token) — zero unauthenticated surfaces; new cross-class IDOR battery + draw batteries at 2/3/5/10/20 groups + concurrent last-seat race (see §5); TypeScript is now a CI gate (`npm run typecheck`, 0 errors — nine latent errors fixed properly, none suppressed) |
 | CGP brand mark | **every Class & Group surface now wears the society's own CGP.jpg emblem** — the navbar door beside Client Access (both the 36-px icon door and the labelled chip variant render the artwork instead of a generic glyph), the organizer workspace topbar tile and the student portal header tile (each a rounded 36-px crop of the emblem with a soft emerald ring). The asset ships from `public/CGP.jpg` (single copy, byte-identical when served), loads lazy + async like every other image, and carries no alt text where it is purely decorative |
 | No zoom in Class & Group | **pinch-zoom and double-tap zoom are disabled inside the section**: while any Class & Group surface is mounted a guard hook tightens the viewport meta to `maximum-scale=1.0, user-scalable=no` and swallows double-taps, `touch-action: pan-y` covers the gestures some Android browsers reach past the meta, and **unmounting restores the exact previous viewport** — the rest of the site zooms exactly as before |
+| Group-change expectations tip | **the Request-a-group-change card carries a small idea icon**: tapping the lightbulb reveals one honest note — *"A request does not guarantee a successful change of group — kindly accept your group and work in harmony."* — and tapping the note anywhere folds it straight back to the icon (self-contained `GroupChangeTip`, amber tip language, `cgm-group-change-tip-toggle` / `cgm-group-change-tip`) |
 | Student wayfinding | **class doors are unique navigation buttons**: every class card (on the welcome board AND My Classes) carries its own stable accent colour — colour rail, monogram tile, coloured status pill and an always-visible **Open →** affordance derived from the class code, so students navigate by sight; the welcome board adds a one-tap **Continue to choose group** gradient CTA (the only one on the board) that opens My Groups directly |
 | Student WhatsApp join | **the moment a student gets a group** — by choosing it, auto-placement, or closing the random-draw reveal — they land on a dedicated **join page**: the group's QR code (downloadable PNG), a **Copy link** button (clipboard API with textarea fallback), an **Open chat** link and the one-tap **Join WhatsApp group** button (click recorded, never treated as join-proof); before the organizer saves a link the page says so honestly; the group card's button opens the same page. The Groups-page **per-card WhatsApp editor is gone** (it never worked and duplicated the workspace) — all link management lives in the workspace's WhatsApp section |
 | Passkey requests | **passkeys are always system-generated — students never invent one**: a student proves the CURRENT passkey and sends a change request; the organizer sees it in the Students area, **Approve & notify** (opening a Generate button for exactly that student, announced by a direct notification) or **Decline** (they are told too); Generate allocates the next unique passkey from the same atomic global sequence registration uses — the class mark is kept, the suffix is never user-chosen so it can never clash — shown once with sessions revoked and a fresh session issued. The old choose-your-own self-change route is gone (404). Table `cgm_passkey_requests`; audits `cgm.passkey.change_requested / request_approved / request_declined / generated`, never carrying a passkey value |
@@ -183,7 +184,7 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 | Suite | Command | Result |
 |---|---|---|
 | Module API (38 sections) | `npm run test:cgm` | **733/733** |
-| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **266/266** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **267/267** |
 | Browser journeys (jsdom + wrangler pages dev, 43 checks) | `npm run test:cgm-browser` | **43/43** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
@@ -416,6 +417,6 @@ src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), Studen
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
 scripts/cgm-tests.mjs                  # 733 API-level checks, 38 sections
-scripts/cgm-ui-tests.mjs               # 266 markup-level checks, 21 sections
+scripts/cgm-ui-tests.mjs               # 267 markup-level checks, 21 sections
 scripts/cgm-browser-check.mjs          # 43 jsdom browser checks vs wrangler dev
 ```
