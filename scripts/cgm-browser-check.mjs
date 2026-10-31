@@ -365,6 +365,10 @@ let savedPasskey = '';
     && await page.waitForFor('Leadership', 5_000)
     && await page.waitForFor('Notify members directly', 5_000),
     page.body().slice(0, 200));
+  const sideNav = page.window.document.querySelector('nav[aria-label="Workspace navigation"]');
+  check('entering a group auto-collapses the main Overview/Classes nav so the group hamburger leads',
+    Boolean(sideNav) && sideNav.className.includes('cgm-sidenav--collapsed'),
+    String(sideNav?.className || 'no nav'));
   const menuButton = page.window.document.querySelector('[data-testid="cgm-workspace-menu"]');
   menuButton && menuButton.click();
   check('the hamburger opens the workspace drawer listing all nine sections',
@@ -372,6 +376,8 @@ let savedPasskey = '';
     && await page.waitForFor('Every recorded change for this group', 5_000)
     && await page.waitForFor('Direct message into every member', 5_000),
     page.body().slice(0, 200));
+  const drawerEl = page.window.document.querySelector('[data-testid="cgm-workspace-drawer"]');
+  check('the sections drawer overlays from the LEFT edge', Boolean(drawerEl) && /(^| )left-0( |$)/.test(drawerEl.className) && !/right-0/.test(drawerEl.className), String(drawerEl?.className || 'no drawer'));
   const historyJump = page.window.document.querySelector('[data-testid="cgm-section-jump-history"]');
   historyJump && historyJump.click();
   check('a section opens as its own full page with a way back to the overview',
@@ -429,6 +435,8 @@ let savedPasskey = '';
   const back = page.buttonByText('Back to groups');
   back && back.click();
   check('leaving the workspace returns to the group grid', await page.waitForFor('Create', 20_000) || await page.waitForFor('Choose an activity', 5_000));
+  const sideNavAfter = page.window.document.querySelector('nav[aria-label="Workspace navigation"]');
+  check('leaving the group restores the main nav', Boolean(sideNavAfter) && !sideNavAfter.className.includes('cgm-sidenav--collapsed'), String(sideNavAfter?.className || 'no nav'));
 }
 
 // Restore the spec-default policies so the local database stays clean.

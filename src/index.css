@@ -2319,6 +2319,13 @@ h3.vault-rich-text {
   color: #ffffff;
 }
 
+/* Desktop collapse: the hamburger in the topbar hides the whole nav column
+   (a group workspace collapses it automatically so its own sections drawer
+   leads). On mobile the overlay rule below still wins when --open. */
+.cgm-sidenav.cgm-sidenav--collapsed {
+  display: none;
+}
+
 .cgm-main {
   flex: 1;
   min-width: 0;
@@ -2327,7 +2334,7 @@ h3.vault-rich-text {
 }
 
 .cgm-nav-toggle {
-  display: none;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 2.25rem;
@@ -2361,10 +2368,6 @@ h3.vault-rich-text {
 }
 
 @media (max-width: 860px) {
-  .cgm-nav-toggle {
-    display: inline-flex;
-  }
-
   .cgm-body {
     position: relative;
   }

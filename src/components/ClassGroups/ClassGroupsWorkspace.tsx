@@ -67,6 +67,10 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
   const [editActivityRequest, setEditActivityRequest] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [navOpen, setNavOpen] = useState(false);
+  // The main nav (Overview, My Classes, …) is a collapsible hamburger on
+  // desktop too. Opening a specific group auto-collapses it so the group's
+  // own sections hamburger leads; leaving the group restores it.
+  const [navCollapsed, setNavCollapsed] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -129,7 +133,17 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
       <ConnectionBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
-          <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
+          <button
+            type="button"
+            data-testid="cgm-nav-toggle"
+            className="cgm-nav-toggle"
+            onClick={() => {
+              if (window.matchMedia('(max-width: 860px)').matches) setNavOpen((open) => !open);
+              else setNavCollapsed((collapsed) => !collapsed);
+            }}
+            aria-expanded={navOpen || !navCollapsed}
+            aria-label="Toggle navigation"
+          >
             <Users className="h-4 w-4" />
           </button>
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-600 text-white"><GraduationCap className="h-5 w-5" /></span>
@@ -165,7 +179,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
       </header>
 
       <div className="cgm-body">
-        <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''}`} aria-label="Workspace navigation">
+        <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''} ${navCollapsed ? 'cgm-sidenav--collapsed' : ''}`} aria-label="Workspace navigation">
           {visibleAreas.map(([key, text, Icon]) => (
             <button
               key={key}
@@ -212,7 +226,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'students' && can('view_roster') && <StudentsArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} canImport={can('import_roster')} sensitive={activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has('view_sensitive_profiles')} onChanged={() => void refresh()} />}
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} openActivityId={editActivityRequest} onEditConsumed={() => setEditActivityRequest(null)} />}
-          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} />}
+          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} onGroupFocus={(open) => setNavCollapsed(open)} />}
           {activeClass && area === 'elections' && can('manage_elections') && <ElectionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} />}
           {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -2046,7 +2060,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
       {menuOpen && (
         <>
           <div className="fixed inset-0 z-40 bg-slate-900/40" aria-hidden="true" onClick={() => setMenuOpen(false)} />
-          <div className="fixed inset-y-0 right-0 z-50 w-80 max-w-[85vw] overflow-y-auto rounded-l-2xl bg-white p-5 shadow-2xl" data-testid="cgm-workspace-drawer" role="navigation" aria-label="Group workspace sections">
+          <div className="fixed inset-y-0 left-0 z-50 w-80 max-w-[85vw] overflow-y-auto rounded-r-2xl bg-white p-5 shadow-2xl" data-testid="cgm-workspace-drawer" role="navigation" aria-label="Group workspace sections">
             <div className="flex items-center justify-between">
               <p className={label}>{group.name} — sections</p>
               <button type="button" className="mini-button" aria-label="Close menu" onClick={() => setMenuOpen(false)}>✕</button>
@@ -2219,7 +2233,7 @@ const ActivityLifecycleButtons = ({ activity, onChanged }: { activity: any; onCh
   );
 };
 
-const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onEditActivity }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void }) => {
+const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onEditActivity, onGroupFocus }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void; onGroupFocus?: (open: boolean) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
   const [activityId, setActivityId] = useState<number | null>(null);
   const [data, setData] = useState<any>(null);
@@ -2254,7 +2268,7 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
         canMove={canMove} canRemove={canRemove} canManageWhatsapp={canManageWhatsapp}
         canAppoint={canAppoint} canAnnounce={canAnnounce} canManage={canManage}
         onChanged={() => void load(activityId)}
-        onBack={() => setOpenGroupId(null)}
+        onBack={() => { setOpenGroupId(null); onGroupFocus?.(false); }}
       />
     );
   }
@@ -2329,7 +2343,7 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
             {(data.groups || []).map((group: any) => (
               <div key={group.id} className={card}>
                 <div className="flex items-center justify-between">
-                  <button type="button" data-testid="cgm-open-group" onClick={() => setOpenGroupId(Number(group.id))} className="group/name flex min-w-0 items-center gap-1.5 text-left" title={`Open the ${group.name} workspace`}>
+                  <button type="button" data-testid="cgm-open-group" onClick={() => { setOpenGroupId(Number(group.id)); onGroupFocus?.(true); }} className="group/name flex min-w-0 items-center gap-1.5 text-left" title={`Open the ${group.name} workspace`}>
                     <span className="truncate font-black text-slate-900 group-hover/name:text-emerald-700">{group.name}</span>
                     <ChevronRight className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                   </button>

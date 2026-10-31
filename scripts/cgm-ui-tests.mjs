@@ -658,6 +658,10 @@ check('the workspace manages THIS group only — dossier, sibling members for sw
   /groupDetail: \(groupId: number\)/.test(forcedClient) && /notifyGroup: \(groupId: number, body/.test(forcedClient)
   && /updateGroup: \(groupId: number, body/.test(forcedClient)
   && /createAnnouncement\(Number\(classId\), \{ title: announceTitle, body: announceBody, pinned: announcePinned, activityId: Number\(activityId\), groupId \}/.test(forcedWorkspace.replace(/\s+/g, ' ')));
+check('the main nav is a collapsible hamburger: entering a group collapses it, the sections drawer leads from the left',
+  /cgm-sidenav--collapsed/.test(workspace) && /onGroupFocus/.test(workspace)
+  && /setNavCollapsed\(open\)/.test(workspace)
+  && /inset-y-0 left-0 z-50 w-80/.test(workspace) && !/inset-y-0 right-0/.test(workspace));
 check('the member sheet prints/downloads customizable PNG/PDF with featured topic + AOB and header/title',
   /cgm-member-sheet/.test(forcedWorkspace) && /cgm-member-sheet-panel/.test(forcedWorkspace)
   && /downloadGroupSheetPng/.test(forcedWorkspace) && /downloadGroupSheetPdf/.test(forcedWorkspace)
