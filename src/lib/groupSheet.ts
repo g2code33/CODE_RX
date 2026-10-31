@@ -20,6 +20,8 @@ export interface GroupSheet {
   dateLabel: string;
   columns: string[];
   rows: string[][];
+  /** Blank write-in rows at 1-based member-row positions (handwriting space). */
+  blankRows?: Array<{ position: number; count: number }>;
   footer: string;
 }
 
@@ -58,6 +60,27 @@ const download = (blob: Blob, name: string) => {
 const safeName = (value: string) => String(value || 'group').replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 60) || 'group';
 
 // ---------------------------------------------------------------------------
+// Blank write-in rows — the organizer can add ruled empty rows at chosen
+// positions (for signatures, late additions, marks). They render in every
+// output as empty banded rows with a write-in line, and never count as
+// members in the header count.
+// ---------------------------------------------------------------------------
+type SheetRow = { cells: string[]; blank: boolean };
+const buildRenderRows = (sheet: GroupSheet): SheetRow[] => {
+  const rows = sheet.rows.length ? sheet.rows : [sheet.columns.map(() => '')];
+  const out: SheetRow[] = [];
+  let cursor = 1; // 1-based position in `rows`
+  const batches = [...(sheet.blankRows || [])].sort((a, b) => a.position - b.position);
+  for (const batch of batches) {
+    const pos = Math.min(Math.max(1, Math.round(batch.position)), rows.length + 1);
+    while (cursor < pos && cursor <= rows.length) { out.push({ cells: rows[cursor - 1], blank: false }); cursor += 1; }
+    for (let i = 0; i < Math.max(0, Math.round(batch.count)); i += 1) out.push({ cells: [], blank: true });
+  }
+  while (cursor <= rows.length) { out.push({ cells: rows[cursor - 1], blank: false }); cursor += 1; }
+  return out;
+};
+
+// ---------------------------------------------------------------------------
 // PNG — canvas rendering
 // ---------------------------------------------------------------------------
 export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => {
@@ -72,7 +95,7 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
   const aobLines = sheet.aob ? wrap(sheet.aob, 108) : [];
   const colWidth = (width - margin * 2) / Math.max(1, sheet.columns.length);
   const rowH = 40;
-  const tableRows = sheet.rows.length ? sheet.rows : [sheet.columns.map(() => '')];
+  const tableRows = buildRenderRows(sheet);
 
   // Pass 1: measure total height.
   ctx.font = '16px system-ui, sans-serif';
@@ -148,14 +171,23 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
     g.fillRect(margin, cursor, width - margin * 2, rowH);
     g.strokeStyle = LINE;
     g.strokeRect(margin, cursor, width - margin * 2, rowH);
-    g.fillStyle = INK;
-    g.font = '14px system-ui, sans-serif';
-    row.forEach((cell, index) => {
-      const text = String(cell ?? '');
-      const clipped = measure(text, '14px system-ui, sans-serif') > colWidth - 16
-        ? `${text.slice(0, Math.max(3, Math.floor((colWidth - 16) / 8)))}…` : text;
-      g.fillText(clipped, margin + index * colWidth + 10, cursor + 25);
-    });
+    if (row.blank) {
+      // A ruled write-in line across the row — space to handwrite.
+      g.strokeStyle = '#94a3b8';
+      g.beginPath();
+      g.moveTo(margin + 10, cursor + rowH - 12);
+      g.lineTo(width - margin - 10, cursor + rowH - 12);
+      g.stroke();
+    } else {
+      g.fillStyle = INK;
+      g.font = '14px system-ui, sans-serif';
+      row.cells.forEach((cell, index) => {
+        const text = String(cell ?? '');
+        const clipped = measure(text, '14px system-ui, sans-serif') > colWidth - 16
+          ? `${text.slice(0, Math.max(3, Math.floor((colWidth - 16) / 8)))}…` : text;
+        g.fillText(clipped, margin + index * colWidth + 10, cursor + 25);
+      });
+    }
     cursor += rowH;
   });
 
@@ -203,7 +235,7 @@ export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
   const colChars = Math.floor(colWidth / 4.8);
   const agendaLines = sheet.agenda ? wrap(sheet.agenda, 92) : [];
   const aobLines = sheet.aob ? wrap(sheet.aob, 92) : [];
-  const tableRows = sheet.rows.length ? sheet.rows : [sheet.columns.map(() => '')];
+  const tableRows = buildRenderRows(sheet);
 
   type Op = string;
   const pages: Op[][] = [];
@@ -255,7 +287,12 @@ export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
   tableRows.forEach((row, rowIndex) => {
     if (cursor - 18 < PDF_MARGIN + 30) { newPage(true); drawTableHead(); }
     if (rowIndex % 2 === 0) ops.push(`0.972 0.980 0.988 rg ${PDF_MARGIN} ${cursor - 18} ${usable} 18 re f`);
-    row.forEach((cell, index) => text(PDF_MARGIN + index * colWidth + 5, cursor - 13, 9, false, pdfClip(cell, colChars)));
+    if (row.blank) {
+      // Ruled write-in line per cell, so handwriting stays inside its column.
+      sheet.columns.forEach((_, index) => ops.push(`0.62 0.66 0.72 rg ${PDF_MARGIN + index * colWidth + 5} ${cursor - 4} ${colWidth - 10} 0.7 re f`));
+    } else {
+      row.cells.forEach((cell, index) => text(PDF_MARGIN + index * colWidth + 5, cursor - 13, 9, false, pdfClip(cell, colChars)));
+    }
     cursor -= 18;
   });
 
@@ -309,6 +346,7 @@ export const downloadGroupSheetPdf = (sheet: GroupSheet): void => {
 export const printGroupSheet = (sheet: GroupSheet): void => {
   const agendaRows = sheet.agenda ? wrap(sheet.agenda, 110) : [];
   const aobRows = sheet.aob ? wrap(sheet.aob, 110) : [];
+  const tableRows = buildRenderRows(sheet);
   const escapeHtml = (value: string) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(sheet.groupName)} — member sheet</title>
 <style>
@@ -329,6 +367,8 @@ export const printGroupSheet = (sheet: GroupSheet): void => {
   th { background: ${EMERALD}; color: #fff; text-align: left; padding: 6px 8px; }
   td { border-bottom: 1px solid ${LINE}; padding: 6px 8px; }
   tr:nth-child(even) td { background: #f8fafc; }
+  tr.blank td { height: 22px; }
+  tr.blank td.fill { background: linear-gradient(#ffffff, #ffffff) bottom / 100% 1px no-repeat; }
   footer { color: ${MUTED}; font-size: 9px; margin-top: 18px; }
 </style></head><body>
 <div class="band"><h1>CODE Rx SOCIETY — Class &amp; Group Management</h1><p>${escapeHtml(sheet.className)} · ${escapeHtml(sheet.activityName)} · ${escapeHtml(sheet.dateLabel)}</p></div>
@@ -337,7 +377,9 @@ export const printGroupSheet = (sheet: GroupSheet): void => {
 ${sheet.topic ? `<p class="topic">Topic: ${escapeHtml(sheet.topic)}</p>` : ''}
 ${agendaRows.length ? `<div class="block"><h3>Agenda</h3><p>${escapeHtml(sheet.agenda)}</p></div>` : ''}
 <table><thead><tr>${sheet.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>
-<tbody>${(sheet.rows.length ? sheet.rows : [sheet.columns.map(() => '')]).map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+<tbody>${tableRows.map((row) => row.blank
+  ? `<tr class="blank">${sheet.columns.map(() => `<td class="fill"></td>`).join('')}</tr>`
+  : `<tr>${row.cells.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>
 ${aobRows.length ? `<div class="block green"><h3>AOB / Other business</h3><p>${escapeHtml(sheet.aob)}</p></div>` : ''}
 <footer>${escapeHtml(sheet.footer)}</footer>
 </body></html>`;

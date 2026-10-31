@@ -1515,6 +1515,13 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   const [agenda, setAgenda] = useState<string | null>(null);
   const [sheetAob, setSheetAob] = useState('');
   const [sheetFields, setSheetFields] = useState({ indexNumber: true, role: true, phone: false, email: false, gender: false, via: false });
+  // Blank columns/rows the organizer inserts at chosen positions before printing.
+  const [blankCols, setBlankCols] = useState<Array<{ label: string; position: number }>>([]);
+  const [blankColLabel, setBlankColLabel] = useState('');
+  const [blankColPos, setBlankColPos] = useState('');
+  const [blankRows, setBlankRows] = useState<Array<{ position: number; count: number }>>([]);
+  const [blankRowPos, setBlankRowPos] = useState('');
+  const [blankRowCount, setBlankRowCount] = useState('1');
 
   const load = useCallback(async () => {
     try {
@@ -1557,10 +1564,26 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
       if (sheetFields.via) cells.push(String(row.assigned_via || '—').replace(/_/g, ' '));
       return cells;
     });
+    // Blank columns: spliced at the organizer's chosen position (highest first
+    // so earlier positions stay valid), adding an empty cell to every row.
+    const sheetColumns = [...columns];
+    const sheetRows = rows.map((cells) => [...cells]);
+    [...blankCols].sort((a, b) => b.position - a.position).forEach((blank) => {
+      const at = Math.min(Math.max(1, blank.position), sheetColumns.length + 1) - 1;
+      sheetColumns.splice(at, 0, blank.label || '');
+      sheetRows.forEach((cells) => cells.splice(at, 0, ''));
+    });
+    // Blank rows: handed to the renderer as ruled write-in bands.
+    const memberCount = sheetRows.length;
+    const blankRowBands = blankRows
+      .map((band) => ({
+        position: Math.min(Math.max(1, band.position || memberCount + 1), memberCount + 1),
+        count: Math.max(1, band.count || 1),
+      }));
     return {
       groupName: String(group.name), topic: group.topic || '', agenda: agenda ?? '', aob: sheetAob,
       className: String(activity?.className || ''), activityName: String(activity?.name || ''), dateLabel,
-      columns, rows,
+      columns: sheetColumns, rows: sheetRows, blankRows: blankRowBands,
       footer: `Generated from CODE Rx on ${dateLabel} · ${activity?.className || ''} · ${activity?.name || ''} · ${group.name}`,
     };
   };
@@ -1638,6 +1661,55 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
                 <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-aob">AOB / other business (this sheet only)</label>
                 <textarea id="cgm-aob" className={`${inputClass} mt-1 min-h-12`} placeholder="Anything else to appear under AOB on this printout…" value={sheetAob} onChange={(event) => setSheetAob(event.target.value)} />
               </div>
+              <div className="grid gap-3 border-t border-emerald-100 pt-2 sm:grid-cols-2">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a blank column (write-in)</p>
+                  <div className="mt-1 flex gap-1.5">
+                    <input className={`${inputClass} w-28`} placeholder="Header (e.g. Sign)" aria-label="Blank column header" value={blankColLabel} onChange={(event) => setBlankColLabel(event.target.value)} />
+                    <input className={`${inputClass} w-20`} type="number" min="1" placeholder="Position" aria-label="Blank column position" value={blankColPos} onChange={(event) => setBlankColPos(event.target.value)} />
+                    <button type="button" className="mini-button" data-testid="cgm-blank-col-add" onClick={() => {
+                      const totalColumns = 1 /* full name */ + (sheetFields.indexNumber ? 1 : 0) + (sheetFields.role ? 1 : 0)
+                        + (detail.viewer?.canSeeSensitive ? ((sheetFields.phone ? 1 : 0) + (sheetFields.email ? 1 : 0) + (sheetFields.gender ? 1 : 0)) : 0)
+                        + (sheetFields.via ? 1 : 0);
+                      const position = Math.min(Math.max(1, Number(blankColPos) || totalColumns + blankCols.length + 1), totalColumns + blankCols.length + 1);
+                      setBlankCols([...blankCols, { label: blankColLabel.trim(), position }]);
+                      setBlankColLabel(''); setBlankColPos('');
+                    }}>+ Add column</button>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add blank row(s) for handwriting</p>
+                  <div className="mt-1 flex gap-1.5">
+                    <input className={`${inputClass} w-20`} type="number" min="1" placeholder="How many" aria-label="Blank row count" value={blankRowCount} onChange={(event) => setBlankRowCount(event.target.value)} />
+                    <input className={`${inputClass} w-24`} type="number" min="1" placeholder="At row" aria-label="Blank row position" value={blankRowPos} onChange={(event) => setBlankRowPos(event.target.value)} />
+                    <button type="button" className="mini-button" data-testid="cgm-blank-row-add" onClick={() => {
+                      const memberCount = (detail.members || []).length;
+                      const position = Math.min(Math.max(1, Number(blankRowPos) || memberCount + 1), memberCount + 1);
+                      setBlankRows([...blankRows, { position, count: Math.max(1, Number(blankRowCount) || 1) }]);
+                      setBlankRowPos(''); setBlankRowCount('1');
+                    }}>+ Add row(s)</button>
+                  </div>
+                </div>
+              </div>
+              {(blankCols.length > 0 || blankRows.length > 0) && (
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                  {blankCols.map((blank, index) => (
+                    <span key={`col-${index}-${blank.position}`} className="rounded-full bg-white px-2 py-0.5" data-testid="cgm-blank-col-list">
+                      blank column @ {blank.position}{blank.label ? ` “${blank.label}”` : ''}
+                      <button type="button" className="ml-1 font-black text-red-500" aria-label="Remove blank column" onClick={() => setBlankCols(blankCols.filter((_, i) => i !== index))}>✕</button>
+                    </span>
+                  ))}
+                  {blankRows.map((band, index) => (
+                    <span key={`row-${index}-${band.position}`} className="rounded-full bg-white px-2 py-0.5" data-testid="cgm-blank-row-list">
+                      {band.count} blank row(s) @ {band.position}
+                      <button type="button" className="ml-1 font-black text-red-500" aria-label="Remove blank rows" onClick={() => setBlankRows(blankRows.filter((_, i) => i !== index))}>✕</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <p className="text-[10px] font-medium text-slate-400">
+                Sheet preview: {(() => { const sheet = buildSheet(); return sheet ? `${sheet.columns.length} column(s) · ${sheet.rows.length} member row(s)${blankRows.length ? ` + ${blankRows.reduce((sum, band) => sum + band.count, 0)} blank row(s)` : ''}` : '0'; })()}
+              </p>
               <div className="flex flex-wrap gap-1.5 pt-1">
                 <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPng(sheet); }}>Download PNG</button>
                 <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPdf(sheet); }}>Download PDF</button>

@@ -3528,6 +3528,46 @@ check('the PDF is a genuine multi-page document with the preamble on page one',
 check('sensitive columns are stripped from the sheet source unless the viewer holds the permission',
   /canSeeSensitive \? ', s\.phone, s\.email, s\.gender' : ''/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-activities.ts'), 'utf8')));
 
+// -- Blank columns/rows: the organizer inserts empty write-in places anywhere --
+await build({ entryPoints: [path.join(ROOT, 'src/lib/groupSheet.ts')], outfile: path.join(CACHE, 'groupSheet.mjs'), bundle: true, format: 'esm', logLevel: 'silent' });
+const sheetLib2 = await import(path.join(CACHE, 'groupSheet.mjs'));
+const baseSheet = {
+  groupName: 'Pod A', className: 'CRX-CLS-9999', activityName: 'Lab Session 1',
+  dateLabel: '31 Oct 2026', columns: ['Full name', 'Index number'],
+  rows: Array.from({ length: 12 }, (_, i) => [`Student ${i + 1}`, `RX30-${String(i + 1).padStart(4, '0')}`]),
+  footer: 'Generated from CODE Rx',
+};
+baseSheet.rows = Array.from({ length: 60 }, (_, i) => [`Student ${i + 1}`, `RX30-${String(i + 1).padStart(4, '0')}`]);
+const plainPdf = Buffer.from(sheetLib2.buildGroupSheetPdf(baseSheet)).toString('latin1');
+const blankedPdf = Buffer.from(sheetLib2.buildGroupSheetPdf({
+  ...baseSheet,
+  blankRows: [{ position: 3, count: 2 }, { position: 61, count: 3 }],
+})).toString('latin1');
+const pdfPages = (pdf) => (pdf.match(/\/Type \/Page[^s]/g) || []).length;
+check('the sheet PDF is a valid document and 60 members + preamble span multi pages',
+  plainPdf.startsWith('%PDF-1.4') && plainPdf.trimEnd().endsWith('%%EOF') && pdfPages(plainPdf) >= 2,
+  `pages ${pdfPages(plainPdf)}`);
+check('blank rows add ruled write-in bands WITHOUT inflating the member count',
+  blankedPdf.includes('60 member') && !blankedPdf.includes('65 member')
+  && (blankedPdf.match(/0\.62 0\.66 0\.72 rg /g) || []).length >= 5
+  && blankedPdf.length > plainPdf.length,
+  `blank-ops ${(blankedPdf.match(/0\.62 0\.66 0\.72 rg /g) || []).length}`);
+const spliced = (() => {
+  // Mirror of the workspace splice: a blank column at position 2 named Sign.
+  const columns = ['Full name', 'Index number'];
+  const rows = baseSheet.rows.map((cells) => [...cells]);
+  const at = Math.min(Math.max(1, 2), columns.length + 1) - 1;
+  columns.splice(at, 0, 'Sign');
+  rows.forEach((cells) => cells.splice(at, 0, ''));
+  return sheetLib2.buildGroupSheetPdf({ ...baseSheet, columns, rows }).length;
+})();
+check('a blank column splices its empty cell into every row (bytes grow, header carries it)',
+  spliced > plainPdf.length);
+const wsSheetSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+check('the member-sheet panel offers blank columns AND blank rows at chosen positions',
+  /cgm-blank-col-add/.test(wsSheetSrc) && /cgm-blank-row-add/.test(wsSheetSrc)
+  && /Blank column position/.test(wsSheetSrc) && /Blank row count/.test(wsSheetSrc));
+
 // ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
