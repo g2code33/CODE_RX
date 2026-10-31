@@ -37,6 +37,8 @@ test suites — nothing is aspirational.**
 | Member sheet | **print or download every member of a group** from its workspace: the **Member sheet** panel lets the organizer pick the columns (Full name always; Index number, Role, Joined via optional; **Phone / Email / Gender appear only when the viewer holds `view_sensitive_profiles`** — the dossier itself strips those columns otherwise), type a **group agenda** (saved on the group via `PATCH`, re-shown every visit) and **AOB** (per-sheet only), insert **blank columns at any position** (optional header, splices a write-in cell into every member row) and **blank write-in row batches at any position** (ruled lines in all three outputs, never counted as members), then **Print** (hidden-iframe), **Download PNG** (1240-px canvas) or **Download PDF** (genuine multi-page A4 document, agenda preamble on page one, table header repeated on continuation pages) — all dependency-free (`src/lib/groupSheet.ts`, byte-level unit-tested through an esbuild bundle); every sheet carries the CODE Rx header band, class · activity · date line, big title with the member count, the saved topic and agenda, the striped member table and an AOB block |
 | Workspace hub | **the group workspace is a hub**: the overview shows all nine section cards at a glance, a **hamburger (☰ All sections)** opens a slide-in drawer — **from the left edge, overlaying the page, only inside a group** — listing overview + nine sections with hints, and every section — Members, Member sheet, Leadership, Elections, Announcements, Notify, WhatsApp, Settings, History — **opens as a full page of its own** with a back-to-overview escape and the most detailed view of that part: Members with search, seats/leaders/joined-via stats and per-member index + via chips; Elections with the lifecycle explained plus anonymity and opened dates; Announcements as a full feed with authors and dates; Settings with the identity facts grid + topic + agenda + capacity; History as a full timestamped list (dossier events cap raised 15 → 40). The **main nav (Overview, My Classes, …) is itself a collapsible hamburger** on desktop now: opening a group auto-collapses it so the group's sections drawer leads, and Back to groups restores it |
 | Group topic & agenda for students | **every member sees their group's topic and agenda on their own group page** — the activity dashboard payload carries `g.topic` + `g.agenda` on `myAssignment`, and an **Our topic & agenda** card (amber topic block + green agenda block, honest empty states) sits directly **before Request a group change**, so whatever the organizer saves in the workspace is what the whole group lives by |
+| Random-selection hardening | **production-readiness pass on the draw reveal**: the carousel strip is centred on the **measured lane width** (`laneTransform` + a ref + `getBoundingClientRect`, so the winning card lands exactly under the golden ring on wide desktops where the lane is narrower than the window — viewport units removed); the **winner id is validated** against the renderable groups (`resolveRevealWinner`) and an invalid id NEVER promotes the first card — the honest panel shows the group **name the server returned with the draw**; **sound flips live mid-animation** (a ref the rAF loop reads, no stale closure); the confetti palette typo is fixed and unused strip calculations are gone; reduced motion additionally skips the confetti field |
+| Production-readiness audit | **all 163 module routes re-audited for guards** (student / organizer / PHANTOM / public-token) — zero unauthenticated surfaces; new cross-class IDOR battery + draw batteries at 2/3/5/10/20 groups + concurrent last-seat race (see §5); TypeScript is now a CI gate (`npm run typecheck`, 0 errors — nine latent errors fixed properly, none suppressed) |
 | CGP brand mark | **every Class & Group surface now wears the society's own CGP.jpg emblem** — the navbar door beside Client Access (both the 36-px icon door and the labelled chip variant render the artwork instead of a generic glyph), the organizer workspace topbar tile and the student portal header tile (each a rounded 36-px crop of the emblem with a soft emerald ring). The asset ships from `public/CGP.jpg` (single copy, byte-identical when served), loads lazy + async like every other image, and carries no alt text where it is purely decorative |
 | No zoom in Class & Group | **pinch-zoom and double-tap zoom are disabled inside the section**: while any Class & Group surface is mounted a guard hook tightens the viewport meta to `maximum-scale=1.0, user-scalable=no` and swallows double-taps, `touch-action: pan-y` covers the gestures some Android browsers reach past the meta, and **unmounting restores the exact previous viewport** — the rest of the site zooms exactly as before |
 | Student wayfinding | **class doors are unique navigation buttons**: every class card (on the welcome board AND My Classes) carries its own stable accent colour — colour rail, monogram tile, coloured status pill and an always-visible **Open →** affordance derived from the class code, so students navigate by sight; the welcome board adds a one-tap **Continue to choose group** gradient CTA (the only one on the board) that opens My Groups directly |
@@ -180,12 +182,26 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (38 sections) | `npm run test:cgm` | **715/715** |
-| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **262/262** |
+| Module API (38 sections) | `npm run test:cgm` | **733/733** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **266/266** |
 | Browser journeys (jsdom + wrangler pages dev, 43 checks) | `npm run test:cgm-browser` | **43/43** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
 | Raw delivery pipeline | `npm run test:raw-delivery` | 27/27 |
+| TypeScript verification | `npm run typecheck` | **0 errors** |
+
+The production-readiness hardening pass (revealed-random draw + full-module
+audit) added, at real coverage: draws exercised at **2 / 3 / 5 / 10 / 20
+groups** (every seat placed once, the extra student waitlisted), a
+**concurrent last-seat race** through `Promise.all` (exactly one assignment),
+a **60-character custom group name** round-trip, **reveal-core units**
+(`resolveRevealWinner` + `laneTransform`) covering invalid winner ids, honest
+server-name fallbacks, 180-char names and lane-centred geometry at desktop
+(2560 px window / 744 px lane) and mobile (375 px / 331 px), and a
+**cross-class IDOR battery** (six outsider probes against a PHANTOM-only
+class: activity read, group create, announcement, registration approve,
+invitation revoke/regenerate — all 401/403/404, nothing leaked, while the
+rightful team reads 200).
 
 §22 covers the five module policies in every mode; §23 the security
 corrections (verification-token gating + resend + expiry + single-use, passkey
@@ -341,8 +357,9 @@ revoked; suspended classes still accepted student actions.
 7. **PWA:** `public/sw.js` cache is `code-rx-v7` (bump on the next shell change);
    the SW caches the shell only and never `/api/*`; `manifest.webmanifest`
    unchanged.
-8. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, all six test
-   suites, the browser journey gate and the production build on every push/PR;
+8. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, the TypeScript
+   verification (`npm run typecheck`), all six test suites, the browser
+   journey gate and the production build on every push/PR;
    the deploy job runs only on `main`, only with `CLOUDFLARE_API_TOKEN` +
    `CLOUDFLARE_ACCOUNT_ID` present (checked via the secrets context), and the
    summary step reports **completed / skipped (credentials unavailable) /
@@ -398,7 +415,7 @@ src/lib/cgm.ts                         # typed client, duplicate guard, offline 
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 715 API-level checks, 38 sections
-scripts/cgm-ui-tests.mjs               # 262 markup-level checks, 21 sections
+scripts/cgm-tests.mjs                  # 733 API-level checks, 38 sections
+scripts/cgm-ui-tests.mjs               # 266 markup-level checks, 21 sections
 scripts/cgm-browser-check.mjs          # 43 jsdom browser checks vs wrangler dev
 ```
