@@ -3620,11 +3620,16 @@ const joinMember = await freshFmtRosterStudent(43, 'Join Nana');
 const joinMemberId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', joinMember.indexNumber.toLowerCase())?.id || 0);
 await memberCall('POST', `/api/cgm/activities/${joinActivityId}/assign-student`, { studentId: joinMemberId, groupId: joinGroupId }, amaToken);
 await memberCall('POST', `/api/cgm/groups/${joinGroupId}/whatsapp`, { url: 'https://chat.whatsapp.com/JoinPageTest1' }, amaToken);
+await memberCall('PATCH', `/api/cgm/groups/${joinGroupId}`, { topic: 'UV-Vis of aspirin', agenda: '1. Review spectra · 2. Split write-up' }, amaToken);
 const joinBystander = await freshFmtRosterStudent(44, 'Join Kwesi');
 const memberDash = await studentCall('GET', `/api/cgm/student/activities/${joinActivityId}`, undefined, joinMember.session);
 check('a group member\u2019s dashboard carries the active WhatsApp link for the join page',
   memberDash.json?.data?.whatsapp?.url === 'https://chat.whatsapp.com/JoinPageTest1',
   JSON.stringify(memberDash.json?.data?.whatsapp ?? null));
+check('the member\u2019s payload carries the group\u2019s topic AND agenda for their group page',
+  memberDash.json?.data?.myAssignment?.topic === 'UV-Vis of aspirin'
+  && memberDash.json?.data?.myAssignment?.agenda === '1. Review spectra · 2. Split write-up',
+  JSON.stringify(memberDash.json?.data?.myAssignment || {}));
 const outsiderDash = await studentCall('GET', `/api/cgm/student/activities/${joinActivityId}`, undefined, joinBystander.session);
 check('a student without a group in that activity gets NO WhatsApp link',
   outsiderDash.json?.data?.whatsapp == null, JSON.stringify(outsiderDash.json?.data?.whatsapp ?? null));

@@ -612,7 +612,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
 
     const eligible = await isEligible(c.env.DB, activity.id, student.id, config.eligibility);
     const myAssignment = await asRows<any>(c.env.DB.prepare(
-      `SELECT ga.id AS assignment_id, g.id AS group_id, g.name AS group_name, g.position, g.capacity
+      `SELECT ga.id AS assignment_id, g.id AS group_id, g.name AS group_name, g.position, g.capacity, g.topic, g.agenda
        FROM cgm_group_assignments ga JOIN cgm_groups g ON g.id = ga.group_id
        WHERE ga.activity_id = ? AND ga.student_id = ? AND ga.status = 'active'`
     ).bind(activity.id, student.id));

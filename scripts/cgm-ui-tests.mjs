@@ -97,6 +97,10 @@ check('the student portal covers classes, groups, elections, attendance, calenda
     .every((label) => studentPortal.includes(label)));
 check('profile changes go through the approval workflow with a reason',
   /requestProfileChange/.test(studentPortal) && /reason/i.test(studentPortal));
+check('the student group page shows the group topic + agenda BEFORE Request a group change',
+  /cgm-student-topic-agenda/.test(studentPortal) && /Our topic &amp; agenda/.test(studentPortal)
+  && studentPortal.indexOf('cgm-student-topic-agenda') < studentPortal.indexOf('Request a group change')
+  && /myGroup\.topic/.test(studentPortal) && /myGroup\.agenda/.test(studentPortal));
 check('student class doors are unique navigation cards (stable accent + monogram + Open affordance) and the welcome board has a Continue-to-groups CTA',
   /ClassNavCard/.test(studentPortal) && /accentForClass/.test(studentPortal) && /monogramOf/.test(studentPortal)
   && /cgm-continue-groups/.test(studentPortal) && /Continue to choose group/.test(studentPortal)

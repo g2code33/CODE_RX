@@ -1129,6 +1129,20 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
       )}
 
       {myGroup && (
+        <div className={`${card} border-emerald-100`} data-testid="cgm-student-topic-agenda">
+          <p className={label}>Our topic &amp; agenda</p>
+          <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3">
+            <p className="text-[10px] font-black uppercase tracking-wider text-amber-700">Group topic</p>
+            <p className="mt-1 text-sm font-bold text-slate-800">{String(myGroup.topic || '') || 'No topic yet — your organizer sets it in the group workspace.'}</p>
+          </div>
+          <div className="mt-2 rounded-xl bg-emerald-50 px-4 py-3">
+            <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Agenda</p>
+            <p className="mt-1 whitespace-pre-wrap text-sm font-semibold text-slate-700">{String(myGroup.agenda || '') || 'No agenda yet — it will appear here once your organizer saves one.'}</p>
+          </div>
+        </div>
+      )}
+
+      {myGroup && (
         <div className={card}>
           <p className={label}>Request a group change</p>
           <MoveRequestCard groups={(data.groups || []).filter((group: any) => Number(group.id) !== Number(myGroup.group_id))} busy={busy} onSubmit={(toGroupId, reason) => runAction(async () => { const result = await cgmStudent.requestMove(Number(myGroup.group_id), toGroupId, reason); return String((result as any)?.message || 'Request sent.'); })} />
