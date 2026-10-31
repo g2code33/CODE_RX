@@ -269,8 +269,6 @@ export interface CgmStudentRow {
   index_number_key: string;
   institution: string;
   institution_key: string;
-  university_id: string | null;
-  university_id_key: string | null;
   phone: string | null;
   phone_key: string | null;
   passkey_verifier: string | null;
@@ -295,7 +293,7 @@ export const studentFromRequest = async (c: Context<{ Bindings: Env }>): Promise
   if (!token || token.length < 32) return null;
   const rows = await asRows<CgmStudentRow & { session_id: number }>(c.env.DB.prepare(
     `SELECT s.id, s.full_name, s.index_number, s.index_number_key, s.institution, s.institution_key,
-            s.university_id, s.university_id_key, s.phone, s.phone_key,
+            s.phone, s.phone_key,
             s.email, s.gender, s.custom_fields_json, s.status, s.passkey_suffix, s.failed_attempts, s.locked_until,
             sess.id AS session_id
      FROM cgm_student_sessions sess

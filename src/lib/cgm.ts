@@ -278,6 +278,8 @@ export const cgm = {
     memberCall(`/api/cgm/classes/${classId}/roster/entries/${entryId}`, { method: 'PATCH', body }),
   deleteRosterEntry: (classId: number, entryId: number) =>
     memberCall(`/api/cgm/classes/${classId}/roster/entries/${entryId}`, { method: 'DELETE' }),
+  bulkDeleteRosterEntries: (classId: number, ids: number[]) =>
+    memberCall(`/api/cgm/classes/${classId}/roster/entries/bulk-delete`, { method: 'POST', body: { ids } }),
 
   // approvals
   registrations: (classId: number, status = 'pending') =>
@@ -292,6 +294,8 @@ export const cgm = {
     memberCall(`/api/cgm/classes/${classId}/members/add`, { method: 'POST', body: { rosterEntryId } }),
   memberAction: (classId: number, memberId: number, action: 'remove' | 'suspend' | 'restore', reason?: string) =>
     memberCall(`/api/cgm/classes/${classId}/members/${memberId}/${action}`, { method: 'POST', body: { reason } }),
+  bulkMemberAction: (classId: number, action: 'suspend' | 'remove', ids: number[], reason?: string) =>
+    memberCall(`/api/cgm/classes/${classId}/members/bulk`, { method: 'POST', body: { action, ids, reason } }),
   membershipRequests: (classId: number) => memberCall(`/api/cgm/classes/${classId}/membership-requests`),
   reviewMembership: (classId: number, requestId: number, approve: boolean, reason?: string) =>
     memberCall(`/api/cgm/classes/${classId}/membership-requests/${requestId}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { reason } }),

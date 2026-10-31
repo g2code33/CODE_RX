@@ -1185,6 +1185,9 @@ const SAFE_MIGRATIONS = [
   // every existing passkey exactly as it is (rx30…).
   { table: 'cgm_students', column: 'passkey_prefix', sql: "ALTER TABLE cgm_students ADD COLUMN passkey_prefix TEXT NOT NULL DEFAULT 'rx30'" },
   { table: 'cgm_classes', column: 'passkey_prefix', sql: "ALTER TABLE cgm_classes ADD COLUMN passkey_prefix TEXT NOT NULL DEFAULT 'rx30'" },
+  // Invitations keep their token so organizers can copy, share and
+  // re-download the QR any time (replaces the show-once flow).
+  { table: 'cgm_invitations', column: 'token_value', sql: 'ALTER TABLE cgm_invitations ADD COLUMN token_value TEXT' },
 
   { table: 'members', column: 'phone_login_key', sql: 'ALTER TABLE members ADD COLUMN phone_login_key TEXT' },
   { table: 'member_activations', column: 'revoked_at', sql: 'ALTER TABLE member_activations ADD COLUMN revoked_at DATETIME' },
@@ -1241,7 +1244,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx20-class-passkey-prefix';
+const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx21-roster-and-invitation-qr';
 
 
 // Role codes stay stable for member history and permissions. Their visible

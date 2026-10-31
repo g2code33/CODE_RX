@@ -46,7 +46,7 @@
  */
 import { build } from 'esbuild';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { pbkdf2Sync, randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -294,16 +294,16 @@ check('the second class is active', q1('SELECT status FROM cgm_classes WHERE id 
 section('3. Roster pipeline (xlsx / csv / json)');
 const XLSX = (await import('xlsx')).default;
 const rosterCsv = [
-  'Full Name,Index Number,University ID,Phone,Gender,Email',
-  'Kofi Mensah,BIO-201-001,ATU/2024/001,0244000001,male,kofi@example.com',
-  'Akosua Darko,BIO-201-002,ATU/2024/002,0244000002,female,akosua@example.com',
-  'Yaw Owusu,BIO-201-003,ATU/2024/003,0244000003,male,yaw@example.com',
-  'Abena Saah,BIO-201-004,ATU/2024/004,0244000004,female,abena@example.com',
-  'Kojo Anane,BIO-201-005,ATU/2024/005,0244000005,male,kojo@example.com',
+  'Full Name,Index Number,Phone,Gender,Email',
+  'Kofi Mensah,BIO-201-001,0244000001,male,kofi@example.com',
+  'Akosua Darko,BIO-201-002,0244000002,female,akosua@example.com',
+  'Yaw Owusu,BIO-201-003,0244000003,male,yaw@example.com',
+  'Abena Saah,BIO-201-004,0244000004,female,abena@example.com',
+  'Kojo Anane,BIO-201-005,0244000005,male,kojo@example.com',
 ].join('\n');
 const csvForm = new FormData();
 csvForm.append('file', new File([rosterCsv], 'roster.csv', { type: 'text/csv' }));
-csvForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number', university_id: 'University ID', phone: 'Phone', gender: 'Gender', email: 'Email' }));
+csvForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number', phone: 'Phone', gender: 'Gender', email: 'Email' }));
 csvForm.append('policy', 'skip');
 const csvImport = await formCall('POST', `/api/cgm/classes/${classAId}/roster/import`, csvForm, amaToken);
 check('a CSV roster imports', csvImport.status === 200, `status ${csvImport.status} ${csvImport.text?.slice(0, 200)}`);
@@ -491,7 +491,7 @@ check('passkey + wrong index number is rejected with the generic failure', wrong
 const wrongPasskey = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30b' });
 check('right index + someone else’s passkey is rejected', wrongPasskey.status === 400, `status ${wrongPasskey.status}`);
 const universityLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'university_id', identifier: 'ATU/2024/001', passkey: 'rx30a' });
-check('sign-in also works with passkey + university ID', Boolean(universityLogin.json?.data?.session?.token), `status ${universityLogin.status}`);
+check('university ID was removed as a sign-in half (index number + phone only)', universityLogin.status === 400, `status ${universityLogin.status}`);
 const phoneLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244000001', passkey: 'rx30a' });
 check('sign-in also works with passkey + phone number', Boolean(phoneLogin.json?.data?.session?.token), `status ${phoneLogin.status}`);
 const junkPasskey = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'hello-world' });
@@ -1238,7 +1238,7 @@ const classScopeMembers = classScopeView.json?.data?.members || [];
 check('contactVisibility "class" shares phone and email with classmates',
   classScopeMembers.length >= 2 && classScopeMembers.some((m) => m.phone === '+233203333333') && classScopeMembers.some((m) => m.email),
   JSON.stringify(classScopeMembers.slice(0, 2)));
-check('a classmate never sees index numbers, university IDs or gender',
+check('a classmate never sees index numbers or gender (and university_id is gone entirely)',
   classScopeMembers.every((m) => m.index_number === undefined && m.university_id === undefined && m.gender === undefined));
 const noneScopeView = await studentCall('GET', `/api/cgm/student/activities/${noneScopeActivity}`, undefined, sessionsToUse[1]);
 const noneScopeMembers = noneScopeView.json?.data?.members || [];
@@ -1863,9 +1863,9 @@ const freshVerify = await call('GET', `/api/cgm/organizer/verify?token=${encodeU
 check('the current token still verifies', freshVerify.status === 200, `status ${freshVerify.status} ${freshVerify.text?.slice(0, 120)}`);
 const reuseVerify = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(String(resendToken3))}`);
 check('verification is single-use — replay gets a predictable refusal', reuseVerify.status === 404, `status ${reuseVerify.status}`);
-const { createHash } = await import('node:crypto');
+const { createHash: shaHash } = await import('node:crypto');
 const expiredToken = `${'a'.repeat(64)}.${Math.floor(Date.now() / 1000) - 3600}`;
-const expiredHash = createHash('sha256').update(`cgm-organizer-verify:${expiredToken}`).digest('hex');
+const expiredHash = shaHash('sha256').update(`cgm-organizer-verify:${expiredToken}`).digest('hex');
 sqlite.prepare("UPDATE cgm_organizer_applications SET verification_token_hash = ?, status = 'pending' WHERE id = ?").run(expiredHash, secAppRow.id);
 const expiredAttempt = await call('GET', `/api/cgm/organizer/verify?token=${encodeURIComponent(expiredToken)}`);
 check('an expired verification link is refused with a resend pointer', expiredAttempt.status === 410, `status ${expiredAttempt.status}`);
@@ -2040,7 +2040,7 @@ check('a revoked invitation is no longer available', revLanding2.status === 404,
 // -- 10. Individual invitations stay identity-bound and single-use ------------
 const invIndividual = await memberCall('POST', `/api/cgm/classes/${invClassId}/invitations`, { kind: 'individual', studentId: Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'inv-101-001'").id) }, phantomToken);
 const invIndividualToken = invIndividual.json?.data?.token || invIndividual.json?.data?.code;
-check('an individual invitation returns its raw token exactly once at creation', /^[0-9a-f]{40,}$/i.test(String(invIndividualToken || '')), String(invIndividualToken || '').slice(0, 12));
+check('an individual invitation returns its raw token (which is stored for the organizer)', /^[0-9a-f]{40,}$/i.test(String(invIndividualToken || '')), String(invIndividualToken || '').slice(0, 12));
 const invIndividualClaim = await studentCall('POST', `/api/cgm/student/invitations/${invIndividualToken}/claim`, {}, ivySession);
 check('the bound student claims the individual invitation', invIndividualClaim.status === 200, `status ${invIndividualClaim.status} ${invIndividualClaim.text?.slice(0, 120)}`);
 const invIndividualReclaim = await studentCall('POST', `/api/cgm/student/invitations/${invIndividualToken}/claim`, {}, ivySession);
@@ -2318,6 +2318,128 @@ check('after the reset new passkeys start with rx30 again',
   String(afterApprove.json?.data?.passkey || '').startsWith('rx30'), String(afterApprove.json?.data?.passkey));
 const untouchedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: 'bio1qq' });
 check('the reset never rewrote the earlier student\'s marked passkey', untouchedLogin.status === 200, `status ${untouchedLogin.status}`);
+
+
+// ===========================================================================
+// 28. Roster mass actions + row editing; invitation tokens that stay;
+//     the dependency-free QR encoder
+// ===========================================================================
+section('28. Roster editing & mass actions, persistent invitations, QR encoder');
+
+// -- Roster rows are individually editable after an upload --------------------
+const freshRow = await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries`, { fullName: 'Edit Me', indexNumber: 'EDIT-28-001' }, amaToken);
+const freshRowId = Number(freshRow.json?.data?.id);
+check('a fresh unregistered row exists for editing', Number.isInteger(freshRowId) && freshRowId > 0, `status ${freshRow.status}`);
+const editName = await memberCall('PATCH', `/api/cgm/classes/${classAId}/roster/entries/${freshRowId}`, { fullName: 'Edit Me Owusu', phone: '0201112233', gender: 'female' }, amaToken);
+check('the organizer edits a roster row after the upload', editName.status === 200, `status ${editName.status} ${editName.text?.slice(0, 120)}`);
+const editedRow = q1('SELECT full_name, phone, gender FROM cgm_roster_entries WHERE id = ?', freshRowId);
+check('the edited name, phone and gender are stored', editedRow?.full_name === 'Edit Me Owusu' && editedRow?.phone === '0201112233' && editedRow?.gender === 'female', JSON.stringify(editedRow));
+const editIndex = await memberCall('PATCH', `/api/cgm/classes/${classAId}/roster/entries/${freshRowId}`, { indexNumber: 'EDIT-28-001B' }, amaToken);
+check('the index number of an unregistered row can be corrected', editIndex.status === 200, `status ${editIndex.status}`);
+check('the corrected index is searchable', q1("SELECT COUNT(*) c FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'edit-28-001b'", classAId).c === 1);
+const editDuplicate = await memberCall('PATCH', `/api/cgm/classes/${classAId}/roster/entries/${freshRowId}`, { indexNumber: 'BIO-201-001' }, amaToken);
+check('an index number cannot collide with another row', editDuplicate.status === 409, `status ${editDuplicate.status}`);
+const registeredEntry = q1("SELECT id, student_id FROM cgm_roster_entries WHERE class_id = ? AND student_id IS NOT NULL LIMIT 1", classAId);
+if (registeredEntry?.id) {
+  const editRegistered = await memberCall('PATCH', `/api/cgm/classes/${classAId}/roster/entries/${registeredEntry.id}`, { indexNumber: 'BIO-201-999' }, amaToken);
+  check("a registered student's index is not edited through the roster row", editRegistered.status === 409, `status ${editRegistered.status}`);
+}
+
+// -- Select-all mass actions on the roster ------------------------------------
+const bulkAdds = [];
+for (const [name, index] of [['Ama Bulk', 'BULK-28-001'], ['Esi Bulk', 'BULK-28-002'], ['Yao Bulk', 'BULK-28-003']]) {
+  const added = await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries`, { fullName: name, indexNumber: index }, amaToken);
+  bulkAdds.push(Number(added.json?.data?.id));
+}
+check('three mass-action fixture rows were added', bulkAdds.every((id) => Number.isInteger(id) && id > 0), JSON.stringify(bulkAdds));
+const bulkNoIds = await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries/bulk-delete`, {}, amaToken);
+check('a bulk delete without a selection is refused', bulkNoIds.status === 400, `status ${bulkNoIds.status}`);
+const bulkForeign = await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries/bulk-delete`, { ids: bulkAdds }, kwameToken);
+check('mass actions still need the roster permission', bulkForeign.status === 403, `status ${bulkForeign.status}`);
+const registeredEntryId = registeredEntry?.id || Number(q1("SELECT id FROM cgm_roster_entries WHERE class_id = ? AND student_id IS NOT NULL LIMIT 1", classAId)?.id);
+const bulkRun = await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries/bulk-delete`, { ids: [...bulkAdds, registeredEntryId] }, amaToken);
+check('the bulk delete removes exactly the unregistered selection',
+  bulkRun.status === 200 && Number(bulkRun.json?.data?.deleted) === 3 && Number(bulkRun.json?.data?.skippedRegistered) === 1,
+  bulkRun.text?.slice(0, 140));
+check('the registered row survives the bulk delete', q1('SELECT COUNT(*) c FROM cgm_roster_entries WHERE id = ?', registeredEntryId).c === 1);
+check('the bulk removal is audited with the count', q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.roster.entries_bulk_removed'").c >= 1);
+
+// -- Select-all mass actions on Members ---------------------------------------
+const membersNow = await memberCall('GET', `/api/cgm/classes/${classAId}/members`, undefined, amaToken);
+const memberIds = (membersNow.json?.data || []).map((row) => Number(row.memberId)).filter((id) => Number.isInteger(id));
+check('classA has members to mass-act on', memberIds.length >= 2, JSON.stringify(memberIds.length));
+const bulkSuspend = await memberCall('POST', `/api/cgm/classes/${classAId}/members/bulk`, { action: 'suspend', ids: memberIds }, amaToken);
+check('select-all suspend suspends every selected membership',
+  bulkSuspend.status === 200 && Number(bulkSuspend.json?.data?.affected) === memberIds.length, bulkSuspend.text?.slice(0, 140));
+check('the memberships are actually suspended', q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND status = 'suspended'", classAId).c === memberIds.length);
+for (const memberId of memberIds) {
+  await memberCall('POST', `/api/cgm/classes/${classAId}/members/${memberId}/restore`, {}, amaToken);
+}
+check('every membership was restored after the mass-action rehearsal',
+  q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND status = 'active'", classAId).c === memberIds.length);
+const bulkRemove = await memberCall('POST', `/api/cgm/classes/${classAId}/members/bulk`, { action: 'remove', ids: memberIds, reason: 'Mass-action drill' }, amaToken);
+check('select-all remove removes the selected memberships with a reason',
+  bulkRemove.status === 200 && Number(bulkRemove.json?.data?.affected) === memberIds.length, bulkRemove.text?.slice(0, 140));
+check('the removals record the drill reason', q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND status = 'removed' AND removal_reason = 'Mass-action drill'", classAId).c === memberIds.length);
+for (const memberId of memberIds) {
+  await memberCall('POST', `/api/cgm/classes/${classAId}/members/${memberId}/restore`, {}, amaToken);
+}
+const bulkBadAction = await memberCall('POST', `/api/cgm/classes/${classAId}/members/bulk`, { action: 'delete', ids: memberIds }, amaToken);
+check('an unknown mass action is refused', bulkBadAction.status === 400, `status ${bulkBadAction.status}`);
+
+// -- Invitation tokens stay copyable and shareable ----------------------------
+const stickyInvite = await memberCall('POST', `/api/cgm/classes/${classAId}/invitations`, { kind: 'general' }, assistantToken);
+const stickyToken = stickyInvite.json?.data?.token;
+const stickyCode = stickyInvite.json?.data?.code;
+check('the created invitation returns its code and token', Boolean(stickyCode) && /^[0-9a-f]{32,}$/i.test(String(stickyToken)), String(stickyCode));
+check('the token is stored so the organizer can come back to it',
+  q1('SELECT token_value FROM cgm_invitations WHERE id = ?', Number(stickyInvite.json?.data?.id))?.token_value === stickyToken);
+const stickyList = await memberCall('GET', `/api/cgm/classes/${classAId}/invitations`, undefined, assistantToken);
+const stickyRow = (stickyList.json?.data || []).find((row) => Number(row.id) === Number(stickyInvite.json?.data?.id));
+check('the invitations list returns the stored token and a ready link any time',
+  stickyRow?.token === stickyToken && String(stickyRow?.link || '').includes('#class-invite/'), JSON.stringify(stickyRow?.link || '').slice(0, 120));
+const stickyLanding = await call('GET', `/api/cgm/invitations/${stickyCode}`);
+check('the stored invitation still resolves for students', stickyLanding.status === 200, `status ${stickyLanding.status}`);
+const stickyRegen = await memberCall('POST', `/api/cgm/invitations/${stickyInvite.json?.data?.id}/regenerate`, {}, assistantToken);
+check('regenerating returns the fresh token', stickyRegen.status === 200 && Boolean(stickyRegen.json?.data?.token), `status ${stickyRegen.status}`);
+const stickyList2 = await memberCall('GET', `/api/cgm/classes/${classAId}/invitations`, undefined, assistantToken);
+const stickyRow2 = (stickyList2.json?.data || []).find((row) => Number(row.id) === Number(stickyInvite.json?.data?.id));
+check('after a regeneration the list serves the fresh token (QR can always re-render)',
+  stickyRow2?.token === stickyRegen.json?.data?.token && stickyRow2?.token !== stickyToken);
+
+// -- The in-house QR encoder (src/lib/qr.ts) ----------------------------------
+await build({ entryPoints: [path.join(ROOT, 'src/lib/qr.ts')], outfile: path.join(CACHE, 'qr.mjs'), bundle: true, format: 'esm', logLevel: 'silent' });
+const { encodeQr, qrVersionFor } = await import(path.join(CACHE, 'qr.mjs'));
+const matrixSha = (qr) =>
+  shaHash('sha256').update(qr.dark.map((cells) => cells.map((cell) => (cell ? 1 : 0)).join('')).join('\n')).digest('hex');
+const inviteUrl = 'https://coderxsociety.pages.dev/#class-invite/LS0002-CAFFCC';
+const qrKnown = encodeQr(inviteUrl);
+check('the QR encoder matches the verified reference for the invite link (known answer)',
+  qrKnown.size === 33 && qrKnown.version === 4 && qrKnown.mask === 2
+  && qrKnown.dark.flat().filter(Boolean).length === 567
+  && matrixSha(qrKnown).startsWith('6c28ff4298ea3ce0'),
+  `size=${qrKnown.size} v=${qrKnown.version} mask=${qrKnown.mask} dark=${qrKnown.dark.flat().filter(Boolean).length}`);
+const qrKnown2 = encodeQr('https://chat.whatsapp.com/InviteLinkExample123');
+check('the QR encoder matches for the WhatsApp link shape too',
+  qrKnown2.size === 33 && qrKnown2.dark.flat().filter(Boolean).length === 573 && matrixSha(qrKnown2).startsWith('e24ba1dc54a291d2'),
+  `dark=${qrKnown2.dark.flat().filter(Boolean).length}`);
+const qrAgain = encodeQr(inviteUrl);
+check('the QR encoder is deterministic', matrixSha(qrAgain) === matrixSha(qrKnown));
+check('the QR code carries its finder patterns at three corners',
+  qrKnown.dark[0][0] && qrKnown.dark[6][6] && qrKnown.dark[0][6]
+  && qrKnown.dark[qrKnown.size - 7][0] && qrKnown.dark[qrKnown.size - 1][qrKnown.size - 7]
+  && !qrKnown.dark[7][7]);
+check('the timing pattern alternates from the finders', qrKnown.dark[8][6] === true && qrKnown.dark[9][6] === false);
+check('the version grows with the payload (level M capacities)',
+  qrVersionFor(14) === 1 && qrVersionFor(15) === 2 && qrVersionFor(2331) === 40 && qrVersionFor(2332) === null);
+let oversizeThrew = false;
+try { encodeQr('x'.repeat(3000)); } catch { oversizeThrew = true; }
+check('an oversized payload is refused cleanly', oversizeThrew);
+const qrLong = encodeQr(`https://coderxsociety.pages.dev/#class-invite/${'L'.repeat(300)}`);
+check('long links encode on a higher version', qrLong.version > 4 && qrLong.dark.length > 0);
+check('the UI renders the QR as inline SVG (no external QR runtime)',
+  readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8').includes('import { encodeQr } from')
+  && !readFileSync(path.join(ROOT, 'package.json'), 'utf8').includes('"qrcode"'));
 
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

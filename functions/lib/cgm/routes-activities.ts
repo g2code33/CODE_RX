@@ -1931,7 +1931,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     roster: {
       permission: 'view_roster',
       header: ['Full name', 'Index number', 'University ID', 'Phone', 'Gender', 'Email', 'Status'],
-      sql: (classId) => `SELECT s.full_name, s.index_number, s.university_id, s.phone, s.gender, s.email, s.status
+      sql: (classId) => `SELECT s.full_name, s.index_number, s.phone, s.gender, s.email, s.status
         FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
         WHERE cm.class_id = ${classId} AND cm.status = 'active' ORDER BY s.full_name`,
     },
@@ -2037,7 +2037,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     let rows: any[];
     let sqlText = report.sql(classId);
     if (sensitiveFields && !sensitive) {
-      sqlText = sqlText.replace('s.university_id, s.phone,', 'NULL, NULL,').replace('s.email,', 'NULL,');
+      sqlText = sqlText.replace('s.phone,', 'NULL,').replace('s.email,', 'NULL,');
     }
     rows = await asRows<any>(c.env.DB.prepare(sqlText));
     await auditCgm(c.env.DB, {
@@ -2145,7 +2145,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         (SELECT COUNT(*) FROM cgm_organizer_applications WHERE status IN ('pending','email_verified')) AS applications,
         (SELECT COUNT(*) FROM cgm_classes WHERE status = 'pending') AS classes,
         (SELECT COUNT(*) FROM cgm_profile_change_requests pcr JOIN cgm_students s ON s.id = pcr.student_id
-           WHERE pcr.status = 'pending' AND pcr.field IN ('gender','index_number','university_id','phone')) AS sensitiveChanges,
+           WHERE pcr.status = 'pending' AND pcr.field IN ('gender','index_number','phone')) AS sensitiveChanges,
         (SELECT COUNT(*) FROM cgm_announcement_reports WHERE status = 'open') AS disputes`
     ));
     const flag = await asRows<{ setting_value: string }>(c.env.DB.prepare(
@@ -2461,7 +2461,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT pcr.*, s.full_name AS student_name, s.index_number
        FROM cgm_profile_change_requests pcr JOIN cgm_students s ON s.id = pcr.student_id
-       WHERE pcr.status = ? AND pcr.field IN ('gender','index_number','university_id','phone')
+       WHERE pcr.status = ? AND pcr.field IN ('gender','index_number','phone')
        ORDER BY pcr.created_at DESC LIMIT 200`
     ).bind(status));
     return c.json({
@@ -2486,7 +2486,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT pcr.*, s.full_name AS student_name FROM cgm_profile_change_requests pcr
        JOIN cgm_students s ON s.id = pcr.student_id
        WHERE pcr.id = ? AND pcr.status = 'pending'
-         AND pcr.field IN ('gender','index_number','university_id','phone')`
+         AND pcr.field IN ('gender','index_number','phone')`
     ).bind(id));
     const request = rows[0];
     if (!request) return bad(c, 'Sensitive change request not found or already reviewed.', 404);
@@ -2513,10 +2513,6 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     } else if (field === 'index_number') {
       await c.env.DB.prepare(
         'UPDATE cgm_students SET index_number = ?, index_number_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-      ).bind(newValue, lookupKey(newValue), Number(request.student_id)).run();
-    } else if (field === 'university_id') {
-      await c.env.DB.prepare(
-        'UPDATE cgm_students SET university_id = ?, university_id_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
       ).bind(newValue, lookupKey(newValue), Number(request.student_id)).run();
     } else if (field === 'phone') {
       await c.env.DB.prepare(

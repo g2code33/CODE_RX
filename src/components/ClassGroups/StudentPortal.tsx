@@ -101,7 +101,6 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
 
   const identifierLabels: Record<string, string> = {
     index_number: 'Index number',
-    university_id: 'University student ID',
     phone: 'Telephone number',
   };
 
@@ -1121,7 +1120,6 @@ const NotificationsView = ({ onChanged }: { onChanged: () => void }) => {
 
 const PROFILE_FIELDS: Array<[string, string, boolean]> = [
   ['full_name', 'Full name', true],
-  ['university_id', 'University student ID', true],
   ['phone', 'Telephone number', true],
   ['gender', 'Gender', true],
   ['email', 'Email address', true],

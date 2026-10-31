@@ -312,11 +312,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     // The canonical columns the import mapper suggests; gender stays optional
     // and defaults to unknown — the engine never infers it.
-    const header = ['full_name', 'index_number', 'university_id', 'email', 'phone', 'gender'];
+    const header = ['full_name', 'index_number', 'email', 'phone', 'gender'];
     const rows = [
-      ['Ama Boakye', 'BIO-201-001', '10850001', 'ama.boakye@example.com', '+233201234567', 'female'],
-      ['Kofi Mensah', 'BIO-201-002', '10850002', 'kofi.mensah@example.com', '+233202234567', 'male'],
-      ['Akosua Owusu', 'CHM-105-010', '10850010', 'akosua.owusu@example.com', '+233209234567', 'unknown'],
+      ['Ama Boakye', 'BIO-201-001', 'ama.boakye@example.com', '+233201234567', 'female'],
+      ['Kofi Mensah', 'BIO-201-002', 'kofi.mensah@example.com', '+233202234567', 'male'],
+      ['Akosua Owusu', 'CHM-105-010', 'akosua.owusu@example.com', '+233209234567', 'unknown'],
     ];
     const format = String(c.req.query('format') || 'csv');
     const fileBase = 'code-rx-roster-template';
@@ -957,17 +957,16 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT r.*, s.id AS linked_student_id, s.status AS student_status
        FROM cgm_roster_entries r LEFT JOIN cgm_students s ON s.id = r.student_id
-       WHERE r.class_id = ? ${search ? 'AND (r.full_name LIKE ? OR r.index_number LIKE ? OR r.university_id LIKE ? OR r.phone LIKE ?)' : ''}
+       WHERE r.class_id = ? ${search ? 'AND (r.full_name LIKE ? OR r.index_number LIKE ? OR r.phone LIKE ?)' : ''}
        ORDER BY r.full_name LIMIT 1000`
     ).bind(...(search
-      ? [classId, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`]
+      ? [classId, `%${search}%`, `%${search}%`, `%${search}%`]
       : [classId])));
     const sensitive = member.isPhantom || guard.context.permissions.has('view_sensitive_profiles' as ClassPermission);
     return c.json({
       success: true,
       data: rows.map((row) => ({
         id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
-        universityId: sensitive ? row.university_id : null,
         phone: sensitive ? row.phone : null,
         gender: row.gender, email: sensitive ? row.email : null,
         customFields: (() => { try { return JSON.parse(row.custom_fields_json || '{}'); } catch { return {}; } })(),
@@ -1002,8 +1001,6 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         full_name: name.slice(0, 160),
         index_number: indexNumber,
         index_number_key: key,
-        university_id: mapped.values.university_id || null as any,
-        university_id_key: mapped.values.university_id ? lookupKey(mapped.values.university_id) : null as any,
         phone: phoneDisplayValue,
         phone_key: phoneDisplayValue ? phoneKey(phoneDisplayValue) : null as any,
         gender: normalizeGender(mapped.values.gender),
@@ -1046,20 +1043,20 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
           // only the roster row is refreshed, and a conflict is flagged for
           // organizer review through the same table.
           batch.push(c.env.DB.prepare(
-            `UPDATE cgm_roster_entries SET full_name = ?, university_id = COALESCE(?, university_id),
+            `UPDATE cgm_roster_entries SET full_name = ?,
              phone = COALESCE(?, phone), phone_key = COALESCE(?, phone_key), gender = ?,
              email = COALESCE(?, email), updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-          ).bind(entry.full_name, entry.university_id, entry.phone, entry.phone_key, entry.gender, entry.email, Number(existing[0].id)));
+          ).bind(entry.full_name, entry.phone, entry.phone_key, entry.gender, entry.email, Number(existing[0].id)));
           updated += 1;
         } else { skipped += 1; }
         continue;
       }
       batch.push(c.env.DB.prepare(
         `INSERT INTO cgm_roster_entries
-         (class_id, index_number, index_number_key, full_name, university_id, university_id_key, phone, phone_key, gender, email, custom_fields_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(classId, entry.index_number, entry.index_number_key, entry.full_name, entry.university_id,
-        entry.university_id_key, entry.phone, entry.phone_key, entry.gender, entry.email, JSON.stringify(entry.custom)));
+         (class_id, index_number, index_number_key, full_name, phone, phone_key, gender, email, custom_fields_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(classId, entry.index_number, entry.index_number_key, entry.full_name,
+        entry.phone, entry.phone_key, entry.gender, entry.email, JSON.stringify(entry.custom)));
       created += 1;
     }
     for (let i = 0; i < batch.length; i += 40) {
@@ -1280,10 +1277,9 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     if (existing[0]) return bad(c, 'A roster entry with this index number already exists.', 409);
     const phone = cleanOrNull(body.phone, 32);
     const result = await c.env.DB.prepare(
-      `INSERT INTO cgm_roster_entries (class_id, index_number, index_number_key, full_name, university_id, university_id_key, phone, phone_key, gender, email)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO cgm_roster_entries (class_id, index_number, index_number_key, full_name, phone, phone_key, gender, email)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(classId, indexNumber, key, fullName,
-      cleanOrNull(body.universityId, 80), body.universityId ? lookupKey(body.universityId) : null,
       phone, phone ? phoneKey(phone) : null, normalizeGender(body.gender), cleanEmail(body.email)).run();
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
@@ -1304,7 +1300,23 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const fields: string[] = []; const values: any[] = [];
     if (body.fullName !== undefined) { fields.push('full_name = ?'); values.push(clean(body.fullName, 160)); }
     if (body.gender !== undefined) { fields.push('gender = ?'); values.push(normalizeGender(body.gender)); }
-    if (body.universityId !== undefined) { fields.push('university_id = ?', 'university_id_key = ?'); values.push(cleanOrNull(body.universityId, 80), body.universityId ? lookupKey(body.universityId) : null); }
+    if (body.indexNumber !== undefined) {
+      // The index number is the login identifier, so a registered student's
+      // index is corrected through the membership, not the roster row.
+      const linked = await asRows<{ student_id: number | null }>(c.env.DB.prepare(
+        'SELECT student_id FROM cgm_roster_entries WHERE id = ? AND class_id = ?'
+      ).bind(entryId, classId));
+      if (linked[0]?.student_id) return bad(c, 'This student has already registered — edit their index number from Members instead.', 409);
+      const indexNumber = clean(body.indexNumber, 80);
+      if (!indexNumber) return bad(c, 'Enter the index number.');
+      const key = lookupKey(indexNumber);
+      const clash = await asRows<{ id: number }>(c.env.DB.prepare(
+        'SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = ? AND id != ?'
+      ).bind(classId, key, entryId));
+      if (clash[0]) return bad(c, 'Another roster entry already uses this index number.', 409);
+      fields.push('index_number = ?', 'index_number_key = ?');
+      values.push(indexNumber, key);
+    }
     if (body.phone !== undefined) { const phone = cleanOrNull(body.phone, 32); fields.push('phone = ?', 'phone_key = ?'); values.push(phone, phone ? phoneKey(phone) : null); }
     if (body.email !== undefined) { fields.push('email = ?'); values.push(cleanEmail(body.email)); }
     if (!fields.length) return bad(c, 'Nothing to update.');
@@ -1337,6 +1349,90 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       action: 'cgm.roster.entry_removed', entityType: 'class', entityId: entryId, classId,
     });
     return c.json({ success: true });
+  });
+
+  // Mass actions: select-all style bulk removal of UNREGISTERED roster rows.
+  // Registered students are never deleted here — their memberships are the
+  // correct surface, exactly like the single-row rule above.
+  app.post('/api/cgm/classes/:id/roster/entries/bulk-delete', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const guard = await requireClassPermission(c, member, classId, 'edit_roster');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const ids = Array.isArray(body.ids)
+      ? [...new Set(body.ids.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0))].slice(0, 1000)
+      : [];
+    if (!ids.length) return bad(c, 'Select the rows to delete.');
+    const placeholders = ids.map(() => '?').join(', ');
+    const targets = await asRows<{ id: number; student_id: number | null }>(c.env.DB.prepare(
+      `SELECT id, student_id FROM cgm_roster_entries WHERE class_id = ? AND id IN (${placeholders})`
+    ).bind(classId, ...ids));
+    const deletable = targets.filter((row) => !row.student_id).map((row) => Number(row.id));
+    const skippedRegistered = targets.length - deletable.length;
+    let deleted = 0;
+    if (deletable.length) {
+      const deletePlaceholders = deletable.map(() => '?').join(', ');
+      const result = await c.env.DB.prepare(
+        `DELETE FROM cgm_roster_entries WHERE class_id = ? AND id IN (${deletePlaceholders})`
+      ).bind(classId, ...deletable).run();
+      deleted = Number(result.meta.changes) || deletable.length;
+    }
+    if (deleted) {
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.roster.entries_bulk_removed', entityType: 'class', entityId: classId, classId,
+        context: { deleted, skippedRegistered, ids: deletable },
+      });
+    }
+    return c.json({ success: true, data: { deleted, skippedRegistered } });
+  });
+
+  // Mass actions on class memberships (Members tab select-all): suspend or
+  // remove many at once, with the same rules and notifications as the
+  // single-member action.
+  app.post('/api/cgm/classes/:id/members/bulk', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const action = String(body.action || '');
+    if (!['remove', 'suspend'].includes(action)) return bad(c, 'Choose to suspend or remove the selected members.');
+    const guard = await requireClassPermission(c, member, classId, action === 'remove' ? 'remove_students' : 'remove_students');
+    if (!guard.ok) return guard.response;
+    const ids = Array.isArray(body.ids)
+      ? [...new Set(body.ids.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0))].slice(0, 1000)
+      : [];
+    if (!ids.length) return bad(c, 'Select the members first.');
+    const reason = cleanOrNull(body.reason, 500);
+    const placeholders = ids.map(() => '?').join(', ');
+    const memberships = await asRows<{ id: number; student_id: number }>(c.env.DB.prepare(
+      `SELECT id, student_id FROM cgm_class_members WHERE class_id = ? AND status = 'active' AND id IN (${placeholders})`
+    ).bind(classId, ...ids));
+    let affected = 0;
+    for (const membership of memberships) {
+      if (action === 'remove') {
+        await c.env.DB.prepare(
+          `UPDATE cgm_class_members SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = ? WHERE id = ?`
+        ).bind(reason, membership.id).run();
+      } else {
+        await c.env.DB.prepare(`UPDATE cgm_class_members SET status = 'suspended' WHERE id = ?`).bind(membership.id).run();
+        await revokeStudentSessions(c.env.DB, Number(membership.student_id));
+      }
+      await notifyStudent(c.env.DB, Number(membership.student_id), 'membership',
+        action === 'remove' ? 'Removed from class' : 'Class membership suspended',
+        reason || `Your membership in this class was ${action}d.`);
+      affected += 1;
+    }
+    if (affected) {
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: `cgm.membership.bulk_${action}`, entityType: 'class', entityId: classId, classId,
+        context: { affected, ids: memberships.map((row) => Number(row.id)), reason },
+      });
+    }
+    return c.json({ success: true, data: { affected } });
   });
 
   app.get('/api/cgm/classes/:id/roster/imports', async (c: any) => {
@@ -1372,7 +1468,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     if (!guard.ok) return guard.response;
     const status = clean(c.req.query('status') || 'pending', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT r.*, re.full_name, re.index_number, re.gender, re.email, re.phone, re.university_id, re.student_id
+      `SELECT r.*, re.full_name, re.index_number, re.gender, re.email, re.phone, re.student_id
        FROM cgm_registration_requests r JOIN cgm_roster_entries re ON re.id = r.roster_entry_id
        WHERE r.class_id = ? AND r.status = ? ORDER BY r.created_at DESC LIMIT 200`
     ).bind(classId, status));
@@ -1380,7 +1476,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       success: true,
       data: rows.map((row) => ({
         id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
-        gender: row.gender, email: row.email, phone: row.phone, universityId: row.university_id,
+        gender: row.gender, email: row.email, phone: row.phone,
         status: row.status, studentId: row.student_id ? Number(row.student_id) : null, createdAt: row.created_at,
       })),
     });
@@ -1424,8 +1520,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const access = await registrationQueueAccess(c, member, classId);
     if (!access.ok) return access.response;
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT r.*, re.full_name, re.index_number, re.gender, re.email, re.phone, re.university_id,
-              re.university_id_key, re.phone_key, re.custom_fields_json, cl.institution, cl.institution_key, cl.name AS class_name
+      `SELECT r.*, re.full_name, re.index_number, re.gender, re.email, re.phone,
+              re.phone_key, re.custom_fields_json, cl.institution, cl.institution_key, cl.name AS class_name
        FROM cgm_registration_requests r
        JOIN cgm_roster_entries re ON re.id = r.roster_entry_id
        JOIN cgm_classes cl ON cl.id = r.class_id
@@ -1485,15 +1581,14 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       issuedPasskey = `${classPrefix}${allocation.suffix}`;
       const inserted = await c.env.DB.prepare(
         `INSERT INTO cgm_students
-         (full_name, index_number, index_number_key, institution, institution_key, university_id, university_id_key,
+         (full_name, index_number, index_number_key, institution, institution_key,
           phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_prefix, passkey_sequence,
           passkey_verifier, passkey_issued_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
       ).bind(
         request.full_name, request.index_number,
         request.index_number_key || String(request.index_number).trim().replace(/\s+/g, ' ').toLowerCase(),
         request.institution, request.institution_key,
-        request.university_id, request.university_id_key,
         request.phone, request.phone_key, request.email, request.gender,
         request.custom_fields_json || '{}',
         allocation.suffix, classPrefix, allocation.sequence, await hashPassword(issuedPasskey),
@@ -1569,7 +1664,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const status = clean(c.req.query('status') || 'active', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT m.id, m.status, m.joined_at, m.added_via, s.id AS student_id, s.full_name, s.index_number,
-              s.university_id, s.phone, s.email, s.gender, s.status AS student_status
+              s.phone, s.email, s.gender, s.status AS student_status
        FROM cgm_class_members m JOIN cgm_students s ON s.id = m.student_id
        WHERE m.class_id = ? AND m.status = ?
        ORDER BY s.full_name LIMIT 1000`
@@ -1580,7 +1675,6 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         memberId: Number(row.id), studentId: Number(row.student_id), fullName: row.full_name,
         indexNumber: row.index_number, gender: row.gender, status: row.status, joinedAt: row.joined_at,
         addedVia: row.added_via, studentStatus: row.student_status,
-        universityId: sensitive ? row.university_id : null,
         phone: sensitive ? row.phone : null,
         email: sensitive ? row.email : null,
       })),
@@ -1763,9 +1857,6 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         if (field === 'phone') {
           updates.push('phone = ?', 'phone_key = ?');
           values.push(value, value ? phoneKey(value) : null);
-        } else if (field === 'university_id') {
-          updates.push('university_id = ?', 'university_id_key = ?');
-          values.push(value, value ? lookupKey(value) : null);
         } else {
           updates.push(`${field} = ?`);
           values.push(value);
@@ -1810,12 +1901,19 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
        LEFT JOIN cgm_students s ON s.id = i.bound_student_id
        WHERE i.class_id = ? ORDER BY i.id DESC LIMIT 100`
     ).bind(classId));
+    const origin = new URL(c.req.url).origin;
     return c.json({
       success: true,
       data: rows.map((row) => ({
         id: Number(row.id), kind: row.kind, code: row.code, expiresAt: row.expires_at,
         maxUses: row.max_uses === null ? null : Number(row.max_uses), useCount: Number(row.use_count),
         revoked: Boolean(row.revoked_at), disabled: Boolean(row.disabled_at),
+        // The token stays available to the organizer: copy, share and
+        // re-render the QR any time (it is permission-gated like the rest).
+        token: row.token_value || null,
+        link: row.token_value || row.code
+          ? `${origin}/#class-invite/${encodeURIComponent(row.code || row.token_value)}`
+          : null,
         boundStudent: row.bound_name || (row.bound_identifier_key ? row.bound_identifier_key : null),
         creator: row.creator_label, createdAt: row.created_at, lastUsedAt: row.last_used_at,
       })),
@@ -1856,7 +1954,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         boundStudentId = studentId;
       } else if (rosterEntryId) {
         const entry = await asRows<any>(c.env.DB.prepare(
-          'SELECT id, index_number_key, university_id_key, phone_key, student_id FROM cgm_roster_entries WHERE id = ? AND class_id = ?'
+          'SELECT id, index_number_key, phone_key, student_id FROM cgm_roster_entries WHERE id = ? AND class_id = ?'
         ).bind(rosterEntryId, classId));
         if (!entry[0]) return bad(c, 'Roster entry not found.', 404);
         if (entry[0].student_id) { boundStudentId = Number(entry[0].student_id); }
@@ -1869,9 +1967,9 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
 
     const result = await c.env.DB.prepare(
       `INSERT INTO cgm_invitations
-       (class_id, kind, code, token_hash, created_by_profile_id, creator_label, bound_student_id, bound_roster_entry_id, bound_identifier_key, expires_at, max_uses)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(classId, kind, code, await sha256Hex(`cgm-invite:${token}`), member.profileId, member.name,
+       (class_id, kind, code, token_hash, token_value, created_by_profile_id, creator_label, bound_student_id, bound_roster_entry_id, bound_identifier_key, expires_at, max_uses)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(classId, kind, code, await sha256Hex(`cgm-invite:${token}`), token, member.profileId, member.name,
       boundStudentId, boundRosterEntryId, boundIdentifierKey,
       expiresAt ? expiresAt.toISOString().replace('T', ' ').slice(0, 19) : null,
       maxUses).run();
@@ -1884,7 +1982,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       success: true,
       data: {
         id: Number(result.meta.last_row_id), kind, code,
-        // The raw token is returned exactly once, at creation. Only its hash is stored.
+        // The token is also stored, so the organizer can come back and copy
+        // or share the invitation any time (manage_invitations only).
         token,
         link: `${new URL(c.req.url).origin}/#class-invite/${encodeURIComponent(code || token)}`,
       },
@@ -1916,8 +2015,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         ? `${(classRow[0].code || 'CRX').replace(/[^A-Z0-9]/gi, '').slice(-6).toUpperCase()}-${randomToken().slice(0, 6).toUpperCase()}`
         : null;
       await c.env.DB.prepare(
-        'UPDATE cgm_invitations SET token_hash = ?, code = COALESCE(?, code), revoked_at = NULL, disabled_at = NULL, use_count = 0 WHERE id = ?'
-      ).bind(await sha256Hex(`cgm-invite:${token}`), freshCode, invitationId).run();
+        'UPDATE cgm_invitations SET token_hash = ?, token_value = ?, code = COALESCE(?, code), revoked_at = NULL, disabled_at = NULL, use_count = 0 WHERE id = ?'
+      ).bind(await sha256Hex(`cgm-invite:${token}`), token, freshCode, invitationId).run();
       await auditCgm(c.env.DB, {
         actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
         action: 'cgm.invitation.regenerated', entityType: 'invitation', entityId: invitationId,

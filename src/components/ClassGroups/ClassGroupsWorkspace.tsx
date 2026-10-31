@@ -3,7 +3,7 @@ import {
   Activity, Archive, Bell, CalendarDays, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
   Megaphone, Plus, RefreshCw, Settings, ShieldCheck, UserCheck, Users, Vote, FileText, X,
 } from 'lucide-react';
-import * as QRCode from 'qrcode';
+import { encodeQr } from '../../lib/qr';
 import {
   cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
@@ -196,7 +196,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'overview' && <OverviewArea classEntry={activeClass} onGo={setArea} />}
           {activeClass && area === 'classes' && <ClassesArea classes={classes} activeClassId={activeClassId} onSwitch={setActiveClassId} onCreated={() => void refresh()} />}
           {activeClass && area === 'students' && can('view_roster') && <StudentsArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} canImport={can('import_roster')} sensitive={activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has('view_sensitive_profiles')} onChanged={() => void refresh()} />}
-          {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} />}
+          {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} onChanged={() => void refresh()} />}
           {activeClass && area === 'elections' && can('manage_elections') && <ElectionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -477,6 +477,8 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [memberSelected, setMemberSelected] = useState<Set<number>>(new Set());
+  const [memberBusy, setMemberBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -498,7 +500,7 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
           </button>
         ))}
         <div className="ml-auto flex gap-2">
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, index, ID, phone…" className={`${inputClass} max-w-56`} aria-label="Search roster" />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, index, phone…" className={`${inputClass} max-w-56`} aria-label="Search roster" />
           {canImport && <button type="button" className="mini-button" onClick={() => setImportOpen((value) => !value)}>Import file</button>}
         </div>
       </div>
@@ -524,12 +526,51 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
           ? <EmptyArea icon={UserCheck} title="No members yet" text="Approved registrations and join requests appear here." />
           : (
             <div className={card}>
+              {canEdit && memberSelected.size > 0 && (
+                <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                  <p className="text-xs font-black uppercase tracking-wide text-amber-700">{memberSelected.size} selected</p>
+                  <button type="button" className="mini-button" disabled={memberBusy} onClick={async () => {
+                    setMemberBusy(true);
+                    try { const result = await cgm.bulkMemberAction(classId, 'suspend', [...memberSelected]); setMessage(`${(result?.data || result || {}).affected ?? memberSelected.size} member(s) suspended.`); setMemberSelected(new Set()); await load(); onChanged(); setError(null); }
+                    catch (failure: any) { setError(failure?.message || 'The members could not be suspended.'); }
+                    finally { setMemberBusy(false); }
+                  }}>Suspend selected</button>
+                  <button type="button" className="mini-button text-red-600" disabled={memberBusy} onClick={async () => {
+                    setMemberBusy(true);
+                    try { const result = await cgm.bulkMemberAction(classId, 'remove', [...memberSelected], 'Removed by organizer'); setMessage(`${(result?.data || result || {}).affected ?? memberSelected.size} member(s) removed.`); setMemberSelected(new Set()); await load(); onChanged(); setError(null); }
+                    catch (failure: any) { setError(failure?.message || 'The members could not be removed.'); }
+                    finally { setMemberBusy(false); }
+                  }}>Remove selected</button>
+                  <button type="button" className="mini-button" onClick={() => setMemberSelected(new Set())}>Clear selection</button>
+                </div>
+              )}
+              {canEdit && members.length > 0 && (
+                <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
+                  <input
+                    type="checkbox"
+                    checked={members.length > 0 && members.every((member) => memberSelected.has(Number(member.memberId)))}
+                    onChange={(event) => setMemberSelected(event.target.checked ? new Set(members.map((member) => Number(member.memberId))) : new Set())}
+                    aria-label="Select all members"
+                  />
+                  <p className="text-[11px] font-black uppercase tracking-wider text-slate-400">Select all {members.length} members</p>
+                </div>
+              )}
               <ul className="divide-y divide-slate-100">
                 {members.map((member) => (
                   <li key={member.memberId} className="flex flex-wrap items-center justify-between gap-2 py-3">
-                    <div>
-                      <p className="text-sm font-black text-slate-800">{member.fullName} <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-slate-500">{member.gender}</span></p>
-                      <p className="text-[11px] font-semibold text-slate-400">{member.indexNumber}{member.phone && sensitive ? ` · ${member.phone}` : ''} · via {member.addedVia}</p>
+                    <div className="flex items-center gap-2">
+                      {canEdit && (
+                        <input
+                          type="checkbox"
+                          checked={memberSelected.has(Number(member.memberId))}
+                          onChange={() => setMemberSelected((current) => { const next = new Set(current); if (next.has(Number(member.memberId))) next.delete(Number(member.memberId)); else next.add(Number(member.memberId)); return next; })}
+                          aria-label={`Select ${member.fullName}`}
+                        />
+                      )}
+                      <div>
+                        <p className="text-sm font-black text-slate-800">{member.fullName} <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-slate-500">{member.gender}</span></p>
+                        <p className="text-[11px] font-semibold text-slate-400">{member.indexNumber}{member.phone && sensitive ? ` · ${member.phone}` : ''} · via {member.addedVia}</p>
+                      </div>
                     </div>
                     <div className="flex gap-2">
                       {member.status === 'suspended' && <button type="button" className="mini-button" onClick={async () => { await cgm.memberAction(classId, Number(member.memberId), 'restore'); await load(); }}>Restore</button>}
@@ -546,42 +587,142 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
   );
 };
 
-const RosterTable = ({ rows, sensitive, canEdit, classId, onChanged }: { rows: any[]; sensitive: boolean; canEdit: boolean; classId: number; onChanged: () => void }) => (
-  <div className={card}>
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
-        <thead>
-          <tr className="border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-400">
-            <th className="py-2 pr-3">Full name</th><th className="py-2 pr-3">Index number</th>
-            {sensitive && <th className="py-2 pr-3">University ID</th>}
-            {sensitive && <th className="py-2 pr-3">Phone</th>}
-            <th className="py-2 pr-3">Gender</th><th className="py-2 pr-3">Status</th>
-            {canEdit && <th className="py-2" />}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-50">
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td className="py-2.5 pr-3 font-bold text-slate-800">{row.fullName}</td>
-              <td className="py-2.5 pr-3 font-mono text-xs text-slate-600">{row.indexNumber}</td>
-              {sensitive && <td className="py-2.5 pr-3 text-slate-500">{row.universityId || '—'}</td>}
-              {sensitive && <td className="py-2.5 pr-3 text-slate-500">{row.phone || '—'}</td>}
-              <td className="py-2.5 pr-3"><span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-slate-500">{row.gender}</span></td>
-              <td className="py-2.5 pr-3 text-xs font-bold uppercase text-emerald-700">{row.status}</td>
-              {canEdit && (
-                <td className="py-2.5">
-                  {row.status === 'unregistered' && (
-                    <button type="button" className="mini-button text-red-600" onClick={async () => { try { await cgm.deleteRosterEntry(classId, Number(row.id)); } catch { /* row already gone */ } onChanged(); }} title="Delete roster row">Delete</button>
-                  )}
-                </td>
-              )}
+const RosterTable = ({ rows, sensitive, canEdit, classId, onChanged }: { rows: any[]; sensitive: boolean; canEdit: boolean; classId: number; onChanged: () => void }) => {
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const unregistered = rows.filter((row) => row.status === 'unregistered');
+  const allSelected = unregistered.length > 0 && unregistered.every((row) => selected.has(Number(row.id)));
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(unregistered.map((row) => Number(row.id))));
+  const toggleRow = (id: number) => setSelected((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const startEdit = (row: any) => {
+    setEditingId(Number(row.id)); setError(null); setNote(null);
+    setDraft({
+      fullName: row.fullName || '', indexNumber: row.indexNumber || '',
+      phone: row.phone || '', gender: row.gender || 'unknown', email: row.email || '',
+    });
+  };
+  const saveEdit = async (row: any) => {
+    setBusy(true); setError(null);
+    try {
+      await cgm.updateRosterEntry(classId, Number(row.id), {
+        fullName: draft.fullName, indexNumber: draft.indexNumber,
+        phone: draft.phone || null, gender: draft.gender, email: draft.email || null,
+      });
+      setEditingId(null);
+      setNote(`${draft.fullName || 'The row'} was updated.`);
+      await onChanged();
+    } catch (failure: any) { setError(failure?.message || 'The row could not be saved.'); }
+    finally { setBusy(false); }
+  };
+  const deleteSelected = async () => {
+    setBusy(true); setError(null);
+    try {
+      const result = await cgm.bulkDeleteRosterEntries(classId, [...selected]);
+      const data = result?.data || result || {};
+      setSelected(new Set());
+      await onChanged();
+      setNote(`Removed ${data.deleted ?? 0} row(s).${data.skippedRegistered ? ` ${data.skippedRegistered} already registered — remove those from Members instead.` : ''}`);
+    } catch (failure: any) { setError(failure?.message || 'The selected rows could not be removed.'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className={card}>
+      {canEdit && selected.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+          <p className="text-xs font-black uppercase tracking-wide text-amber-700">{selected.size} selected</p>
+          <button type="button" className="mini-button text-red-600" disabled={busy} onClick={deleteSelected}>Delete selected</button>
+          <button type="button" className="mini-button" onClick={() => setSelected(new Set())}>Clear selection</button>
+        </div>
+      )}
+      {error && <div className="mb-3"><Banner tone="error">{error}</Banner></div>}
+      {note && <div className="mb-3"><Banner tone="success">{note}</Banner></div>}
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-400">
+              {canEdit && <th className="py-2 pr-2"><input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all unregistered rows" /></th>}
+              <th className="py-2 pr-3">Full name</th><th className="py-2 pr-3">Index number</th>
+              {sensitive && <th className="py-2 pr-3">Phone</th>}
+              <th className="py-2 pr-3">Gender</th><th className="py-2 pr-3">Status</th>
+              {canEdit && <th className="py-2" />}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {rows.map((row) => editingId === Number(row.id) ? (
+              <tr key={row.id} className="bg-emerald-50/40">
+                {canEdit && <td className="py-2.5 pr-2" />}
+                <td className="py-2.5 pr-3">
+                  <input className={`${inputClass} max-w-56`} value={draft.fullName} onChange={(event) => setDraft({ ...draft, fullName: event.target.value })} aria-label="Full name" />
+                </td>
+                <td className="py-2.5 pr-3">
+                  <input
+                    className={`${inputClass} max-w-40 font-mono text-xs`}
+                    value={draft.indexNumber}
+                    disabled={row.status !== 'unregistered'}
+                    title={row.status !== 'unregistered' ? 'Already registered — the index number is part of their sign-in and can be corrected from Members.' : undefined}
+                    onChange={(event) => setDraft({ ...draft, indexNumber: event.target.value })}
+                    aria-label="Index number"
+                  />
+                </td>
+                {sensitive && (
+                  <td className="py-2.5 pr-3">
+                    <input className={`${inputClass} max-w-36`} value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} aria-label="Phone" />
+                  </td>
+                )}
+                <td className="py-2.5 pr-3">
+                  <select className={`${inputClass} max-w-28`} value={draft.gender} onChange={(event) => setDraft({ ...draft, gender: event.target.value })} aria-label="Gender">
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="unknown">Unknown</option>
+                  </select>
+                </td>
+                <td className="py-2.5 pr-3 text-xs font-bold uppercase text-emerald-700">{row.status}</td>
+                <td className="py-2.5 whitespace-nowrap">
+                  <button type="button" className="mini-button" disabled={busy} onClick={() => void saveEdit(row)}>{busy ? 'Saving…' : 'Save'}</button>
+                  <button type="button" className="mini-button ml-1" onClick={() => setEditingId(null)}>Cancel</button>
+                </td>
+              </tr>
+            ) : (
+              <tr key={row.id}>
+                {canEdit && (
+                  <td className="py-2.5 pr-2">
+                    {row.status === 'unregistered' && (
+                      <input type="checkbox" checked={selected.has(Number(row.id))} onChange={() => toggleRow(Number(row.id))} aria-label={`Select ${row.fullName}`} />
+                    )}
+                  </td>
+                )}
+                <td className="py-2.5 pr-3 font-bold text-slate-800">{row.fullName}</td>
+                <td className="py-2.5 pr-3 font-mono text-xs text-slate-600">{row.indexNumber}</td>
+                {sensitive && <td className="py-2.5 pr-3 text-slate-500">{row.phone || '—'}</td>}
+                <td className="py-2.5 pr-3"><span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-slate-500">{row.gender}</span></td>
+                <td className="py-2.5 pr-3 text-xs font-bold uppercase text-emerald-700">{row.status}</td>
+                {canEdit && (
+                  <td className="py-2.5 whitespace-nowrap">
+                    <button type="button" className="mini-button" onClick={() => startEdit(row)} title="Edit this row">Edit</button>
+                    {row.status === 'unregistered' && (
+                      <button type="button" className="mini-button ml-1 text-red-600" onClick={async () => { try { await cgm.deleteRosterEntry(classId, Number(row.id)); } catch { /* row already gone */ } onChanged(); }} title="Delete roster row">Delete</button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: any) => void }) => {
   const [file, setFile] = useState<File | null>(null);
@@ -594,8 +735,7 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
 
   const fields: Array<[string, string]> = [
     ['full_name', 'Full name'], ['index_number', 'Index number'],
-    ['university_id', 'University ID'], ['phone', 'Phone'],
-    ['gender', 'Gender'], ['email', 'Email'],
+    ['phone', 'Phone'], ['gender', 'Gender'], ['email', 'Email'],
   ];
   const headers: string[] = info?.headers || [];
   const peek: Record<string, string> = info?.columnPeek || {};
@@ -766,15 +906,98 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
 // Invitations
 // ---------------------------------------------------------------------------
 
-const InvitationsArea = ({ classId }: { classId: number }) => {
+// ---------------------------------------------------------------------------
+// QR rendering (dependency-free: src/lib/qr.ts) + invitation sharing
+// ---------------------------------------------------------------------------
+
+/** Draws a QR matrix as inline SVG and — in real browsers — exports a PNG
+ * image stamped with the class name on top and the shared class entry under
+ * the code, so one poster is all students need. */
+const QrBlock = ({ url, headerText, footerText, downloadName, downloadable, small }: {
+  url: string; headerText: string; footerText?: string; downloadName: string; downloadable?: boolean; small?: boolean;
+}) => {
+  const [qr] = useState(() => { try { return encodeQr(url); } catch { return null; } });
+  const [note, setNote] = useState<string | null>(null);
+  if (!qr) return <p className="text-[11px] font-medium text-slate-400">The QR code could not be built for this link.</p>;
+  const quiet = 4;
+  const dim = qr.size + quiet * 2;
+
+  const downloadPng = () => {
+    const scale = 8;
+    const top = headerText.length > 30 ? 84 : 60;
+    const bottom = footerText ? 56 : 24;
+    const width = dim * scale;
+    const height = dim * scale + top + bottom;
+    const canvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+    const ctx: any = canvas ? canvas.getContext('2d') : null;
+    if (!canvas || !ctx) { setNote('Images cannot be exported here — take a screenshot of the code instead.'); return; }
+    canvas.width = width; canvas.height = height;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#0f172a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${headerText.length > 30 ? 24 : 30}px system-ui, -apple-system, sans-serif`;
+    ctx.fillText(headerText, width / 2, top / 2, width - 28);
+    ctx.fillStyle = '#000000';
+    for (let row = 0; row < qr.size; row++) {
+      for (let col = 0; col < qr.size; col++) {
+        if (qr.dark[row][col]) ctx.fillRect((col + quiet) * scale, top + (row + quiet) * scale, scale, scale);
+      }
+    }
+    if (footerText) {
+      ctx.fillStyle = '#334155';
+      ctx.font = `bold ${footerText.length > 44 ? 16 : 21}px system-ui, -apple-system, sans-serif`;
+      ctx.fillText(footerText, width / 2, height - bottom / 2, width - 28);
+    }
+    canvas.toBlob((blob: Blob | null) => {
+      if (!blob) { setNote('The image could not be exported.'); return; }
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = downloadName.endsWith('.png') ? downloadName : `${downloadName}.png`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+      setNote(null);
+    }, 'image/png');
+  };
+
+  return (
+    <div className={`inline-block rounded-xl border border-slate-200 bg-white p-3 text-center ${small ? '' : 'shadow-sm'}`}>
+      <p className="text-sm font-black text-slate-900">{headerText}</p>
+      {footerText && <p className="mt-0.5 max-w-52 text-[11px] font-bold text-slate-500">{footerText}</p>}
+      <svg viewBox={`0 0 ${dim} ${dim}`} className={`mx-auto mt-2 ${small ? 'h-28 w-28' : 'h-40 w-40'}`} role="img" aria-label={`QR code for ${headerText}`} shapeRendering="crispEdges">
+        <rect width={dim} height={dim} fill="#ffffff" />
+        {qr.dark.flatMap((rowCells, row) => rowCells.map((cell, col) => cell ? (
+          <rect key={`${row}-${col}`} x={quiet + col} y={quiet + row} width={1} height={1} fill="#000000" />
+        ) : null))}
+      </svg>
+      {downloadable && <div className="mt-2"><button type="button" className="mini-button" onClick={downloadPng}>Download image (PNG)</button></div>}
+      {note && <p className="mt-1 text-[11px] font-bold text-amber-600">{note}</p>}
+    </div>
+  );
+};
+
+const copyToClipboard = async (text: string): Promise<boolean> => {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch {
+    try {
+      const area = document.createElement('textarea');
+      area.value = text; area.setAttribute('readonly', 'true');
+      document.body.appendChild(area); area.select();
+      const copied = document.execCommand('copy');
+      area.remove();
+      return copied;
+    } catch { return false; }
+  }
+};
+
+const InvitationsArea = ({ classId, className, classCode }: { classId: number; className: string; classCode: string | null }) => {
   const [rows, setRows] = useState<any[] | null>(null);
   const [kind, setKind] = useState<'general' | 'individual'>('general');
   const [expiresAt, setExpiresAt] = useState('');
   const [maxUses, setMaxUses] = useState('');
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<any>(null);
-  const [issuedQr, setIssuedQr] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [entryLine, setEntryLine] = useState('');
+  const [qrRowId, setQrRowId] = useState<number | null>(null);
   const roster = cgm.roster(classId);
   const [rosterRows, setRosterRows] = useState<any[]>([]);
   const [boundEntryId, setBoundEntryId] = useState('');
@@ -784,6 +1007,12 @@ const InvitationsArea = ({ classId }: { classId: number }) => {
   useEffect(() => { void roster.then((data) => setRosterRows((data.data || data) as any[])).catch(() => setRosterRows([])); }, [roster]);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const linkFor = (row: any): string | null =>
+    row.link || (row.code || row.token ? `${origin}/#class-invite/${encodeURIComponent(row.code || row.token)}` : null);
+  const entryFooter = entryLine.trim() ? `Entry password: ${entryLine.trim()}` : 'Scan to join this class';
+  const copyLink = async (link: string) => {
+    setMessage((await copyToClipboard(link)) ? 'Link copied — paste it anywhere to share.' : 'Copy failed — select the link text and copy it manually.');
+  };
 
   return (
     <div className="space-y-5">
@@ -808,7 +1037,7 @@ const InvitationsArea = ({ classId }: { classId: number }) => {
               if (kind === 'individual' && boundEntryId) body.rosterEntryId = Number(boundEntryId);
               const result = await cgm.createInvitation(classId, body);
               setIssued(result);
-              setIssuedQr(await QRCode.toDataURL(`${origin}/#class-invite/${result.code || ''}`, { width: 256, margin: 1 }).catch(() => null));
+              setQrRowId(null);
               await load();
             } catch (failure: any) { setMessage(failure?.message || 'The invitation failed.'); }
             finally { setBusy(false); }
@@ -829,41 +1058,63 @@ const InvitationsArea = ({ classId }: { classId: number }) => {
         {message && <div className="mt-3"><Banner tone="error">{message}</Banner></div>}
         {issued && (
           <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
-            <p className="text-xs font-black uppercase tracking-wider text-emerald-700">Invitation created — the token is shown only now</p>
+            <p className="text-xs font-black uppercase tracking-wider text-emerald-700">Invitation created — copy or share it any time</p>
             {issued.code && <p className="mt-2 font-mono text-sm font-black text-slate-800">{issued.code}</p>}
-            <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{issued.link}</p>
-            <div className="mt-3 inline-block rounded-xl bg-white p-2">
-              {issuedQr
-                ? <img src={issuedQr} alt={`QR code linking to the invitation ${issued.code || ''}`} className="h-32 w-32" />
-                : <p className="text-[11px] text-slate-400">QR unavailable offline.</p>}
+            <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{linkFor(issued)}</p>
+            <div className="mt-3 flex flex-wrap items-start gap-3">
+              {linkFor(issued) && (
+                <QrBlock url={linkFor(issued) as string} headerText={className} footerText={entryFooter} downloadName={`${(classCode || 'class').replace(/[^A-Za-z0-9-]+/g, '-')}-join-qr.png`} downloadable />
+              )}
+              {linkFor(issued) && <button type="button" className="mini-button" onClick={() => copyLink(linkFor(issued) as string)}>Copy link</button>}
             </div>
-            <p className="mt-2 text-[11px] font-medium text-slate-400">Store it now: only a hash is kept on the server. Regenerate if it leaks.</p>
+            <p className="mt-2 text-[11px] font-medium text-slate-400">It stays on this page — come back any time to copy, share or download the QR again.</p>
           </div>
         )}
       </div>
 
       <div className={card}>
         <p className={label}>Existing invitations</p>
+        <p className="mt-1 text-xs font-medium text-slate-500">Every invitation keeps its link, so you can copy, share or download the QR any time. Type the shared class entry password to print it under the QR image students download.</p>
+        <input
+          value={entryLine}
+          onChange={(event) => setEntryLine(event.target.value)}
+          placeholder="Shared class entry password (printed under the QR)"
+          className={`${inputClass} mt-2 max-w-80`}
+          aria-label="Shared class entry password printed under the QR"
+        />
         {(rows || []).length === 0 && <p className="mt-2 text-xs font-medium text-slate-400">None yet.</p>}
         <ul className="mt-3 divide-y divide-slate-100">
-          {(rows || []).map((row) => (
-            <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
-              <div>
-                <p className="text-sm font-black text-slate-800">{row.code || `#${row.id}`}</p>
-                <p className="text-[11px] font-semibold text-slate-400">
-                  {row.kind} · {row.useCount}{row.maxUses ? `/${row.maxUses}` : ''} used · {row.expiresAt ? `expires ${formatDate(row.expiresAt)}` : 'no expiry'}
-                  {row.revoked ? ' · revoked' : row.disabled ? ' · disabled' : ''}
-                  {row.boundStudent ? ` · for ${row.boundStudent}` : ''}
-                </p>
-              </div>
-              <div className="flex gap-2">
-                {row.disabled && <button type="button" className="mini-button" onClick={async () => { await cgm.invitationAction(Number(row.id), 'enable'); await load(); }}>Enable</button>}
-                {!row.revoked && !row.disabled && <button type="button" className="mini-button" onClick={async () => { await cgm.invitationAction(Number(row.id), 'disable'); await load(); }}>Disable</button>}
-                {!row.revoked && <button type="button" className="mini-button" onClick={async () => { await cgm.invitationAction(Number(row.id), 'revoke'); await load(); }}>Revoke</button>}
-                {!row.revoked && <button type="button" className="mini-button" onClick={async () => { const result = await cgm.invitationAction(Number(row.id), 'regenerate'); setIssued(result); await load(); }}>Regenerate</button>}
-              </div>
-            </li>
-          ))}
+          {(rows || []).map((row) => {
+            const link = linkFor(row);
+            return (
+              <li key={row.id} className="py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-black text-slate-800">{row.code || row.token || `#${row.id}`}</p>
+                    <p className="text-[11px] font-semibold text-slate-400">
+                      {row.kind} · {row.useCount}{row.maxUses ? `/${row.maxUses}` : ''} used · {row.expiresAt ? `expires ${formatDate(row.expiresAt)}` : 'no expiry'}
+                      {row.revoked ? ' · revoked' : row.disabled ? ' · disabled' : ''}
+                      {row.boundStudent ? ` · for ${row.boundStudent}` : ''}
+                    </p>
+                    {link && <p className="mt-0.5 break-all font-mono text-[11px] text-slate-400">{link}</p>}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {link && <button type="button" className="mini-button" onClick={() => copyLink(link)}>Copy link</button>}
+                    {link && <button type="button" className="mini-button" onClick={() => setQrRowId(qrRowId === row.id ? null : Number(row.id))}>{qrRowId === row.id ? 'Hide QR' : 'Show QR'}</button>}
+                    {row.disabled && <button type="button" className="mini-button" onClick={async () => { await cgm.invitationAction(Number(row.id), 'enable'); await load(); }}>Enable</button>}
+                    {!row.revoked && !row.disabled && <button type="button" className="mini-button" onClick={async () => { await cgm.invitationAction(Number(row.id), 'disable'); await load(); }}>Disable</button>}
+                    {!row.revoked && <button type="button" className="mini-button" onClick={async () => { await cgm.invitationAction(Number(row.id), 'revoke'); await load(); }}>Revoke</button>}
+                    {!row.revoked && <button type="button" className="mini-button" onClick={async () => { const result = await cgm.invitationAction(Number(row.id), 'regenerate'); setIssued(result); setQrRowId(Number(row.id)); await load(); }}>Regenerate</button>}
+                  </div>
+                </div>
+                {qrRowId === row.id && link && (
+                  <div className="mt-3">
+                    <QrBlock url={link} headerText={className} footerText={entryFooter} downloadName={`${(row.code || classCode || 'class').replace(/[^A-Za-z0-9-]+/g, '-')}-join-qr.png`} downloadable />
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
       </div>
     </div>
@@ -1125,9 +1376,8 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
     setMessage(`WhatsApp link ${action}d.`);
   };
 
-  const showWhatsappQr = async (groupId: number, url: string) => {
-    const dataUrl = await QRCode.toDataURL(url, { width: 256, margin: 1 }).catch(() => null);
-    setQrByGroup((current) => ({ ...current, [groupId]: dataUrl || '' }));
+  const showWhatsappQr = (groupId: number, url: string) => {
+    setQrByGroup((current) => ({ ...current, [groupId]: url }));
   };
 
   return (
@@ -1231,8 +1481,8 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                           }}>Replace</button>
                         </div>
                         {qrByGroup[Number(group.id)] && (
-                          <div className="mt-2 inline-block rounded-xl bg-white p-2 ring-1 ring-slate-100">
-                            <img src={qrByGroup[Number(group.id)]} alt={`WhatsApp QR for ${group.name}`} className="h-28 w-28" />
+                          <div className="mt-2">
+                            <QrBlock url={qrByGroup[Number(group.id)]} headerText={String(group.name || 'WhatsApp group')} footerText="WhatsApp group invite" downloadName={`${String(group.name || 'group').replace(/[^A-Za-z0-9-]+/g, '-')}-whatsapp-qr.png`} downloadable small />
                           </div>
                         )}
                       </div>
@@ -1933,7 +2183,7 @@ const ApprovalsArea = ({ classId, canRegistrations, canMemberships, canProfiles,
               <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
                 <div>
                   <p className="text-sm font-black text-slate-800">{row.fullName}</p>
-                  <p className="text-[11px] font-semibold text-slate-400">{row.indexNumber}{row.universityId ? ` · ${row.universityId}` : ''} · requested {formatWhen(row.createdAt)}</p>
+                  <p className="text-[11px] font-semibold text-slate-400">{row.indexNumber} · requested {formatWhen(row.createdAt)}</p>
                 </div>
                 <div className="flex gap-2">
                   <button type="button" className="cgm-primary-button" onClick={async () => {
@@ -2226,7 +2476,7 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
         <p className={label}>Student login format</p>
         <p className="mt-1 text-xs font-medium text-slate-500">The passkey is always required. Choose the confirming identifier and whether students may change their own passkey. Changes follow propose → notify → activate.</p>
         <div className="mt-3 flex flex-wrap gap-3">
-          {['index_number', 'university_id', 'phone'].map((key) => (
+          {['index_number', 'phone'].map((key) => (
             <label key={key} className="flex items-center gap-2 text-xs font-bold text-slate-600">
               <input
                 type="checkbox"
@@ -2238,7 +2488,7 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
                   return next;
                 })}
               />
-              {key === 'index_number' ? 'Index number' : key === 'university_id' ? 'University ID' : 'Phone'}
+              {key === 'index_number' ? 'Index number' : 'Phone'}
             </label>
           ))}
           <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
@@ -2268,7 +2518,7 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
 
       <div className={card}>
         <p className={label}>Privacy &amp; approvals</p>
-        <p className="mt-1 text-xs font-medium text-slate-500">Choose what classmates may see. Names are always visible; contact fields are further limited per activity to the group or the class. Index numbers, university IDs and gender are never shown to classmates — the index number is half of a sign-in credential, and sensitive data additionally needs the organizer permission.</p>
+        <p className="mt-1 text-xs font-medium text-slate-500">Choose what classmates may see. Names are always visible; contact fields are further limited per activity to the group or the class. Index numbers and gender are never shown to classmates — the index number is half of a sign-in credential, and sensitive data additionally needs the organizer permission.</p>
         <div className="mt-3 flex flex-wrap gap-3">
           {['full_name', 'phone', 'email'].map((key) => (
             <label key={key} className="flex items-center gap-2 text-xs font-bold text-slate-600">

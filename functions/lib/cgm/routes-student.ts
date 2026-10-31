@@ -83,7 +83,6 @@ const publicStudent = (student: CgmStudentRow) => ({
   fullName: student.full_name,
   indexNumber: student.index_number,
   institution: student.institution,
-  universityId: student.university_id,
   phone: student.phone,
   email: student.email,
   gender: student.gender,
@@ -190,14 +189,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         const indexKey = String(fullEntry.index_number).trim().replace(/\s+/g, ' ').toLowerCase();
         const inserted = await c.env.DB.prepare(
           `INSERT INTO cgm_students
-           (full_name, index_number, index_number_key, institution, institution_key, university_id, university_id_key,
+           (full_name, index_number, index_number_key, institution, institution_key,
             phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_prefix, passkey_sequence,
             passkey_verifier, passkey_issued_at, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
         ).bind(
           fullEntry.full_name, fullEntry.index_number, indexKey,
           fullClass.institution, fullClass.institution_key,
-          fullEntry.university_id, fullEntry.university_id_key || (fullEntry.university_id ? lookupKey(fullEntry.university_id) : null),
           fullEntry.phone, fullEntry.phone_key || (fullEntry.phone ? phoneKey(fullEntry.phone) : null),
           fullEntry.email, fullEntry.gender || 'unknown', fullEntry.custom_fields_json || '{}',
           allocation.suffix, classPrefix, allocation.sequence, await hashPassword(issuedPasskey),
@@ -300,7 +298,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       : String(identifier).trim().replace(/\s+/g, ' ').toLowerCase();
     const storedIdentifier = identifierType === 'phone'
       ? student.phone_key
-      : identifierType === 'university_id' ? student.university_id_key : student.index_number_key;
+      : student.index_number_key;
     // Every failed attempt on a known identity counts toward the same lockout,
     // whichever half was wrong — brute-forcing the passkey against a known
     // identifier is locked exactly like identifier guessing.
@@ -583,8 +581,8 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // Privacy-first (§35): classmates see each other's names only. Contact
     // fields (phone, email) are appended per row ONLY when the activity's
     // contact visibility allows it — 'class' for everyone here, 'group' for
-    // the viewer's own group, 'none' for nobody. Index numbers, university
-    // IDs and gender never reach a classmate, whatever the setting says.
+    // the viewer's own group, 'none' for nobody. Index numbers and gender
+    // never reach a classmate, whatever the setting says.
     const members = groupIds.length ? await asRows<any>(c.env.DB.prepare(
       `SELECT ga.group_id, s.id AS student_id, s.full_name,
               CASE WHEN l.role = 'leader' THEN 'leader' WHEN l.role = 'assistant' THEN 'assistant' ELSE NULL END AS leader_role
@@ -597,7 +595,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // §35 — per-class field visibility decides WHICH fields classmates may see
     // at all (privacy-first default: names only); the activity's contact
     // visibility then scopes those fields to the group or the class. Identity
-    // fields (index number, university ID, gender) never reach classmates:
+    // fields (index number, gender) never reach classmates:
     // the index number is half of a sign-in credential.
     const classSettings = sanitizeClassSettings(JSON.parse(activity.class_settings || '{}'));
     const showPhone = classSettings.studentVisibleFields.includes('phone')
@@ -1280,7 +1278,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (field === 'phone' && !/^\+?[\d\s()-]{7,20}$/.test(newValue)) return bad(c, 'Enter a valid telephone number.');
 
     const current = (student as any)[field];
-    if (field === 'university_id' || field === 'email' || field === 'phone') {
+    if (field === 'email' || field === 'phone') {
       if ((current || '') === newValue) return bad(c, 'That is already your current value.');
     } else if (current === newValue) {
       return bad(c, 'That is already your current value.');
@@ -1290,11 +1288,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // (keys normalized exactly as the organizer approval would) and the trail
     // records the automatic decision. Identity index numbers stay locked.
     if (await modulePolicy(c.env.DB, 'profile_change_mode') === 'auto') {
-      if (field === 'university_id') {
-        await c.env.DB.prepare(
-          'UPDATE cgm_students SET university_id = ?, university_id_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-        ).bind(newValue, newValue ? lookupKey(newValue) : null, student.id).run();
-      } else if (field === 'phone') {
+      if (field === 'phone') {
         await c.env.DB.prepare(
           'UPDATE cgm_students SET phone = ?, phone_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
         ).bind(newValue, phoneKey(newValue), student.id).run();
@@ -1469,7 +1463,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       const boundStudent = invitation.bound_student_id ? Number(invitation.bound_student_id) : null;
       const boundKey = invitation.bound_identifier_key ? String(invitation.bound_identifier_key) : null;
       const matches = boundStudent === student.id
-        || (boundKey && [student.index_number_key, student.university_id_key, student.phone_key].includes(boundKey));
+        || (boundKey && [student.index_number_key, student.phone_key].includes(boundKey));
       if (!matches) return { status: 403 as const, response: bad(c, 'This invitation was issued to a different student.', 403) };
       // Roster-bound invitations carry the registration with them.
       if (invitation.bound_roster_entry_id) {

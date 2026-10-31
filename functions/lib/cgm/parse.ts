@@ -10,14 +10,13 @@ const HEADER_ALIASES: Record<string, string[]> = {
   full_name: ['full name', 'name', 'student name', 'students name', 'fullname', 'student', 'student names'],
   index_number: ['index number', 'index', 'indexno', 'index no', 'exam index', 'examination index', 'exam number',
     'examination number', 'student index', 'index num', 'class index', 'serial number'],
-  university_id: ['university id', 'university student id', 'student id', 'universityid', 'school id', 'institution id', 'id number'],
   phone: ['phone', 'telephone', 'phone number', 'telephone number', 'mobile', 'mobile number', 'contact',
     'contact number', 'contact details', 'tel', 'tel no', 'cell', 'cell number', 'whatsapp number'],
   gender: ['gender', 'sex', 'male or female'],
   email: ['email', 'email address', 'e mail', 'mail', 'student email', 'emailaddr'],
 };
 
-export const ROSTER_FIELDS = ['full_name', 'index_number', 'university_id', 'phone', 'gender', 'email'] as const;
+export const ROSTER_FIELDS = ['full_name', 'index_number', 'phone', 'gender', 'email'] as const;
 export type RosterField = (typeof ROSTER_FIELDS)[number];
 
 const normalizeHeader = (value: unknown) => String(value ?? '').trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');

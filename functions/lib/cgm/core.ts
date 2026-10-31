@@ -310,12 +310,11 @@ export const sanitizeLeaderPermissions = (value: unknown): LeaderPermission[] =>
 
 /** The identifiers that may accompany the passkey at login. The passkey is
  * always required; these only choose the second half of the credential. */
-export const LOGIN_IDENTIFIER_KEYS = ['index_number', 'university_id', 'phone'] as const;
+export const LOGIN_IDENTIFIER_KEYS = ['index_number', 'phone'] as const;
 export type LoginIdentifierKey = (typeof LOGIN_IDENTIFIER_KEYS)[number];
 
 export const LOGIN_IDENTIFIER_LABELS: Record<LoginIdentifierKey, string> = {
   index_number: 'Index number',
-  university_id: 'University student ID',
   phone: 'Telephone number',
 };
 
@@ -366,7 +365,6 @@ export interface ClassSettings {
 export const STUDENT_PROFILE_FIELDS = [
   'full_name',
   'index_number',
-  'university_id',
   'phone',
   'gender',
   'email',
@@ -377,7 +375,6 @@ export type StudentProfileField = (typeof STUDENT_PROFILE_FIELDS)[number];
 export const STUDENT_PROFILE_FIELD_LABELS: Record<StudentProfileField, string> = {
   full_name: 'Full name',
   index_number: 'Index number',
-  university_id: 'University student ID',
   phone: 'Telephone number',
   gender: 'Gender',
   email: 'Email address',
@@ -387,7 +384,7 @@ export const STUDENT_PROFILE_FIELD_LABELS: Record<StudentProfileField, string> =
  * deliberate organizer decision (or a sensitive-data permission). */
 export const defaultClassSettings = (): ClassSettings => ({
   studentVisibleFields: ['full_name'],
-  sensitiveFields: ['index_number', 'university_id', 'phone', 'email'],
+  sensitiveFields: ['index_number', 'phone', 'email'],
   membershipApprovalRequired: true,
   registrationApprovals: 'organizers',
   loginFormat: { ...DEFAULT_LOGIN_FORMAT },

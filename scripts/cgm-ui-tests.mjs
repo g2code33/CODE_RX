@@ -122,8 +122,9 @@ check('roster import supports the three formats and duplicate policies',
   && /'skip'|value="skip"/.test(workspace) && /value="update"/.test(workspace) && /value="flag"/.test(workspace));
 check('the import flow validates before it imports: the file is inspected on choose and rows can be re-checked',
   /previewRosterFile/.test(workspace) && /Check rows for problems/.test(workspace) && /Import \$\{info\?\.totalRows/.test(workspace));
-check('invitations show the code and QR exactly once at creation',
-  /shown only now/.test(workspace) && /QRCode|toDataURL/.test(workspace));
+check('invitations keep their link: copy, share and re-render the QR any time',
+  /copy or share it any time/.test(workspace) && /QrBlock/.test(workspace) && /Copy link/.test(workspace)
+  && /Show QR/.test(workspace) && /Download image \(PNG\)/.test(workspace));
 check('general and individual invitations are distinct flows',
   /'general'/.test(workspace) && /'individual'/.test(workspace) && /rosterEntryId/.test(workspace));
 check('disable, revoke and regenerate are all reachable',
@@ -258,7 +259,7 @@ check('the election form collects nomination and voting windows',
 check('organizers manage one WhatsApp link per group (set, replace, disable, revoke)',
   /canManageWhatsapp/.test(workspace) && /cgm\.setWhatsApp\(/.test(workspace) && /whatsappAction\(/.test(workspace) && /setWhatsApp:/.test(client) && /whatsappAction:/.test(client));
 check('the WhatsApp link shows a QR and tracks clicks without claiming join-proof',
-  /qrByGroup/.test(workspace) && /QRCode\.toDataURL\(url/.test(workspace) && /clickCount/.test(workspace));
+  /qrByGroup/.test(workspace) && /showWhatsappQr/.test(workspace) && /clickCount/.test(workspace));
 
 // Reports in three formats (spec §16)
 check('reports download as CSV, Excel or PDF from one control',
@@ -471,6 +472,44 @@ check('the server validates the mark and audits every change',
   && /cgm\.class\.passkey_prefix/.test(organizerRoutesSrc));
 check('login resolves the passkey by its stored mark plus letters (prefix-aware lookup)',
   /passkey_prefix \|\| passkey_suffix = \?/.test(studentRoutes));
+
+section('17. Roster mass actions, row editing, no university ID, dependency-free QR');
+
+const qrSource = src('src/lib/qr.ts');
+
+check('university ID is gone from every module surface (index number is the identity)',
+  !/university/i.test(workspace) && !/university/i.test(studentPortal)
+  && !/university/i.test(src('functions/lib/cgm/parse.ts'))
+  && /'index_number', 'phone' as const|LOGIN_IDENTIFIER_KEYS = \['index_number', 'phone'\]/.test(src('functions/lib/cgm/core.ts')));
+
+check('the organizer can edit a roster row after the upload (name, index, phone, gender)',
+  /Edit this row/.test(workspace) && /updateRosterEntry/.test(workspace)
+  && /aria-label="Index number"/.test(workspace)
+  && /Another roster entry already uses this index number/.test(organizerRoutesSrc)
+  && /already registered/.test(workspace));
+
+check('the roster has select-all plus bulk delete for mass actions',
+  /Select all unregistered rows/.test(workspace) && /bulkDeleteRosterEntries/.test(workspace)
+  && /Delete selected/.test(workspace) && /Clear selection/.test(workspace)
+  && /skippedRegistered/.test(workspace));
+
+check('the Members tab has select-all with bulk suspend and remove',
+  /Select all members/.test(workspace) && /bulkMemberAction/.test(workspace)
+  && /Suspend selected/.test(workspace) && /Remove selected/.test(workspace));
+
+check('invitation QR codes render from the module\'s own dependency-free encoder',
+  /import \{ encodeQr \} from '\.\.\/\.\.\/lib\/qr'/.test(workspace) && /const QrBlock/.test(workspace)
+  && /<svg viewBox=/.test(workspace) && /crispEdges/.test(workspace)
+  && /ISO\/IEC 18004|Reed–Solomon/.test(qrSource) && /GF_EXP/.test(qrSource) && /penaltyN3/.test(qrSource));
+
+check('the QR image downloads as a PNG stamped with the class name and shared entry',
+  /downloadPng/.test(workspace) && /toBlob/.test(workspace) && /'image\/png'/.test(workspace)
+  && /\.png`/.test(workspace) && /Entry password: /.test(workspace)
+  && /Shared class entry password/.test(workspace));
+
+check('the student sign-in halves are the index number or the phone only',
+  /index_number: 'Index number',/.test(studentPortal) && !/university/i.test(studentPortal)
+  && /index_number: 'Index number',\n  phone: 'Telephone number',/.test(src('functions/lib/cgm/core.ts')));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
