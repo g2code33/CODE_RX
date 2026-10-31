@@ -1243,8 +1243,8 @@ const attendanceUnmuted = q1("SELECT COUNT(*) c FROM cgm_student_notifications W
 check('unmuting restores the notifications', Number(attendanceUnmuted) === Number(attendanceMuted) + 1, `muted=${attendanceMuted} unmuted=${attendanceUnmuted}`);
 
 // --- §35 Contact visibility ---------------------------------------------------
-// The class's field-visibility gate must share phone/email with classmates for
-// these tests; the privacy-first default is names only.
+// The class's field-visibility gate shares phone/email with classmates;
+// the default is names + contact (organiser can narrow it).
 const widenFieldsS17 = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name', 'phone', 'email'] }, amaToken);
 check('the organizer can set class-level field visibility', widenFieldsS17.status === 200, `status ${widenFieldsS17.status} ${widenFieldsS17.text?.slice(0, 140)}`);
 // Fixture shaping: the roster gave these students contact details.
@@ -2567,9 +2567,9 @@ const adwoaSession = adwoaLogin.json?.data?.session?.token;
 check('the automatically registered student signs in', Boolean(adwoaSession), `status ${adwoaLogin.status}`);
 const classmatesBefore = await studentCall('GET', `/api/cgm/student/classes/${zooClassId}`, undefined, adwoaSession);
 const classmatesDefault = classmatesBefore.json?.data?.classmates || [];
-check('classmates are listed with names by default and contacts stay private',
+check('classmates are listed with names and contacts by default',
   classmatesDefault.length === 2
-  && classmatesDefault.every((row) => row.fullName && row.phone === undefined && row.email === undefined),
+  && classmatesDefault.every((row) => row.fullName && Boolean(row.phone)),
   JSON.stringify(classmatesDefault).slice(0, 160));
 await memberCall('POST', `/api/cgm/classes/${zooClassId}/settings`, { studentVisibleFields: ['full_name', 'phone'] }, amaToken);
 const classmatesAfter = await studentCall('GET', `/api/cgm/student/classes/${zooClassId}`, undefined, adwoaSession);
