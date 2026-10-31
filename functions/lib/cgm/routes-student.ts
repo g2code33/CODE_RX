@@ -18,7 +18,8 @@
  *   GET  /api/cgm/student/notifications
  *   POST /api/cgm/student/notifications/read
  *   POST /api/cgm/student/profile/change
- *   POST /api/cgm/student/passkey/change
+ *   POST /api/cgm/student/passkey/request   proves the current passkey, asks the organizer
+ *   POST /api/cgm/student/passkey/generate  after approval — system-issued unique passkey
  *   GET  /api/cgm/invitations/:code                  public invitation landing
  *   POST /api/cgm/student/join                       membership request by code
  *   POST /api/cgm/student/invitations/:code/claim    individual invitation claim
@@ -1570,68 +1571,104 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
   // -------------------------------------------------------------------------
   // Passkey change (only when a class allows it) + reset by organizer
   // -------------------------------------------------------------------------
-  app.post('/api/cgm/student/passkey/change', async (c: any) => {
+  // ---------------------------------------------------------------------------
+  // Passkey change requests — passkeys are ALWAYS system-generated. A student
+  // proves who they are with the CURRENT passkey and asks the organizer; the
+  // organizer approves (or declines) and only then does the student get a
+  // Generate button that allocates the next unique passkey from the same
+  // atomic global sequence registration uses — users never invent their own,
+  // so a chosen passkey can never collide with another student's.
+  // ---------------------------------------------------------------------------
+  app.get('/api/cgm/student/passkey/request', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT id, class_id, status, requested_at, handled_at, handled_label FROM cgm_passkey_requests
+       WHERE student_id = ? ORDER BY id DESC LIMIT 1`
+    ).bind(student.id));
+    const row = rows[0] || null;
+    return c.json({ success: true, data: row ? {
+      id: Number(row.id), classId: Number(row.class_id), status: String(row.status),
+      requestedAt: row.requested_at, handledAt: row.handled_at, handledLabel: row.handled_label || null,
+    } : null });
+  });
+
+  app.post('/api/cgm/student/passkey/request', async (c: any) => {
     const student = await requireStudent(c);
     if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
     if (!throttle(c, 5, 3600)) return bad(c, 'Too many attempts. Try again later.', 429);
     const body = await readBody(c);
     const currentPasskey = clean(body.currentPasskey, 40);
-    const newPasskey = clean(body.newPasskey, 40).toLowerCase();
-
-    // The replacement keeps the student's own mark (default rx30) and only
-    // the letters after it change — the mark is part of how the passkey
-    // resolves at sign-in.
-    const ownRows = await asRows<{ passkey_prefix: string | null; passkey_verifier: string | null }>(c.env.DB.prepare(
-      'SELECT passkey_prefix, passkey_verifier FROM cgm_students WHERE id = ?'
+    // Which class the request lands in: the organizer of THAT class approves it.
+    const classId = Number(body.classId) || Number((await asRows<{ class_id: number }>(c.env.DB.prepare(
+      `SELECT m.class_id AS class_id FROM cgm_class_members m JOIN cgm_classes cl ON cl.id = m.class_id
+       WHERE m.student_id = ? AND m.status = 'active' AND cl.status = 'active' ORDER BY cl.id LIMIT 1`
+    ).bind(student.id))[0] || {}).class_id || 0);
+    if (!classId) return bad(c, 'Join a class before requesting a passkey change.', 400);
+    const ownRows = await asRows<{ passkey_verifier: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_verifier FROM cgm_students WHERE id = ?'
     ).bind(student.id));
-    const ownPrefix = String(ownRows[0]?.passkey_prefix || 'rx30');
-    const suffix = newPasskey.startsWith(ownPrefix) ? newPasskey.slice(ownPrefix.length) : '';
-    const newSequence = suffix ? sequenceForSuffix(suffix) : null;
-    if (!newSequence) {
-      return bad(c, `Your passkey starts with ${ownPrefix} — keep that mark and change the letters after it (for example ${ownPrefix}ab).`, 400);
-    }
-
-    // Allowed only when at least one active class enables self-service change.
-    const allowed = await asRows<{ c: number }>(c.env.DB.prepare(
-      `SELECT COUNT(*) AS c FROM cgm_class_members m
-       JOIN cgm_classes cl ON cl.id = m.class_id
-       WHERE m.student_id = ? AND m.status = 'active' AND cl.status = 'active'
-         AND cl.settings_json LIKE '%"allowStudentPasskeyChange":true%'`
-    ).bind(student.id));
-    if (!Number(allowed[0]?.c || 0)) {
-      return bad(c, 'Self-service passkey changes are not enabled for your classes. Ask your organizer for a reset.', 403);
-    }
-    // The session projection deliberately omits the verifier; the fresh read
-    // above carries it for this one check so the comparison actually happens.
     const storedVerifier = ownRows[0]?.passkey_verifier;
     if (!storedVerifier || !await verifyPassword(currentPasskey, storedVerifier)) {
       return bad(c, 'Your current passkey did not match.', 400);
     }
-    // The passkey IS the lookup key (login resolves the student by its mark
-    // and letters), so a change must rotate the verifier, the sequence and
-    // the suffix together — otherwise the student could never sign in again.
-    try {
-      await c.env.DB.prepare(
-        `UPDATE cgm_students SET passkey_verifier = ?, passkey_sequence = ?, passkey_suffix = ?,
-           passkey_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).bind(await hashPassword(newPasskey), newSequence, suffix, student.id).run();
-    } catch (error) {
-      if (String((error as any)?.errcode || '') === '2067' || /UNIQUE/i.test(String((error as any)?.message || error))) {
-        return bad(c, 'That passkey is already in use by another student — the format is valid but taken.', 409);
-      }
-      throw error;
+    const open = await asRows<{ id: number; status: string }>(c.env.DB.prepare(
+      `SELECT id, status FROM cgm_passkey_requests WHERE student_id = ? AND status IN ('pending','approved') ORDER BY id DESC LIMIT 1`
+    ).bind(student.id));
+    if (open[0]) {
+      return bad(c, open[0].status === 'pending'
+        ? 'You already have a request waiting for your organizer.'
+        : 'Your request was approved — tap Generate new passkey.', 409);
     }
+    await c.env.DB.prepare(
+      `INSERT INTO cgm_passkey_requests (class_id, student_id, status) VALUES (?, ?, 'pending')`
+    ).bind(classId, student.id).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+      action: 'cgm.passkey.change_requested', entityType: 'student', entityId: student.id, classId,
+    });
+    await notifyStudent(c.env.DB, student.id, 'security', 'Passkey change requested',
+      'Your request was sent to your organizer. When they approve it, a Generate new passkey button appears here and the system creates your new unique passkey.');
+    return c.json({ success: true, data: { message: 'Request sent. Your organizer can now approve it for you.' } });
+  });
+
+  app.post('/api/cgm/student/passkey/generate', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    if (!throttle(c, 5, 3600)) return bad(c, 'Too many attempts. Try again later.', 429);
+    const approved = (await asRows<{ id: number; class_id: number }>(c.env.DB.prepare(
+      `SELECT id, class_id FROM cgm_passkey_requests WHERE student_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1`
+    ).bind(student.id)))[0];
+    if (!approved) {
+      return bad(c, 'No approved passkey change waiting. Send a request to your organizer first.', 403);
+    }
+    const prefixRows = await asRows<{ passkey_prefix: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_prefix FROM cgm_classes WHERE id = ?'
+    ).bind(Number(approved.class_id)));
+    const classPrefix = String(prefixRows[0]?.passkey_prefix || 'rx30');
+    // The system issues the next free position from the SAME atomic global
+    // sequence registration uses — unique by construction, never user-chosen.
+    const allocation = await allocateStudentPasskey(c.env.DB);
+    const issuedPasskey = `${classPrefix}${allocation.suffix}`;
+    await c.env.DB.prepare(
+      `UPDATE cgm_students SET passkey_verifier = ?, passkey_sequence = ?, passkey_suffix = ?,
+         passkey_prefix = ?, passkey_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(await hashPassword(issuedPasskey), allocation.sequence, allocation.suffix, classPrefix, student.id).run();
+    await c.env.DB.prepare(
+      `UPDATE cgm_passkey_requests SET status = 'completed', handled_at = COALESCE(handled_at, CURRENT_TIMESTAMP) WHERE id = ?`
+    ).bind(Number(approved.id)).run();
     await revokeStudentSessions(c.env.DB, student.id);
     const session = await createStudentSession(c.env.DB, student.id, {
       ip: c.req.header('cf-connecting-ip'), userAgent: c.req.header('user-agent'),
     });
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
-      action: 'cgm.passkey.self_change', entityType: 'student', entityId: student.id,
+      action: 'cgm.passkey.generated', entityType: 'student', entityId: student.id,
+      classId: Number(approved.class_id),
     });
     await notifyStudent(c.env.DB, student.id, 'security', 'Your passkey was changed',
-      'Your sign-in passkey was changed successfully. If this was not you, contact your organizer immediately.');
-    return c.json({ success: true, data: { session, message: 'Passkey changed. Keep it safe — it is shown only now.' } });
+      'A new system-generated passkey was issued and shown once on your screen. If this was not you, contact your organizer immediately.');
+    return c.json({ success: true, data: { passkey: issuedPasskey, session, message: 'New passkey generated. It is shown only now — save it.' } });
   });
 
   // -------------------------------------------------------------------------

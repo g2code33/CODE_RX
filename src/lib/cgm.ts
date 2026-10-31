@@ -284,6 +284,10 @@ export const cgm = {
   updateClass: (classId: number, body: Record<string, unknown>) =>
     memberCall(`/api/cgm/classes/${classId}`, { method: 'PATCH', body }),
   submitClass: (classId: number) => memberCall(`/api/cgm/classes/${classId}/submit`, { method: 'POST', body: {} }),
+  passkeyRequests: (classId: number) =>
+    memberCall(`/api/cgm/classes/${classId}/passkey-requests`),
+  decidePasskeyRequest: (classId: number, requestId: number, decision: 'approve' | 'decline') =>
+    memberCall(`/api/cgm/classes/${classId}/passkey-requests/${requestId}/${decision}`, { method: 'POST', body: {} }),
   setPasskeyPrefix: (classId: number, prefix: string) =>
     memberCall(`/api/cgm/classes/${classId}/passkey-prefix`, { method: 'POST', body: { prefix } }),
   rotateEntryPassword: (classId: number, entryPassword: string) =>
@@ -541,8 +545,13 @@ export const cgmStudent = {
     studentCall('/api/cgm/student/notifications/read', { method: 'POST', body }),
   requestProfileChange: (body: { field: string; newValue: string; reason?: string }) =>
     studentCall('/api/cgm/student/profile/change', { method: 'POST', body }),
-  changePasskey: (currentPasskey: string, newPasskey: string) =>
-    studentCall('/api/cgm/student/passkey/change', { method: 'POST', body: { currentPasskey, newPasskey } }),
+  // Passkeys are system-generated: request with the CURRENT passkey, the
+  // organizer approves, then Generate allocates the next unique passkey.
+  myPasskeyRequest: () => studentCall('/api/cgm/student/passkey/request'),
+  requestPasskeyChange: (classId: number | null, currentPasskey: string) =>
+    studentCall('/api/cgm/student/passkey/request', { method: 'POST', body: { classId: classId ?? undefined, currentPasskey } }),
+  generatePasskey: () =>
+    studentCall('/api/cgm/student/passkey/generate', { method: 'POST', body: {} }),
   invitationInfo: (code: string) => studentCall(`/api/cgm/invitations/${encodeURIComponent(code)}`),
   joinClass: (code: string) => studentCall('/api/cgm/student/join', { method: 'POST', body: { code } }),
   claimInvitation: (code: string) => studentCall(`/api/cgm/student/invitations/${encodeURIComponent(code)}/claim`, { method: 'POST', body: {} }),

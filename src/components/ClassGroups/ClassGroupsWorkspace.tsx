@@ -493,6 +493,10 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
   const [importOpen, setImportOpen] = useState(false);
   const [memberSelected, setMemberSelected] = useState<Set<number>>(new Set());
   const [memberBusy, setMemberBusy] = useState(false);
+  // Passkey change requests: students prove the CURRENT passkey and ask; the
+  // organizer approves (opens Generate for that one student) or declines —
+  // both via a direct notification to that student.
+  const [passkeyRequests, setPasskeyRequests] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -500,6 +504,7 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
       setRows(rosterData.data || rosterData);
       const memberData = await cgm.members(classId);
       setMembers(memberData.data || memberData);
+      setPasskeyRequests(await cgm.passkeyRequests(classId).catch(() => []));
     } catch (failure: any) { setError(failure?.message || 'The roster could not be loaded.'); }
   }, [classId, search]);
 
@@ -517,6 +522,31 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
           <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, index, phone…" className={`${inputClass} max-w-56`} aria-label="Search roster" />
           {canImport && <button type="button" className="mini-button" onClick={() => setImportOpen((value) => !value)}>Import file</button>}
         </div>
+      </div>
+
+      <div className={card} data-testid="cgm-passkey-requests">
+        <div className="flex items-center justify-between gap-2">
+          <p className={label}>Passkey change requests</p>
+          {passkeyRequests.some((row) => row.status === 'pending') && <span className="rounded-full bg-amber-200 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-amber-800">{passkeyRequests.filter((row) => row.status === 'pending').length} waiting</span>}
+        </div>
+        <p className="mt-1 text-[11px] font-medium text-slate-400">Passkeys are system-generated, so a student cannot invent a new one. They prove their current passkey and ask; approving opens a Generate button for exactly that student (they are notified directly). Declining tells them too.</p>
+        <ul className="mt-3 space-y-1.5">
+          {passkeyRequests.map((row) => (
+            <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs" data-testid={`cgm-passkey-request-${row.status}`}>
+              <span className="font-black text-slate-700">{row.fullName} <span className="ml-1 font-semibold text-slate-400">{row.indexNumber}</span></span>
+              <span className="flex items-center gap-2">
+                <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${row.status === 'pending' ? 'bg-amber-200 text-amber-800' : row.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : row.status === 'completed' ? 'bg-slate-200 text-slate-600' : 'bg-red-100 text-red-600'}`}>{row.status}</span>
+                {row.status === 'pending' && canEdit && (
+                  <>
+                    <button type="button" className="mini-button" onClick={async () => { try { const result: any = await cgm.decidePasskeyRequest(classId, Number(row.id), 'approve'); setMessage(String(result?.message || 'Approved.')); await load(); onChanged(); } catch (failure: any) { setError(failure?.message || 'Failed.'); } }}>Approve &amp; notify</button>
+                    <button type="button" className="mini-button text-red-600" onClick={async () => { try { const result: any = await cgm.decidePasskeyRequest(classId, Number(row.id), 'decline'); setMessage(String(result?.message || 'Declined.')); await load(); onChanged(); } catch (failure: any) { setError(failure?.message || 'Failed.'); } }}>Decline</button>
+                  </>
+                )}
+              </span>
+            </li>
+          ))}
+          {!passkeyRequests.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No passkey change requests.</li>}
+        </ul>
       </div>
 
       {message && <Banner tone="success">{message}</Banner>}

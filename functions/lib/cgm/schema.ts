@@ -562,6 +562,18 @@ CREATE TABLE IF NOT EXISTS cgm_activity_templates (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS cgm_passkey_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER NOT NULL,
+  student_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','declined','completed')),
+  note TEXT,
+  handled_member_id INTEGER,
+  handled_label TEXT,
+  requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  handled_at DATETIME
+);
+
 CREATE TABLE IF NOT EXISTS cgm_student_notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL,
@@ -636,6 +648,8 @@ CREATE TABLE IF NOT EXISTS cgm_audit (
  * boot never fails.
  */
 export const CGM_INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_student ON cgm_passkey_requests(student_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_class ON cgm_passkey_requests(class_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_students_identity ON cgm_students(institution_key, index_number_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_students_sequence ON cgm_students(passkey_sequence);
 CREATE INDEX IF NOT EXISTS idx_cgm_students_status ON cgm_students(status);

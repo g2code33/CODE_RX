@@ -1186,6 +1186,71 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     return c.json({ success: true, data: { prefix, message: `Passkeys issued through this class now start with ${prefix}. Students who already have a passkey keep theirs.` } });
   });
 
+  // ---------------------------------------------------------------------------
+  // Passkey change requests — students prove themselves with the CURRENT
+  // passkey and ask; the organizer approves (opening generation for exactly
+  // that one student) or declines, and the student is told by a direct
+  // notification either way. The new passkey itself is always system-generated.
+  // ---------------------------------------------------------------------------
+  app.get('/api/cgm/classes/:id/passkey-requests', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const guard = await requireClassPermission(c, member, classId, 'edit_roster');
+    if (!guard.ok) return guard.response;
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.id, r.status, r.requested_at, r.handled_at, r.handled_label,
+              s.id AS student_id, s.full_name, s.index_number
+       FROM cgm_passkey_requests r JOIN cgm_students s ON s.id = r.student_id
+       WHERE r.class_id = ?
+       ORDER BY CASE r.status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, r.id DESC
+       LIMIT 50`
+    ).bind(classId));
+    return c.json({ success: true, data: rows.map((row) => ({
+      id: Number(row.id), status: String(row.status), requestedAt: row.requested_at, handledAt: row.handled_at,
+      handledLabel: row.handled_label || null, studentId: Number(row.student_id),
+      fullName: row.full_name, indexNumber: row.index_number,
+    })) });
+  });
+
+  const decidePasskeyRequest = (decision: 'approved' | 'declined') => async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const guard = await requireClassPermission(c, member, classId, 'edit_roster');
+    if (!guard.ok) return guard.response;
+    const requestId = Number(c.req.param('requestId'));
+    if (!Number.isInteger(requestId) || requestId <= 0) return bad(c, 'Request not found.', 404);
+    const rows = await asRows<{ id: number; status: string; student_id: number; full_name: string }>(c.env.DB.prepare(
+      `SELECT r.id, r.status, r.student_id, s.full_name FROM cgm_passkey_requests r
+       JOIN cgm_students s ON s.id = r.student_id WHERE r.id = ? AND r.class_id = ?`
+    ).bind(requestId, classId));
+    const request = rows[0];
+    if (!request) return bad(c, 'Request not found.', 404);
+    if (request.status !== 'pending') return bad(c, `This request was already ${request.status}.`, 409);
+    await c.env.DB.prepare(
+      `UPDATE cgm_passkey_requests SET status = ?, handled_member_id = ?, handled_label = ?, handled_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(decision, member.profileId ?? null, member.name, requestId).run();
+    if (decision === 'approved') {
+      await notifyStudent(c.env.DB, Number(request.student_id), 'security', 'Passkey reset approved',
+        `${member.name} approved your passkey change request. Open your profile and tap "Generate new passkey" — the system creates your new unique passkey and shows it once.`);
+    } else {
+      await notifyStudent(c.env.DB, Number(request.student_id), 'security', 'Passkey change request declined',
+        `${member.name} declined your passkey change request. Your current passkey still works — contact your organizer if you need help.`);
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: decision === 'approved' ? 'cgm.passkey.request_approved' : 'cgm.passkey.request_declined',
+      entityType: 'student', entityId: Number(request.student_id), classId,
+      context: { requestId },
+    });
+    return c.json({ success: true, data: { status: decision, message: decision === 'approved'
+      ? `Approved — ${request.full_name} can now generate a new passkey, and has been notified.`
+      : `Declined — ${request.full_name} has been notified.` } });
+  };
+  app.post('/api/cgm/classes/:id/passkey-requests/:requestId/approve', decidePasskeyRequest('approved'));
+  app.post('/api/cgm/classes/:id/passkey-requests/:requestId/decline', decidePasskeyRequest('declined'));
+
   app.post('/api/cgm/classes/:id/roster/import', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);

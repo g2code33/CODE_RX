@@ -206,7 +206,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 41);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 42);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -1547,26 +1547,52 @@ check('after eight failures even the correct passkey is refused while locked', l
 check('the lockout is recorded with an expiry',
   Boolean(q1('SELECT locked_until FROM cgm_students WHERE id = ?', lockStudentId)?.locked_until));
 
-// --- Passkey change revokes every existing session -----------------------------
+// --- Passkey change REQUEST flow: system generates, organizer approves ----------
+// Students never invent passkeys. They prove the CURRENT passkey, the
+// organizer approves for exactly that student, and Generate allocates the
+// next unique passkey from the same atomic sequence registration uses.
 const preChangeLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 const sessionBeforeChange = preChangeLogin.json?.data?.session?.token;
 check('the passkey-change target signed in with the original passkey', Boolean(sessionBeforeChange), `status ${preChangeLogin.status}`);
-const enableSelfChange = await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, {
-  studentVisibleFields: ['full_name', 'phone', 'email'],
-  loginFormat: { identifiers: ['index_number'], allowStudentPasskeyChange: true },
-}, amaToken);
-check('the class enables self-service passkey change', enableSelfChange.status === 200, `status ${enableSelfChange.status}`);
-const passkeyChange = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: bio001Passkey(), newPasskey: 'rx30qz' }, sessionBeforeChange);
-const sessionAfterChange = passkeyChange.json?.data?.session?.token;
-check('the passkey change returns exactly one fresh session', passkeyChange.status === 200 && Boolean(sessionAfterChange), `status ${passkeyChange.status}`);
+const wrongProof = await studentCall('POST', '/api/cgm/student/passkey/request', { classId: classAId, currentPasskey: 'rx30zzzzzz' }, sessionBeforeChange);
+check('a passkey change REQUEST needs the correct current passkey', wrongProof.status === 400, `status ${wrongProof.status}`);
+const changeRequest = await studentCall('POST', '/api/cgm/student/passkey/request', { classId: classAId, currentPasskey: bio001Passkey() }, sessionBeforeChange);
+check('with the current passkey the request reaches the organizer', changeRequest.status === 200, `status ${changeRequest.status} ${changeRequest.text?.slice(0, 120)}`);
+const myRequest = await studentCall('GET', '/api/cgm/student/passkey/request', undefined, sessionBeforeChange);
+check('the student sees their request waiting', myRequest.json?.data?.status === 'pending', JSON.stringify(myRequest.json?.data || {}));
+const duplicateRequest = await studentCall('POST', '/api/cgm/student/passkey/request', { classId: classAId, currentPasskey: bio001Passkey() }, sessionBeforeChange);
+check('a second open request is refused (one at a time)', duplicateRequest.status === 409, `status ${duplicateRequest.status}`);
+const earlyGenerate = await studentCall('POST', '/api/cgm/student/passkey/generate', {}, sessionBeforeChange);
+check('generating before approval is refused', earlyGenerate.status === 403, `status ${earlyGenerate.status}`);
+const requestList = await memberCall('GET', `/api/cgm/classes/${classAId}/passkey-requests`, undefined, amaToken);
+const pendingRow = (requestList.json?.data || []).find((row) => Number(row.studentId) === Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'bio-201-001'")?.id));
+check('the organizer sees the pending request with the student named', requestList.status === 200 && pendingRow?.status === 'pending' && Boolean(pendingRow?.fullName), JSON.stringify((requestList.json?.data || []).slice(0, 2)));
+const approveRequest = await memberCall('POST', `/api/cgm/classes/${classAId}/passkey-requests/${Number(pendingRow?.id)}/approve`, {}, amaToken);
+check('approving opens generation for exactly that student', approveRequest.status === 200, `status ${approveRequest.status} ${approveRequest.text?.slice(0, 120)}`);
+const approvalNotice = q1("SELECT id FROM cgm_student_notifications WHERE student_id = ? AND title = 'Passkey reset approved'", pendingRow?.studentId);
+check('the approval notifies THAT student directly', Boolean(approvalNotice));
+const passkeyGenerate = await studentCall('POST', '/api/cgm/student/passkey/generate', {}, sessionBeforeChange);
+const generatedPasskey = String(passkeyGenerate.json?.data?.passkey || '');
+const sessionAfterChange = passkeyGenerate.json?.data?.session?.token;
+check('after approval the system generates a unique passkey, shown once with a fresh session',
+  passkeyGenerate.status === 200 && /^rx30[a-z]+$/.test(generatedPasskey) && generatedPasskey !== bio001Passkey() && Boolean(sessionAfterChange),
+  `status ${passkeyGenerate.status} passkey ${generatedPasskey ? 'issued' : 'missing'}`);
 const oldSessionTry = await studentCall('GET', '/api/cgm/student/me', undefined, sessionBeforeChange);
 check('the pre-change session is dead immediately', oldSessionTry.status === 401, `status ${oldSessionTry.status}`);
 const newSessionTry = await studentCall('GET', '/api/cgm/student/me', undefined, sessionAfterChange);
 check('the fresh session works', newSessionTry.status === 200, `status ${newSessionTry.status}`);
-const newPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
-check('sign-in works with the new passkey', Boolean(newPasskeyLogin.json?.data?.session?.token), `status ${newPasskeyLogin.status}`);
+const newPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: generatedPasskey });
+check('sign-in works with the generated passkey', Boolean(newPasskeyLogin.json?.data?.session?.token), `status ${newPasskeyLogin.status}`);
 const oldPasskeyLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 check('the old passkey is gone for good', oldPasskeyLogin.status >= 400, `status ${oldPasskeyLogin.status}`);
+const reRequest = await studentCall('POST', '/api/cgm/student/passkey/request', { classId: classAId, currentPasskey: generatedPasskey }, sessionAfterChange);
+check('after completion the student can request again', reRequest.status === 200, `status ${reRequest.status}`);
+const reRequestRow = (await memberCall('GET', `/api/cgm/classes/${classAId}/passkey-requests`, undefined, amaToken)).json?.data?.find((row) => row.status === 'pending');
+const declineRequest = await memberCall('POST', `/api/cgm/classes/${classAId}/passkey-requests/${Number(reRequestRow?.id)}/decline`, {}, amaToken);
+const declinedGenerate = await studentCall('POST', '/api/cgm/student/passkey/generate', {}, sessionAfterChange);
+check('a declined request never opens generation', declineRequest.status === 200 && declinedGenerate.status === 403, `decline ${declineRequest.status} generate ${declinedGenerate.status}`);
+const legacyChange = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: generatedPasskey, newPasskey: 'rx30qz' }, sessionAfterChange);
+check('the old choose-your-own change route is gone (404)', legacyChange.status === 404, `status ${legacyChange.status}`);
 
 // --- Logout revokes the session -------------------------------------------------
 const logoutSession = newPasskeyLogin.json?.data?.session?.token;
@@ -1595,8 +1621,12 @@ const voteAuditRows = auditRowsAll.filter((row) => row.action === 'cgm.election.
 check('vote audit rows record anonymity, never the candidate or the choice',
   voteAuditRows.length > 0 && voteAuditRows.every((row) => !/candidate/i.test(row.context_json || '')),
   `rows=${voteAuditRows.length}`);
-const passkeyChangeAudit = auditRowsAll.filter((row) => row.action === 'cgm.passkey.self_change');
-check('the passkey change is audited without the new value', passkeyChangeAudit.length === 1, `rows=${passkeyChangeAudit.length}`);
+const passkeyChangeAudit = auditRowsAll.filter((row) => String(row.action).startsWith('cgm.passkey.'));
+check('every passkey step is audited without any passkey value in the context',
+  ['cgm.passkey.change_requested', 'cgm.passkey.request_approved', 'cgm.passkey.request_declined', 'cgm.passkey.generated']
+    .every((action) => passkeyChangeAudit.some((row) => row.action === action))
+  && passkeyChangeAudit.every((row) => !(row.context_json || '').includes(generatedPasskey)),
+  `actions=${passkeyChangeAudit.map((row) => row.action).join(',')}`);
 
 // ===========================================================================
 // 21. Governance (step 10, spec §5/§6/§30) — runs last: the transfer test
@@ -1631,7 +1661,7 @@ check('PHANTOM can suspend a class', suspendClass.status === 200, `status ${susp
 check('the suspended class is marked in the database', q1('SELECT status FROM cgm_classes WHERE id = ?', classAId)?.status === 'suspended');
 // Logout in §20 revoked every session of this identity (logout-all is the
 // safer default on shared school devices), so sign in fresh for the class views.
-const governanceLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+const governanceLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: generatedPasskey });
 const governanceSession = governanceLogin.json?.data?.session?.token || sessionAfterChange;
 const suspendedClassView = await studentCall('GET', `/api/cgm/student/classes/${classAId}`, undefined, governanceSession);
 check('students cannot open a suspended class', suspendedClassView.status >= 400, `status ${suspendedClassView.status}`);
@@ -1829,7 +1859,7 @@ await setPolicy('membership_request_mode', 'approval');
 
 // -- profile_change_mode: auto applies immediately with normalized keys -------
 await setPolicy('profile_change_mode', 'auto');
-const governanceFresh = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+const governanceFresh = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: generatedPasskey });
 const governanceToken = governanceFresh.json?.data?.session?.token || governanceSession;
 const autoProfileChange = await studentCall('POST', '/api/cgm/student/profile/change', { field: 'phone', newValue: '0209000042', reason: 'New number' }, governanceToken);
 check('auto: the profile change is applied immediately', autoProfileChange.status === 200, `status ${autoProfileChange.status} ${autoProfileChange.text?.slice(0, 160)}`);
@@ -1936,11 +1966,11 @@ check('a successful sign-in resets the failure counters',
 const govStudent = q1("SELECT id, passkey_verifier FROM cgm_students WHERE index_number_key = 'bio-201-001'");
 sqlite.prepare('UPDATE cgm_students SET passkey_verifier = ? WHERE id = ?').run(memberHash('concurrent-probe'), govStudent.id);
 const concurrentWrong = await Promise.all(Array.from({ length: 8 }, () =>
-  studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' })));
+  studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: generatedPasskey })));
 check('eight concurrent verifier failures are all refused', concurrentWrong.every((r) => r.status === 400), concurrentWrong.map((r) => r.status).join(','));
 check('concurrent failures converge on the lockout',
   Boolean(q1("SELECT locked_until FROM cgm_students WHERE index_number_key = 'bio-201-001'")?.locked_until));
-const concurrentLocked = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+const concurrentLocked = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: generatedPasskey });
 check('the correct passkey is refused while locked', concurrentLocked.status === 423, `status ${concurrentLocked.status}`);
 sqlite.prepare("UPDATE cgm_students SET passkey_verifier = ?, locked_until = NULL, failed_attempts = 0 WHERE id = ?").run(govStudent.passkey_verifier, govStudent.id);
 
@@ -2271,7 +2301,7 @@ check('PHANTOM can override the class mark', markPhantom.status === 200, `status
 await setMark(classAId, 'bio1', assistantToken);
 
 // -- Existing students keep their passkeys ------------------------------------
-const keeperLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+const keeperLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: generatedPasskey });
 check('an existing rx30 student still signs in after the class mark changed', keeperLogin.status === 200, `status ${keeperLogin.status}`);
 check('the existing student kept the rx30 mark on their identity',
   q1("SELECT passkey_prefix FROM cgm_students WHERE index_number_key = 'bio-201-001'")?.passkey_prefix === 'rx30');
@@ -2325,17 +2355,22 @@ const autoMarkLogin = await studentCall('POST', '/api/cgm/student/login', { iden
 check('the automatically issued marked passkey signs in at once', autoMarkLogin.status === 200, `status ${autoMarkLogin.status}`);
 await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'approval' }, phantomToken);
 
-// -- Self-service change keeps the student's own mark --------------------------
-await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name'], loginFormat: { identifiers: ['index_number'], allowStudentPasskeyChange: true } }, assistantToken);
+// -- A generated passkey keeps the CLASS mark (suffix stays system-issued) ------
 const markSession = markLogin.json?.data?.session?.token;
-const changeWrongMark = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: expectedMark, newPasskey: 'rx30qq' }, markSession);
-check('a self-service change cannot leave the student\'s own mark', changeWrongMark.status === 400 && /bio1/.test(String(changeWrongMark.json?.error)), changeWrongMark.text?.slice(0, 140));
-const changeOk = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: expectedMark, newPasskey: 'bio1qq' }, markSession);
-check('the self-service change keeps the mark and rotates the letters', changeOk.status === 200, `status ${changeOk.status}`);
-const relogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: 'bio1qq' });
-check('the student signs in with the changed marked passkey', relogin.status === 200, `status ${relogin.status}`);
-check('the sequence rotated with the change (suffix unique)',
-  q1("SELECT passkey_suffix FROM cgm_students WHERE index_number_key = 'mrk-27-001'")?.passkey_suffix === 'qq');
+const markStudentId = Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'mrk-27-001'")?.id || 0);
+const oldMarkSuffix = q1('SELECT passkey_suffix FROM cgm_students WHERE id = ?', markStudentId)?.passkey_suffix;
+await studentCall('POST', '/api/cgm/student/passkey/request', { classId: classAId, currentPasskey: expectedMark }, markSession);
+const markPending = (await memberCall('GET', `/api/cgm/classes/${classAId}/passkey-requests`, undefined, assistantToken)).json?.data?.find((row) => Number(row.studentId) === markStudentId && row.status === 'pending');
+const markPkApprove = await memberCall('POST', `/api/cgm/classes/${classAId}/passkey-requests/${Number(markPending?.id)}/approve`, {}, assistantToken);
+const markPkGenerate = await studentCall('POST', '/api/cgm/student/passkey/generate', {}, markSession);
+const newMarkedPasskey = String(markPkGenerate.json?.data?.passkey || '');
+check('the generated passkey keeps the class mark with a fresh system suffix',
+  markPkApprove.status === 200 && markPkGenerate.status === 200 && newMarkedPasskey.startsWith('bio1') && newMarkedPasskey !== expectedMark,
+  `approve ${markPkApprove.status} generate ${markPkGenerate.status} ${newMarkedPasskey ? 'issued' : 'missing'}`);
+const relogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: newMarkedPasskey });
+check('the student signs in with the generated marked passkey', relogin.status === 200, `status ${relogin.status}`);
+check('the sequence rotated with the generation (suffix unique, never user-chosen)',
+  q1('SELECT passkey_suffix FROM cgm_students WHERE id = ?', markStudentId)?.passkey_suffix !== oldMarkSuffix);
 
 // -- Resetting to the default --------------------------------------------------
 const markReset = await setMark(classAId, '', assistantToken);
@@ -2346,8 +2381,8 @@ const afterRow = (afterQueue.json?.data || []).find((row) => row.indexNumber ===
 const afterApprove = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${afterRow.id}/approve`, {}, amaToken);
 check('after the reset new passkeys start with rx30 again',
   String(afterApprove.json?.data?.passkey || '').startsWith('rx30'), String(afterApprove.json?.data?.passkey));
-const untouchedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: 'bio1qq' });
-check('the reset never rewrote the earlier student\'s marked passkey', untouchedLogin.status === 200, `status ${untouchedLogin.status}`);
+const untouchedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: newMarkedPasskey });
+check('the reset never rewrote the earlier student\'s generated marked passkey', untouchedLogin.status === 200, `status ${untouchedLogin.status}`);
 
 
 // ===========================================================================
@@ -2698,7 +2733,7 @@ check('the roster-bound individual invitation exists', Boolean(backfillToken), `
 sqlite.prepare(
   "UPDATE cgm_students SET full_name = '', index_number = '', index_number_key = '', phone = '0244117294', phone_key = '233244117294' WHERE index_number_key = 'bio-201-001'"
 ).run();
-const phoneFirstLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244117294', passkey: 'rx30qz' });
+const phoneFirstLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244117294', passkey: generatedPasskey });
 const phoneFirstSession = phoneFirstLogin.json?.data?.session?.token;
 check('the phone-first student signs in with their phone and passkey', Boolean(phoneFirstSession), `status ${phoneFirstLogin.status} ${phoneFirstLogin.text?.slice(0, 120)}`);
 const backfillClaim = await studentCall('POST', `/api/cgm/student/invitations/${backfillToken}/claim`, {}, phoneFirstSession);
@@ -2853,7 +2888,7 @@ check('the migration keeps expiry, limits and usage counts intact',
 check('re-running the migration is idempotent', (await worker.migrateInvitationTokenStorage(d1, env)).encrypted === 0);
 const legacyGeneralLanding = await call('GET', `/api/cgm/invitations/${legacyGeneralCode}`);
 check('existing general invitation codes still resolve after the migration', legacyGeneralLanding.status === 200, `status ${legacyGeneralLanding.status}`);
-const legacyIndividualLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244117294', passkey: 'rx30qz' });
+const legacyIndividualLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244117294', passkey: generatedPasskey });
 const legacyIndividualSession = legacyIndividualLogin.json?.data?.session?.token;
 const legacyIndividualClaim = await studentCall('POST', `/api/cgm/student/invitations/${legacyIndividualToken}/claim`, {}, legacyIndividualSession);
 check('an existing individual invitation link (raw token) still works after the migration',
@@ -3613,7 +3648,7 @@ check('a non-numeric group id answers 404 instead of a D1 500',
 const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
 check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
   /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
-  && /VAULT_SCHEMA_VERSION = '2026-10-31-code-rx23-/.test(schemaSrc));
+  && /VAULT_SCHEMA_VERSION = '2026-10-31-code-rx2[34]-/.test(schemaSrc));
 
 // ---------------------------------------------------------------------------
 

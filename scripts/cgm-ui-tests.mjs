@@ -97,8 +97,14 @@ check('the student portal covers classes, groups, elections, attendance, calenda
     .every((label) => studentPortal.includes(label)));
 check('profile changes go through the approval workflow with a reason',
   /requestProfileChange/.test(studentPortal) && /reason/i.test(studentPortal));
-check('passkey self-change is presented as optional and organizer-controlled',
-  /Only available when a class enables self-service/.test(studentPortal));
+check('the passkey card is request-based: current passkey to ask, organizer approves, Generate is system-issued',
+  /cgm-student-passkey-card/.test(studentPortal) && /requestPasskeyChange/.test(studentPortal)
+  && /generatePasskey/.test(studentPortal) && /cgm-passkey-generate/.test(studentPortal)
+  && /never type your own new passkey|never type your own new passkey/i.test(studentPortal)
+  && !/newPasskey \(rx30…\)/.test(studentPortal));
+check('the organizer sees passkey change requests with approve-and-notify / decline',
+  /cgm-passkey-requests/.test(workspace) && /decidePasskeyRequest/.test(workspace)
+  && /Approve &amp; notify/.test(workspace) && /Passkey change requests/.test(workspace));
 check('invitation join flow exists for signed-in students', /joinClass/.test(studentPortal) && /claimInvitation/.test(studentPortal));
 
 section('5. Frontend API client namespaces');
@@ -201,7 +207,9 @@ const backend = ['routes-student.ts', 'routes-organizer.ts', 'routes-activities.
 for (const endpoint of [
   '/api/cgm/student/register', '/api/cgm/student/login', '/api/cgm/student/join',
   '/api/cgm/student/invitations/:code/claim', '/api/cgm/student/profile/change',
-  '/api/cgm/student/passkey/change', '/api/cgm/classes', '/api/cgm/classes/:id/roster/import',
+  '/api/cgm/student/passkey/request', '/api/cgm/student/passkey/generate',
+  '/api/cgm/classes/:id/passkey-requests', '/api/cgm/classes/:id/passkey-requests/:requestId/approve',
+  '/api/cgm/classes/:id/passkey-requests/:requestId/decline', '/api/cgm/classes', '/api/cgm/classes/:id/roster/import',
   '/api/cgm/classes/:id/invitations', '/api/cgm/classes/:id/registrations/:requestId/approve',
   '/api/cgm/activities/:id/generate', '/api/cgm/activities/:id/assign-remaining',
   '/api/cgm/activities/:id/lifecycle', '/api/cgm/groups/:id/elections', '/api/cgm/elections/:id/close',
@@ -351,10 +359,10 @@ check('the service worker keeps caching the shell only', /CACHE = 'code-rx-v7'/.
 
 // ===========================================================================
 section('15. Step-9 security sweep: verifiable credential rotation, lockout model');
-check('passkey changes verify against a freshly-read verifier and rotate verifier + sequence + suffix together',
-  /SELECT passkey_prefix, passkey_verifier FROM cgm_students WHERE id = \?/.test(studentRoutes)
-  && /passkey_sequence = \?, passkey_suffix = \?/.test(studentRoutes)
-  && /That passkey is already in use/.test(studentRoutes));
+check('passkey generation verifies the current passkey and rotates verifier + sequence + suffix together (system-issued)',
+  /passkey_sequence = \?, passkey_suffix = \?/.test(studentRoutes)
+  && /allocateStudentPasskey/.test(studentRoutes)
+  && /Your current passkey did not match/.test(studentRoutes));
 check('a passkey change revokes every live session and issues exactly one fresh one',
   /revokeStudentSessions/.test(studentRoutes) && /passkey was changed/.test(studentRoutes));
 check('lockout guards the confirming half: the audit marks the lock without counting anonymous wrong passkeys',

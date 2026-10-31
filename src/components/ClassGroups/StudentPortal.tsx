@@ -1559,8 +1559,19 @@ const ProfileView = ({ me, onChanged }: { me: any; onChanged: () => void }) => {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [currentPw, setCurrentPw] = useState('');
-  const [newPw, setNewPw] = useState('');
+  // Passkey change REQUEST flow — the passkey is always system-generated:
+  // prove the current one, the organizer approves, then Generate allocates
+  // the next unique passkey (shown once, never chosen by the student).
+  const [pkCurrent, setPkCurrent] = useState('');
+  const [pkClassId, setPkClassId] = useState<number | null>(null);
+  const [passkeyReq, setPasskeyReq] = useState<any>(null);
+  const [issuedPasskey, setIssuedPasskey] = useState<string | null>(null);
+  const activeClasses: any[] = (me?.classes || []).filter((entry: any) => (entry.member_status || entry.status) === 'active');
+  const loadPasskeyRequest = async () => {
+    try { const result: any = await cgmStudent.myPasskeyRequest(); setPasskeyReq(result?.data ?? null); }
+    catch { setPasskeyReq(null); }
+  };
+  useEffect(() => { void loadPasskeyRequest(); }, []);
 
   const student = me?.student || {};
   // Fixed identity fields are SHOWN (read-only) so students always know what
@@ -1622,26 +1633,81 @@ const ProfileView = ({ me, onChanged }: { me: any; onChanged: () => void }) => {
         </form>
       </div>
 
-      <div className={card}>
-        <p className={label}>Change my passkey</p>
-        <p className="mt-1 text-[11px] font-medium text-slate-400">Only available when a class enables self-service. Otherwise ask your organizer for a secure reset.</p>
-        <form
-          className="mt-3 grid gap-2 sm:grid-cols-2"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            setBusy(true); setMessage(null); setError(null);
-            try {
-              const result = await cgmStudent.changePasskey(currentPw, newPw);
-              setMessage(String((result as any)?.message || 'Passkey changed.'));
-              setCurrentPw(''); setNewPw('');
-            } catch (failure: any) { setError(failure?.message || 'The change failed.'); }
-            finally { setBusy(false); }
-          }}
-        >
-          <input required type="password" className={inputClass} value={currentPw} onChange={(event) => setCurrentPw(event.target.value)} placeholder="Current passkey" autoComplete="current-password" />
-          <input required type="password" className={`${inputClass} font-mono`} value={newPw} onChange={(event) => setNewPw(event.target.value)} placeholder="New passkey (rx30…)" autoComplete="new-password" />
-          <button type="submit" disabled={busy} className="cgm-primary-button sm:col-span-2">{busy ? 'Saving…' : 'Change passkey'}</button>
-        </form>
+      <div className={card} data-testid="cgm-student-passkey-card">
+        <p className={label}>Change my passkey — system-generated</p>
+        <p className="mt-1 text-[11px] font-medium text-slate-400">
+          You never type your own new passkey: the system generates it so it can never clash with another student&rsquo;s key.
+          Prove who you are with your <span className="font-bold">current passkey</span> to ask your organizer; when they approve
+          (or send you the link), a <span className="font-bold">Generate new passkey</span> button appears here.
+        </p>
+        {issuedPasskey && (
+          <div className="mt-3 rounded-xl bg-emerald-50 px-4 py-3" role="alert">
+            <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Your new passkey — shown only once, save it now</p>
+            <p className="mt-1 font-mono text-lg font-black tracking-wider text-emerald-900">{issuedPasskey}</p>
+          </div>
+        )}
+        {passkeyReq?.status === 'pending' && (
+          <p className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700" data-testid="cgm-passkey-request-pending">
+            Request sent {passkeyReq.requestedAt ? `on ${new Date(passkeyReq.requestedAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })} ` : ''}— waiting for your organizer to approve it.
+          </p>
+        )}
+        {passkeyReq?.status === 'approved' && (
+          <div className="mt-3">
+            <button
+              type="button"
+              data-testid="cgm-passkey-generate"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true); setMessage(null); setError(null);
+                try {
+                  const result: any = await cgmStudent.generatePasskey();
+                  setIssuedPasskey(String(result?.passkey || ''));
+                  setPasskeyReq(null);
+                  setMessage(String(result?.message || 'New passkey generated.'));
+                  onChanged();
+                } catch (failure: any) { setError(failure?.message || 'The generation failed.'); }
+                finally { setBusy(false); void loadPasskeyRequest(); }
+              }}
+              className="cgm-primary-button"
+            >
+              {busy ? 'Generating…' : '🔑 Generate new passkey'}
+            </button>
+            <p className="mt-1 text-[10px] font-medium text-slate-400">Approved by your organizer — the system picks the next unique passkey.</p>
+          </div>
+        )}
+        {passkeyReq?.status === 'declined' && (
+          <p className="mt-3 rounded-xl bg-red-50 px-4 py-3 text-xs font-bold text-red-600">
+            {passkeyReq.handledLabel ? `${passkeyReq.handledLabel} declined your request.` : 'Your request was declined.'} You can ask again below.
+          </p>
+        )}
+        {passkeyReq?.status !== 'pending' && passkeyReq?.status !== 'approved' && (
+          <form
+            className="mt-3 grid gap-2 sm:grid-cols-2"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              setBusy(true); setMessage(null); setError(null);
+              try {
+                const result: any = await cgmStudent.requestPasskeyChange(pkClassId, pkCurrent);
+                setMessage(String((result as any)?.message || 'Request sent.'));
+                setPkCurrent('');
+                await loadPasskeyRequest();
+                onChanged();
+              } catch (failure: any) { setError(failure?.message || 'The request failed.'); }
+              finally { setBusy(false); }
+            }}
+          >
+            {activeClasses.length > 1 && (
+              <select className={inputClass} value={pkClassId ?? ''} onChange={(event) => setPkClassId(Number(event.target.value) || null)} aria-label="Class for the passkey request">
+                <option value="">Choose class…</option>
+                {activeClasses.map((entry: any) => <option key={entry.class_id} value={Number(entry.class_id)}>{entry.class_name || entry.name || `Class ${entry.class_id}`}</option>)}
+              </select>
+            )}
+            <input required type="password" className={inputClass} value={pkCurrent} onChange={(event) => setPkCurrent(event.target.value)} placeholder="Current passkey (proves it is you)" autoComplete="current-password" />
+            <button type="submit" disabled={busy} className="cgm-primary-button sm:col-span-2" data-testid="cgm-passkey-request-submit">{busy ? 'Sending…' : 'Request passkey change from my organizer'}</button>
+          </form>
+        )}
+        {message && <p role="status" className="mt-2 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">{message}</p>}
+        {error && <p role="alert" className="mt-2 rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-600">{error}</p>}
       </div>
     </div>
   );
