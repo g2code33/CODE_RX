@@ -607,9 +607,10 @@ check("the assignment-method dropdown offers 'Random selection — system picks 
   /value="random">Random selection — system picks for every student</.test(forcedWorkspace));
 check('the organizer finish button names the random mode so stragglers can be swept in',
   /Assign remaining \(random mode\)/.test(forcedWorkspace) && /assignRemaining/.test(forcedWorkspace));
-check("a 'Create empty groups only' button exists so forced-random activities get groups WITHOUT placing anyone",
-  /cgm-create-empty-groups/.test(forcedWorkspace) && /Create empty groups only/.test(forcedWorkspace)
-  && /addGroups\(Number\(activityId\), \{ count/.test(forcedWorkspace));
+check('random mode shows ONLY the fair finisher — no place-all button that could bypass the draw, no staging button',
+  /cgm-create-empty-groups/.test(forcedWorkspace) === false
+  && /data\.config\.method === 'automatic' && \(/.test(forcedWorkspace)
+  && /the groups above already exist for the draw/.test(forcedWorkspace));
 check('group naming is decided in the activity form: numbered / lettered / custom list',
   /cgm-act-naming/.test(forcedWorkspace) && /Numbered — Group 1, Group 2, Group 3…/.test(forcedWorkspace)
   && /Lettered — Group A, Group B, Group C…/.test(forcedWorkspace) && /cgm-act-names/.test(forcedWorkspace));

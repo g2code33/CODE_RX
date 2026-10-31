@@ -3217,8 +3217,13 @@ const portalSrc3 = readFileSync(path.join(ROOT, 'src/components/ClassGroups/Stud
 const cgmClientSrc = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
 check("the organizer form offers 'Random selection — system picks for every student'", /value="random">Random selection — system picks for every student</.test(workspaceSrc));
 check("the organizer finish button names the random mode ('Assign remaining (random mode)')", /Assign remaining \(random mode\)/.test(workspaceSrc));
-check("a 'Create empty groups only' button lets the organizer stage groups before any student draws",
-  /Create empty groups only/.test(workspaceSrc) && /cgm-add-groups|addGroups\(Number\(activityId\)/.test(workspaceSrc));
+check('the Groups page is mode-aware: place-all only for organizer-auto, the fair finisher otherwise — no staging button',
+  /data\.config\.method === 'automatic' && \(/.test(workspaceSrc)
+  && /Create empty groups only/.test(workspaceSrc) === false
+  && /Assign remaining \(random mode\)/.test(workspaceSrc)
+  && /the groups above already exist for the draw/.test(workspaceSrc));
+check('group creation can never exceed the plan (POST /groups caps at the planned count)',
+  /const room = Math\.max\(0, Number\(groupConfig\.groupCount\) - startPosition\);/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-activities.ts'), 'utf8')));
 check('every member row carries a Swap… control that calls the swap API', /Swap…<\/option>/.test(workspaceSrc) && /swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(workspaceSrc));
 check('the client library exposes the swap endpoint', /swapStudents: \(activityId: number, studentIdA: number, studentIdB: number\)/.test(cgmClientSrc) && /swap-students/.test(cgmClientSrc));
 check('the student portal hides manual picking in forced random mode and explains the fair draw',
@@ -3294,8 +3299,8 @@ check("the activity form owns group naming: numbered / lettered / custom with a 
   && /Lettered — Group A, Group B, Group C…/.test(wsSrc) && /cgm-act-names/.test(wsSrc));
 check('the Groups page can no longer change the plan — read-only planned strip plus a jump to the activity settings',
   /cgm-planned-groups/.test(wsSrc) && /cgm-edit-activity-settings/.test(wsSrc) && /cgm-gen-count/.test(wsSrc) === false);
-check('creating empty groups fills exactly the planned shortfall from the activity settings',
-  /const missing = planned \? Math\.max\(1, planned - \(data\.groups \|\| \[\]\)\.length\) : 0;/.test(wsSrc));
+check('repeat group staging can never double the groups (capped response reported)',
+  /capped: toCreate < count/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-activities.ts'), 'utf8')));
 
 // ---------------------------------------------------------------------------
 // 35. Plan coordination: groups already defined at publish, editable plan until

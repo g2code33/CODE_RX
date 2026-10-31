@@ -1582,7 +1582,7 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
         <>
           {canGenerate && (
             <div className={card}>
-              <p className={label}>Automatic assignment</p>
+              <p className={label}>{data.config.method === 'random' ? 'Random selection' : data.config.method === 'automatic' ? 'Automatic assignment' : 'Organizer finish'}</p>
               {(() => {
                 const planned = data.config.groupCount ? Number(data.config.groupCount) : null;
                 const existingCount = (data.groups || []).length;
@@ -1600,38 +1600,35 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                 );
               })()}
               <div className="mt-3 flex flex-wrap items-end gap-2">
-                <button
-                  type="button"
-                  disabled={busy}
-                  className="cgm-primary-button"
-                  onClick={() => void run(async () => {
-                    const result = await cgm.generateGroups(Number(activityId), {});
-                    const warnings = (result as any)?.warnings || [];
-                    setMessage(`Placed ${(result as any)?.placed} student(s).${(result as any)?.unplaced ? ` ${(result as any)?.unplaced} could not fit.` : ''}${warnings.length ? ` ${warnings.join(' ')}` : ''}`);
-                    return result;
-                  })}
-                >
-                  {busy ? 'Working…' : 'Assign students'}
-                </button>
-                <button type="button" disabled={busy} className="mini-button" data-testid="cgm-create-empty-groups" onClick={() => void run(async () => {
-                  const planned = Number(data.config.groupCount) || 0;
-                  const missing = planned ? Math.max(1, planned - (data.groups || []).length) : 0;
-                  if (!missing) { setMessage('All planned groups already exist — nothing to create.'); return; }
-                  await cgm.addGroups(Number(activityId), { count: missing, ...(data.config.capacity ? { capacity: Number(data.config.capacity) } : {}) });
-                  setMessage(`Created ${missing} empty group(s) (${planned - missing + 1}…${planned} of the planned ${planned}) — nobody placed yet.`);
-                })}>
-                  Create empty groups only
-                </button>
+                {data.config.method === 'automatic' && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className="cgm-primary-button"
+                    onClick={() => void run(async () => {
+                      const result = await cgm.generateGroups(Number(activityId), {});
+                      const warnings = (result as any)?.warnings || [];
+                      setMessage(`Placed ${(result as any)?.placed} student(s).${(result as any)?.unplaced ? ` ${(result as any)?.unplaced} could not fit.` : ''}${warnings.length ? ` ${warnings.join(' ')}` : ''}`);
+                      return result;
+                    })}
+                  >
+                    {busy ? 'Working…' : 'Assign students'}
+                  </button>
+                )}
                 {data.config.method !== 'automatic' && (
-                  <button type="button" disabled={busy} className="mini-button" onClick={() => void run(async () => { const result = await cgm.assignRemaining(Number(activityId)); setMessage(`Placed ${(result as any)?.placed} remaining, promoted ${(result as any)?.promoted} from the waiting list.`); return result; })}>
-                    {data.config.method === 'random' ? 'Assign remaining (random mode)' : 'Assign remaining (hybrid)'}
+                  <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void run(async () => { const result = await cgm.assignRemaining(Number(activityId)); setMessage(`Placed ${(result as any)?.placed} remaining, promoted ${(result as any)?.promoted} from the waiting list.`); return result; })}>
+                    {data.config.method === 'random' ? 'Assign remaining (random mode)' : 'Assign remaining'}
                   </button>
                 )}
                 <button type="button" disabled={busy} className="mini-button" data-testid="cgm-edit-activity-settings" onClick={() => onEditActivity(Number(activityId))}>
                   ✎ Change in activity settings
                 </button>
               </div>
-              <p className="mt-2 text-[11px] font-medium text-slate-400">Balanced sizes, hard capacity limits, and the gender/repeat rules configured for this activity. Published assignments are never reshuffled.</p>
+              <p className="mt-2 text-[11px] font-medium text-slate-400">
+                {data.config.method === 'random'
+                  ? 'Students draw their own groups with an exactly equal chance — the groups above already exist for the draw, and this button only places anyone left over.'
+                  : 'Balanced sizes, hard capacity limits, and the gender/repeat rules configured for this activity. Published assignments are never reshuffled.'}
+              </p>
             </div>
           )}
 
