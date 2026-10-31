@@ -42,7 +42,7 @@ check('the navbar carries the dedicated Class & Groups door to #class-groups',
   /href="#class-groups"/.test(navbar) && /Classes &amp; Groups|Classes & Groups/.test(navbar));
 const classGroupsEntry = src('src/components/ClassGroupsEntry.tsx');
 check('the Class & Groups door is a compact icon button beside the client access door (no header text pills)',
-  /href="#class-groups"/.test(classGroupsEntry) && /Users className/.test(classGroupsEntry)
+  /href="#class-groups"/.test(classGroupsEntry) && /CGP\.jpg/.test(classGroupsEntry)
   && /<ClassGroupsEntry variant="icon" \/>/.test(navbar) && /<ClientPortalEntry variant="icon" \/>/.test(navbar)
   && !/variant="chip"/.test(navbar)
   && navbar.indexOf('<ClassGroupsEntry') < navbar.indexOf('<ClientPortalEntry'));
@@ -101,6 +101,16 @@ check('the student group page shows the group topic + agenda BEFORE Request a gr
   /cgm-student-topic-agenda/.test(studentPortal) && /Our topic &amp; agenda/.test(studentPortal)
   && studentPortal.indexOf('cgm-student-topic-agenda') < studentPortal.indexOf('Request a group change')
   && /myGroup\.topic/.test(studentPortal) && /myGroup\.agenda/.test(studentPortal));
+check('the CGP logo replaces the icon everywhere: navbar door, organizer topbar, student header',
+  /CGP\.jpg/.test(classGroupsEntry) && !/Users className/.test(classGroupsEntry)
+  && (workspace.match(/CGP\.jpg/g) || []).length >= 1
+  && (studentPortal.match(/CGP\.jpg/g) || []).length >= 1
+  && !/bg-emerald-600 text-white"><GraduationCap className="h-5 w-5"/.test(workspace)
+  && !/bg-emerald-600 text-white"><GraduationCap className="h-5 w-5"/.test(studentPortal));
+check('zooming is prevented inside Class & Group: viewport guard hook + touch-action pan-y',
+  /useCgmNoZoom/.test(workspace) && /useCgmNoZoom/.test(studentPortal)
+  && /user-scalable=no/.test(src('src/components/ClassGroups/noZoom.ts'))
+  && /touch-action: pan-y/.test(src('src/index.css')));
 check('student class doors are unique navigation cards (stable accent + monogram + Open affordance) and the welcome board has a Continue-to-groups CTA',
   /ClassNavCard/.test(studentPortal) && /accentForClass/.test(studentPortal) && /monogramOf/.test(studentPortal)
   && /cgm-continue-groups/.test(studentPortal) && /Continue to choose group/.test(studentPortal)

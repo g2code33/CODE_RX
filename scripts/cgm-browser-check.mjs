@@ -286,6 +286,9 @@ let savedPasskey = '';
   check('the student dashboard opens after the confirmation',
     await page.waitForFor('CODE Rx Student Portal', 30_000), `errs=${page.jsdomErrors.slice(0, 3).join(' | ') || 'none'} body=${page.body().slice(0, 160)}`);
   check('the dashboard lists the joined class', await page.waitForFor('Browser Check Pharmacy Lab', 20_000));
+  check('the student portal wears the CGP logo and keeps the zoom lock',
+    Boolean(page.window.document.querySelector('img[src="/CGP.jpg"]'))
+    && String(page.window.document.querySelector('meta[name="viewport"]')?.getAttribute('content') || '').includes('user-scalable=no'));
   check('the welcome board carries the unique Continue-to-groups CTA and a distinctive class door',
     Boolean(page.window.document.querySelector('[data-testid="cgm-continue-groups"]'))
     && Boolean(page.window.document.querySelector('[data-testid="cgm-class-nav-card"]')),
@@ -373,6 +376,10 @@ let savedPasskey = '';
     && await page.waitForFor('Leadership', 5_000)
     && await page.waitForFor('Notify members directly', 5_000),
     page.body().slice(0, 200));
+  check('the CGP logo marks the organizer topbar and the viewport is zoom-locked',
+    Boolean(page.window.document.querySelector('img[src="/CGP.jpg"]'))
+    && String(page.window.document.querySelector('meta[name="viewport"]')?.getAttribute('content') || '').includes('user-scalable=no'),
+    `viewport=${String(page.window.document.querySelector('meta[name="viewport"]')?.getAttribute('content') || 'none')}`);
   const sideNav = page.window.document.querySelector('nav[aria-label="Workspace navigation"]');
   check('entering a group auto-collapses the main Overview/Classes nav so the group hamburger leads',
     Boolean(sideNav) && sideNav.className.includes('cgm-sidenav--collapsed'),

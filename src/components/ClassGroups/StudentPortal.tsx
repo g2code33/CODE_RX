@@ -7,6 +7,7 @@ import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStuden
 import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { QrBlock } from './ClassGroupsWorkspace';
+import { useCgmNoZoom } from './noZoom';
 
 /**
  * CODE Rx — Student Portal.
@@ -360,6 +361,7 @@ const readContinuation = (): InviteContinuation | null => {
 const clearContinuation = () => { try { sessionStorage.removeItem(INVITE_CONTINUATION_KEY); } catch { /* private mode */ } };
 
 export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: { inviteCode: string | null; voteTarget?: number | null; leaderTarget?: number | null; onExit: () => void }) => {
+  useCgmNoZoom();
   const [session, setSession] = useState<CgmStudentSession | null>(() => studentSession.read());
   const [me, setMe] = useState<any>(null);
   const [section, setSection] = useState<Section>('home');
@@ -436,7 +438,7 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
           <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
             <Users className="h-4 w-4" />
           </button>
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-600 text-white"><GraduationCap className="h-5 w-5" /></span>
+          <img src="/CGP.jpg" alt="Classes & Groups" className="h-9 w-9 rounded-xl object-cover object-[50%_38%] shadow-sm ring-1 ring-emerald-900/20" loading="lazy" decoding="async" />
           <div>
             <p className="text-sm font-black text-slate-900">CODE Rx Student Portal</p>
             <p className="text-[11px] font-semibold text-slate-400">{me?.student?.fullName || '…'} · {me?.student?.indexNumber || ''}</p>
