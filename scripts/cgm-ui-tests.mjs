@@ -263,7 +263,9 @@ check('the election form collects nomination and voting windows',
 check('organizers manage one WhatsApp link per group (set, replace, disable, revoke)',
   /canManageWhatsapp/.test(workspace) && /cgm\.setWhatsApp\(/.test(workspace) && /whatsappAction\(/.test(workspace) && /setWhatsApp:/.test(client) && /whatsappAction:/.test(client));
 check('the WhatsApp link shows a QR and tracks clicks without claiming join-proof',
-  /qrByGroup/.test(workspace) && /showWhatsappQr/.test(workspace) && /clickCount/.test(workspace));
+  /QrBlock/.test(workspace) && /click_count} member click\(s\)/.test(workspace) && /clicks are not proof of joining/.test(workspace));
+check('the group cards carry NO WhatsApp editor — the group workspace owns it',
+  !/Paste link…/.test(workspace) && !/qrByGroup/.test(workspace) && /WhatsApp lives in the group workspace/.test(workspace));
 
 // Reports in three formats (spec §16)
 check('reports download as CSV, Excel or PDF from one control',

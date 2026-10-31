@@ -1979,22 +1979,6 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
     finally { setBusy(false); }
   };
 
-  const [qrByGroup, setQrByGroup] = useState<Record<number, string>>({});
-
-  const setWhatsapp = async (groupId: number, url: string) => {
-    await run(() => cgm.setWhatsApp(groupId, url));
-    setMessage(url ? 'WhatsApp link saved — only group members can open it.' : 'WhatsApp link revoked.');
-  };
-
-  const whatsappAction = async (groupId: number, action: 'disable' | 'enable' | 'revoke') => {
-    await run(() => cgm.whatsappAction(groupId, action));
-    setMessage(`WhatsApp link ${action}d.`);
-  };
-
-  const showWhatsappQr = (groupId: number, url: string) => {
-    setQrByGroup((current) => ({ ...current, [groupId]: url }));
-  };
-
   if (openGroupId && activityId) {
     return (
       <GroupDetail
@@ -2125,42 +2109,7 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                   ))}
                   {!((data.members || []).some((member: any) => Number(member.group_id) === Number(group.id))) && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Empty</li>}
                 </ul>
-                {canManageWhatsapp && (
-                  <div className="mt-3 border-t border-slate-100 pt-3">
-                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">WhatsApp group</p>
-                    {(data.whatsapp || []).filter((link: any) => Number(link.groupId) === Number(group.id)).slice(0, 1).map((link: any) => (
-                      <div key={link.id} className="mt-1.5">
-                        <p className="break-all text-[11px] font-semibold {link.status === 'active' ? 'text-slate-600' : 'text-slate-400 line-through'}">{link.url}</p>
-                        <p className="text-[10px] font-bold uppercase text-slate-400">{link.status} · {link.clickCount} click(s){link.clickCount ? ' — clicks are not proof of joining' : ''}</p>
-                        <div className="mt-1.5 flex flex-wrap gap-1.5">
-                          {link.status === 'active' && (
-                            <>
-                              <button type="button" className="mini-button" onClick={() => void showWhatsappQr(Number(group.id), String(link.url))}>QR</button>
-                              <button type="button" className="mini-button" onClick={() => void whatsappAction(Number(group.id), 'disable')}>Disable</button>
-                              <button type="button" className="mini-button text-red-600" onClick={() => void whatsappAction(Number(group.id), 'revoke')}>Revoke</button>
-                            </>
-                          )}
-                          {link.status === 'disabled' && <button type="button" className="mini-button" onClick={() => void whatsappAction(Number(group.id), 'enable')}>Enable</button>}
-                          <button type="button" className="mini-button" onClick={async () => {
-                            const url = await appDialog.prompt({ title: 'Replace the WhatsApp link', label: 'Paste the new https://chat.whatsapp.com/… link', confirmLabel: 'Replace' });
-                            if (url) await setWhatsapp(Number(group.id), url);
-                          }}>Replace</button>
-                        </div>
-                        {qrByGroup[Number(group.id)] && (
-                          <div className="mt-2">
-                            <QrBlock url={qrByGroup[Number(group.id)]} headerText={String(group.name || 'WhatsApp group')} footerText="WhatsApp group invite" downloadName={`${String(group.name || 'group').replace(/[^A-Za-z0-9-]+/g, '-')}-whatsapp-qr.png`} downloadable small />
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    {!(data.whatsapp || []).some((link: any) => Number(link.groupId) === Number(group.id)) && (
-                      <button type="button" className="mini-button mt-1.5" onClick={async () => {
-                        const url = await appDialog.prompt({ title: `Add the WhatsApp group link for ${group.name}`, label: 'Paste the https://chat.whatsapp.com/… invite link', confirmLabel: 'Save' });
-                        if (url) await setWhatsapp(Number(group.id), url);
-                      }}>Paste link…</button>
-                    )}
-                  </div>
-                )}
+                {/* WhatsApp lives in the group workspace now — open the group to manage it. */}
               </div>
             ))}
           </div>
