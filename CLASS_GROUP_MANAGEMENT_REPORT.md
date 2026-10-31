@@ -162,8 +162,8 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (34 sections) | `npm run test:cgm` | **656/656** |
-| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **242/242** |
+| Module API (34 sections) | `npm run test:cgm` | **657/657** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **243/243** |
 | Browser journeys (jsdom + wrangler pages dev, 25 checks) | `npm run test:cgm-browser` | **25/25** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
@@ -328,7 +328,7 @@ src/lib/cgm.ts                         # typed client, duplicate guard, offline 
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 656 API-level checks, 34 sections
-scripts/cgm-ui-tests.mjs               # 242 markup-level checks, 21 sections
+scripts/cgm-tests.mjs                  # 657 API-level checks, 34 sections
+scripts/cgm-ui-tests.mjs               # 243 markup-level checks, 21 sections
 scripts/cgm-browser-check.mjs          # 25 jsdom browser journeys vs wrangler dev
 ```

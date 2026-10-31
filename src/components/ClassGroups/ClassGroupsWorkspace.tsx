@@ -1536,6 +1536,13 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                 >
                   {busy ? 'Working…' : 'Assign students'}
                 </button>
+                <button type="button" disabled={busy} className="mini-button" data-testid="cgm-create-empty-groups" onClick={() => void run(async () => {
+                  const count = Math.max(1, Math.floor(Number(genCount) || Number(data.config.groupCount) || 2));
+                  await cgm.addGroups(Number(activityId), { count, ...(data.config.capacity ? { capacity: Number(data.config.capacity) } : {}) });
+                  setMessage(`Created ${count} empty group(s) with the activity's capacity — nobody placed yet.`);
+                })}>
+                  Create empty groups only
+                </button>
                 {data.config.method !== 'automatic' && (
                   <button type="button" disabled={busy} className="mini-button" onClick={() => void run(async () => { const result = await cgm.assignRemaining(Number(activityId)); setMessage(`Placed ${(result as any)?.placed} remaining, promoted ${(result as any)?.promoted} from the waiting list.`); return result; })}>
                     {data.config.method === 'random' ? 'Assign remaining (random mode)' : 'Assign remaining (hybrid)'}

@@ -607,6 +607,9 @@ check("the assignment-method dropdown offers 'Random selection — system picks 
   /value="random">Random selection — system picks for every student</.test(forcedWorkspace));
 check('the organizer finish button names the random mode so stragglers can be swept in',
   /Assign remaining \(random mode\)/.test(forcedWorkspace) && /assignRemaining/.test(forcedWorkspace));
+check("a 'Create empty groups only' button exists so forced-random activities get groups WITHOUT placing anyone",
+  /cgm-create-empty-groups/.test(forcedWorkspace) && /Create empty groups only/.test(forcedWorkspace)
+  && /addGroups\(Number\(activityId\), \{ count/.test(forcedWorkspace));
 check('every group member row carries a Swap… control fed from the other groups\' members',
   /aria-label=\{`Swap \$\{member\.full_name\} with a member of another group`\}/.test(forcedWorkspace)
   && /cgm\.swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(forcedWorkspace)

@@ -3213,6 +3213,8 @@ const portalSrc3 = readFileSync(path.join(ROOT, 'src/components/ClassGroups/Stud
 const cgmClientSrc = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
 check("the organizer form offers 'Random selection — system picks for every student'", /value="random">Random selection — system picks for every student</.test(workspaceSrc));
 check("the organizer finish button names the random mode ('Assign remaining (random mode)')", /Assign remaining \(random mode\)/.test(workspaceSrc));
+check("a 'Create empty groups only' button lets the organizer stage groups before any student draws",
+  /Create empty groups only/.test(workspaceSrc) && /cgm-add-groups|addGroups\(Number\(activityId\)/.test(workspaceSrc));
 check('every member row carries a Swap… control that calls the swap API', /Swap…<\/option>/.test(workspaceSrc) && /swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(workspaceSrc));
 check('the client library exposes the swap endpoint', /swapStudents: \(activityId: number, studentIdA: number, studentIdB: number\)/.test(cgmClientSrc) && /swap-students/.test(cgmClientSrc));
 check('the student portal hides manual picking in forced random mode and explains the fair draw',
