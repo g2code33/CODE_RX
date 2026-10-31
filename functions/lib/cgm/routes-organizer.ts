@@ -28,6 +28,7 @@
 
 import type { Hono } from 'hono';
 import { randomToken, sha256Hex, audit as memberAudit } from '../vault';
+import { INVITATION_KEY_SETUP_HINT, invitationSealingAvailable, openInvitationToken, sealInvitationToken } from './invite-crypto';
 import { cleanEmail } from '../validate';
 import { createNotification } from '../notifications';
 import { recordPhantomInboxItem } from '../phantom-inbox';
@@ -1902,22 +1903,44 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
        WHERE i.class_id = ? ORDER BY i.id DESC LIMIT 100`
     ).bind(classId));
     const origin = new URL(c.req.url).origin;
-    return c.json({
-      success: true,
-      data: rows.map((row) => ({
+    const view = await Promise.all(rows.map(async (row) => {
+      const base: Record<string, unknown> = {
         id: Number(row.id), kind: row.kind, code: row.code, expiresAt: row.expires_at,
         maxUses: row.max_uses === null ? null : Number(row.max_uses), useCount: Number(row.use_count),
         revoked: Boolean(row.revoked_at), disabled: Boolean(row.disabled_at),
-        // The token stays available to the organizer: copy, share and
-        // re-render the QR any time (it is permission-gated like the rest).
-        token: row.token_value || null,
-        link: row.token_value || row.code
-          ? `${origin}/#class-invite/${encodeURIComponent(row.code || row.token_value)}`
-          : null,
         boundStudent: row.bound_name || (row.bound_identifier_key ? row.bound_identifier_key : null),
         creator: row.creator_label, createdAt: row.created_at, lastUsedAt: row.last_used_at,
-      })),
-    });
+      };
+      if (row.kind === 'general') {
+        // General invitations are shared by their public code — there is no
+        // bearer secret to re-display.
+        base.token = null;
+        base.link = row.code ? `${origin}/#class-invite/${encodeURIComponent(row.code)}` : null;
+        return base;
+      }
+      // Individual invitations: the secret only leaves the database through
+      // authenticated decryption (this manage_invitations-guarded endpoint).
+      const token = await openInvitationToken(c.env, row.token_enc);
+      if (token) {
+        base.token = token;
+        base.link = `${origin}/#class-invite/${encodeURIComponent(token)}`;
+      } else if (row.token_value && !row.token_enc) {
+        // Legacy row the seal backfill has not reached (key not yet configured):
+        // still functional and shareable through the existing value.
+        base.token = row.token_value;
+        base.link = `${origin}/#class-invite/${encodeURIComponent(row.token_value)}`;
+        base.legacyPlaintext = true;
+      } else {
+        // Tampered ciphertext or a key version that no longer exists — fail
+        // closed for this row (no crash, no partial secret) and tell the
+        // organizer to regenerate.
+        base.token = null;
+        base.link = null;
+        base.secretProblem = 'undecryptable';
+      }
+      return base;
+    }));
+    return c.json({ success: true, data: view });
   });
 
   app.post('/api/cgm/classes/:id/invitations', async (c: any) => {
@@ -1940,6 +1963,16 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const code = kind === 'general'
       ? `${(klass.code || 'CRX').replace(/[^A-Z0-9]/gi, '').slice(-6).toUpperCase()}-${randomToken().slice(0, 6).toUpperCase()}`
       : null;
+    // Individual secrets are bearer credentials: they are sealed with the
+    // deployment's AES-GCM key material before touching the database. No key
+    // configuration → a clear 503, never a plaintext fallback.
+    let sealed: { sealed: string; keyVersion: string } | null = null;
+    if (kind === 'individual') {
+      sealed = await sealInvitationToken(c.env, token);
+      if (!sealed) {
+        return c.json({ success: false, error: `Individual invitations need the ${INVITATION_KEY_SETUP_HINT}Configure it in Cloudflare and redeploy, or use a general invitation meanwhile.` }, 503);
+      }
+    }
     let boundStudentId: number | null = null;
     let boundRosterEntryId: number | null = null;
     let boundIdentifierKey: string | null = null;
@@ -1967,9 +2000,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
 
     const result = await c.env.DB.prepare(
       `INSERT INTO cgm_invitations
-       (class_id, kind, code, token_hash, token_value, created_by_profile_id, creator_label, bound_student_id, bound_roster_entry_id, bound_identifier_key, expires_at, max_uses)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(classId, kind, code, await sha256Hex(`cgm-invite:${token}`), token, member.profileId, member.name,
+       (class_id, kind, code, token_hash, token_value, token_enc, token_key_version, created_by_profile_id, creator_label, bound_student_id, bound_roster_entry_id, bound_identifier_key, expires_at, max_uses)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(classId, kind, code, await sha256Hex(`cgm-invite:${token}`),
+      sealed?.sealed ?? null, sealed?.keyVersion ?? null,
+      member.profileId, member.name,
       boundStudentId, boundRosterEntryId, boundIdentifierKey,
       expiresAt ? expiresAt.toISOString().replace('T', ' ').slice(0, 19) : null,
       maxUses).run();
@@ -1982,9 +2017,10 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       success: true,
       data: {
         id: Number(result.meta.last_row_id), kind, code,
-        // The token is also stored, so the organizer can come back and copy
-        // or share the invitation any time (manage_invitations only).
-        token,
+        // Shown in this response (and later re-displayable only through the
+        // permission-gated decryption path): the secret itself is never stored
+        // in plaintext.
+        ...(kind === 'individual' ? { token } : {}),
         link: `${new URL(c.req.url).origin}/#class-invite/${encodeURIComponent(code || token)}`,
       },
     });
@@ -2007,16 +2043,25 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     } else if (action === 'enable') {
       await c.env.DB.prepare('UPDATE cgm_invitations SET disabled_at = NULL WHERE id = ?').bind(invitationId).run();
     } else {
+      const kindRow = await asRows<{ kind: string }>(c.env.DB.prepare('SELECT kind FROM cgm_invitations WHERE id = ?').bind(invitationId));
       const token = randomToken();
+      let freshSeal: { sealed: string; keyVersion: string } | null = null;
+      if (String(kindRow[0]?.kind) === 'individual') {
+        freshSeal = await sealInvitationToken(c.env, token);
+        if (!freshSeal) {
+          return c.json({ success: false, error: `Regenerating an individual invitation needs the ${INVITATION_KEY_SETUP_HINT}Configure it in Cloudflare and redeploy.` }, 503);
+        }
+      }
       // A leaked code must die with regeneration, so general invitations get a
       // fresh code as well as a fresh token; individual ones keep no code.
+      // The hash swap is what invalidates the previous secret instantly.
       const classRow = await asRows<{ code: string }>(c.env.DB.prepare('SELECT code FROM cgm_classes WHERE id = ?').bind(Number(rows[0].class_id)));
       const freshCode = classRow[0]
         ? `${(classRow[0].code || 'CRX').replace(/[^A-Z0-9]/gi, '').slice(-6).toUpperCase()}-${randomToken().slice(0, 6).toUpperCase()}`
         : null;
       await c.env.DB.prepare(
-        'UPDATE cgm_invitations SET token_hash = ?, token_value = ?, code = COALESCE(?, code), revoked_at = NULL, disabled_at = NULL, use_count = 0 WHERE id = ?'
-      ).bind(await sha256Hex(`cgm-invite:${token}`), token, freshCode, invitationId).run();
+        'UPDATE cgm_invitations SET token_hash = ?, token_value = NULL, token_enc = ?, token_key_version = ?, code = COALESCE(?, code), revoked_at = NULL, disabled_at = NULL, use_count = 0 WHERE id = ?'
+      ).bind(await sha256Hex(`cgm-invite:${token}`), freshSeal?.sealed ?? null, freshSeal?.keyVersion ?? null, freshCode, invitationId).run();
       await auditCgm(c.env.DB, {
         actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
         action: 'cgm.invitation.regenerated', entityType: 'invitation', entityId: invitationId,
@@ -2025,7 +2070,9 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       return c.json({
         success: true,
         data: {
-          token, ...(freshCode ? { code: freshCode } : {}),
+          // General invitations carry no bearer half — only their fresh code.
+          ...(String(kindRow[0]?.kind) === 'individual' ? { token } : {}),
+          ...(freshCode ? { code: freshCode } : {}),
           link: `${new URL(c.req.url).origin}/#class-invite/${encodeURIComponent(freshCode || token)}`,
         },
       });

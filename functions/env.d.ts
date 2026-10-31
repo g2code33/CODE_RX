@@ -10,6 +10,15 @@ export interface Env {
   PHANTOM_EMAIL?: string;
   /** Seed-only secret; configure in Cloudflare, never in frontend code. */
   ADMIN_PASSWORD?: string;
+  /**
+   * CGM individual-invitation secret sealing keys (AES-256-GCM). A JSON object
+   * mapping key versions to base64-encoded 32-byte keys, e.g.
+   *   {"v1": "<openssl rand -base64 32>"}
+   * Required before individual invitations can be created; existing rows keep
+   * working via their lookup hashes until it is configured. See
+   * functions/lib/cgm/invite-crypto.ts and CLASS_GROUP_MANAGEMENT_REPORT.md.
+   */
+  CGM_INVITATION_KEYS?: string;
   TELEGRAM_LINK: string;
   /** Optional Community Telegram Bot secret; configure only in Cloudflare. */
   TELEGRAM_BOT_TOKEN?: string;

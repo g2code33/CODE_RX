@@ -134,7 +134,13 @@ const BUCKET = {
   },
 };
 
-const env = { DB: d1, JWT_SECRET: 'cgm-test-secret', PHANTOM_EMAIL, ADMIN_PASSWORD: PHANTOM_PASSWORD, BUCKET, CGM_DEV_PREVIEW_TOKENS: '1' };
+// A fresh 32-byte sealing key per run — the same shape the production
+// CGM_INVITATION_KEYS secret has (JSON version → base64 key).
+const INVITE_TEST_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64');
+const env = {
+  DB: d1, JWT_SECRET: 'cgm-test-secret', PHANTOM_EMAIL, ADMIN_PASSWORD: PHANTOM_PASSWORD, BUCKET,
+  CGM_DEV_PREVIEW_TOKENS: '1', CGM_INVITATION_KEYS: JSON.stringify({ v1: INVITE_TEST_KEY }),
+};
 
 const worker = await import(path.join(CACHE, 'worker.mjs'));
 const app = worker.default;
@@ -2411,25 +2417,29 @@ for (const memberId of memberIds) {
 const bulkBadAction = await memberCall('POST', `/api/cgm/classes/${classAId}/members/bulk`, { action: 'delete', ids: memberIds }, amaToken);
 check('an unknown mass action is refused', bulkBadAction.status === 400, `status ${bulkBadAction.status}`);
 
-// -- Invitation tokens stay copyable and shareable ----------------------------
+// -- General invitations are code-only: no second bearer secret exists ---------
 const stickyInvite = await memberCall('POST', `/api/cgm/classes/${classAId}/invitations`, { kind: 'general' }, assistantToken);
-const stickyToken = stickyInvite.json?.data?.token;
 const stickyCode = stickyInvite.json?.data?.code;
-check('the created invitation returns its code and token', Boolean(stickyCode) && /^[0-9a-f]{32,}$/i.test(String(stickyToken)), String(stickyCode));
-check('the token is stored so the organizer can come back to it',
-  q1('SELECT token_value FROM cgm_invitations WHERE id = ?', Number(stickyInvite.json?.data?.id))?.token_value === stickyToken);
+check('a general invitation is created with a public code and NO bearer token',
+  Boolean(stickyCode) && stickyInvite.json?.data?.token === undefined, String(stickyCode));
+check('no raw bearer half is stored for a general invitation (code is the shareable half)',
+  q1('SELECT token_value, token_enc FROM cgm_invitations WHERE id = ?', Number(stickyInvite.json?.data?.id))?.token_value === null
+  && q1('SELECT token_enc FROM cgm_invitations WHERE id = ?', Number(stickyInvite.json?.data?.id))?.token_enc === null);
 const stickyList = await memberCall('GET', `/api/cgm/classes/${classAId}/invitations`, undefined, assistantToken);
 const stickyRow = (stickyList.json?.data || []).find((row) => Number(row.id) === Number(stickyInvite.json?.data?.id));
-check('the invitations list returns the stored token and a ready link any time',
-  stickyRow?.token === stickyToken && String(stickyRow?.link || '').includes('#class-invite/'), JSON.stringify(stickyRow?.link || '').slice(0, 120));
+check('the invitations list serves the general link from the public code, with no token',
+  stickyRow?.token === null && String(stickyRow?.link || '').includes(`#class-invite/${stickyCode}`), JSON.stringify(stickyRow?.link || '').slice(0, 120));
 const stickyLanding = await call('GET', `/api/cgm/invitations/${stickyCode}`);
-check('the stored invitation still resolves for students', stickyLanding.status === 200, `status ${stickyLanding.status}`);
+check('the public code keeps resolving for students', stickyLanding.status === 200, `status ${stickyLanding.status}`);
 const stickyRegen = await memberCall('POST', `/api/cgm/invitations/${stickyInvite.json?.data?.id}/regenerate`, {}, assistantToken);
-check('regenerating returns the fresh token', stickyRegen.status === 200 && Boolean(stickyRegen.json?.data?.token), `status ${stickyRegen.status}`);
+check('regenerating a general invitation issues a fresh code (no token half at all)',
+  stickyRegen.status === 200 && Boolean(stickyRegen.json?.data?.code) && stickyRegen.json?.data?.token === undefined, `status ${stickyRegen.status}`);
 const stickyList2 = await memberCall('GET', `/api/cgm/classes/${classAId}/invitations`, undefined, assistantToken);
 const stickyRow2 = (stickyList2.json?.data || []).find((row) => Number(row.id) === Number(stickyInvite.json?.data?.id));
-check('after a regeneration the list serves the fresh token (QR can always re-render)',
-  stickyRow2?.token === stickyRegen.json?.data?.token && stickyRow2?.token !== stickyToken);
+check('after regeneration the fresh code works and the old code is dead',
+  String(stickyRow2?.link || '').includes(`#class-invite/${stickyRegen.json?.data?.code}`)
+  && (await call('GET', `/api/cgm/invitations/${stickyCode}`)).status === 404
+  && (await call('GET', `/api/cgm/invitations/${stickyRegen.json?.data?.code}`)).status === 200);
 
 // -- The in-house QR encoder (src/lib/qr.ts) ----------------------------------
 await build({ entryPoints: [path.join(ROOT, 'src/lib/qr.ts')], outfile: path.join(CACHE, 'qr.mjs'), bundle: true, format: 'esm', logLevel: 'silent' });
@@ -2744,6 +2754,249 @@ check('the reveal page lists the details on file beside the one-time passkey',
   /Your details on file/.test(revealSource) && /detailRows/.test(revealSource));
 check('the organizer workspace can share a leader sign-up link (#leader-apply/)',
   /#leader-apply\//.test(readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8')));
+
+// ---------------------------------------------------------------------------
+// 31. Invitation security: sealed secrets, atomic claims, migration, races
+// ---------------------------------------------------------------------------
+section('31. Invitation sealing (AES-GCM), atomic usage consumption, migration safety');
+
+const inviteTokenHash = (token) => shaHash('sha256').update(`cgm-invite:${token}`).digest('hex');
+const freshFmtRosterStudent = async (n, fullName) => {
+  const indexNumber = `PH/PHA/25/${String(n).padStart(4, '0')}`;
+  await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName, indexNumber, phone: `024511${String(n).padStart(4, '0')}` }, amaToken);
+  const register = await call('POST', '/api/cgm/student/register', { classCode: fmtCode, indexNumber, entryPassword: 'fmt-101-entry' });
+  const passkey = String(register.json?.data?.passkey || '');
+  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: indexNumber, passkey });
+  return { indexNumber, studentId: Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', indexNumber.toLowerCase())?.id || 0), session: login.json?.data?.session?.token, register };
+};
+const invitationRow = (id) => q1('SELECT * FROM cgm_invitations WHERE id = ?', id);
+
+// -- 1+2+3: individual secrets are sealed at rest, hash-validatable, and only
+//            re-displayable to an authorized organizer -------------------------
+const sealedInvite = await memberCall('POST', `/api/cgm/classes/${classBId}/invitations`, { kind: 'individual', studentId: Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'chm-105-001'")?.id || 0) }, phantomToken);
+const sealedToken = String(sealedInvite.json?.data?.token || '');
+check('an individual invitation still returns its secret exactly once at creation',
+  sealedInvite.status === 200 && /^[0-9a-f]{32,}$/i.test(sealedToken), `status ${sealedInvite.status} token=${sealedToken ? 'present' : 'missing'}`);
+const sealedDbRow = invitationRow(Number(sealedInvite.json?.data?.id));
+check('the raw individual token is NEVER stored in plaintext',
+  sealedDbRow?.token_value === null && Boolean(sealedDbRow?.token_enc) && !String(sealedDbRow?.token_enc).includes(sealedToken),
+  JSON.stringify({ token_value: sealedDbRow?.token_value, enc: String(sealedDbRow?.token_enc || '').slice(0, 24) }));
+check('the stored token hash validates the original token (not merely the code)',
+  sealedDbRow?.token_hash === inviteTokenHash(sealedToken) && sealedDbRow?.token_hash !== inviteTokenHash(String(sealedDbRow?.code || '')));
+check('the sealed blob records its key version',
+  sealedDbRow?.token_key_version === 'v1', String(sealedDbRow?.token_key_version));
+const authorizedList = await memberCall('GET', `/api/cgm/classes/${classBId}/invitations`, undefined, phantomToken);
+const authorizedRow = (authorizedList.json?.data || []).find((row) => Number(row.id) === Number(sealedInvite.json?.data?.id));
+check('an authorized organizer can still retrieve and share the sealed link any time',
+  authorizedRow?.token === sealedToken && String(authorizedRow?.link || '').includes(encodeURIComponent(sealedToken)),
+  JSON.stringify({ token: authorizedRow?.token ? 'present' : 'missing', link: String(authorizedRow?.link || '').slice(0, 60) }));
+const strangerList = await memberCall('GET', `/api/cgm/classes/${classBId}/invitations`, undefined, amaToken);
+check('an unrelated organizer can never retrieve another class invitation secret',
+  strangerList.status === 403 && !JSON.stringify(strangerList.json || {}).includes(sealedToken.slice(0, 16)), `status ${strangerList.status}`);
+const studentPeek = await studentCall('GET', `/api/cgm/classes/${classBId}/invitations`, undefined, fmtSession);
+check('a student can never list organizer invitation material', studentPeek.status === 401 || studentPeek.status === 403, `status ${studentPeek.status}`);
+
+// -- 4: tampered ciphertext fails authentication (closed), claim still works --
+sqlite.prepare('UPDATE cgm_invitations SET token_enc = ? WHERE id = ?').run(`v1.${sealedDbRow.token_enc.split('.')[1]}.cGFtcGVyZWQ=`, Number(sealedInvite.json?.data?.id));
+const tamperedList = await memberCall('GET', `/api/cgm/classes/${classBId}/invitations`, undefined, phantomToken);
+const tamperedRow = (tamperedList.json?.data || []).find((row) => Number(row.id) === Number(sealedInvite.json?.data?.id));
+check('tampered ciphertext fails authentication: no secret re-displayed, row flagged for regeneration',
+  tamperedRow?.token === null && tamperedRow?.link === null && tamperedRow?.secretProblem === 'undecryptable',
+  JSON.stringify({ token: tamperedRow?.token, problem: tamperedRow?.secretProblem }));
+const tamperedClaim = await studentCall('POST', `/api/cgm/student/invitations/${sealedToken}/claim`, {}, fmtSession);
+check('validation still flows through the lookup hash when the sealed copy is corrupted',
+  tamperedClaim.status === 200 || tamperedClaim.status === 403 || tamperedClaim.status === 410, `status ${tamperedClaim.status} (hash path alive)`);
+sqlite.prepare('UPDATE cgm_invitations SET token_enc = ? WHERE id = ?').run(sealedDbRow.token_enc, Number(sealedInvite.json?.data?.id));
+
+// -- 5: missing encryption configuration fails safely -------------------------
+const savedKeys = env.CGM_INVITATION_KEYS;
+env.CGM_INVITATION_KEYS = '';
+const noKeyCreate = await memberCall('POST', `/api/cgm/classes/${classBId}/invitations`, { kind: 'individual', studentId: Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'chm-105-002'")?.id || 0) }, phantomToken);
+check('creating an individual invitation without key material fails safely with setup guidance (never plaintext)',
+  noKeyCreate.status === 503 && /CGM_INVITATION_KEYS/.test(String(noKeyCreate.json?.error || '')) && !noKeyCreate.json?.data?.token,
+  `status ${noKeyCreate.status} ${String(noKeyCreate.json?.error || '').slice(0, 90)}`);
+const legacyPendingRow = invitationRow(Number(sealedInvite.json?.data?.id));
+sqlite.prepare("INSERT INTO cgm_invitations (class_id, kind, code, token_hash, token_value, created_by_profile_id, creator_label, expires_at, max_uses, use_count) VALUES (?, 'individual', NULL, ?, 'legacyplain', NULL, 'Legacy Import', NULL, NULL, 0)").run(
+  classBId, inviteTokenHash('a'.repeat(64)));
+const noKeyMigration = await worker.migrateInvitationTokenStorage(d1, env);
+const legacyStill = q1("SELECT token_value, token_enc FROM cgm_invitations WHERE token_value = 'legacyplain'");
+check('the seal migration without a key writes nothing and reports the pending plaintext',
+  noKeyMigration.keyConfigured === false && noKeyMigration.pendingPlaintext >= 1 && legacyStill?.token_value === 'legacyplain' && legacyStill?.token_enc === null,
+  JSON.stringify(noKeyMigration));
+env.CGM_INVITATION_KEYS = savedKeys;
+
+// -- 6+7: existing invitations survive the migration and keep working ---------
+const legacyGeneralCode = 'LS0001-LEGACY';
+sqlite.prepare(
+  "INSERT INTO cgm_invitations (class_id, kind, code, token_hash, token_value, created_by_profile_id, creator_label, expires_at, max_uses, use_count) VALUES (?, 'general', ?, ?, 'legacy-general-raw', NULL, 'Legacy Import', '2030-12-31 00:00:00', 50, 3)"
+).run(fmtClassId, legacyGeneralCode, inviteTokenHash('b'.repeat(64)));
+const legacyIndividualToken = 'c'.repeat(64);
+const efuaStudentId = Number(q1("SELECT id FROM cgm_students WHERE phone_key = '233244117294'")?.id || 0);
+sqlite.prepare(
+  "INSERT INTO cgm_invitations (class_id, kind, code, token_hash, token_value, created_by_profile_id, creator_label, bound_student_id, expires_at, max_uses, use_count) VALUES (?, 'individual', NULL, ?, ?, NULL, 'Legacy Import', ?, '2030-12-31 00:00:00', NULL, 0)"
+).run(fmtClassId, inviteTokenHash(legacyIndividualToken), 'legacyplain2', efuaStudentId);
+const legacyIndividualId = q1("SELECT id FROM cgm_invitations WHERE token_value = 'legacyplain2'").id;
+const legacyGeneralId = q1('SELECT id FROM cgm_invitations WHERE code = ?', legacyGeneralCode).id;
+const sealRun = await worker.migrateInvitationTokenStorage(d1, env);
+const sealedLegacyIndividual = invitationRow(legacyIndividualId);
+const sealedLegacyGeneral = invitationRow(legacyGeneralId);
+check('the migration seals legacy individual secrets and removes every plaintext value',
+  sealRun.encrypted >= 2 && sealedLegacyIndividual.token_enc !== null && sealedLegacyIndividual.token_value === null,
+  JSON.stringify({ encrypted: sealRun.encrypted, pending: sealRun.pendingPlaintext }));
+check('the migration keeps expiry, limits and usage counts intact',
+  sealedLegacyIndividual.expires_at === '2030-12-31 00:00:00' && Number(sealedLegacyIndividual.use_count) === 0
+  && sealedLegacyGeneral.max_uses === 50 && Number(sealedLegacyGeneral.use_count) === 3);
+check('re-running the migration is idempotent', (await worker.migrateInvitationTokenStorage(d1, env)).encrypted === 0);
+const legacyGeneralLanding = await call('GET', `/api/cgm/invitations/${legacyGeneralCode}`);
+check('existing general invitation codes still resolve after the migration', legacyGeneralLanding.status === 200, `status ${legacyGeneralLanding.status}`);
+const legacyIndividualLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'phone', identifier: '0244117294', passkey: 'rx30qz' });
+const legacyIndividualSession = legacyIndividualLogin.json?.data?.session?.token;
+const legacyIndividualClaim = await studentCall('POST', `/api/cgm/student/invitations/${legacyIndividualToken}/claim`, {}, legacyIndividualSession);
+check('an existing individual invitation link (raw token) still works after the migration',
+  legacyIndividualClaim.status === 200, `status ${legacyIndividualClaim.status} ${legacyIndividualClaim.text?.slice(0, 100)}`);
+check('the migrated invitation recorded exactly one use', Number(invitationRow(legacyIndividualId)?.use_count) === 1);
+
+// -- 8: regeneration invalidates the previous secret --------------------------
+const regenTarget = await memberCall('POST', `/api/cgm/classes/${classBId}/invitations`, { kind: 'individual', studentId: Number(q1("SELECT id FROM cgm_students WHERE index_number_key = 'chm-105-003'")?.id || 0) }, phantomToken);
+const oldRegenToken = String(regenTarget.json?.data?.token || '');
+const regenDone = await memberCall('POST', `/api/cgm/invitations/${regenTarget.json?.data?.id}/regenerate`, {}, phantomToken);
+const newRegenToken = String(regenDone.json?.data?.token || '');
+check('regeneration issues a fresh sealed secret and retires the old hash',
+  regenDone.status === 200 && newRegenToken && newRegenToken !== oldRegenToken
+  && invitationRow(Number(regenTarget.json?.data?.id))?.token_hash === inviteTokenHash(newRegenToken)
+  && invitationRow(Number(regenTarget.json?.data?.id))?.token_value === null);
+const regenRow = (await memberCall('GET', `/api/cgm/classes/${classBId}/invitations`, undefined, phantomToken)).json?.data?.find((row) => Number(row.id) === Number(regenTarget.json?.data?.id));
+check('the list decrypts the regenerated secret for the authorized organizer', regenRow?.token === newRegenToken, String(regenRow?.token || '').slice(0, 8));
+
+// -- 10+11+15: identity binding and exactly-once consumption ------------------
+const boundSprint = await freshFmtRosterStudent(1, 'Bound Baffour');
+check('the bound student exists before the invitation is issued', Boolean(boundSprint.studentId && boundSprint.session), JSON.stringify({ id: boundSprint.studentId }));
+const boundInvite = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/invitations`, { kind: 'individual', studentId: boundSprint.studentId }, amaToken);
+const boundToken = String(boundInvite.json?.data?.token || '');
+const outsider = await freshFmtRosterStudent(2, 'Outsider Osei');
+const outsiderClaim = await studentCall('POST', `/api/cgm/student/invitations/${boundToken}/claim`, {}, outsider.session);
+check('an individual invitation can never be claimed by a different student',
+  outsiderClaim.status === 403 && Number(invitationRow(Number(boundInvite.json?.data?.id))?.use_count) === 0, `status ${outsiderClaim.status}`);
+const boundClaim = await studentCall('POST', `/api/cgm/student/invitations/${boundToken}/claim`, {}, boundSprint.session);
+check('the bound student claims exactly once', boundClaim.status === 200 && Number(invitationRow(Number(boundInvite.json?.data?.id))?.use_count) === 1, `status ${boundClaim.status} uses=${invitationRow(Number(boundInvite.json?.data?.id))?.use_count}`);
+const boundReplay = await studentCall('POST', `/api/cgm/student/invitations/${boundToken}/claim`, {}, boundSprint.session);
+check('a second claim of the same individual invitation is refused without inflating usage',
+  boundReplay.status === 410 && Number(invitationRow(Number(boundInvite.json?.data?.id))?.use_count) === 1, `status ${boundReplay.status}`);
+
+// -- 12: concurrent claims cannot consume one individual invitation twice ------
+const sealRaceInvite = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/invitations`, { kind: 'individual', studentId: outsider.studentId }, amaToken);
+const sealRaceToken = String(sealRaceInvite.json?.data?.token || '');
+const sealRaceAttempts = await Promise.all([1, 2, 3, 4].map(() =>
+  studentCall('POST', `/api/cgm/student/invitations/${sealRaceToken}/claim`, {}, outsider.session)));
+const sealRaceWins = sealRaceAttempts.filter((r) => r.status === 200).length;
+check('four concurrent claims of one single-use invitation win exactly once',
+  sealRaceWins === 1 && Number(invitationRow(Number(sealRaceInvite.json?.data?.id))?.use_count) === 1,
+  `statuses=${sealRaceAttempts.map((r) => r.status).join(',')} uses=${invitationRow(Number(sealRaceInvite.json?.data?.id))?.use_count}`);
+
+// -- 13: concurrent general claims cannot exceed max_uses ----------------------
+setPolicy('membership_request_mode', 'auto');
+const maxedInvite = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/invitations`, { kind: 'general', maxUses: 2 }, amaToken);
+const maxedCode = String(maxedInvite.json?.data?.code || '');
+// The five racers register into a SEPARATE class, so none of them is already
+// a member of the invited class (an already-member response never consumes).
+const raceClass = await memberCall('POST', '/api/cgm/classes', { name: 'RACE 900 Sprint Hall', institution: 'Accra Technical University' }, amaToken);
+const raceClassId = raceClass.json?.data?.classId ?? raceClass.json?.data?.class?.id ?? raceClass.json?.data?.id;
+const raceClassCode = raceClass.json?.data?.code ?? raceClass.json?.data?.class?.code;
+await memberCall('POST', `/api/cgm/classes/${raceClassId}/entry-password`, { entryPassword: 'race-900-entry' }, amaToken);
+await memberCall('POST', `/api/cgm/phantom/classes/${raceClassId}/approve`, {}, phantomToken);
+await memberCall('POST', `/api/cgm/classes/${raceClassId}/settings`, { registrationMode: 'auto' }, amaToken);
+const sprinters = [];
+for (let n = 3; n <= 7; n += 1) {
+  const indexNumber = `RACE/900/${String(n).padStart(4, '0')}`;
+  await memberCall('POST', `/api/cgm/classes/${raceClassId}/roster/entries`, { fullName: `Sprinter ${n}`, indexNumber }, amaToken);
+  const register = await call('POST', '/api/cgm/student/register', { classCode: raceClassCode, indexNumber, entryPassword: 'race-900-entry' });
+  const passkey = String(register.json?.data?.passkey || '');
+  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: indexNumber, passkey });
+  sprinters.push(login.json?.data?.session?.token);
+}
+check('five sprinter sessions are ready for the max-uses race', sprinters.filter(Boolean).length === 5, `sessions=${sprinters.filter(Boolean).length}`);
+const maxedAttempts = await Promise.all(sprinters.map((session) =>
+  studentCall('POST', '/api/cgm/student/join', { code: maxedCode }, session)));
+const maxedWins = maxedAttempts.filter((r) => r.status === 200).length;
+const maxedRow = invitationRow(Number(maxedInvite.json?.data?.id));
+check('concurrent general claims never exceed max_uses (2 seats, 5 racers)',
+  maxedWins === 2 && Number(maxedRow?.use_count) === 2
+  && q1("SELECT COUNT(*) c FROM cgm_class_members WHERE class_id = ? AND student_id IN (SELECT id FROM cgm_students WHERE index_number_key LIKE 'ph/pha/25/000%')", fmtClassId).c >= 2,
+  `statuses=${maxedAttempts.map((r) => r.status).join(',')} uses=${maxedRow?.use_count}`);
+
+// -- 14+17: duplicates and already-members never inflate usage -----------------
+setPolicy('membership_request_mode', 'approval');
+const dupInvite = await memberCall('POST', `/api/cgm/classes/${classBId}/invitations`, { kind: 'general' }, phantomToken);
+const dupCode = String(dupInvite.json?.data?.code || '');
+const dupSprint = await freshFmtRosterStudent(9, 'Requester Rita');
+const dupPk = String(q1('SELECT passkey_prefix || passkey_suffix AS pk FROM cgm_students WHERE index_number_key = ?', dupSprint.indexNumber.toLowerCase())?.pk || '');
+await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: dupSprint.indexNumber, passkey: dupPk });
+const dupIndexKey = dupSprint.indexNumber.toLowerCase();
+sqlite.prepare("UPDATE cgm_students SET status = 'active' WHERE index_number_key = ?").run(dupIndexKey);
+const dupLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: dupSprint.indexNumber, passkey: dupPk });
+const dupSessionToken = dupLogin.json?.data?.session?.token;
+const dupFirst = await studentCall('POST', '/api/cgm/student/join', { code: dupCode }, dupSessionToken);
+const dupSecond = await studentCall('POST', '/api/cgm/student/join', { code: dupCode }, dupSessionToken);
+check('the first join requests membership and consumes exactly one use',
+  dupFirst.status === 200 && dupFirst.json?.data?.state === 'requested' && Number(invitationRow(Number(dupInvite.json?.data?.id))?.use_count) === 1,
+  `status ${dupFirst.status} state=${dupFirst.json?.data?.state}`);
+check('a duplicate request answers consistently WITHOUT inflating usage',
+  dupSecond.status === 200 && dupSecond.json?.data?.state === 'requested' && Number(invitationRow(Number(dupInvite.json?.data?.id))?.use_count) === 1,
+  `status ${dupSecond.status} state=${dupSecond.json?.data?.state}`);
+const zooInvite = await memberCall('POST', `/api/cgm/classes/${zooClassId}/invitations`, { kind: 'general' }, amaToken);
+const zooMemberJoin = await studentCall('POST', '/api/cgm/student/join', { code: String(zooInvite.json?.data?.code || '') }, adwoaSession);
+check('an already-member student gets a consistent response with zero usage inflation',
+  zooMemberJoin.status === 200 && zooMemberJoin.json?.data?.state === 'member' && Number(invitationRow(Number(zooInvite.json?.data?.id))?.use_count) === 0,
+  `status ${zooMemberJoin.status} state=${zooMemberJoin.json?.data?.state}`);
+
+// -- 18: expired, disabled and revoked invitations remain unusable -------------
+const deadInvite = await memberCall('POST', `/api/cgm/classes/${classBId}/invitations`, { kind: 'general' }, phantomToken);
+const deadCode = String(deadInvite.json?.data?.code || '');
+const deadId = Number(deadInvite.json?.data?.id);
+sqlite.prepare("UPDATE cgm_invitations SET expires_at = '2020-01-01 00:00:00' WHERE id = ?").run(deadId);
+const expiredTry = await studentCall('POST', '/api/cgm/student/join', { code: deadCode }, dupSessionToken);
+check('an expired invitation is refused and consumes nothing',
+  expiredTry.status === 410 && Number(invitationRow(deadId)?.use_count) === 0, `status ${expiredTry.status}`);
+await memberCall('POST', `/api/cgm/invitations/${deadId}/enable`, {}, phantomToken);
+sqlite.prepare("UPDATE cgm_invitations SET expires_at = NULL, disabled_at = CURRENT_TIMESTAMP WHERE id = ?").run(deadId);
+const disabledTry = await studentCall('POST', '/api/cgm/student/join', { code: deadCode }, dupSessionToken);
+check('a disabled invitation is refused and consumes nothing',
+  disabledTry.status === 404 && Number(invitationRow(deadId)?.use_count) === 0, `status ${disabledTry.status}`);
+await memberCall('POST', `/api/cgm/invitations/${deadId}/revoke`, {}, phantomToken);
+sqlite.prepare("UPDATE cgm_invitations SET disabled_at = NULL WHERE id = ?").run(deadId);
+const revokedTry = await studentCall('POST', '/api/cgm/student/join', { code: deadCode }, dupSessionToken);
+check('a revoked invitation stays permanently unusable and consumes nothing',
+  revokedTry.status === 404 && Number(invitationRow(deadId)?.use_count) === 0, `status ${revokedTry.status}`);
+
+// -- 16: roster-bound claims increment exactly once ----------------------------
+await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName: 'Roster Bound Bea', indexNumber: 'PH/PHA/25/0010', phone: '0245110010' }, amaToken);
+const beaEntryId = Number(q1("SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'ph/pha/25/0010'", fmtClassId)?.id || 0);
+const beaInvite = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/invitations`, { kind: 'individual', rosterEntryId: beaEntryId }, amaToken);
+const beaToken = String(beaInvite.json?.data?.token || '');
+const beaRegister = await call('POST', '/api/cgm/student/register', { classCode: fmtCode, indexNumber: 'PH/PHA/25/0010', entryPassword: 'fmt-101-entry' });
+const beaPasskey = String(beaRegister.json?.data?.passkey || '');
+const beaLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'PH/PHA/25/0010', passkey: beaPasskey });
+const beaClaim = await studentCall('POST', `/api/cgm/student/invitations/${beaToken}/claim`, {}, beaLogin.json?.data?.session?.token);
+check('a roster-bound claim consumes exactly one use and files the registration',
+  beaClaim.status === 200 && Number(invitationRow(Number(beaInvite.json?.data?.id))?.use_count) === 1
+  && q1("SELECT COUNT(*) c FROM cgm_registration_requests WHERE roster_entry_id = ? AND student_id = (SELECT id FROM cgm_students WHERE index_number_key = 'ph/pha/25/0010')", beaEntryId).c === 1,
+  `status ${beaClaim.status} uses=${invitationRow(Number(beaInvite.json?.data?.id))?.use_count}`);
+
+// -- source pins: no raw secret ever reaches logs or audit records -------------
+const organizerSrc = readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-organizer.ts'), 'utf8');
+check('invitation secrets are sealed with AES-GCM before any database write (no plaintext path at creation)',
+  /sealInvitationToken/.test(organizerSrc) && /VALUES \(\?, \?, \?, \?, NULL, \?, \?/.test(organizerSrc));
+check('the claim path consumes usage through one atomic conditional UPDATE (not a SELECT guard)',
+  /use_count = use_count \+ 1[\s\S]*?AND \(kind = 'general' OR use_count < 1\)/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-student.ts'), 'utf8')));
+
+// -- Identity & privacy pins (Phase 5) -----------------------------------------
+const coreSrc = readFileSync(path.join(ROOT, 'functions/lib/cgm/core.ts'), 'utf8');
+check('university ID is not a student sign-in identifier (index number and phone only)',
+  /LOGIN_IDENTIFIER_KEYS[\s\S]{0,120}/.exec(coreSrc)?.[0]?.includes('index_number')
+  && !/LOGIN_IDENTIFIER_KEYS[\s\S]{0,160}/.exec(coreSrc)?.[0]?.includes('university_id'),
+  (/(LOGIN_IDENTIFIER_KEYS[\s\S]{0,140})/.exec(coreSrc)?.[1] || '').slice(0, 120));
+check('the classmates payload exposes names plus visibility-gated phone/email only (never gender or index numbers)',
+  /classmates\.map\(\(row\) => \(\{[\s\S]{0,220}/.exec(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-student.ts'), 'utf8'))?.[0]?.includes('visibleFields.includes') === true);
 
 // ---------------------------------------------------------------------------
 

@@ -20,3 +20,9 @@ export const registerClassGroupRoutes = (app: Hono<any>) => {
   registerCgmOrganizerRoutes(app);
   registerCgmActivityRoutes(app);
 };
+
+// Operational reuse + suite access: the idempotent invitation-seal backfill
+// (legacy plaintext secrets → AES-GCM). It runs automatically once per
+// isolate on the first CGM request (requireModuleEnabled) and is safe to
+// invoke directly at any time.
+export { migrateInvitationTokenStorage } from './lib/cgm/invite-crypto';

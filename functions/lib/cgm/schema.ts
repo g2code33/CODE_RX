@@ -242,6 +242,8 @@ CREATE TABLE IF NOT EXISTS cgm_invitations (
   code TEXT,
   token_hash TEXT NOT NULL UNIQUE,
   token_value TEXT,
+  token_enc TEXT,
+  token_key_version TEXT,
   created_by_profile_id INTEGER,
   creator_label TEXT,
   bound_student_id INTEGER,

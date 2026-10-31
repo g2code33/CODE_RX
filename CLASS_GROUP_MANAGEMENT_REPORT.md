@@ -22,7 +22,7 @@ test suites — nothing is aspirational.**
 |---|---|
 | Student identities | Separate from Society members; identified by **index number only** (university ID was removed entirely — roster, members, sign-in, register, profile fields, reports); register = index number + shared class entry password → pending → organizer approval → **permanent passkey shown once** (tiers run `a–z → aa–az → ba–bz → …` but the order **inside each tier is scattered** — a fixed permutation, `(17·p + 11) mod tier` — so keys are never guessable alphabetically; bijective per tier, no omissions, never reset or reused, `UNIQUE(passkey_sequence)`, and a suffix already held by a legacy sequential key is skipped, never reissued); the organizer may set a **per-class passkey mark** (the letters in front, e.g. `bio1`) in Settings — default stays `rx30`, issued passkeys are `<mark><suffix>` while the ONE global suffix sequence continues, and **existing passkeys are never rewritten** |
 | Task-12 student surface | **Index numbers accept every format** — register and login normalise case and separators (`PH/PHA/24/0292` ≡ `ph-pha-24-0292` ≡ `ph pha 24 0292` ≡ `ph.pha.24.0292`), with the expected pattern shown as a hint under the inputs; the **passkey reveal is its own page** (the registration form disappears) showing the one-time key plus **every detail on file** (name, index, phone, email, gender, class); **gender self-service** — a student with no recorded gender sets it in the class page before choosing a group in a gender-balanced activity (server returns 428 until set; organizer-set values are locked); a phone-first student who claims a roster-bound personal invitation gets the **roster identity backfilled** (name + index) |
-| Student sign-in | **Passkey is the lookup key** (login resolves the student by its sequence); the organizer-controlled identifier (index number / university ID / phone) is the confirming half. 8 identifier failures → 20-minute lockout. Wrong passkey is an *anonymous* failure and can never count per account (anti-enumeration) |
+| Student sign-in | **Passkey is the lookup key** (login resolves the student by its sequence); the organizer-controlled identifier (index number — in any case/separator format — or phone) is the confirming half. University ID is NOT a sign-in or identity field anywhere. 8 identifier failures → 20-minute lockout. Wrong passkey is an *anonymous* failure and can never count per account (anti-enumeration) |
 | Organizer lifecycle | Member applies → EmailJS verification link → PHANTOM approve / reject / correction / **suspend / reinstate / revoke** (with reason). No self-approval anywhere. Suspension revokes every team seat; reinstatement restores exactly what it revoked |
 | Classes | draft → configure → submit → PHANTOM approve/reject/correct/suspend/reinstate; **Settings can run registrations and membership requests AUTOMATIC** (passkey on the spot / straight-in join; PHANTOM's module-wide policy still caps it); `CRX-CLS-####` permanent ids; approval history table; sensitive post-approval edits route back to PHANTOM; entry password rotatable (stored only as a `cgm-entry:`-namespaced PBKDF2 verifier) |
 | Team | primary organizer + co-organizers + assistants with granular per-class permissions; **ownership transfer propose → accept** swaps roles atomically; revocation is immediate; no self-grant; PHANTOM overrides everything |
@@ -39,14 +39,14 @@ test suites — nothing is aspirational.**
 | Notifications | in-app via the platform's notification system + optional EmailJS email; §31 catalogue; read/unread, mark-all; **per-category student preferences** (security + registration categories pinned server-side); deadline reminders with day-scoped dedupe keys backed by a unique partial index |
 | Calendar | central student calendar: Monday-first month grid + per-day details + agenda, filterable by type, tz-aware |
 | Reports | roster / activities overview / assignments / movements / leadership / elections / turnout / attendance / pending / organizer-actions in **CSV, Excel (xlsx) and PDF** (dependency-free PDF 1.4 writer); sensitive columns stripped without `view_sensitive_profiles`; **students download their own records** (attendance, group history with removals, leadership history) as CSV |
-| Privacy (§35) | per-class `studentVisibleFields` **enforced server-side** (privacy-first default: names only); per-activity `contactVisibility` scopes phone/email to group or class; identity fields (index number, university ID, gender) are a hard floor — never visible to classmates at any setting; roster/report stripping for the sensitive permission; nothing private leaks through invitation pages or logs |
+| Privacy (§35) | per-class `studentVisibleFields` **enforced server-side** (privacy-first default: names only); per-activity `contactVisibility` scopes phone/email to group or class; identity fields (index number, gender) are a hard floor — never visible to classmates at any setting (university ID no longer exists in the identity system); roster/report stripping for the sensitive permission; nothing private leaks through invitation pages or logs |
 | Offline (§38) | connection banner in all three shells (online/offline/reconnecting, `role="status"`); duplicate-submission guard on every mutating call (in-flight lock → 409); failed fetches raise real offline errors — offline approvals/votes are never faked; **every request carries a 20 s abort deadline** (60 s for uploads/downloads) — a wedged network or tab surfaces as "The server took too long to answer", releases the guard and lets the user retry, instead of an eternal spinner |
 | PHANTOM oversight (§30) | applications, class approvals (**including drafts: PHANTOM can submit-&-approve or reject an unsubmitted draft, and approve a previously rejected class**), sensitive changes, registration-approval delegations (capped, usage-counted, revocable, surfaced in the organizer's status), organizer activity, audit browser, disputes, module flag, **module-wide policy console** — all server-enforced |
 | Module policies (§30) | **Module settings console**: PHANTOM decides per process — organizer applications, class creation, student registration, membership requests, profile changes — between **approval required / automatic / closed** (profile changes: approval/automatic). Enforced server-side on every entry route; missing/invalid rows fall back to the spec default (approval); automatic decisions reuse the exact approval-path writes, are labelled "Policy (automatic)" and audited (`cgm.module.policy`, `cgm.*.auto_approved`, `cgm.profile_change.auto_applied`); closed modes refuse **before** any row is written; flipping a mode never touches already-queued requests |
 | Invitation continuation | an open invitation survives sign-in and registration: class banner on the auth screen, class code prefilled (entry password still required), automatic claim after authentication, machine-readable states (`joined`/`requested`/`member`), dismissal + sign-out + expiry clear the context; general codes ride a 10-minute sessionStorage continuation, individual tokens never touch storage |
 
 **Code size:** ~14,200 lines across the backend (`functions/class-group-routes.ts`,
-`functions/lib/cgm/{core,service,schema,assignment,parse,pdf,routes-activities,routes-organizer,routes-student}.ts`),
+`functions/lib/cgm/{core,service,schema,assignment,parse,pdf,invite-crypto,routes-activities,routes-organizer,routes-student}.ts`),
 the client (`src/lib/cgm.ts`, `src/components/ClassGroups/{ClassGroupsWorkspace,StudentPortal,PhantomClasses,ConnectionBanner}.tsx`),
 the client (`src/lib/cgm.ts`, `src/components/ClassGroups/{ClassGroupsWorkspace,StudentPortal,PhantomClasses,ConnectionBanner}.tsx`),
 the three test harnesses. **148 API routes** (75 activities/groups/elections/announcements,
@@ -57,10 +57,37 @@ the three test harnesses. **148 API routes** (75 activities/groups/elections/ann
 
 ## 2. SECURITY MODEL (verified by §20 + §23 of the test suite)
 
-- **Hashed everywhere:** passkeys, class entry passwords, organizer-verify and
-  invitation tokens are stored only as PBKDF2 / SHA-256 verifiers with the
-  prefixes `cgm-entry:`, `cgm-organizer-verify:`, `cgm-invite:`. Raw values are
-  shown exactly once.
+- **Hashed everywhere:** passkeys, class entry passwords and organizer-verify
+  tokens are stored only as PBKDF2 / SHA-256 verifiers with the prefixes
+  `cgm-entry:`, `cgm-organizer-verify:`, `cgm-invite:`. Raw values are shown
+  exactly once (§31 + §20 verify).
+- **Individual invitation secrets are sealed, not stored (§31):** the database
+  keeps the SHA-256 lookup hash (validation) plus an AES-256-GCM sealed copy
+  (`v1.<iv>.<ciphertext+tag>`, authenticated encryption, random IV per seal,
+  key version recorded) so an authorized `manage_invitations` organizer can
+  still copy or re-QR a live personal link. A database export alone can never
+  re-issue an invitation. General invitations carry **no bearer secret at
+  all** — their public code is the shareable half, and any legacy raw value
+  was cleared by the migration. Sealing requires the `CGM_INVITATION_KEYS`
+  Cloudflare secret: a JSON object of version → base64 32-byte keys, e.g.
+  `{"v1":"<openssl rand -base64 32>"}`. Without it, creating or regenerating
+  an individual invitation returns a 503 with the exact setup step — never a
+  plaintext fallback. Tampered ciphertext fails authentication and the row is
+  flagged `undecryptable` for regeneration.
+- **Invitation usage is consumed atomically (§31):** one conditional UPDATE
+  (`use_count = use_count + 1 WHERE … not revoked/disabled/expired, under
+  max_uses, individuals unconsumed`) is the final concurrency guard — four
+  racing claims of a single-use invitation win exactly once, concurrent
+  general claims can never exceed `max_uses`, duplicates and already-member
+  responses never inflate the count, and an individual is consumed exactly
+  once (never before AND again after membership handling — a pre-existing
+  double-increment bug was found and fixed here).
+- **Idempotent seal migration (§31):** on the first CGM request per isolate,
+  legacy plaintext individual secrets are sealed and the plaintext removed;
+  expiry, limits, usage counts and every existing link keep working (legacy
+  tokens validate through their hashes). Without a configured key nothing is
+  written and the pending count is logged loudly (no secret values, ever).
+  Re-running is a no-op.
 - **Session discipline:** opaque student session tokens (hashed at rest,
   live-token unique index). Passkey change and logout revoke **all** sessions
   (logout-all is deliberate — shared school devices). Student sessions are
@@ -134,7 +161,7 @@ the three test harnesses. **148 API routes** (75 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (30 sections) | `npm run test:cgm` | **579/579** |
+| Module API (32 sections) | `npm run test:cgm` | **616/616** |
 | Module UI (markup-level, 18 sections) | `npm run test:cgm-ui` | **226/226** |
 | Browser journeys (jsdom + wrangler pages dev, 25 checks) | `npm run test:cgm-browser` | **25/25** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
@@ -145,6 +172,11 @@ the three test harnesses. **148 API routes** (75 activities/groups/elections/ann
 corrections (verification-token gating + resend + expiry + single-use, passkey
 notification hygiene, lockout on both failure halves, concurrent-failure
 convergence, archived-identity refusal, anti-enumeration, email health);
+§31 the invitation-security battery (sealing at rest, hash validation,
+authorized-only retrieval, tamper detection, missing-key fail-safe, migration
+survival + idempotence, regeneration invalidation, identity binding,
+exactly-once and concurrent-claim races, no-inflation guarantees, and the
+expired/disabled/revoked matrix);
 §24 the invitation continuation journey (all twelve acceptance scenarios);
 §25 policy transitions with pending rows + data retention; §30 the Task-12
 batch (scattered passkey tiers with the legacy-suffix skip rule, tolerant
@@ -199,9 +231,20 @@ revoked; suspended classes still accepted student actions.
 1. **Merge order:** land this branch's work on `main` (maintainer pulls
    manually — the branch is never pushed by the agent).
 2. **D1:** nothing to run by hand — cold start applies the new tables; the
-   `rx19` version bump runs the seven guarded ALTERs and the new indexes.
-3. **R2:** the existing `BUCKET` binding is reused; no new bucket.
-4. **EmailJS:** set `EMAILJS_TEMPLATE_ID_GENERAL` (plus the existing
+   `rx22` version bump (`2026-10-31-code-rx22-invitation-sealing`) runs the
+   guarded ALTERs (including `cgm_invitations.token_enc` +
+   `token_key_version`) and the new indexes. The invitation-seal backfill then
+   runs automatically (idempotent, once per isolate) — **no manual migration
+   and no secret values are ever printed**.
+3. **Cloudflare secret (REQUIRED before individual invitations work):** set
+   `CGM_INVITATION_KEYS` = `{"v1":"<openssl rand -base64 32>"}` (wrangler
+   pages secret put CGM_INVITATION_KEYS / dashboard). Rotation = add a higher
+   version; old sealed rows keep their version and decrypt until those keys
+   are removed. Until the secret exists, creating or regenerating an
+   individual invitation answers 503 with these instructions; every other
+   flow (general invitations, claims, migration survival) is unaffected.
+4. **R2:** the existing `BUCKET` binding is reused; no new bucket.
+5. **EmailJS:** set `EMAILJS_TEMPLATE_ID_GENERAL` (plus the existing
    `EMAILJS_*` service keys) for organizer-verification and notification
    emails. Without them the application is saved and PHANTOM sees the missing
    variable names in the oversight header; the applicant uses
@@ -210,31 +253,38 @@ revoked; suspended classes still accepted student actions.
    environments (`CGM_DEV_PREVIEW_TOKENS='1'`); links expire after
    `CGM_VERIFY_TTL_HOURS` (default 24), are single-use, and resends
    invalidate the previous link.
-5. **Module flag:** enable via PHANTOM → Class & Groups (`class_groups_enabled = '1'`);
+6. **Module flag:** enable via PHANTOM → Class & Groups (`class_groups_enabled = '1'`);
    routes 404 while disabled, so the site can ship dark.
-6. **PWA:** `public/sw.js` cache is `code-rx-v7` (bump on the next shell change);
+7. **PWA:** `public/sw.js` cache is `code-rx-v7` (bump on the next shell change);
    the SW caches the shell only and never `/api/*`; `manifest.webmanifest`
    unchanged.
-7. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, all six test
+8. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, all six test
    suites, the browser journey gate and the production build on every push/PR;
    the deploy job runs only on `main`, only with `CLOUDFLARE_API_TOKEN` +
    `CLOUDFLARE_ACCOUNT_ID` present (checked via the secrets context), and the
    summary step reports **completed / skipped (credentials unavailable) /
    failed** honestly. Never a deploy on a red suite.
-8. **Deferred by spec §40:** chat, announcement threads, the WhatsApp Cloud API,
+9. **Deferred by spec §40:** chat, announcement threads, the WhatsApp Cloud API,
    an Android app, external calendar sync. The HTTP API is reusable for a
    future Android client without change.
-9. **Verified where:** implemented + verified by automated tests = everything
-   in §5; implemented + manually verified in the local preview stack = the
-   browser journeys and the wrangler dev flows; verified IN PRODUCTION =
-   remote D1 cold-start table creation (maintainer, 2026-10-31, see §4);
-   **still requires production verification** = real EmailJS delivery and the
-   Cloudflare Pages deploy itself. Live production email was NOT verified from
-   the sandbox. CI note: the test-gate's first run on `main` (run 41135881444)
-   passed all six suites and the build and correctly blocked the deploy; the
-   only red step was the browser gate's own passkey sanity check rejecting
-   `rx30a` — the legitimate FIRST passkey of a fresh CI database — fixed in
-   `143da18` and verified twice locally against a fresh D1 (19/19, exit 0).
+10. **Verified where (honest separation):** implemented + verified by the
+   automated suites in this branch = everything in §5 **including invitation
+   sealing, the seal migration and the atomic-claim races**; implemented +
+   manually verified in the LOCAL preview stack (wrangler pages dev + local
+   D1 + jsdom) = the browser journeys and the wrangler dev flows, with the
+   dev `CGM_INVITATION_KEYS` value from `.dev.vars`; **NOT verified in
+   production from this branch** = the Cloudflare Pages deploy of this work,
+   the production `CGM_INVITATION_KEYS` secret, and live email delivery.
+   **Deploy order matters:** set the production `CGM_INVITATION_KEYS` secret
+   BEFORE pulling/deploying this branch, otherwise individual-invitation
+   creation and regeneration answer 503 until it exists (everything else,
+   including all existing invitation links, keeps working). Live production
+   email has never been verifiable from the sandbox. CI note: the test-gate's
+   first run on `main` (run 41135881444) passed all six suites and the build
+   and correctly blocked the deploy; the only red step was the browser gate's
+   own passkey sanity check rejecting `rx30a` — the legitimate FIRST passkey
+   of a fresh CI database — fixed in `143da18` and verified twice locally
+   against a fresh D1.
 
 ---
 
@@ -246,6 +296,7 @@ functions/lib/cgm/core.ts              # config/permission sanitizers, passkey m
 functions/lib/cgm/service.ts           # sessions, throttles, audit, notify, atomic guard
 functions/lib/cgm/schema.ts            # 41 tables + 52 indexes (35 + 17 unique)
 functions/lib/cgm/assignment.ts        # balancing engine + gender rules
+functions/lib/cgm/invite-crypto.ts     # invitation secret sealing (AES-256-GCM) + seal migration
 functions/lib/cgm/parse.ts             # xlsx/csv/json roster parsing + mapping
 src/lib/qr.ts                          # dependency-free QR encoder (byte mode, EC level M, v1-40)
 functions/lib/cgm/pdf.ts               # dependency-free PDF writer

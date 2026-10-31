@@ -6358,3 +6358,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
 export { recordClientInboxItemForTest };
 
 export default app;
+
+// Suite/operations access to the idempotent invitation-seal backfill (it also
+// runs automatically once per isolate on the first CGM request).
+export { migrateInvitationTokenStorage } from './lib/cgm/invite-crypto';

@@ -221,6 +221,20 @@ export const requireModuleEnabled = async (c: Context<{ Bindings: Env }>) => {
   if (!await classGroupsEnabled(c.env.DB)) {
     return c.json({ success: false, error: 'The Class & Group module is paused by PHANTOM.' }, 404);
   }
+  // One-time-per-isolate seal backfill: legacy plaintext individual invitation
+  // secrets are encrypted, legacy general bearer values are cleared. Idempotent
+  // and failure-tolerant (a missing key is reported loudly, never a crash and
+  // never a plaintext fallback).
+  const boot = globalThis as any;
+  if (!boot.__cgmInvitationSealDone) {
+    boot.__cgmInvitationSealDone = true;
+    try {
+      const { migrateInvitationTokenStorage } = await import('./invite-crypto');
+      await migrateInvitationTokenStorage(c.env.DB, c.env);
+    } catch (failure: any) {
+      console.error(`[cgm] invitation seal backfill failed (non-fatal): ${failure?.message || failure}`);
+    }
+  }
   return null;
 };
 

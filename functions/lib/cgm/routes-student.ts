@@ -1559,6 +1559,37 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     });
   });
 
+  /**
+   * Atomic consumption of one invitation use — the FINAL concurrency guard,
+   * not the preceding SELECTs. A single conditional UPDATE decides: the row
+   * must be live (not revoked/disabled), unexpired, under its maximum, and an
+   * individual invitation must still be unconsumed. Whoever's UPDATE changes
+   * exactly one row wins the seat; everyone else gets a precise refusal.
+   */
+  const consumeInvitationUse = async (db: D1Database, invitationId: number): Promise<boolean> => {
+    const result = await db.prepare(
+      `UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND revoked_at IS NULL AND disabled_at IS NULL
+         AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%d %H:%M:%S', 'now'))
+         AND (max_uses IS NULL OR use_count < max_uses)
+         AND (kind = 'general' OR use_count < 1)`
+    ).bind(invitationId).run();
+    return Number(result.meta?.changes || 0) === 1;
+  };
+
+  /** After a lost consumption race, re-read the row for the precise reason. */
+  const invitationRefusal = async (db: D1Database, invitationId: number): Promise<string> => {
+    const rows = await asRows<any>(db.prepare(
+      'SELECT kind, revoked_at, disabled_at, expires_at, max_uses, use_count FROM cgm_invitations WHERE id = ?'
+    ).bind(invitationId));
+    const row = rows[0];
+    if (!row || row.revoked_at || row.disabled_at) return 'This invitation is no longer available.';
+    if (row.expires_at && new Date(String(row.expires_at).replace(' ', 'T')).getTime() < Date.now()) return 'This invitation has expired.';
+    if (row.kind === 'individual' && Number(row.use_count) >= 1) return 'This invitation has already been used.';
+    if (row.max_uses !== null && Number(row.use_count) >= Number(row.max_uses)) return 'This invitation has reached its usage limit.';
+    return 'This invitation is no longer available.';
+  };
+
   const membershipFromInvitation = async (c: any, code: string) => {
     const student = await requireStudent(c);
     if (!student) return { status: 401 as const, response: c.json({ success: false, error: 'Sign in first to use this invitation.' }, 401) };
@@ -1608,6 +1639,11 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
           const pendingReq = await asRows<{ id: number }>(c.env.DB.prepare(
             `SELECT id FROM cgm_registration_requests WHERE roster_entry_id = ? AND status = 'pending'`
           ).bind(entry[0].id));
+          // The atomic consume is the gate: only a claim that wins it may
+          // write the registration request (one use, one outcome).
+          if (!await consumeInvitationUse(c.env.DB, Number(invitation.id))) {
+            return { status: 409 as const, response: bad(c, await invitationRefusal(c.env.DB, Number(invitation.id)), 409) };
+          }
           if (!pendingReq[0] && !entry[0].student_id) {
             await c.env.DB.prepare(
               `INSERT INTO cgm_registration_requests (class_id, roster_entry_id, student_id, identifier_hint)
@@ -1633,9 +1669,6 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
             ).bind(rosterName, rosterName, rosterIndex, rosterIndex,
               rosterIndex, rosterIndex.toLowerCase(), student.id).run();
           }
-          await c.env.DB.prepare(
-            'UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?'
-          ).bind(Number(invitation.id)).run();
           return {
             status: 200 as const,
             response: c.json({ success: true, data: { message: 'Your registration was submitted through your personal invitation and awaits approval.' } }),
@@ -1645,9 +1678,9 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         // Student-bound (non-roster) individual invitations consume their
         // single use at claim time — replay gets the single-use refusal even
         // when the bound student already holds the membership.
-        await c.env.DB.prepare(
-          'UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?'
-        ).bind(Number(invitation.id)).run();
+        if (!await consumeInvitationUse(c.env.DB, Number(invitation.id))) {
+          return { status: 409 as const, response: bad(c, await invitationRefusal(c.env.DB, Number(invitation.id)), 409) };
+        }
       }
     }
 
@@ -1670,12 +1703,18 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         `SELECT id FROM cgm_membership_requests WHERE class_id = ? AND student_id = ? AND status = 'pending'`
       ).bind(classId, student.id));
       if (pending[0]) return { status: 200 as const, response: c.json({ success: true, data: { state: 'requested', message: 'Your membership request is already awaiting review.' } }) };
+      // Consume before writing: concurrent claims can never push past
+      // max_uses. ONLY general invitations consume here — an individual's
+      // single use was already consumed once in the identity-verified branch
+      // above (never increment before membership handling AND after it).
+      if (invitation.kind === 'general') {
+        if (!await consumeInvitationUse(c.env.DB, Number(invitation.id))) {
+          return { status: 409 as const, response: bad(c, await invitationRefusal(c.env.DB, Number(invitation.id)), 409) };
+        }
+      }
       await c.env.DB.prepare(
         `INSERT INTO cgm_membership_requests (class_id, student_id, invitation_id) VALUES (?, ?, ?)`
       ).bind(classId, student.id, Number(invitation.id)).run();
-      await c.env.DB.prepare(
-        'UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?'
-      ).bind(Number(invitation.id)).run();
       await auditCgm(c.env.DB, {
         actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
         action: 'cgm.membership.requested', entityType: 'class', entityId: classId, classId,
@@ -1683,13 +1722,16 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       return { status: 200 as const, response: c.json({ success: true, data: { state: 'requested', message: 'Your membership request was sent for approval.' } }) };
     }
 
-    // Approval-free join (organizer configured it that way).
+    // Approval-free join (organizer configured it that way). Individuals
+    // already consumed their single use above.
+    if (invitation.kind === 'general') {
+      if (!await consumeInvitationUse(c.env.DB, Number(invitation.id))) {
+        return { status: 409 as const, response: bad(c, await invitationRefusal(c.env.DB, Number(invitation.id)), 409) };
+      }
+    }
     await c.env.DB.prepare(
       `INSERT OR IGNORE INTO cgm_class_members (class_id, student_id, added_via, added_by_label) VALUES (?, ?, 'invitation', ?)`
     ).bind(classId, student.id, `Invitation ${invitation.code || ''}`.trim()).run();
-    await c.env.DB.prepare(
-      'UPDATE cgm_invitations SET use_count = use_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?'
-    ).bind(Number(invitation.id)).run();
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
       action: 'cgm.membership.joined', entityType: 'class', entityId: classId, classId,

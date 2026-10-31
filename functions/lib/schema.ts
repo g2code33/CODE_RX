@@ -1188,6 +1188,14 @@ const SAFE_MIGRATIONS = [
   // Invitations keep their token so organizers can copy, share and
   // re-download the QR any time (replaces the show-once flow).
   { table: 'cgm_invitations', column: 'token_value', sql: 'ALTER TABLE cgm_invitations ADD COLUMN token_value TEXT' },
+  // Invitation hardening: individual invitation secrets are sealed with
+  // AES-256-GCM (token_enc = "v1.<iv>.<ciphertext+tag>") so a database export
+  // alone can never re-issue a personal invitation link. token_key_version
+  // records which configured key version sealed the blob. The legacy
+  // plaintext token_value column stays for compatibility and is emptied by
+  // the idempotent seal backfill (migrateInvitationTokenStorage).
+  { table: 'cgm_invitations', column: 'token_enc', sql: 'ALTER TABLE cgm_invitations ADD COLUMN token_enc TEXT' },
+  { table: 'cgm_invitations', column: 'token_key_version', sql: 'ALTER TABLE cgm_invitations ADD COLUMN token_key_version TEXT' },
 
   { table: 'members', column: 'phone_login_key', sql: 'ALTER TABLE members ADD COLUMN phone_login_key TEXT' },
   { table: 'member_activations', column: 'revoked_at', sql: 'ALTER TABLE member_activations ADD COLUMN revoked_at DATETIME' },
@@ -1244,7 +1252,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx21-roster-and-invitation-qr';
+const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx22-invitation-sealing';
 
 
 // Role codes stay stable for member history and permissions. Their visible
