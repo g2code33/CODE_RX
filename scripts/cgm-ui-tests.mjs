@@ -551,9 +551,14 @@ check('the student login status persists (localStorage session with expiry, sign
 check('the organizer workspace has its own Sign out beside Exit',
   /memberAuth\.logout\(\)/.test(workspace) && /End this session on this device/.test(workspace));
 
-check('group planning uses the roster: typing groups fills the size from the class roll',
-  /applyGroupMath/.test(workspace) && /per group — keep it or adjust freely/.test(workspace)
-  && /students on the roster/.test(workspace) && /active members/.test(workspace));
+check('group planning is one-way from the total roster: groups never get rewritten, sizes are derived',
+  /const setGroupCount/.test(workspace) && !/applyGroupMath/.test(workspace)
+  && /Total roster: \$\{plannedStudents\}/.test(workspace)
+  && /maximum per group: \$\{maxPerGroup\}/.test(workspace)
+  && /group\$\{surplusStudents === 1 \? '' : 's'\} of \$\{maxPerGroup\}/.test(workspace));
+check('the group count input is the only writer of groupCount (nothing changes it after setting)',
+  /onChange=\{\(event\) => setGroupCount\(event\.target\.value\)\}/.test(workspace)
+  && !/cgm-act-size/.test(workspace));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, Archive, Bell, CalendarDays, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
   Megaphone, Plus, RefreshCw, Settings, ShieldCheck, UserCheck, Users, Vote, FileText, X, LogOut,
@@ -1152,11 +1152,11 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
     electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
   });
 
-  // The roster decides the sensible sizes: the moment the organizer types a
-  // number of groups (or a target size), the other field fills itself from
-  // the class size — the organizer just keeps or adjusts the suggestion.
+  // The TOTAL ROSTER decides the sizes: the organizer only ever types the
+  // number of groups — the per-group math (base share, surplus split across
+  // the groups, hard maximum) is derived and displayed, and nothing ever
+  // rewrites the number they typed.
   const [sizeBase, setSizeBase] = useState<{ roster: number; members: number } | null>(null);
-  const lastSized = useRef<'groups' | 'size' | null>(null);
 
   const load = useCallback(async () => {
     setRows(await cgm.activities(classId).catch(() => []));
@@ -1170,26 +1170,42 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
   }, [classId]);
   useEffect(() => { void load(); }, [load]);
 
-  const plannedStudents = sizeBase ? (sizeBase.members > 0 ? sizeBase.members : sizeBase.roster) : 0;
-  const sizeSource = sizeBase ? (sizeBase.members > 0 ? 'active members' : 'students on the roster') : 'students';
-  const applyGroupMath = (field: 'groups' | 'size', raw: string) => {
-    lastSized.current = field;
+  const plannedStudents = sizeBase ? (sizeBase.roster > 0 ? sizeBase.roster : sizeBase.members) : 0;
+  const activeNow = sizeBase ? sizeBase.members : 0;
+  const groupsNum = Math.max(0, Math.floor(Number(form.groupCount) || 0));
+  const basePerGroup = groupsNum >= 2 && plannedStudents > 0 ? Math.floor(plannedStudents / groupsNum) : 0;
+  const surplusStudents = groupsNum >= 2 && plannedStudents > 0 ? plannedStudents % groupsNum : 0;
+  const maxPerGroup = basePerGroup + (surplusStudents > 0 ? 1 : 0);
+  // Typing the group count is the ONLY thing that sets it. Sizes and the hard
+  // capacity follow the roster automatically: every group carries the base
+  // share, the surplus students spread one each over the first groups, and
+  // the capacity auto-fills with the resulting maximum so everyone fits.
+  const setGroupCount = (raw: string) => {
     const value = Math.max(1, Math.floor(Number(raw) || 0));
-    if (field === 'groups' && value > 0 && plannedStudents > 0) {
-      const perGroup = Math.ceil(plannedStudents / value);
-      setForm((current) => ({ ...current, groupCount: raw, targetGroupSize: String(perGroup), capacity: current.capacity || String(perGroup) }));
-    } else if (field === 'size' && value > 0 && plannedStudents > 0) {
-      const groups = Math.max(1, Math.ceil(plannedStudents / value));
-      setForm((current) => ({ ...current, targetGroupSize: raw, groupCount: String(groups) }));
-    } else {
-      setForm((current) => ({ ...current, [field === 'groups' ? 'groupCount' : 'targetGroupSize']: raw }));
-    }
+    setForm((current) => {
+      const next = { ...current, groupCount: raw };
+      if (value >= 2 && plannedStudents > 0) {
+        const base = Math.floor(plannedStudents / value);
+        const extra = plannedStudents % value;
+        next.targetGroupSize = base >= 2 ? String(base) : '';
+        next.capacity = String(base + (extra > 0 ? 1 : 0) || 1);
+      }
+      return next;
+    });
   };
-  const groupMathHint = plannedStudents > 0 && form.groupCount && Number(form.groupCount) > 0
-    ? `${plannedStudents} ${sizeSource} ÷ ${form.groupCount} groups ≈ ${Math.ceil(plannedStudents / Number(form.groupCount))} per group — keep it or adjust freely.`
-    : plannedStudents > 0
-      ? `${plannedStudents} ${sizeSource} detected — type the number of groups and the sizes fill themselves in.`
-      : null;
+  const groupMathStrip = groupsNum >= 2
+    ? (plannedStudents > 0
+        ? `Total roster: ${plannedStudents} student${plannedStudents === 1 ? '' : 's'}`
+          + `${activeNow > 0 && activeNow !== plannedStudents ? ` (${activeNow} active so far)` : ''}`
+          + ` · ${groupsNum} groups → ${surplusStudents > 0
+              ? `${surplusStudents} group${surplusStudents === 1 ? '' : 's'} of ${maxPerGroup} + ${groupsNum - surplusStudents} of ${basePerGroup}`
+              : `an even ${basePerGroup} per group`}`
+          + ` · maximum per group: ${maxPerGroup}`
+        : 'No students on the roster yet — the sizes are worked out automatically the moment students are on the roster.')
+    : null;
+  const capacityWarning = groupsNum >= 2 && plannedStudents > 0 && form.capacity && Number(form.capacity) < maxPerGroup
+    ? ` Capacity ${form.capacity} is below the needed maximum ${maxPerGroup} — up to ${plannedStudents - Number(form.capacity) * groupsNum} student(s) would not fit.`
+    : '';
 
   // Editing opens the same form, prefilled from the saved configuration.
   const toLocalInput = (iso: unknown) => {
@@ -1283,10 +1299,13 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
                 <option value="hybrid">Hybrid (self first, organizer finishes)</option>
               </select>
             </div>
-            <div><label className={label} htmlFor="cgm-act-groups">Number of groups</label><input id="cgm-act-groups" type="number" min="2" max="50" className={`${inputClass} mt-1`} value={form.groupCount} onChange={(event) => applyGroupMath('groups', event.target.value)} /></div>
-            <div><label className={label} htmlFor="cgm-act-size">…or target group size</label><input id="cgm-act-size" type="number" min="2" className={`${inputClass} mt-1`} value={form.targetGroupSize} onChange={(event) => applyGroupMath('size', event.target.value)} /></div>
-            {groupMathHint && <p className="sm:col-span-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-800">{groupMathHint}</p>}
-            <div><label className={label} htmlFor="cgm-act-cap">Group capacity (hard limit)</label><input id="cgm-act-cap" type="number" min="1" className={`${inputClass} mt-1`} value={form.capacity} onChange={(event) => setForm({ ...form, capacity: event.target.value })} /></div>
+            <div><label className={label} htmlFor="cgm-act-groups">Number of groups</label><input id="cgm-act-groups" type="number" min="2" max="50" className={`${inputClass} mt-1`} value={form.groupCount} onChange={(event) => setGroupCount(event.target.value)} /></div>
+            <div>
+              <label className={label} htmlFor="cgm-act-max">Maximum per group (calculated)</label>
+              <input id="cgm-act-max" readOnly disabled value={groupsNum >= 2 && plannedStudents > 0 ? String(maxPerGroup) : '—'} className={`${inputClass} mt-1 cursor-not-allowed bg-slate-50 font-black text-slate-700`} />
+            </div>
+            {groupMathStrip && <p className="sm:col-span-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-800" data-testid="cgm-group-math">{groupMathStrip}{capacityWarning}</p>}
+            <div><label className={label} htmlFor="cgm-act-cap">Group capacity (hard limit — auto-filled with the maximum)</label><input id="cgm-act-cap" type="number" min="1" className={`${inputClass} mt-1`} value={form.capacity} onChange={(event) => setForm({ ...form, capacity: event.target.value })} /></div>
             <div><label className={label} htmlFor="cgm-act-gender">Gender rule</label>
               <select id="cgm-act-gender" className={`${inputClass} mt-1`} value={form.genderRule} onChange={(event) => setForm({ ...form, genderRule: event.target.value })}>
                 <option value="none">No gender consideration</option>
