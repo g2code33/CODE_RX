@@ -313,6 +313,12 @@ revoked; suspended classes still accepted student actions.
    are removed. Until the secret exists, creating or regenerating an
    individual invitation answers 503 with these instructions; every other
    flow (general invitations, claims, migration survival) is unaffected.
+   The value is parsed strictly (JSON object, `v1`-style versions, every key
+   base64 of EXACTLY 32 bytes — a 32-**character** string is only 24 bytes
+   and silently disables the whole ring), so check a candidate OFFLINE first:
+   `node scripts/verify-invitation-key.mjs '{"v1":"…"}'` prints VALID or the
+   exact failed rule and never echoes the key. Secrets bind at deploy time —
+   set the secret, THEN deploy/push.
 4. **R2:** the existing `BUCKET` binding is reused; no new bucket.
 5. **EmailJS:** set `EMAILJS_TEMPLATE_ID_GENERAL` (plus the existing
    `EMAILJS_*` service keys) for organizer-verification and notification
