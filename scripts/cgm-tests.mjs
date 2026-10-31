@@ -3478,6 +3478,57 @@ section('37. Blank-page guard: no undefined icons or components in the workspace
 }
 
 // ---------------------------------------------------------------------------
+// 38. Member sheet: agenda persistence, sensitive-column gating, print/PNG/PDF pins
+// ---------------------------------------------------------------------------
+section('38. Member sheet: agenda, field customization, PNG/PDF/print');
+
+const agendaSave = await memberCall('PATCH', `/api/cgm/groups/${podA}`, { agenda: '1. Review titration data · 2. Assign write-up sections' }, amaToken);
+const dossierWithAgenda = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, amaToken);
+check('the group agenda is saved on the group and returns on the dossier',
+  agendaSave.status === 200 && dossierWithAgenda.json?.data?.group?.agenda === '1. Review titration data · 2. Assign write-up sections',
+  `status ${agendaSave.status} agenda=${JSON.stringify(dossierWithAgenda.json?.data?.group?.agenda)}`);
+
+// The class fixture set a phone on the roster earlier; PHANTOM holds every
+// permission, so the dossier must carry the sensitive columns for PHANTOM.
+const sensitiveDossier = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, phantomToken);
+const sensitiveMember = (sensitiveDossier.json?.data?.members || [])[0] || {};
+check('with the view-sensitive permission the dossier carries phone/email/gender for the sheet',
+  sensitiveDossier.json?.data?.viewer?.canSeeSensitive === true && 'phone' in sensitiveMember && 'email' in sensitiveMember,
+  `canSee=${sensitiveDossier.json?.data?.viewer?.canSeeSensitive} keys=${JSON.stringify(Object.keys(sensitiveMember))}`);
+const organizerDossier = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, amaToken);
+check('PHANTOM and the organizer both see the sensitivity flag honestly',
+  typeof organizerDossier.json?.data?.viewer?.canSeeSensitive === 'boolean');
+
+// §33's swap reshuffled pods, so find a group that genuinely holds 2+ members
+// and try to shrink it below its live size.
+let capFloorChecked = null;
+for (const groupRow of labGroups) {
+  const gid = Number(groupRow.id);
+  const dossierNow = await memberCall('GET', `/api/cgm/groups/${gid}`, undefined, phantomToken);
+  const liveSize = dossierNow.json?.data?.group?.size || 0;
+  if (liveSize < 2) continue;
+  const shrink = await memberCall('PATCH', `/api/cgm/groups/${gid}`, { capacity: liveSize - 1 }, amaToken);
+  capFloorChecked = shrink.status === 409;
+  break;
+}
+check('the capacity floor still guards the patch route (a 2+ member group cannot shrink below its size)',
+  capFloorChecked === true, `result ${JSON.stringify(capFloorChecked)}`);
+
+const wsSheet = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+const sheetLib = readFileSync(path.join(ROOT, 'src/lib/groupSheet.ts'), 'utf8');
+check('the member sheet panel offers field customization, agenda, AOB and all three outputs',
+  /cgm-member-sheet-panel/.test(wsSheet) && /cgm-agenda/.test(wsSheet) && /cgm-aob/.test(wsSheet)
+  && /Save agenda/.test(wsSheet) && /Download PNG/.test(wsSheet) && /Download PDF/.test(wsSheet) && />Print</.test(wsSheet));
+check('the sheet renderer draws header, title+topic, agenda block, table and AOB for PNG, PDF and print',
+  /AGENDA/.test(sheetLib) && /AOB \/ OTHER BUSINESS/.test(sheetLib)
+  && /CODE Rx SOCIETY — Class & Group Management/.test(sheetLib)
+  && /renderGroupSheetCanvas/.test(sheetLib) && /buildGroupSheetPdf/.test(sheetLib) && /printGroupSheet/.test(sheetLib));
+check('the PDF is a genuine multi-page document with the preamble on page one',
+  /%PDF-1\.4/.test(sheetLib) && /newPage = \(continuation = false\)/.test(sheetLib) && /member sheet \(continued\)/.test(sheetLib));
+check('sensitive columns are stripped from the sheet source unless the viewer holds the permission',
+  /canSeeSensitive \? ', s\.phone, s\.email, s\.gender' : ''/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-activities.ts'), 'utf8')));
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 

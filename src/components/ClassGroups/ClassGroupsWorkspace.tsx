@@ -7,6 +7,7 @@ import { encodeQr } from '../../lib/qr';
 import {
   cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
+import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
 import { appDialog } from '../AppDialog';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
@@ -1508,6 +1509,12 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   const [electionTitle, setElectionTitle] = useState('');
   const [waUrl, setWaUrl] = useState<string | null>(null);
   const [showQr, setShowQr] = useState(false);
+  // The member sheet: choose the columns, save the group agenda, add AOB,
+  // then print it or download it as PNG / PDF.
+  const [showSheet, setShowSheet] = useState(false);
+  const [agenda, setAgenda] = useState<string | null>(null);
+  const [sheetAob, setSheetAob] = useState('');
+  const [sheetFields, setSheetFields] = useState({ indexNumber: true, role: true, phone: false, email: false, gender: false, via: false });
 
   const load = useCallback(async () => {
     try {
@@ -1517,13 +1524,45 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
     } catch (failure: any) { setError(failure?.message || 'This group could not be loaded.'); }
   }, [groupId]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (detail) { setTopic(detail.group?.topic ?? ''); setCapacity(detail.group?.capacity != null ? String(detail.group.capacity) : ''); setWaUrl(detail.whatsapp?.url ?? ''); } }, [detail]);
+  useEffect(() => { if (detail) { setTopic(detail.group?.topic ?? ''); setAgenda(detail.group?.agenda ?? ''); setCapacity(detail.group?.capacity != null ? String(detail.group.capacity) : ''); setWaUrl(detail.whatsapp?.url ?? ''); } }, [detail]);
 
   const run = async (work: () => Promise<any>, done?: string) => {
     setBusy(true); setMessage(null); setError(null);
     try { await work(); if (done) setMessage(done); await load(); onChanged(); }
     catch (failure: any) { setError(failure?.message || 'That did not work.'); }
     finally { setBusy(false); }
+  };
+
+  const buildSheet = () => {
+    if (!detail) return null;
+    const dateLabel = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    const columns = ['Full name'];
+    if (sheetFields.indexNumber) columns.push('Index number');
+    if (sheetFields.role) columns.push('Role');
+    if (detail.viewer?.canSeeSensitive) {
+      if (sheetFields.phone) columns.push('Phone');
+      if (sheetFields.email) columns.push('Email');
+      if (sheetFields.gender) columns.push('Gender');
+    }
+    if (sheetFields.via) columns.push('Joined via');
+    const rows = (detail.members || []).map((row: any) => {
+      const cells = [String(row.full_name || '')];
+      if (sheetFields.indexNumber) cells.push(String(row.index_number || '—'));
+      if (sheetFields.role) cells.push(rolesOf(row.roles).join(', ') || 'Member');
+      if (detail.viewer?.canSeeSensitive) {
+        if (sheetFields.phone) cells.push(String(row.phone || '—'));
+        if (sheetFields.email) cells.push(String(row.email || '—'));
+        if (sheetFields.gender) cells.push(String(row.gender || '—'));
+      }
+      if (sheetFields.via) cells.push(String(row.assigned_via || '—').replace(/_/g, ' '));
+      return cells;
+    });
+    return {
+      groupName: String(group.name), topic: group.topic || '', agenda: agenda ?? '', aob: sheetAob,
+      className: String(activity?.className || ''), activityName: String(activity?.name || ''), dateLabel,
+      columns, rows,
+      footer: `Generated from CODE Rx on ${dateLabel} · ${activity?.className || ''} · ${activity?.name || ''} · ${group.name}`,
+    };
   };
 
   if (!detail) {
@@ -1568,7 +1607,44 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
       <div className="grid gap-3 lg:grid-cols-2">
         {/* Members */}
         <div className={card}>
-          <p className={label}>Members ({group.size})</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className={label}>Members ({group.size})</p>
+            <button type="button" className="mini-button" data-testid="cgm-member-sheet" onClick={() => setShowSheet((current) => !current)}>
+              {showSheet ? 'Hide member sheet' : '🖨 Member sheet'}
+            </button>
+          </div>
+          {showSheet && (
+            <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 space-y-2" data-testid="cgm-member-sheet-panel">
+              <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Member sheet — choose what to include</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] font-bold text-slate-600">
+                <label className="flex items-center gap-1.5"><input type="checkbox" checked disabled /> Full name</label>
+                <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.indexNumber} onChange={(event) => setSheetFields({ ...sheetFields, indexNumber: event.target.checked })} /> Index number</label>
+                <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.role} onChange={(event) => setSheetFields({ ...sheetFields, role: event.target.checked })} /> Role</label>
+                {detail.viewer?.canSeeSensitive ? (
+                  <>
+                    <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.phone} onChange={(event) => setSheetFields({ ...sheetFields, phone: event.target.checked })} /> Phone</label>
+                    <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.email} onChange={(event) => setSheetFields({ ...sheetFields, email: event.target.checked })} /> Email</label>
+                    <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.gender} onChange={(event) => setSheetFields({ ...sheetFields, gender: event.target.checked })} /> Gender</label>
+                  </>
+                ) : <span className="text-slate-400">Phone / email / gender need the view-sensitive permission</span>}
+                <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.via} onChange={(event) => setSheetFields({ ...sheetFields, via: event.target.checked })} /> Joined via</label>
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-agenda">Group agenda (saved with the group, printed on the sheet)</label>
+                <textarea id="cgm-agenda" className={`${inputClass} mt-1 min-h-16`} placeholder="e.g. 1. Review last week's titration data · 2. Assign write-up sections · 3. Deadline check" value={agenda ?? ''} onChange={(event) => setAgenda(event.target.value)} />
+                <button type="button" disabled={busy} className="mini-button mt-1" onClick={() => void run(() => cgm.updateGroup(groupId, { agenda: agenda ?? '' }), 'Agenda saved.')}>Save agenda</button>
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-aob">AOB / other business (this sheet only)</label>
+                <textarea id="cgm-aob" className={`${inputClass} mt-1 min-h-12`} placeholder="Anything else to appear under AOB on this printout…" value={sheetAob} onChange={(event) => setSheetAob(event.target.value)} />
+              </div>
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPng(sheet); }}>Download PNG</button>
+                <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) downloadGroupSheetPdf(sheet); }}>Download PDF</button>
+                <button type="button" disabled={busy} className="mini-button" onClick={() => { const sheet = buildSheet(); if (sheet) printGroupSheet(sheet); }}>Print</button>
+              </div>
+            </div>
+          )}
           <ul className="mt-3 space-y-1.5">
             {detail.members.map((row: any) => {
               const roles = rolesOf(row.roles);

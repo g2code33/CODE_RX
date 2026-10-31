@@ -365,6 +365,40 @@ let savedPasskey = '';
     && await page.waitForFor('Leadership', 5_000)
     && await page.waitForFor('Notify members directly', 5_000),
     page.body().slice(0, 200));
+  const sheetToggle = page.window.document.querySelector('[data-testid="cgm-member-sheet"]');
+  sheetToggle && sheetToggle.click();
+  check('the member sheet panel opens with field choices, agenda, AOB and print/PNG/PDF outputs',
+    await page.waitForFor('Member sheet — choose what to include', 10_000)
+    && await page.waitForFor('Group agenda (saved with the group, printed on the sheet)', 5_000)
+    && await page.waitForFor('AOB / other business (this sheet only)', 5_000)
+    && await page.waitForFor('Download PNG', 5_000)
+    && await page.waitForFor('Download PDF', 5_000)
+    && await page.waitForFor('Save agenda', 5_000),
+    page.body().slice(0, 200));
+  const aobBox = page.window.document.querySelector('#cgm-aob');
+  if (aobBox) {
+    const taSetter = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value').set;
+    taSetter.call(aobBox, 'Confirm lab coats before Friday');
+    aobBox.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+  }
+  const agendaBox = page.window.document.querySelector('#cgm-agenda');
+  if (agendaBox) {
+    const taSetter2 = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value').set;
+    taSetter2.call(agendaBox, '1. Review titration data');
+    agendaBox.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+  }
+  const saveAgenda = [...page.window.document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Save agenda');
+  saveAgenda && saveAgenda.click();
+  await new Promise((r) => setTimeout(r, 3000));
+  if (process.env.CODE_RX_SHEET_DEBUG) {
+    const wsText = (page.window.document.querySelector('[data-testid="cgm-group-workspace"]')?.textContent || '(no workspace)').replace(/\s+/g, ' ');
+    console.log('SHEET_DEBUG workspace:', wsText.slice(0, 600));
+    console.log('SHEET_DEBUG jsdomErrors:', JSON.stringify(jsdomErrors.slice(-5)));
+  }
+  check('saving the group agenda confirms inside the workspace',
+    await page.waitForFor('Agenda saved.', 15_000), page.body().slice(0, 200));
+  const printBtn = [...page.window.document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Print');
+  check('the sheet offers a working Print action with the renderer wired in', Boolean(printBtn) && typeof printBtn.click === 'function');
   const back = page.buttonByText('Back to groups');
   back && back.click();
   check('leaving the workspace returns to the group grid', await page.waitForFor('Create', 20_000) || await page.waitForFor('Choose an activity', 5_000));

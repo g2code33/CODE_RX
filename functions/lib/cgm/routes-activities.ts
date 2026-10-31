@@ -1081,8 +1081,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT g.*, (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
        FROM cgm_groups g WHERE g.id = ?`
     ).bind(groupId)))[0];
+    // Sensitive contact columns ride only for viewers holding the
+    // view-sensitive permission — the same rule the roster and reports use.
+    const canSeeSensitive = Boolean(guard.context.permissions?.has('view_sensitive_profiles'));
     const members = await asRows<any>(c.env.DB.prepare(
-      `SELECT s.id, s.full_name, s.index_number, ga.id AS assignment_id, ga.assigned_via,
+      `SELECT s.id, s.full_name, s.index_number${canSeeSensitive ? ', s.phone, s.email, s.gender' : ''}, ga.id AS assignment_id, ga.assigned_via,
               (SELECT GROUP_CONCAT(l.role || ':' || l.id) FROM cgm_leadership_appointments l
                WHERE l.group_id = ? AND l.student_id = s.id AND l.status = 'active') AS roles
        FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id
@@ -1126,9 +1129,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       data: {
         group: {
           id: Number(groupRow.id), name: groupRow.name || `Group ${groupRow.position}`, position: Number(groupRow.position),
-          topic: groupRow.topic || '', capacity: groupRow.capacity === null || groupRow.capacity === undefined ? null : Number(groupRow.capacity),
+          topic: groupRow.topic || '', agenda: groupRow.agenda || '', capacity: groupRow.capacity === null || groupRow.capacity === undefined ? null : Number(groupRow.capacity),
           size: Number(groupRow.size), status: groupRow.status,
         },
+        viewer: { canSeeSensitive },
         activity: activity ? {
           id: Number(activity.id), name: activity.name, status: activity.status,
           method: config?.method, className: activity.class_name,
@@ -1155,6 +1159,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const topic = cleanOrNull(body.topic, 200);
       updates.push('topic = ?');
       values.push(topic);
+    }
+    if (body.agenda !== undefined) {
+      const agenda = cleanOrNull(body.agenda, 2000);
+      updates.push('agenda = ?');
+      values.push(agenda);
     }
     if (body.capacity !== undefined) {
       const capacity = body.capacity === null ? null : Math.max(1, Math.min(200, Math.floor(Number(body.capacity))));
