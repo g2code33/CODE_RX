@@ -84,10 +84,17 @@ async function apiCall<T = any>(endpoint: string, options: RequestInit = {}): Pr
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
   let response: Response;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
   try {
-    response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
-  } catch {
+    response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers, signal: options.signal ?? controller.signal });
+  } catch (failure: any) {
+    if (failure?.name === 'AbortError') {
+      throw new ApiError('The server took too long to answer. Check your connection and try again.', 0);
+    }
     throw new ApiError('Cannot reach the server. Is the API running?', 0);
+  } finally {
+    clearTimeout(timer);
   }
 
   let data: any = null;

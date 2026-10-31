@@ -227,6 +227,10 @@ const pdfWriter = src('functions/lib/cgm/pdf.ts');
 // Offline & connection state (spec §38)
 check('the connection banner exists with online/offline states and a status role',
   /ConnectionBanner/.test(banner) && /role="status"/.test(banner) && /offline/i.test(banner));
+check('every module request carries an abort deadline — a dead network shows an error, never an eternal spinner',
+  /cgmFetch/.test(client) && /AbortController/.test(client) && /CGM_TIMEOUT_MS = 20_000/.test(client)
+  && /The server took too long to answer/.test(client)
+  && !/await fetch\(`\$\{API_BASE\}\$\{endpoint\}`/.test(client));
 check('every class & group shell renders the connection banner',
   /<ConnectionBanner \/>/.test(workspace) && /<ConnectionBanner \/>/.test(studentPortal) && /<ConnectionBanner \/>/.test(phantom));
 check('mutating calls are guarded against duplicate submissions (in-flight lock → 409)',

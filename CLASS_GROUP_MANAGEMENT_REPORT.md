@@ -40,7 +40,7 @@ test suites — nothing is aspirational.**
 | Calendar | central student calendar: Monday-first month grid + per-day details + agenda, filterable by type, tz-aware |
 | Reports | roster / activities overview / assignments / movements / leadership / elections / turnout / attendance / pending / organizer-actions in **CSV, Excel (xlsx) and PDF** (dependency-free PDF 1.4 writer); sensitive columns stripped without `view_sensitive_profiles`; **students download their own records** (attendance, group history with removals, leadership history) as CSV |
 | Privacy (§35) | per-class `studentVisibleFields` **enforced server-side** (privacy-first default: names only); per-activity `contactVisibility` scopes phone/email to group or class; identity fields (index number, university ID, gender) are a hard floor — never visible to classmates at any setting; roster/report stripping for the sensitive permission; nothing private leaks through invitation pages or logs |
-| Offline (§38) | connection banner in all three shells (online/offline/reconnecting, `role="status"`); duplicate-submission guard on every mutating call (in-flight lock → 409); failed fetches raise real offline errors — offline approvals/votes are never faked |
+| Offline (§38) | connection banner in all three shells (online/offline/reconnecting, `role="status"`); duplicate-submission guard on every mutating call (in-flight lock → 409); failed fetches raise real offline errors — offline approvals/votes are never faked; **every request carries a 20 s abort deadline** (60 s for uploads/downloads) — a wedged network or tab surfaces as "The server took too long to answer", releases the guard and lets the user retry, instead of an eternal spinner |
 | PHANTOM oversight (§30) | applications, class approvals (**including drafts: PHANTOM can submit-&-approve or reject an unsubmitted draft, and approve a previously rejected class**), sensitive changes, registration-approval delegations (capped, usage-counted, revocable, surfaced in the organizer's status), organizer activity, audit browser, disputes, module flag, **module-wide policy console** — all server-enforced |
 | Module policies (§30) | **Module settings console**: PHANTOM decides per process — organizer applications, class creation, student registration, membership requests, profile changes — between **approval required / automatic / closed** (profile changes: approval/automatic). Enforced server-side on every entry route; missing/invalid rows fall back to the spec default (approval); automatic decisions reuse the exact approval-path writes, are labelled "Policy (automatic)" and audited (`cgm.module.policy`, `cgm.*.auto_approved`, `cgm.profile_change.auto_applied`); closed modes refuse **before** any row is written; flipping a mode never touches already-queued requests |
 | Invitation continuation | an open invitation survives sign-in and registration: class banner on the auth screen, class code prefilled (entry password still required), automatic claim after authentication, machine-readable states (`joined`/`requested`/`member`), dismissal + sign-out + expiry clear the context; general codes ride a 10-minute sessionStorage continuation, individual tokens never touch storage |
@@ -135,7 +135,7 @@ the three test harnesses. **148 API routes** (75 activities/groups/elections/ann
 | Suite | Command | Result |
 |---|---|---|
 | Module API (30 sections) | `npm run test:cgm` | **579/579** |
-| Module UI (markup-level, 18 sections) | `npm run test:cgm-ui` | **225/225** |
+| Module UI (markup-level, 18 sections) | `npm run test:cgm-ui` | **226/226** |
 | Browser journeys (jsdom + wrangler pages dev, 25 checks) | `npm run test:cgm-browser` | **25/25** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
@@ -256,6 +256,6 @@ src/lib/cgm.ts                         # typed client, duplicate guard, offline 
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # PhantomClasses (oversight), ConnectionBanner
 scripts/cgm-tests.mjs                  # 579 API-level checks, 30 sections
-scripts/cgm-ui-tests.mjs               # 225 markup-level checks, 18 sections
+scripts/cgm-ui-tests.mjs               # 226 markup-level checks, 18 sections
 scripts/cgm-browser-check.mjs          # 25 jsdom browser journeys vs wrangler dev
 ```

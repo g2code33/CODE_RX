@@ -80,6 +80,27 @@ export class CgmError extends Error {
 // in flight, a second identical call is refused instead of silently firing twice.
 const inFlight = new Set<string>();
 
+// A request that never answers must never wedge the UI: every call carries
+// an abort deadline so a dead socket (or a wedged browser tab) surfaces as a
+// readable error and releases the duplicate guard instead of spinning.
+const CGM_TIMEOUT_MS = 20_000;
+const CGM_DOWNLOAD_TIMEOUT_MS = 60_000;
+
+async function cgmFetch(url: string, init: RequestInit, timeoutMs: number = CGM_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (failure: any) {
+    if (failure?.name === 'AbortError') {
+      throw new CgmError('The server took too long to answer. Check your connection and try again.', 0, 'timeout');
+    }
+    throw failure;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function guardDuplicate(method: string, endpoint: string): () => void {
   if (method === 'GET') return () => undefined;
   const key = `${method} ${endpoint}`;
@@ -91,22 +112,23 @@ function guardDuplicate(method: string, endpoint: string): () => void {
 async function memberCall<T = any>(endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
   const method = options.method || 'GET';
   const release = guardDuplicate(method, endpoint);
-  const { getToken } = await import('./cloudflare');
   try {
+    const { getToken } = await import('./cloudflare');
     const headers = new Headers({ Accept: 'application/json' });
     const token = getToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
     let response: Response;
     try {
-      response = await fetch(`${API_BASE}${endpoint}`, {
+      response = await cgmFetch(`${API_BASE}${endpoint}`, {
         method,
         headers,
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         credentials: 'omit',
         cache: 'no-store',
       });
-    } catch {
+    } catch (failure: any) {
+      if (failure instanceof CgmError) throw failure;
       throw new CgmError('We could not reach Code Rx Society. Check your connection and try again.', 0, 'offline');
     }
     let json: any = null;
@@ -129,14 +151,15 @@ async function studentCall<T = any>(endpoint: string, options: { method?: string
   if (options.body !== undefined) headers.set('Content-Type', 'application/json');
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${endpoint}`, {
+    response = await cgmFetch(`${API_BASE}${endpoint}`, {
       method: options.method || 'GET',
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       credentials: 'omit',
       cache: 'no-store',
     });
-  } catch {
+  } catch (failure: any) {
+    if (failure instanceof CgmError) throw failure;
     throw new CgmError('We could not reach Code Rx Society. Check your connection and try again.', 0, 'offline');
   }
   let json: any = null;
@@ -161,8 +184,9 @@ async function memberFormCall<T = any>(endpoint: string, form: FormData): Promis
     if (token) headers.set('Authorization', `Bearer ${token}`);
     let response: Response;
     try {
-      response = await fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers, body: form, credentials: 'omit', cache: 'no-store' });
-    } catch {
+      response = await cgmFetch(`${API_BASE}${endpoint}`, { method: 'POST', headers, body: form, credentials: 'omit', cache: 'no-store' }, CGM_DOWNLOAD_TIMEOUT_MS);
+    } catch (failure: any) {
+      if (failure instanceof CgmError) throw failure;
       throw new CgmError('We could not reach Code Rx Society. Check your connection and try again.', 0, 'offline');
     }
     let json: any = null;
@@ -180,7 +204,8 @@ export async function downloadReport(classId: number, kind: string, format: 'csv
   const headers = new Headers({ Accept: 'text/csv' });
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${API_BASE}/api/cgm/classes/${classId}/reports/${kind}?format=${format}`, { headers, credentials: 'omit' });
+  const response = await cgmFetch(`${API_BASE}/api/cgm/classes/${classId}/reports/${kind}?format=${format}`, { headers, credentials: 'omit' }, CGM_DOWNLOAD_TIMEOUT_MS)
+    .catch((failure: any) => { throw failure instanceof CgmError ? failure : new CgmError('The report could not be generated.', 0); });
   if (!response.ok) throw new CgmError('The report could not be generated.', response.status);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
@@ -202,9 +227,9 @@ export async function previewRosterFile(classId: number, file: File) {
   const headers = new Headers();
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${API_BASE}/api/cgm/classes/${classId}/roster/preview`, {
+  const response = await cgmFetch(`${API_BASE}/api/cgm/classes/${classId}/roster/preview`, {
     method: 'POST', headers, body: form, credentials: 'omit',
-  });
+  }, CGM_DOWNLOAD_TIMEOUT_MS);
   const json = await response.json().catch(() => null);
   if (!response.ok) throw new CgmError(json?.error || 'The file could not be read.', response.status);
   return json?.data ?? json;
@@ -225,9 +250,10 @@ export async function importRosterFile(
   const headers = new Headers();
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(
+  const response = await cgmFetch(
     `${API_BASE}/api/cgm/classes/${classId}/roster/import${preview ? '?preview=1' : ''}`,
     { method: 'POST', headers, body: form, credentials: 'omit' },
+    CGM_DOWNLOAD_TIMEOUT_MS,
   );
   const json = await response.json().catch(() => null);
   if (!response.ok) {
@@ -523,7 +549,7 @@ export async function downloadMyRecords() {
   const headers = new Headers({ Accept: 'text/csv' });
   const session = studentSession.read();
   if (session?.token) headers.set(STUDENT_SESSION_HEADER, session.token);
-  const response = await fetch(`${API_BASE}/api/cgm/student/records/export`, { headers, credentials: 'omit' });
+  const response = await cgmFetch(`${API_BASE}/api/cgm/student/records/export`, { headers, credentials: 'omit' }, CGM_DOWNLOAD_TIMEOUT_MS);
   if (!response.ok) throw new CgmError('Your records could not be exported.', response.status);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
@@ -542,7 +568,7 @@ export async function downloadRosterTemplate(format: 'csv' | 'xlsx' | 'json' = '
   const headers = new Headers({ Accept: '*/*' });
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${API_BASE}/api/cgm/roster/template?format=${format}`, { headers, credentials: 'omit' });
+  const response = await cgmFetch(`${API_BASE}/api/cgm/roster/template?format=${format}`, { headers, credentials: 'omit' }, CGM_DOWNLOAD_TIMEOUT_MS);
   if (!response.ok) throw new CgmError('The sample template could not be generated.', response.status);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
