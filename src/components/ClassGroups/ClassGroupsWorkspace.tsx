@@ -1514,6 +1514,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   const [agenda, setAgenda] = useState<string | null>(null);
   const [sheetAob, setSheetAob] = useState('');
   const [sheetFields, setSheetFields] = useState({ indexNumber: true, role: true, phone: false, email: false, gender: false, via: false });
+  const [sheetIncludeTopic, setSheetIncludeTopic] = useState(true);
   // Blank columns/rows the organizer inserts at chosen positions before printing.
   const [blankCols, setBlankCols] = useState<Array<{ label: string; position: number }>>([]);
   const [blankColLabel, setBlankColLabel] = useState('');
@@ -1585,7 +1586,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
         count: Math.max(1, band.count || 1),
       }));
     return {
-      groupName: String(group.name), topic: group.topic || '', agenda: agenda ?? '', aob: sheetAob,
+      groupName: String(group.name), topic: group.topic || '', includeTopic: sheetIncludeTopic, aob: sheetAob,
       className: String(activity?.className || ''), activityName: String(activity?.name || ''), dateLabel,
       columns: sheetColumns, rows: sheetRows, blankRows: blankRowBands,
       footer: `Generated from CODE Rx on ${dateLabel} · ${activity?.className || ''} · ${activity?.name || ''} · ${group.name}`,
@@ -1712,10 +1713,11 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
         ) : <span className="text-slate-400">Phone / email / gender need the view-sensitive permission</span>}
         <label className="flex items-center gap-1.5"><input type="checkbox" checked={sheetFields.via} onChange={(event) => setSheetFields({ ...sheetFields, via: event.target.checked })} /> Joined via</label>
       </div>
-      <div>
-        <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-agenda">Group agenda (saved with the group, printed on the sheet)</label>
-        <textarea id="cgm-agenda" className={`${inputClass} mt-1 min-h-16`} placeholder="e.g. 1. Review last week's titration data · 2. Assign write-up sections · 3. Deadline check" value={agenda ?? ''} onChange={(event) => setAgenda(event.target.value)} />
-        <button type="button" disabled={busy} className="mini-button mt-1" onClick={() => void run(() => cgm.updateGroup(groupId, { agenda: agenda ?? '' }), 'Agenda saved.')}>Save agenda</button>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+          <input type="checkbox" data-testid="cgm-sheet-topic-toggle" checked={sheetIncludeTopic} onChange={(event) => setSheetIncludeTopic(event.target.checked)} />
+          Feature the group topic on the sheet{group.topic ? '' : ' (no topic set yet — save one in Settings or above)'}
+        </label>
       </div>
       <div>
         <label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-aob">AOB / other business (this sheet only)</label>

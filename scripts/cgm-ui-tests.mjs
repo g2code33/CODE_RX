@@ -650,10 +650,10 @@ check('the workspace manages THIS group only — dossier, sibling members for sw
   /groupDetail: \(groupId: number\)/.test(forcedClient) && /notifyGroup: \(groupId: number, body/.test(forcedClient)
   && /updateGroup: \(groupId: number, body/.test(forcedClient)
   && /createAnnouncement\(Number\(classId\), \{ title: announceTitle, body: announceBody, pinned: announcePinned, activityId: Number\(activityId\), groupId \}/.test(forcedWorkspace.replace(/\s+/g, ' ')));
-check('the member sheet prints/downloads customizable PNG/PDF with agenda + AOB and header/title',
+check('the member sheet prints/downloads customizable PNG/PDF with featured topic + AOB and header/title',
   /cgm-member-sheet/.test(forcedWorkspace) && /cgm-member-sheet-panel/.test(forcedWorkspace)
   && /downloadGroupSheetPng/.test(forcedWorkspace) && /downloadGroupSheetPdf/.test(forcedWorkspace)
-  && /printGroupSheet/.test(forcedWorkspace) && /Save agenda/.test(forcedWorkspace)
+  && /printGroupSheet/.test(forcedWorkspace) && /cgm-sheet-topic-toggle/.test(forcedWorkspace)
   && /AOB \/ other business/.test(forcedWorkspace)
   && /Joined via/.test(forcedWorkspace));
 check('the swap route enforces capacity-safe in-place exchange, gender-separate protection and audit',

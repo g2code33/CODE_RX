@@ -3517,11 +3517,12 @@ check('the capacity floor still guards the patch route (a 2+ member group cannot
 
 const wsSheet = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
 const sheetLib = readFileSync(path.join(ROOT, 'src/lib/groupSheet.ts'), 'utf8');
-check('the member sheet panel offers field customization, agenda, AOB and all three outputs',
-  /cgm-member-sheet-panel/.test(wsSheet) && /cgm-agenda/.test(wsSheet) && /cgm-aob/.test(wsSheet)
-  && /Save agenda/.test(wsSheet) && /Download PNG/.test(wsSheet) && /Download PDF/.test(wsSheet) && />Print</.test(wsSheet));
-check('the sheet renderer draws header, title+topic, agenda block, table and AOB for PNG, PDF and print',
-  /AGENDA/.test(sheetLib) && /AOB \/ OTHER BUSINESS/.test(sheetLib)
+check('the member sheet panel offers field customization, the topic toggle, AOB and all three outputs',
+  /cgm-member-sheet-panel/.test(wsSheet) && /cgm-sheet-topic-toggle/.test(wsSheet) && /cgm-aob/.test(wsSheet)
+  && /Download PNG/.test(wsSheet) && /Download PDF/.test(wsSheet) && />Print</.test(wsSheet));
+check('the sheet renderer draws header, title, featured GROUP TOPIC block (toggleable), table and AOB — agenda is gone from the sheet',
+  !/AGENDA/.test(sheetLib) && /GROUP TOPIC/.test(sheetLib) && /includeTopic/.test(sheetLib)
+  && /AOB \/ OTHER BUSINESS/.test(sheetLib)
   && /CODE Rx SOCIETY — Class & Group Management/.test(sheetLib)
   && /renderGroupSheetCanvas/.test(sheetLib) && /buildGroupSheetPdf/.test(sheetLib) && /printGroupSheet/.test(sheetLib));
 check('the PDF is a genuine multi-page document with the preamble on page one',

@@ -384,21 +384,31 @@ let savedPasskey = '';
   await page.waitForFor('Members (', 10_000);
   const sheetToggle = page.window.document.querySelector('[data-testid="cgm-member-sheet"]');
   sheetToggle && sheetToggle.click();
-  check('the member sheet panel opens with field choices, agenda, AOB and print/PNG/PDF outputs',
+  check('the member sheet panel opens with field choices, the topic toggle, AOB and print/PNG/PDF outputs',
     await page.waitForFor('Member sheet — choose what to include', 10_000)
-    && await page.waitForFor('Group agenda (saved with the group, printed on the sheet)', 5_000)
+    && await page.waitForFor('Feature the group topic on the sheet', 5_000)
     && await page.waitForFor('AOB / other business (this sheet only)', 5_000)
     && await page.waitForFor('Download PNG', 5_000)
-    && await page.waitForFor('Download PDF', 5_000)
-    && await page.waitForFor('Save agenda', 5_000),
+    && await page.waitForFor('Download PDF', 5_000),
     page.body().slice(0, 200));
+  const topicToggle = page.window.document.querySelector('[data-testid="cgm-sheet-topic-toggle"]');
+  check('the topic toggle defaults to ON', Boolean(topicToggle) && topicToggle.checked === true);
   const aobBox = page.window.document.querySelector('#cgm-aob');
   if (aobBox) {
     const taSetter = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value').set;
     taSetter.call(aobBox, 'Confirm lab coats before Friday');
     aobBox.dispatchEvent(new page.window.Event('input', { bubbles: true }));
   }
-  const agendaBox = page.window.document.querySelector('#cgm-agenda');
+  // The agenda editor lives in Settings now; the sheet no longer prints it.
+  const menuForSettings = page.window.document.querySelector('[data-testid="cgm-workspace-menu"]');
+  menuForSettings && menuForSettings.click();
+  await page.waitForFor('Workspace overview', 5_000);
+  const settingsJump = page.window.document.querySelector('[data-testid="cgm-section-jump-settings"]');
+  settingsJump && settingsJump.click();
+  check('the Settings section page opens from the drawer with the identity facts grid',
+    await page.waitForFor('Assignment method', 10_000) && await page.waitForFor('Capacity for THIS group', 5_000),
+    page.body().slice(0, 200));
+  const agendaBox = page.window.document.querySelector('#cgm-settings-agenda');
   if (agendaBox) {
     const taSetter2 = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value').set;
     taSetter2.call(agendaBox, '1. Review titration data');
@@ -406,14 +416,14 @@ let savedPasskey = '';
   }
   const saveAgenda = [...page.window.document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Save agenda');
   saveAgenda && saveAgenda.click();
-  await new Promise((r) => setTimeout(r, 3000));
-  if (process.env.CODE_RX_SHEET_DEBUG) {
-    const wsText = (page.window.document.querySelector('[data-testid="cgm-group-workspace"]')?.textContent || '(no workspace)').replace(/\s+/g, ' ');
-    console.log('SHEET_DEBUG workspace:', wsText.slice(0, 600));
-    console.log('SHEET_DEBUG jsdomErrors:', JSON.stringify(jsdomErrors.slice(-5)));
-  }
-  check('saving the group agenda confirms inside the workspace',
+  check('saving the group agenda from Settings confirms inside the workspace',
     await page.waitForFor('Agenda saved.', 15_000), page.body().slice(0, 200));
+  const menuForSheet = page.window.document.querySelector('[data-testid="cgm-workspace-menu"]');
+  menuForSheet && menuForSheet.click();
+  await page.waitForFor('Workspace overview', 5_000);
+  const sheetJump = page.window.document.querySelector('[data-testid="cgm-section-jump-sheet"]');
+  sheetJump && sheetJump.click();
+  await page.waitForFor('Member sheet — choose what to include', 10_000);
   const printBtn = [...page.window.document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Print');
   check('the sheet offers a working Print action with the renderer wired in', Boolean(printBtn) && typeof printBtn.click === 'function');
   const back = page.buttonByText('Back to groups');

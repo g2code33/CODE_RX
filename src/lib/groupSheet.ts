@@ -5,15 +5,17 @@
  *   • a downloadable PNG (canvas),  • a genuine multi-page PDF (built here,
  * Helvetica, A4 portrait, with the agenda + AOB preamble on page one),
  *   • a browser print of the same document.
- * The header (society · class · activity), the group title + topic, the
- * saved group AGENDA, the chosen member columns and an AOB block always
- * appear — the printout is a real working document for the group.
+ * The header (society · class · activity), the group title, the featured
+ * GROUP TOPIC block (organizer can toggle it off), the chosen member
+ * columns and an AOB block appear — the printout is a real working
+ * document for the group.
  */
 
 export interface GroupSheet {
   groupName: string;
   topic?: string;
-  agenda?: string;
+  /** Feature the group topic as a printed block (default: on). */
+  includeTopic?: boolean;
   aob?: string;
   className: string;
   activityName: string;
@@ -91,7 +93,8 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
   ctx.font = '16px system-ui, sans-serif';
   const measure = (text: string, font: string) => { ctx.font = font; return ctx.measureText(text).width; };
 
-  const agendaLines = sheet.agenda ? wrap(sheet.agenda, 108) : [];
+  const showTopic = sheet.includeTopic !== false && Boolean(sheet.topic);
+  const topicLines = showTopic ? wrap(sheet.topic || '', 108) : [];
   const aobLines = sheet.aob ? wrap(sheet.aob, 108) : [];
   const colWidth = (width - margin * 2) / Math.max(1, sheet.columns.length);
   const rowH = 40;
@@ -102,8 +105,7 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
   let y = 0;
   const headerH = 96;
   y += headerH + 40;                       // band + title area
-  y += sheet.topic ? 30 : 0;
-  y += agendaLines.length ? 52 + agendaLines.length * 24 + 14 : 0;
+  y += topicLines.length ? 52 + topicLines.length * 24 + 14 : 0;
   y += 46;                                  // table head
   y += tableRows.length * rowH;
   y += aobLines.length ? 52 + aobLines.length * 24 + 14 : 0;
@@ -137,25 +139,19 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
   g.fillText(`${sheet.rows.length} member(s)`, width - margin, cursor);
   g.textAlign = 'left';
   cursor += 14;
-  if (sheet.topic) {
-    g.fillStyle = EMERALD;
-    g.font = '600 17px system-ui, sans-serif';
-    g.fillText(`Topic: ${sheet.topic}`, margin, cursor + 16);
-    cursor += 30;
-  }
 
-  // Agenda block.
-  if (agendaLines.length) {
+  // Featured GROUP TOPIC block (toggleable — on by default).
+  if (topicLines.length) {
     cursor += 24;
     g.fillStyle = AMBER_SOFT;
-    g.fillRect(margin, cursor, width - margin * 2, 40 + agendaLines.length * 24);
+    g.fillRect(margin, cursor, width - margin * 2, 40 + topicLines.length * 24);
     g.fillStyle = '#92400e';
     g.font = '800 13px system-ui, sans-serif';
-    g.fillText('AGENDA', margin + 16, cursor + 24);
+    g.fillText('GROUP TOPIC', margin + 16, cursor + 24);
     g.fillStyle = INK;
     g.font = '15px system-ui, sans-serif';
-    agendaLines.forEach((line, index) => g.fillText(line, margin + 16, cursor + 46 + index * 24));
-    cursor += 40 + agendaLines.length * 24 + 14;
+    topicLines.forEach((line, index) => g.fillText(line, margin + 16, cursor + 46 + index * 24));
+    cursor += 40 + topicLines.length * 24 + 14;
   }
 
   // Table.
@@ -233,7 +229,8 @@ export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
   const usable = PDF_W - PDF_MARGIN * 2;
   const colWidth = usable / Math.max(1, sheet.columns.length);
   const colChars = Math.floor(colWidth / 4.8);
-  const agendaLines = sheet.agenda ? wrap(sheet.agenda, 92) : [];
+  const showTopic = sheet.includeTopic !== false && Boolean(sheet.topic);
+  const topicLines = showTopic ? wrap(sheet.topic || '', 92) : [];
   const aobLines = sheet.aob ? wrap(sheet.aob, 92) : [];
   const tableRows = buildRenderRows(sheet);
 
@@ -261,8 +258,6 @@ export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
   text(PDF_MARGIN, cursor, 17, true, pdfClip(sheet.groupName, 44));
   const countLabel = `${sheet.rows.length} member(s)`;
   text(PDF_W - PDF_MARGIN - countLabel.length * 4.6, cursor, 10, false, countLabel, 0.35);
-  cursor -= 18;
-  if (sheet.topic) { text(PDF_MARGIN, cursor, 10, true, pdfClip(`Topic: ${sheet.topic}`, 100), 0.2); cursor -= 16; }
   cursor -= 8;
 
   const block = (heading: string, body: string[], fill: string, headingColor: number) => {
@@ -274,7 +269,7 @@ export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
     body.forEach((line, index) => text(PDF_MARGIN + 10, cursor - 32 - index * 14, 9.5, false, line));
     cursor -= height + 14;
   };
-  block('AGENDA', agendaLines, '1 0.972 0.921', 0.09);
+  block('GROUP TOPIC', topicLines, '1 0.972 0.921', 0.09);
 
   // Table with page breaks + repeated header.
   const drawTableHead = () => {
@@ -344,7 +339,7 @@ export const downloadGroupSheetPdf = (sheet: GroupSheet): void => {
 // Print — the same document through a hidden iframe
 // ---------------------------------------------------------------------------
 export const printGroupSheet = (sheet: GroupSheet): void => {
-  const agendaRows = sheet.agenda ? wrap(sheet.agenda, 110) : [];
+  const showTopic = sheet.includeTopic !== false && Boolean(sheet.topic);
   const aobRows = sheet.aob ? wrap(sheet.aob, 110) : [];
   const tableRows = buildRenderRows(sheet);
   const escapeHtml = (value: string) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -374,8 +369,7 @@ export const printGroupSheet = (sheet: GroupSheet): void => {
 <div class="band"><h1>CODE Rx SOCIETY — Class &amp; Group Management</h1><p>${escapeHtml(sheet.className)} · ${escapeHtml(sheet.activityName)} · ${escapeHtml(sheet.dateLabel)}</p></div>
 <h2>${escapeHtml(sheet.groupName)}</h2>
 <p class="count">${sheet.rows.length} member(s)</p>
-${sheet.topic ? `<p class="topic">Topic: ${escapeHtml(sheet.topic)}</p>` : ''}
-${agendaRows.length ? `<div class="block"><h3>Agenda</h3><p>${escapeHtml(sheet.agenda)}</p></div>` : ''}
+${showTopic ? `<div class="block"><h3>Group topic</h3><p>${escapeHtml(sheet.topic)}</p></div>` : ''}
 <table><thead><tr>${sheet.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>
 <tbody>${tableRows.map((row) => row.blank
   ? `<tr class="blank">${sheet.columns.map(() => `<td class="fill"></td>`).join('')}</tr>`
