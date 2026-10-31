@@ -613,6 +613,11 @@ check('random mode shows ONLY the fair finisher — no place-all button that cou
   /cgm-create-empty-groups/.test(forcedWorkspace) === false
   && /data\.config\.method === 'automatic' && \(/.test(forcedWorkspace)
   && /the groups above already exist for the draw/.test(forcedWorkspace));
+check('students get a dedicated WhatsApp join page (QR, copy link, open chat, Join button) right after placement',
+  /cgm-student-whatsapp-page/.test(forcedPortal) && /cgm-student-join-whatsapp/.test(forcedPortal)
+  && /Copy link/.test(forcedPortal) && /Open chat/.test(forcedPortal)
+  && /setWaPage\(true\)/.test(forcedPortal) && /cgm-student-whatsapp-empty/.test(forcedPortal)
+  && /cgm-student-whatsapp-open-page/.test(forcedPortal));
 check('group naming is decided in the activity form: numbered / lettered / custom list',
   /cgm-act-naming/.test(forcedWorkspace) && /Numbered — Group 1, Group 2, Group 3…/.test(forcedWorkspace)
   && /Lettered — Group A, Group B, Group C…/.test(forcedWorkspace) && /cgm-act-names/.test(forcedWorkspace));

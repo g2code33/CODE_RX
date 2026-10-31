@@ -927,7 +927,7 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
 /** Draws a QR matrix as inline SVG and — in real browsers — exports a PNG
  * image stamped with the class name on top and the shared class entry under
  * the code, so one poster is all students need. */
-const QrBlock = ({ url, headerText, footerText, downloadName, downloadable, small }: {
+export const QrBlock = ({ url, headerText, footerText, downloadName, downloadable, small }: {
   url: string; headerText: string; footerText?: string; downloadName: string; downloadable?: boolean; small?: boolean;
 }) => {
   const [qr] = useState(() => { try { return encodeQr(url); } catch { return null; } });

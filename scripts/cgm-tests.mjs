@@ -3109,11 +3109,11 @@ section('33. Forced random method, organizer finish, direct member swaps');
 // -- Forced random: the organizer picks the method, students can only draw ----
 const forcedDraw = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
   name: 'Forced Draw Lab', type: 'practical',
-  config: { method: 'random', groupCount: 2, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  config: { method: 'random', groupCount: 2, capacity: 200, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
 }, amaToken);
 const forcedDrawId = forcedDraw.json?.data?.activityId ?? forcedDraw.json?.data?.activity?.id ?? forcedDraw.json?.data?.id;
 await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/lifecycle`, { action: 'open' }, amaToken);
-await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/groups`, { count: 2, capacity: 10 }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/groups`, { count: 2, capacity: 200 }, amaToken);
 const forcedConfig = JSON.parse(q1('SELECT config_json FROM cgm_activities WHERE id = ?', forcedDrawId)?.config_json || '{}');
 check("the 'random' assignment method is accepted and survives the config sanitizer", forcedConfig.method === 'random', `method=${forcedConfig.method}`);
 
@@ -3135,7 +3135,8 @@ const finishRun = await memberCall('POST', `/api/cgm/activities/${forcedDrawId}/
 check('the organizer can auto-assign the rest in random mode (students who never drew)',
   finishRun.status === 200 && Number(finishRun.json?.data?.placed) >= 1, `status ${finishRun.status} ${finishRun.text?.slice(0, 100)}`);
 check('after the organizer finish, both drawn and swept students sit in exactly one real group',
-  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id IN (?, ?) AND status = 'active'", forcedDrawId, forcedStudentId, lazyId).c === 2);
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id IN (?, ?) AND status = 'active'", forcedDrawId, forcedStudentId, lazyId).c === 2,
+  `forced=${JSON.stringify(q1("SELECT status FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ?", forcedDrawId, forcedStudentId))} lazy=${JSON.stringify(q1("SELECT status FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ?", forcedDrawId, lazyId))}`);
 
 // -- Direct swaps: organizer exchanges two members between their groups ------
 const swapLab = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
@@ -3567,6 +3568,35 @@ const wsSheetSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/Clas
 check('the member-sheet panel offers blank columns AND blank rows at chosen positions',
   /cgm-blank-col-add/.test(wsSheetSrc) && /cgm-blank-row-add/.test(wsSheetSrc)
   && /Blank column position/.test(wsSheetSrc) && /Blank row count/.test(wsSheetSrc));
+
+// -- The student's WhatsApp join page: the dashboard payload feeds it ---------
+// Hermetic fixture (later sections reshuffle earlier ones' members): one
+// automatic activity, one placed member with a live link, one unassigned peer.
+const joinActivity = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Join Page Lab', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 2, capacity: 5, genderRule: 'none', overflow: 'waitlist', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const joinActivityId = joinActivity.json?.data?.activityId ?? joinActivity.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${joinActivityId}/lifecycle`, { action: 'publish' }, amaToken);
+const joinGroups = ((await memberCall('GET', `/api/cgm/activities/${joinActivityId}`, undefined, amaToken)).json?.data?.groups || []);
+const joinGroupId = Number(joinGroups[0].id);
+const joinMember = await freshFmtRosterStudent(43, 'Join Nana');
+const joinMemberId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', joinMember.indexNumber.toLowerCase())?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${joinActivityId}/assign-student`, { studentId: joinMemberId, groupId: joinGroupId }, amaToken);
+await memberCall('POST', `/api/cgm/groups/${joinGroupId}/whatsapp`, { url: 'https://chat.whatsapp.com/JoinPageTest1' }, amaToken);
+const joinBystander = await freshFmtRosterStudent(44, 'Join Kwesi');
+const memberDash = await studentCall('GET', `/api/cgm/student/activities/${joinActivityId}`, undefined, joinMember.session);
+check('a group member\u2019s dashboard carries the active WhatsApp link for the join page',
+  memberDash.json?.data?.whatsapp?.url === 'https://chat.whatsapp.com/JoinPageTest1',
+  JSON.stringify(memberDash.json?.data?.whatsapp ?? null));
+const outsiderDash = await studentCall('GET', `/api/cgm/student/activities/${joinActivityId}`, undefined, joinBystander.session);
+check('a student without a group in that activity gets NO WhatsApp link',
+  outsiderDash.json?.data?.whatsapp == null, JSON.stringify(outsiderDash.json?.data?.whatsapp ?? null));
+const studentPortalSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/StudentPortal.tsx'), 'utf8');
+check('the student join page shows QR, copy link, open chat and the big Join button right after placement',
+  /cgm-student-whatsapp-page/.test(studentPortalSrc) && /cgm-student-join-whatsapp/.test(studentPortalSrc)
+  && /Copy link/.test(studentPortalSrc) && /Open chat/.test(studentPortalSrc)
+  && /setWaPage\(true\)/.test(studentPortalSrc) && /cgm-student-whatsapp-empty/.test(studentPortalSrc));
 
 // ---------------------------------------------------------------------------
 

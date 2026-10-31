@@ -6,6 +6,7 @@ import {
 import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
 import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
+import { QrBlock } from './ClassGroupsWorkspace';
 
 /**
  * CODE Rx — Student Portal.
@@ -786,6 +787,11 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
   const [reveal, setReveal] = useState<null | { groups: Array<{ id: number; name: string }>; winnerId: number; groupName: string }>(null);
   const [drawBusy, setDrawBusy] = useState(false);
   const [drawError, setDrawError] = useState<string | null>(null);
+  // The WhatsApp join page: the moment a student HAS a group — chosen,
+  // auto-placed, or drawn — a full page offers the QR, copy link, open chat
+  // and the one-tap Join WhatsApp group button.
+  const [waPage, setWaPage] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => { setActivityId(openActivityId); }, [openActivityId]);
 
@@ -859,6 +865,87 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
   // students cannot pick or auto-place; the fair server draw is the only way in.
   const forcedRandom = data.activity.config?.method === 'random';
 
+  const copyWhatsappLink = async () => {
+    const url = String(data.whatsapp?.url || '');
+    if (!url) return;
+    try { await navigator.clipboard.writeText(url); }
+    catch {
+      const input = window.document.createElement('textarea');
+      input.value = url;
+      window.document.body.appendChild(input);
+      input.select();
+      try { window.document.execCommand('copy'); } catch { /* clipboard blocked */ }
+      input.remove();
+    }
+    setLinkCopied(true);
+    window.setTimeout(() => setLinkCopied(false), 2000);
+  };
+
+  // The dedicated JOIN page — shown immediately after the student gets the
+  // group (choice, auto-placement or the random draw) and from the group card.
+  if (myGroup && waPage) {
+    const groupName = String(myGroup.group_name || `Group ${myGroup.position}`);
+    return (
+      <div className="space-y-5">
+        <button type="button" className="mini-button" onClick={() => setWaPage(false)}><ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Back to my group</button>
+        <div className={`${card} mx-auto max-w-md border-emerald-200 text-center`} data-testid="cgm-student-whatsapp-page">
+          <p className={label}>{data.class.name} · {data.activity.name}</p>
+          <h2 className="mt-1 text-xl font-black text-emerald-900">{groupName}</h2>
+          <p className="mt-1 text-xs font-bold uppercase tracking-wider text-emerald-600">You’re in — join the group’s WhatsApp</p>
+          {data.whatsapp ? (
+            <>
+              <div className="mt-4 flex justify-center">
+                <QrBlock
+                  url={String(data.whatsapp.url)}
+                  headerText={groupName}
+                  footerText="WhatsApp group invite"
+                  downloadName={`${groupName.replace(/[^A-Za-z0-9-]+/g, '-').toLowerCase()}-whatsapp-qr.png`}
+                  downloadable
+                />
+              </div>
+              <p className="mt-3 break-all rounded-xl bg-slate-50 px-3 py-2 text-[11px] font-semibold text-slate-500">{String(data.whatsapp.url)}</p>
+              <div className="mt-3 flex flex-wrap justify-center gap-2">
+                <button type="button" className="mini-button" onClick={() => void copyWhatsappLink()}>{linkCopied ? 'Copied ✓' : 'Copy link'}</button>
+                <a className="mini-button" href={String(data.whatsapp.url)} target="_blank" rel="noopener noreferrer">Open chat ↗</a>
+              </div>
+              <button
+                type="button"
+                data-testid="cgm-student-join-whatsapp"
+                disabled={busy}
+                onClick={() => void runAction(async () => {
+                  const result = await cgmStudent.whatsappClick(Number(data.whatsapp.id));
+                  window.open(String((result as any)?.url || data.whatsapp.url), '_blank', 'noopener');
+                  return 'Opening WhatsApp…';
+                })}
+                className="cgm-primary-button mt-4 w-full"
+              >
+                Join WhatsApp group
+              </button>
+              <p className="mt-2 text-[10px] font-medium text-slate-400">Opening the link records your click — your organizer can see the count, but only real attendance proves you joined.</p>
+            </>
+          ) : (
+            <div className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700" data-testid="cgm-student-whatsapp-empty">
+              Your organizer has not added the WhatsApp link for this group yet. This page will show the QR code and the join button the moment the link is saved.
+            </div>
+          )}
+          <div className="mt-4 border-t border-slate-100 pt-3 text-left">
+            <p className={label}>Your group mates</p>
+            <div className="mt-2 space-y-1.5">
+              {(data.members || []).filter((member: any) => Number(member.group_id) === Number(myGroup.group_id)).map((member: any) => (
+                <div key={member.student_id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                  <span className="font-bold text-slate-700">
+                    {member.full_name}{Number(member.student_id) === Number(me.student.id) ? ' (you)' : ''}
+                  </span>
+                  {member.leader_role && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black uppercase text-white">{member.leader_role}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <button type="button" className="mini-button" onClick={() => onOpenActivity(null)}><ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Activities</button>
@@ -890,18 +977,17 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
             ))}
           </div>
           {data.whatsapp && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void runAction(async () => {
-                const result = await cgmStudent.whatsappClick(Number(data.whatsapp.id));
-                window.open(String((result as any)?.url || data.whatsapp.url), '_blank', 'noopener');
-                return undefined;
-              })}
-              className="cgm-primary-button mt-4"
-            >
-              Join WhatsApp group
-            </button>
+            <>
+              <button
+                type="button"
+                data-testid="cgm-student-whatsapp-open-page"
+                onClick={() => setWaPage(true)}
+                className="cgm-primary-button mt-4"
+              >
+                Join WhatsApp group
+              </button>
+              <p className="mt-1 text-[10px] font-medium text-slate-400">Opens your group's WhatsApp page — QR code, copy link and one-tap join.</p>
+            </>
           )}
         </div>
       ) : data.waitlisted ? (
@@ -922,6 +1008,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
                 disabled={busy || group.full}
                 onClick={() => void runAction(async () => {
                   await cgmStudent.selfAssign(Number(data.activity.id), Number(group.id));
+                  setWaPage(true);
                   return 'You joined the group.';
                 })}
                 className={`flex items-center justify-between rounded-xl border px-4 py-3 text-left text-sm transition ${group.full ? 'border-slate-100 opacity-50' : 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-300'}`}
@@ -932,7 +1019,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
             ))}
           </div>}
           <div className="mt-3 flex flex-wrap gap-2">
-            {!forcedRandom && <button type="button" disabled={busy} onClick={() => void runAction(async () => { await cgmStudent.selfAssign(Number(data.activity.id)); return 'You have been placed in a group.'; })} className="cgm-primary-button">
+            {!forcedRandom && <button type="button" disabled={busy} onClick={() => void runAction(async () => { await cgmStudent.selfAssign(Number(data.activity.id)); setWaPage(true); return 'You have been placed in a group.'; })} className="cgm-primary-button">
               Assign me automatically
             </button>}
             <button
@@ -985,7 +1072,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
           groups={reveal.groups}
           winnerId={reveal.winnerId}
           activityName={data?.activity?.name}
-          onClose={() => { setReveal(null); if (activityId) void load(activityId); onChanged(); }}
+          onClose={() => { setReveal(null); if (activityId) void load(activityId); onChanged(); setWaPage(true); }}
         />
       )}
     </div>
