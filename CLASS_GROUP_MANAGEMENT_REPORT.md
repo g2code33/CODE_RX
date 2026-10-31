@@ -319,6 +319,13 @@ revoked; suspended classes still accepted student actions.
    `node scripts/verify-invitation-key.mjs '{"v1":"…"}'` prints VALID or the
    exact failed rule and never echoes the key. Secrets bind at deploy time —
    set the secret, THEN deploy/push.
+   **DONE + verified in production (2026-10-31):** an INDIVIDUAL invitation
+   was created successfully on `coderxsociety.pages.dev` (organizer → Class
+   invitations → Individual → Create): the seal accepted a `{"v1": …}` key,
+   the token link `#class-invite/<64-hex>` was issued, stored SEALED and
+   re-displayed with its QR — creation, storage and the decrypt round-trip
+   all work against the live production secret. This checklist item is
+   closed; only live email delivery remains outside sandbox verification.
 4. **R2:** the existing `BUCKET` binding is reused; no new bucket.
 5. **EmailJS:** set `EMAILJS_TEMPLATE_ID_GENERAL` (plus the existing
    `EMAILJS_*` service keys) for organizer-verification and notification
@@ -355,8 +362,10 @@ revoked; suspended classes still accepted student actions.
    dev `CGM_INVITATION_KEYS` value from `.dev.vars`; the random-draw reveal
    ANIMATION itself was reviewed at the markup/CSS level and exercised only
    through the local preview — no production student has drawn a group yet; **NOT verified in
-   production from this branch** = the Cloudflare Pages deploy of this work,
-   the production `CGM_INVITATION_KEYS` secret, and live email delivery.
+   production from this branch** = the Cloudflare Pages deploy of this work
+   (the maintainer pulls and deploys; individual invitations were created
+   successfully on production on 2026-10-31, which also proves the
+   production `CGM_INVITATION_KEYS` secret), and live email delivery.
    **Deploy order matters:** set the production `CGM_INVITATION_KEYS` secret
    BEFORE pulling/deploying this branch, otherwise individual-invitation
    creation and regeneration answer 503 until it exists (everything else,
