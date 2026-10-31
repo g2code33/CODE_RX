@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, GraduationCap,
+  ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, Compass, GraduationCap,
   LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
@@ -478,7 +478,13 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
 
         <main className="cgm-main">
           {loading && <p className="text-sm font-semibold text-slate-400">Loading your portal…</p>}
-          {!loading && section === 'home' && <StudentHome me={me} onOpenClass={(id) => { setOpenClassId(id); setSection('classes'); }} />}
+          {!loading && section === 'home' && (
+            <StudentHome
+              me={me}
+              onOpenClass={(id) => { setOpenClassId(id); setSection('classes'); }}
+              onOpenGroups={() => { setOpenActivityId(null); setSection('groups'); }}
+            />
+          )}
           {!loading && section === 'classes' && (openClassId
             ? <ClassDetailView classId={openClassId} onBack={() => setOpenClassId(null)} onOpenActivity={(id) => { setOpenActivityId(id); setSection('groups'); }} me={me} onGenderSet={refreshMe} />
             : <MyClassesView me={me} onOpen={(id) => setOpenClassId(id)} onRefresh={refreshMe} inviteCode={inviteCode} />)}
@@ -510,7 +516,59 @@ const Empty = ({ icon: Icon, title, text }: { icon: any; title: string; text: st
   </div>
 );
 
-const StudentHome = ({ me, onOpenClass }: { me: any; onOpenClass: (id: number) => void }) => {
+/** Every class door gets its OWN stable colour + monogram, so students
+ * recognise where each button leads at a glance — navigation by sight. */
+const CLASS_ACCENTS = [
+  { tile: 'bg-emerald-600', bar: 'bg-emerald-500', chip: 'bg-emerald-50 text-emerald-700', ring: 'hover:border-emerald-300' },
+  { tile: 'bg-sky-600', bar: 'bg-sky-500', chip: 'bg-sky-50 text-sky-700', ring: 'hover:border-sky-300' },
+  { tile: 'bg-violet-600', bar: 'bg-violet-500', chip: 'bg-violet-50 text-violet-700', ring: 'hover:border-violet-300' },
+  { tile: 'bg-amber-500', bar: 'bg-amber-400', chip: 'bg-amber-50 text-amber-700', ring: 'hover:border-amber-300' },
+  { tile: 'bg-rose-600', bar: 'bg-rose-500', chip: 'bg-rose-50 text-rose-700', ring: 'hover:border-rose-300' },
+  { tile: 'bg-teal-600', bar: 'bg-teal-500', chip: 'bg-teal-50 text-teal-700', ring: 'hover:border-teal-300' },
+];
+const accentForClass = (code: string) => CLASS_ACCENTS[
+  [...String(code || '?')].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % CLASS_ACCENTS.length
+];
+const monogramOf = (name: string) => (
+  String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((word) => word[0]).join('').toUpperCase() || '?'
+);
+
+const ClassNavCard = ({ entry, onOpen, detail }: { entry: any; onOpen: () => void; detail?: string }) => {
+  const accent = accentForClass(entry.code);
+  return (
+    <button
+      type="button"
+      data-testid="cgm-class-nav-card"
+      onClick={onOpen}
+      aria-label={`Open ${entry.name}`}
+      className={`${card} group relative overflow-hidden text-left transition hover:-translate-y-0.5 hover:shadow-lg ${accent.ring}`}
+    >
+      <span className={`absolute inset-y-0 left-0 w-1.5 ${accent.bar}`} aria-hidden="true" />
+      <div className="flex items-start gap-3 pl-2.5">
+        <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-sm font-black text-white ${accent.tile}`} aria-hidden="true">
+          {monogramOf(entry.name)}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center justify-between gap-2">
+            <span className="truncate font-black text-slate-900">{entry.name}</span>
+            <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-emerald-500" />
+          </span>
+          <span className="mt-0.5 block truncate text-xs font-semibold text-slate-500">
+            {entry.code} · {detail || entry.institution || '—'}
+          </span>
+          <span className="mt-2 flex items-center justify-between gap-2">
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${entry.member_status === 'active' ? accent.chip : 'bg-red-50 text-red-600'}`}>
+              {entry.member_status === 'active' ? 'Active member' : 'Suspended'}
+            </span>
+            <span className="text-[10px] font-black uppercase tracking-wider text-emerald-600">Open →</span>
+          </span>
+        </span>
+      </div>
+    </button>
+  );
+};
+
+const StudentHome = ({ me, onOpenClass, onOpenGroups }: { me: any; onOpenClass: (id: number) => void; onOpenGroups: () => void }) => {
   const classes: any[] = me?.classes || [];
   const pending = [...(me?.pendingMemberships || []), ...(me?.pendingRegistrations || [])];
   return (
@@ -529,16 +587,24 @@ const StudentHome = ({ me, onOpenClass }: { me: any; onOpenClass: (id: number) =
       </div>
 
       {classes.length > 0 && (
+        <button
+          type="button"
+          data-testid="cgm-continue-groups"
+          onClick={onOpenGroups}
+          className="flex w-full items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-500 px-5 py-4 text-left text-white shadow-lg shadow-emerald-600/25 transition hover:from-emerald-500 hover:to-teal-400"
+        >
+          <span>
+            <span className="block text-sm font-black uppercase tracking-wider">Continue to choose group</span>
+            <span className="mt-0.5 block text-[11px] font-semibold text-emerald-50">Pick your group straight away — open My Groups.</span>
+          </span>
+          <Compass className="h-6 w-6 shrink-0" aria-hidden="true" />
+        </button>
+      )}
+
+      {classes.length > 0 && (
         <div className="grid gap-3 sm:grid-cols-2">
           {classes.map((entry) => (
-            <button key={entry.class_id} type="button" onClick={() => onOpenClass(Number(entry.class_id))} className={`${card} text-left transition hover:border-emerald-300`}>
-              <div className="flex items-center justify-between">
-                <p className="font-black text-slate-900">{entry.name}</p>
-                <ChevronRight className="h-4 w-4 text-emerald-500" />
-              </div>
-              <p className="mt-1 text-xs font-semibold text-slate-500">{entry.code} · {entry.institution || '—'}</p>
-              <p className="mt-2 text-[11px] font-bold uppercase tracking-wider text-emerald-600">{entry.member_status === 'active' ? 'Active member' : 'Suspended'}</p>
-            </button>
+            <ClassNavCard key={entry.class_id} entry={entry} onOpen={() => onOpenClass(Number(entry.class_id))} />
           ))}
         </div>
       )}
@@ -592,10 +658,12 @@ const MyClassesView = ({ me, onOpen, onRefresh, inviteCode }: { me: any; onOpen:
       {classes.length ? (
         <div className="grid gap-3 sm:grid-cols-2">
           {classes.map((entry) => (
-            <button key={entry.class_id} type="button" onClick={() => onOpen(Number(entry.class_id))} className={`${card} text-left transition hover:border-emerald-300`}>
-              <p className="font-black text-slate-900">{entry.name}</p>
-              <p className="mt-1 text-xs font-semibold text-slate-500">{entry.code} · {entry.department || entry.institution || ''} {entry.academic_year ? `· ${entry.academic_year}` : ''}</p>
-            </button>
+            <ClassNavCard
+              key={entry.class_id}
+              entry={entry}
+              onOpen={() => onOpen(Number(entry.class_id))}
+              detail={`${entry.department || entry.institution || '—'}${entry.academic_year ? ` · ${entry.academic_year}` : ''}`}
+            />
           ))}
         </div>
       ) : (

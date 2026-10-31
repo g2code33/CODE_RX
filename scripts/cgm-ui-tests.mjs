@@ -97,6 +97,10 @@ check('the student portal covers classes, groups, elections, attendance, calenda
     .every((label) => studentPortal.includes(label)));
 check('profile changes go through the approval workflow with a reason',
   /requestProfileChange/.test(studentPortal) && /reason/i.test(studentPortal));
+check('student class doors are unique navigation cards (stable accent + monogram + Open affordance) and the welcome board has a Continue-to-groups CTA',
+  /ClassNavCard/.test(studentPortal) && /accentForClass/.test(studentPortal) && /monogramOf/.test(studentPortal)
+  && /cgm-continue-groups/.test(studentPortal) && /Continue to choose group/.test(studentPortal)
+  && /onOpenGroups/.test(studentPortal));
 check('the passkey card is request-based: current passkey to ask, organizer approves, Generate is system-issued',
   /cgm-student-passkey-card/.test(studentPortal) && /requestPasskeyChange/.test(studentPortal)
   && /generatePasskey/.test(studentPortal) && /cgm-passkey-generate/.test(studentPortal)

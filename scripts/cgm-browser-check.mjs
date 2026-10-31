@@ -286,6 +286,14 @@ let savedPasskey = '';
   check('the student dashboard opens after the confirmation',
     await page.waitForFor('CODE Rx Student Portal', 30_000), `errs=${page.jsdomErrors.slice(0, 3).join(' | ') || 'none'} body=${page.body().slice(0, 160)}`);
   check('the dashboard lists the joined class', await page.waitForFor('Browser Check Pharmacy Lab', 20_000));
+  check('the welcome board carries the unique Continue-to-groups CTA and a distinctive class door',
+    Boolean(page.window.document.querySelector('[data-testid="cgm-continue-groups"]'))
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-class-nav-card"]')),
+    page.body().slice(0, 160));
+  const continueGroups = page.window.document.querySelector('[data-testid="cgm-continue-groups"]');
+  continueGroups && continueGroups.click();
+  check('Continue to choose group opens My Groups directly (the activity picker)',
+    await page.waitForFor('Open an activity', 20_000), page.body().slice(0, 160));
 
   // 5. Mobile navigation: the toggle opens the sidebar.
   const toggle = page.window.document.querySelector('[aria-label="Toggle navigation"]');
