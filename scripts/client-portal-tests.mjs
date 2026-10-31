@@ -761,7 +761,7 @@ const main = async () => {
   check('document lifecycle is constrained to the six named states',
     lifecycleSql.includes('published') && lifecycleSql.includes('in_review') && lifecycleSql.includes('unpublished'));
   check('schema version marker was advanced',
-    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('class-group-management'));
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-10-31-code-rx20-class-passkey-prefix'));
   // Phase 20 adds the review section's own table: one row per answer, so a
   // client who changes their mind leaves a trail instead of overwriting.
   // Phase 20 adds the review table, the signature table and the message table:

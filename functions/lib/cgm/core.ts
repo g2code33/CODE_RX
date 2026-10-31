@@ -23,6 +23,16 @@
 // second time.
 
 export const STUDENT_PASSKEY_PREFIX = 'rx30';
+
+/**
+ * A class can put its own mark in front of the passkeys it issues (the
+ * default stays rx30). 2–10 lowercase letters and digits — rx30 itself shows
+ * digits are allowed. Existing passkeys are never rewritten.
+ */
+export const sanitizePasskeyPrefix = (value: unknown): string | null => {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return /^[a-z0-9]{2,10}$/.test(normalized) ? normalized : null;
+};
 export const STUDENT_PASSKEY_SEQUENCE_ID = 'student_passkey';
 
 /** The passkey suffix for a 1-based sequence position (bijective base-26). */
@@ -46,10 +56,15 @@ export const passkeyForSequence = (sequence: number): string =>
 export const sequenceForPasskey = (passkey: string): number | null => {
   const normalized = String(passkey || '').trim().toLowerCase();
   if (!normalized.startsWith(STUDENT_PASSKEY_PREFIX)) return null;
-  const suffix = normalized.slice(STUDENT_PASSKEY_PREFIX.length);
-  if (!/^[a-z]+$/.test(suffix)) return null;
+  return sequenceForSuffix(normalized.slice(STUDENT_PASSKEY_PREFIX.length));
+};
+
+/** The sequence position behind a bare a–z suffix, or null. */
+export const sequenceForSuffix = (suffix: string): number | null => {
+  const normalized = String(suffix || '').trim().toLowerCase();
+  if (!normalized || !/^[a-z]+$/.test(normalized)) return null;
   let sequence = 0;
-  for (const character of suffix) sequence = sequence * 26 + (character.charCodeAt(0) - 96);
+  for (const character of normalized) sequence = sequence * 26 + (character.charCodeAt(0) - 96);
   return sequence > 0 ? sequence : null;
 };
 

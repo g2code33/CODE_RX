@@ -345,7 +345,7 @@ check('the service worker keeps caching the shell only', /CACHE = 'code-rx-v7'/.
 // ===========================================================================
 section('15. Step-9 security sweep: verifiable credential rotation, lockout model');
 check('passkey changes verify against a freshly-read verifier and rotate verifier + sequence + suffix together',
-  /SELECT passkey_verifier FROM cgm_students WHERE id = \?/.test(studentRoutes)
+  /SELECT passkey_prefix, passkey_verifier FROM cgm_students WHERE id = \?/.test(studentRoutes)
   && /passkey_sequence = \?, passkey_suffix = \?/.test(studentRoutes)
   && /That passkey is already in use/.test(studentRoutes));
 check('a passkey change revokes every live session and issues exactly one fresh one',
@@ -461,6 +461,16 @@ check('columns are linked automatically from the header names and the link says 
 check('required columns block the import with a clear call to action',
   /missingRequired\.length > 0/.test(workspace) && /Map \$\{missingRequired/.test(workspace)
   && /requiredFields/.test(workspace));
+
+check('the organizer can set a per-class passkey mark in Settings, default rx30, existing passkeys never rewritten',
+  /Passkey mark for this class/.test(workspace) && /Save passkey mark/.test(workspace)
+  && /empty = default rx30/.test(workspace) && /keep theirs/.test(workspace)
+  && /setPasskeyPrefix/.test(client) && /passkey-prefix/.test(organizerRoutesSrc));
+check('the server validates the mark and audits every change',
+  /sanitizePasskeyPrefix/.test(activityRoutesSrc) === false && /sanitizePasskeyPrefix/.test(src('functions/lib/cgm/core.ts'))
+  && /cgm\.class\.passkey_prefix/.test(organizerRoutesSrc));
+check('login resolves the passkey by its stored mark plus letters (prefix-aware lookup)',
+  /passkey_prefix \|\| passkey_suffix = \?/.test(studentRoutes));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

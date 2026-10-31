@@ -243,6 +243,8 @@ export const cgm = {
   updateClass: (classId: number, body: Record<string, unknown>) =>
     memberCall(`/api/cgm/classes/${classId}`, { method: 'PATCH', body }),
   submitClass: (classId: number) => memberCall(`/api/cgm/classes/${classId}/submit`, { method: 'POST', body: {} }),
+  setPasskeyPrefix: (classId: number, prefix: string) =>
+    memberCall(`/api/cgm/classes/${classId}/passkey-prefix`, { method: 'POST', body: { prefix } }),
   rotateEntryPassword: (classId: number, entryPassword: string) =>
     memberCall(`/api/cgm/classes/${classId}/entry-password`, { method: 'POST', body: { entryPassword } }),
   updateSettings: (classId: number, body: Record<string, unknown>) =>

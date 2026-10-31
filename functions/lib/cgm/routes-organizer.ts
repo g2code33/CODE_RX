@@ -56,7 +56,7 @@ import {
   type RosterField,
 } from './parse';
 import { hashPassword } from '../auth';
-import { allocateStudentPasskey } from './core';
+import { allocateStudentPasskey, sanitizePasskeyPrefix } from './core';
 import {
   asRows,
   auditCgm,
@@ -538,6 +538,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
           description: klass.description, status: klass.status, createdAt: klass.created_at,
           submittedAt: klass.submitted_at, reviewReason: klass.review_reason,
           entryPasswordSet: Boolean(klass.entry_password_verifier),
+          passkeyPrefix: String(klass.passkey_prefix || 'rx30'),
         },
         settings,
         counts: {
@@ -1146,6 +1147,47 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     });
   });
 
+  // The class mark in front of every passkey this class issues (default
+  // rx30). Existing passkeys are never rewritten; the letters after the mark
+  // stay globally unique forever.
+  app.post('/api/cgm/classes/:id/passkey-prefix', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const guard = await requireClassPermission(c, member, classId, 'manage_class_settings');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const requested = String(body.prefix ?? '').trim().toLowerCase();
+    const rows = await asRows<{ passkey_prefix: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_prefix FROM cgm_classes WHERE id = ?'
+    ).bind(classId));
+    const previous = String(rows[0]?.passkey_prefix || 'rx30');
+    if (!requested || requested === 'rx30') {
+      if (previous !== 'rx30') {
+        await c.env.DB.prepare(
+          "UPDATE cgm_classes SET passkey_prefix = 'rx30', updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        ).bind(classId).run();
+        await auditCgm(c.env.DB, {
+          actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+          action: 'cgm.class.passkey_prefix', entityType: 'class', entityId: classId, classId,
+          context: { from: previous, to: 'rx30' },
+        });
+      }
+      return c.json({ success: true, data: { prefix: 'rx30', message: 'Passkey mark reset to the default rx30. Students who already have a passkey keep theirs.' } });
+    }
+    const prefix = sanitizePasskeyPrefix(requested);
+    if (!prefix) return bad(c, 'Passkey marks use 2 to 10 lowercase letters and digits — for example rx30, bio1 or chem2.', 400);
+    await c.env.DB.prepare(
+      'UPDATE cgm_classes SET passkey_prefix = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+    ).bind(prefix, classId).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.class.passkey_prefix', entityType: 'class', entityId: classId, classId,
+      context: { from: previous, to: prefix },
+    });
+    return c.json({ success: true, data: { prefix, message: `Passkeys issued through this class now start with ${prefix}. Students who already have a passkey keep theirs.` } });
+  });
+
   app.post('/api/cgm/classes/:id/roster/import', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
@@ -1418,30 +1460,35 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       ).bind(request.institution_key, request.index_number_key || String(request.index_number).trim().replace(/\s+/g, ' ').toLowerCase()));
       studentId = existing[0] ? Number(existing[0].id) : null;
     }
+    // Passkeys issued through this class carry the class mark (default rx30).
+    const classPrefixRows = await asRows<{ passkey_prefix: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_prefix FROM cgm_classes WHERE id = ?'
+    ).bind(classId));
+    const classPrefix = String(classPrefixRows[0]?.passkey_prefix || 'rx30');
     if (studentId) {
       const student = await asRows<{ passkey_sequence: number | null; status: string }>(c.env.DB.prepare(
         'SELECT passkey_sequence, status FROM cgm_students WHERE id = ?'
       ).bind(studentId));
       if (student[0] && student[0].passkey_sequence === null) {
         const allocation = await allocateStudentPasskey(c.env.DB);
-        issuedPasskey = allocation.passkey;
+        issuedPasskey = `${classPrefix}${allocation.suffix}`;
         await c.env.DB.prepare(
-          `UPDATE cgm_students SET passkey_suffix = ?, passkey_sequence = ?, passkey_verifier = ?,
+          `UPDATE cgm_students SET passkey_suffix = ?, passkey_prefix = ?, passkey_sequence = ?, passkey_verifier = ?,
            passkey_issued_at = CURRENT_TIMESTAMP, status = 'active', full_name = COALESCE(NULLIF(?, ''), full_name),
            updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-        ).bind(allocation.suffix, allocation.sequence, await hashPassword(allocation.passkey), request.full_name, studentId).run();
+        ).bind(allocation.suffix, classPrefix, allocation.sequence, await hashPassword(issuedPasskey), request.full_name, studentId).run();
       } else if (student[0] && student[0].status === 'pending') {
         await c.env.DB.prepare(`UPDATE cgm_students SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(studentId).run();
       }
     } else {
       const allocation = await allocateStudentPasskey(c.env.DB);
-      issuedPasskey = allocation.passkey;
+      issuedPasskey = `${classPrefix}${allocation.suffix}`;
       const inserted = await c.env.DB.prepare(
         `INSERT INTO cgm_students
          (full_name, index_number, index_number_key, institution, institution_key, university_id, university_id_key,
-          phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_sequence, passkey_verifier,
-          passkey_issued_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
+          phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_prefix, passkey_sequence,
+          passkey_verifier, passkey_issued_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
       ).bind(
         request.full_name, request.index_number,
         request.index_number_key || String(request.index_number).trim().replace(/\s+/g, ' ').toLowerCase(),
@@ -1449,7 +1496,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
         request.university_id, request.university_id_key,
         request.phone, request.phone_key, request.email, request.gender,
         request.custom_fields_json || '{}',
-        allocation.suffix, allocation.sequence, await hashPassword(allocation.passkey),
+        allocation.suffix, classPrefix, allocation.sequence, await hashPassword(issuedPasskey),
       ).run();
       studentId = Number(inserted.meta.last_row_id);
     }

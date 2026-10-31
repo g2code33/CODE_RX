@@ -1181,6 +1181,10 @@ const SAFE_MIGRATIONS = [
   { table: 'cgm_announcements', column: 'attachment_type', sql: 'ALTER TABLE cgm_announcements ADD COLUMN attachment_type TEXT' },
   { table: 'cgm_announcements', column: 'attachment_size', sql: 'ALTER TABLE cgm_announcements ADD COLUMN attachment_size INTEGER' },
   { table: 'cgm_student_notifications', column: 'dedupe_key', sql: 'ALTER TABLE cgm_student_notifications ADD COLUMN dedupe_key TEXT' },
+  // Class & Group Management: per-class passkey marks. The default keeps
+  // every existing passkey exactly as it is (rx30…).
+  { table: 'cgm_students', column: 'passkey_prefix', sql: "ALTER TABLE cgm_students ADD COLUMN passkey_prefix TEXT NOT NULL DEFAULT 'rx30'" },
+  { table: 'cgm_classes', column: 'passkey_prefix', sql: "ALTER TABLE cgm_classes ADD COLUMN passkey_prefix TEXT NOT NULL DEFAULT 'rx30'" },
 
   { table: 'members', column: 'phone_login_key', sql: 'ALTER TABLE members ADD COLUMN phone_login_key TEXT' },
   { table: 'member_activations', column: 'revoked_at', sql: 'ALTER TABLE member_activations ADD COLUMN revoked_at DATETIME' },
@@ -1237,7 +1241,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-10-30-code-rx19-class-group-management-step6';
+const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx20-class-passkey-prefix';
 
 
 // Role codes stay stable for member history and permissions. Their visible

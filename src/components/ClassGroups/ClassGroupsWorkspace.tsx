@@ -2142,12 +2142,15 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
   const [approvalRequired, setApprovalRequired] = useState(true);
   const [identifiers, setIdentifiers] = useState<Set<string>>(new Set(['index_number']));
   const [allowChange, setAllowChange] = useState(false);
+  const [passkeyPrefix, setPasskeyPrefix] = useState('rx30');
+  const [prefixDraft, setPrefixDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const data = await cgm.classDetail(classId).catch(() => null);
     setDetail(data);
+    setPasskeyPrefix(String(data?.class?.passkeyPrefix || 'rx30'));
     if (data?.settings) {
       setVisibleFields(new Set(data.settings.studentVisibleFields || []));
       setApprovalRequired(data.settings.membershipApprovalRequired !== false);
@@ -2180,6 +2183,42 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
           <div><label className={label} htmlFor="cgm-entry-pw">New password (min 6)</label><input id="cgm-entry-pw" required minLength={6} type="password" className={`${inputClass} mt-1`} value={entryPassword} onChange={(event) => setEntryPassword(event.target.value)} /></div>
           <button type="submit" disabled={busy} className="cgm-primary-button">Save &amp; rotate</button>
           <span className="text-[11px] font-bold uppercase text-slate-400">{detail.class.entryPasswordSet ? 'currently set' : 'not set — required before submission'}</span>
+        </form>
+      </div>
+
+      <div className={card}>
+        <p className={label}>Passkey mark for this class</p>
+        <p className="mt-1 text-xs font-medium text-slate-500">
+          New students approved through this class get passkeys that start with your mark. The default is <strong>rx30</strong>; the letters after the mark stay globally unique forever, so two classes can even share a mark without colliding. Students who already have a passkey keep theirs — nothing is ever rewritten.
+        </p>
+        <form
+          className="mt-3 flex flex-wrap items-end gap-2"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setBusy(true);
+            try {
+              const result: any = await cgm.setPasskeyPrefix(classId, prefixDraft);
+              setMessage(String(result?.message || 'Passkey mark updated.'));
+              setPrefixDraft('');
+              await load();
+            } catch (failure: any) { setMessage(failure?.message || 'The update failed.'); }
+            finally { setBusy(false); }
+          }}
+        >
+          <div>
+            <label className={label} htmlFor="cgm-passkey-prefix">New mark (2–10 lowercase letters/digits, empty = default rx30)</label>
+            <input
+              id="cgm-passkey-prefix"
+              className={`${inputClass} mt-1 font-mono`}
+              value={prefixDraft}
+              onChange={(event) => setPrefixDraft(event.target.value)}
+              placeholder={`currently ${passkeyPrefix}`}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <button type="submit" disabled={busy} className="cgm-primary-button">Save passkey mark</button>
+          <span className="text-[11px] font-bold uppercase text-slate-400">current: {passkeyPrefix}</span>
         </form>
       </div>
 

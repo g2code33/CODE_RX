@@ -279,6 +279,7 @@ export interface CgmStudentRow {
   gender: 'male' | 'female' | 'unknown';
   status: 'pending' | 'active' | 'locked' | 'archived';
   passkey_suffix: string | null;
+  passkey_prefix: string | null;
   failed_attempts: number;
   locked_until: string | null;
   passkey_change_allowed: number;

@@ -33,9 +33,9 @@ import type { Hono } from 'hono';
 import {
   LOGIN_IDENTIFIER_KEYS,
   allocateStudentPasskey,
+  sequenceForSuffix,
   lookupKey,
   phoneKey,
-  sequenceForPasskey,
   STUDENT_PROFILE_FIELDS,
   sanitizeActivityConfig,
   sanitizeClassSettings,
@@ -87,7 +87,7 @@ const publicStudent = (student: CgmStudentRow) => ({
   phone: student.phone,
   email: student.email,
   gender: student.gender,
-  passkeyHint: student.passkey_suffix ? `rx30${student.passkey_suffix.slice(0, 1)}…` : null,
+  passkeyHint: student.passkey_suffix ? `${String(student.passkey_prefix || 'rx30')}${student.passkey_suffix.slice(0, 1)}…` : null,
   customFields: (() => { try { return JSON.parse(student.custom_fields_json || '{}'); } catch { return {}; } })(),
 });
 
@@ -112,7 +112,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!classCode || !indexNumber || !entryPassword) return bad(c, GENERIC_REGISTER_FAILURE, 400);
 
     const classRows = await asRows<any>(c.env.DB.prepare(
-      `SELECT id, name, code, institution, institution_key, entry_password_verifier FROM cgm_classes WHERE code = ? AND status = 'active'`
+      `SELECT id, name, code, institution, institution_key, passkey_prefix, entry_password_verifier FROM cgm_classes WHERE code = ? AND status = 'active'`
     ).bind(classCode));
     const klass = classRows[0];
     // Anti-enumeration: unknown class, unknown index and wrong password all
@@ -168,38 +168,39 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       ).bind(entry.id)))[0] || {}).id || 0);
       let studentId = existingStudentId;
       let issuedPasskey: string | null = null;
+      const classPrefix = String(klass.passkey_prefix || 'rx30');
       if (studentId) {
         const row = (await asRows<{ passkey_sequence: number | null; status: string }>(c.env.DB.prepare(
           'SELECT passkey_sequence, status FROM cgm_students WHERE id = ?'
         ).bind(studentId)))[0];
         if (row && row.passkey_sequence === null) {
           const allocation = await allocateStudentPasskey(c.env.DB);
-          issuedPasskey = allocation.passkey;
+          issuedPasskey = `${classPrefix}${allocation.suffix}`;
           await c.env.DB.prepare(
-            `UPDATE cgm_students SET passkey_suffix = ?, passkey_sequence = ?, passkey_verifier = ?,
+            `UPDATE cgm_students SET passkey_suffix = ?, passkey_prefix = ?, passkey_sequence = ?, passkey_verifier = ?,
              passkey_issued_at = CURRENT_TIMESTAMP, status = 'active', full_name = COALESCE(NULLIF(?, ''), full_name),
              updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-          ).bind(allocation.suffix, allocation.sequence, await hashPassword(allocation.passkey), fullEntry.full_name, studentId).run();
+          ).bind(allocation.suffix, classPrefix, allocation.sequence, await hashPassword(issuedPasskey), fullEntry.full_name, studentId).run();
         } else if (row && row.status === 'pending') {
           await c.env.DB.prepare(`UPDATE cgm_students SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(studentId).run();
         }
       } else {
         const allocation = await allocateStudentPasskey(c.env.DB);
-        issuedPasskey = allocation.passkey;
+        issuedPasskey = `${classPrefix}${allocation.suffix}`;
         const indexKey = String(fullEntry.index_number).trim().replace(/\s+/g, ' ').toLowerCase();
         const inserted = await c.env.DB.prepare(
           `INSERT INTO cgm_students
            (full_name, index_number, index_number_key, institution, institution_key, university_id, university_id_key,
-            phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_sequence, passkey_verifier,
-            passkey_issued_at, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
+            phone, phone_key, email, gender, custom_fields_json, passkey_suffix, passkey_prefix, passkey_sequence,
+            passkey_verifier, passkey_issued_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'active')`
         ).bind(
           fullEntry.full_name, fullEntry.index_number, indexKey,
           fullClass.institution, fullClass.institution_key,
           fullEntry.university_id, fullEntry.university_id_key || (fullEntry.university_id ? lookupKey(fullEntry.university_id) : null),
           fullEntry.phone, fullEntry.phone_key || (fullEntry.phone ? phoneKey(fullEntry.phone) : null),
           fullEntry.email, fullEntry.gender || 'unknown', fullEntry.custom_fields_json || '{}',
-          allocation.suffix, allocation.sequence, await hashPassword(allocation.passkey),
+          allocation.suffix, classPrefix, allocation.sequence, await hashPassword(issuedPasskey),
         ).run();
         studentId = Number(inserted.meta.last_row_id);
       }
@@ -276,12 +277,15 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const passkey = clean(body.passkey, 40);
     if (!identifier || !passkey) return bad(c, GENERIC_LOGIN_FAILURE, 400);
 
-    const sequence = sequenceForPasskey(passkey);
-    if (sequence === null) return c.json({ success: false, error: GENERIC_LOGIN_FAILURE }, 400);
-
+    // The passkey is the lookup key: each class may put its own mark in
+    // front (default rx30), and the stored prefix + suffix pair is unique,
+    // so one exact match resolves the identity — any other input is the
+    // same anonymous failure.
+    const presented = passkey.trim().toLowerCase();
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT * FROM cgm_students WHERE passkey_sequence = ?`
-    ).bind(sequence));
+      `SELECT * FROM cgm_students
+       WHERE passkey_sequence IS NOT NULL AND passkey_prefix || passkey_suffix = ?`
+    ).bind(presented));
     const student = rows[0];
     // Unknown passkey and wrong identifier behave identically.
     if (!student) return c.json({ success: false, error: GENERIC_LOGIN_FAILURE }, 400);
@@ -1335,8 +1339,20 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!throttle(c, 5, 3600)) return bad(c, 'Too many attempts. Try again later.', 429);
     const body = await readBody(c);
     const currentPasskey = clean(body.currentPasskey, 40);
-    const newPasskey = clean(body.newPasskey, 40);
-    if (sequenceForPasskey(newPasskey) === null) return bad(c, 'Passkeys look like rx30a, rx30b, rx30aa — your replacement must follow the same format.', 400);
+    const newPasskey = clean(body.newPasskey, 40).toLowerCase();
+
+    // The replacement keeps the student's own mark (default rx30) and only
+    // the letters after it change — the mark is part of how the passkey
+    // resolves at sign-in.
+    const ownRows = await asRows<{ passkey_prefix: string | null; passkey_verifier: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_prefix, passkey_verifier FROM cgm_students WHERE id = ?'
+    ).bind(student.id));
+    const ownPrefix = String(ownRows[0]?.passkey_prefix || 'rx30');
+    const suffix = newPasskey.startsWith(ownPrefix) ? newPasskey.slice(ownPrefix.length) : '';
+    const newSequence = suffix ? sequenceForSuffix(suffix) : null;
+    if (!newSequence) {
+      return bad(c, `Your passkey starts with ${ownPrefix} — keep that mark and change the letters after it (for example ${ownPrefix}ab).`, 400);
+    }
 
     // Allowed only when at least one active class enables self-service change.
     const allowed = await asRows<{ c: number }>(c.env.DB.prepare(
@@ -1348,24 +1364,20 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!Number(allowed[0]?.c || 0)) {
       return bad(c, 'Self-service passkey changes are not enabled for your classes. Ask your organizer for a reset.', 403);
     }
-    // The session projection deliberately omits the verifier; read it
-    // directly for this one check so the comparison actually happens.
-    const verifierRows = await asRows<{ passkey_verifier: string | null }>(c.env.DB.prepare(
-      'SELECT passkey_verifier FROM cgm_students WHERE id = ?'
-    ).bind(student.id));
-    const storedVerifier = verifierRows[0]?.passkey_verifier;
+    // The session projection deliberately omits the verifier; the fresh read
+    // above carries it for this one check so the comparison actually happens.
+    const storedVerifier = ownRows[0]?.passkey_verifier;
     if (!storedVerifier || !await verifyPassword(currentPasskey, storedVerifier)) {
       return bad(c, 'Your current passkey did not match.', 400);
     }
-    // The passkey IS the lookup key (login resolves the student by its
-    // sequence), so a change must rotate the verifier, the sequence and the
-    // suffix together — otherwise the student could never sign in again.
-    const newSequence = sequenceForPasskey(newPasskey);
+    // The passkey IS the lookup key (login resolves the student by its mark
+    // and letters), so a change must rotate the verifier, the sequence and
+    // the suffix together — otherwise the student could never sign in again.
     try {
       await c.env.DB.prepare(
         `UPDATE cgm_students SET passkey_verifier = ?, passkey_sequence = ?, passkey_suffix = ?,
            passkey_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).bind(await hashPassword(newPasskey), newSequence, newPasskey.slice(4).toLowerCase(), student.id).run();
+      ).bind(await hashPassword(newPasskey), newSequence, suffix, student.id).run();
     } catch (error) {
       if (String((error as any)?.errcode || '') === '2067' || /UNIQUE/i.test(String((error as any)?.message || error))) {
         return bad(c, 'That passkey is already in use by another student — the format is valid but taken.', 409);

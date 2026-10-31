@@ -2208,6 +2208,117 @@ check('a member without import permission cannot inspect the file', pvDenied.sta
 const pvUnknown = await formCall('POST', '/api/cgm/classes/999999/roster/preview', (() => { const f = new FormData(); f.append('file', new File([pvCsv], 'x.csv', { type: 'text/csv' })); return f; })(), amaToken);
 check('inspection respects class access', [403, 404].includes(pvUnknown.status), `status ${pvUnknown.status}`);
 
+
+// ===========================================================================
+// 27. Per-class passkey marks: an organizer can put their own letters in
+//     front of the passkeys their class issues; the default stays rx30 and
+//     existing passkeys are never rewritten.
+// ===========================================================================
+section('27. Per-class passkey marks (default rx30)');
+
+const setMark = (classId, prefix, token) => memberCall('POST', `/api/cgm/classes/${classId}/passkey-prefix`, { prefix }, token);
+
+// -- Permission + validation --------------------------------------------------
+// (§21 transferred classA's ownership to the assistant; ama stays co-organizer.)
+const markDenied = await setMark(classAId, 'bio1', kwameToken);
+check('a non-organizer of the class cannot change the passkey mark', markDenied.status === 403, `status ${markDenied.status}`);
+const markBad = await setMark(classAId, 'BIO-1!', assistantToken);
+check('marks with forbidden characters are refused', markBad.status === 400, `status ${markBad.status}`);
+const markLong = await setMark(classAId, 'abcdefghijklmnop', assistantToken);
+check('an over-long mark is refused', markLong.status === 400, `status ${markLong.status}`);
+check('the refusals wrote nothing',
+  q1("SELECT passkey_prefix FROM cgm_classes WHERE id = ?", classAId)?.passkey_prefix === undefined
+  || q1("SELECT passkey_prefix FROM cgm_classes WHERE id = ?", classAId)?.passkey_prefix === 'rx30');
+
+// -- Set the mark on class A --------------------------------------------------
+const markSet = await setMark(classAId, 'bio1', assistantToken);
+check('the organizer sets a class passkey mark', markSet.status === 200 && markSet.json?.data?.prefix === 'bio1', markSet.text?.slice(0, 140));
+check('the mark is stored on the class', q1('SELECT passkey_prefix FROM cgm_classes WHERE id = ?', classAId)?.passkey_prefix === 'bio1');
+check('the mark change is audited with the old and new value',
+  Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.class.passkey_prefix' AND context_json LIKE '%bio1%'")));
+const markPhantom = await setMark(classAId, 'biox', phantomToken);
+check('PHANTOM can override the class mark', markPhantom.status === 200, `status ${markPhantom.status}`);
+await setMark(classAId, 'bio1', assistantToken);
+
+// -- Existing students keep their passkeys ------------------------------------
+const keeperLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: 'rx30qz' });
+check('an existing rx30 student still signs in after the class mark changed', keeperLogin.status === 200, `status ${keeperLogin.status}`);
+check('the existing student kept the rx30 mark on their identity',
+  q1("SELECT passkey_prefix FROM cgm_students WHERE index_number_key = 'bio-201-001'")?.passkey_prefix === 'rx30');
+
+// -- New approval issues a marked passkey continuing the global sequence ------
+const markRosterCsv = ['Full Name,Index Number', 'Mark One,MRK-27-001', 'Mark Two,MRK-27-002', 'Mark Three,MRK-27-003'].join('\n');
+const markForm = new FormData();
+markForm.append('file', new File([markRosterCsv], 'mark.csv', { type: 'text/csv' }));
+markForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number' }));
+markForm.append('policy', 'skip');
+await formCall('POST', `/api/cgm/classes/${classAId}/roster/import`, markForm, amaToken);
+const markRegister = await call('POST', '/api/cgm/student/register', { classCode: classACode, indexNumber: 'MRK-27-001', entryPassword: 'bio-201-entry' });
+const markQueue = await memberCall('GET', `/api/cgm/classes/${classAId}/registrations?status=pending`, undefined, amaToken);
+const markRow = (markQueue.json?.data || []).find((row) => row.indexNumber === 'MRK-27-001');
+const markApprove = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${markRow.id}/approve`, {}, amaToken);
+const expectedMark = `bio1${bijective(Number(q1("SELECT next_value FROM cgm_sequences WHERE id = 'student_passkey'").next_value) - 1)}`;
+check('an approval under a custom mark issues a marked passkey', markApprove.json?.data?.passkey === expectedMark,
+  `got ${markApprove.json?.data?.passkey} expected ${expectedMark}`);
+check('the sequence after the mark still continues the global counter',
+  q1("SELECT passkey_prefix || passkey_suffix AS pk FROM cgm_students WHERE index_number_key = 'mrk-27-001'")?.pk === expectedMark);
+check('the suffix stays globally unique',
+  new Set(q('SELECT passkey_suffix FROM cgm_students WHERE passkey_suffix IS NOT NULL').map((r) => r.passkey_suffix)).size
+    === q('SELECT COUNT(*) c FROM cgm_students WHERE passkey_suffix IS NOT NULL')[0].c);
+
+// -- Sign-in with the marked passkey ------------------------------------------
+const markLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: expectedMark });
+check('the marked passkey signs its student in', markLogin.status === 200, `status ${markLogin.status}`);
+const markWrong = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: 'bio1zzp' });
+check('a wrong suffix under a valid-looking mark is the generic anonymous failure (never a lock, never an oracle)',
+  markWrong.status === 400 && Boolean(markWrong.json?.error)
+  && !q1('SELECT locked_until FROM cgm_students WHERE index_number_key = ?', 'mrk-27-001')?.locked_until
+  && markWrong.json?.error === unknownPasskey.json?.error);
+const markOldShape = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: `rx30${expectedMark.slice(4)}` });
+check('the same suffix under the WRONG mark never signs in', markOldShape.status === 400, `status ${markOldShape.status}`);
+const markHint = (markLogin.json?.data?.student?.passkeyHint || '');
+check('the student record hints with the own mark only', markHint.startsWith('bio1') && markHint.endsWith('…'), markHint);
+
+// -- Automatic registration carries the class mark too ------------------------
+await setMark(autoClassId, 'phy7', kwameToken);
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'auto' }, phantomToken);
+const autoRosterForm2 = new FormData();
+autoRosterForm2.append('file', new File(['Full Name,Index Number\nMark Auto,AUTO-101-003'], 'r.csv', { type: 'text/csv' }));
+autoRosterForm2.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number' }));
+autoRosterForm2.append('policy', 'skip');
+await formCall('POST', `/api/cgm/classes/${autoClassId}/roster/import`, autoRosterForm2, kwameToken);
+const autoMarkRegister = await call('POST', '/api/cgm/student/register', { classCode: autoClassCode, indexNumber: 'AUTO-101-003', entryPassword: 'phy-201-entry' });
+check('automatic registration issues the class mark as well',
+  String(autoMarkRegister.json?.data?.passkey || '').startsWith('phy7'), String(autoMarkRegister.json?.data?.passkey));
+const autoMarkPasskey = String(autoMarkRegister.json?.data?.passkey || '');
+const autoMarkLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'AUTO-101-003', passkey: autoMarkPasskey });
+check('the automatically issued marked passkey signs in at once', autoMarkLogin.status === 200, `status ${autoMarkLogin.status}`);
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'student_registration_mode', value: 'approval' }, phantomToken);
+
+// -- Self-service change keeps the student's own mark --------------------------
+await memberCall('POST', `/api/cgm/classes/${classAId}/settings`, { studentVisibleFields: ['full_name'], loginFormat: { identifiers: ['index_number'], allowStudentPasskeyChange: true } }, assistantToken);
+const markSession = markLogin.json?.data?.session?.token;
+const changeWrongMark = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: expectedMark, newPasskey: 'rx30qq' }, markSession);
+check('a self-service change cannot leave the student\'s own mark', changeWrongMark.status === 400 && /bio1/.test(String(changeWrongMark.json?.error)), changeWrongMark.text?.slice(0, 140));
+const changeOk = await studentCall('POST', '/api/cgm/student/passkey/change', { currentPasskey: expectedMark, newPasskey: 'bio1qq' }, markSession);
+check('the self-service change keeps the mark and rotates the letters', changeOk.status === 200, `status ${changeOk.status}`);
+const relogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: 'bio1qq' });
+check('the student signs in with the changed marked passkey', relogin.status === 200, `status ${relogin.status}`);
+check('the sequence rotated with the change (suffix unique)',
+  q1("SELECT passkey_suffix FROM cgm_students WHERE index_number_key = 'mrk-27-001'")?.passkey_suffix === 'qq');
+
+// -- Resetting to the default --------------------------------------------------
+const markReset = await setMark(classAId, '', assistantToken);
+check('an empty mark resets the class to rx30', markReset.status === 200 && markReset.json?.data?.prefix === 'rx30', markReset.text?.slice(0, 120));
+const afterReset = await call('POST', '/api/cgm/student/register', { classCode: classACode, indexNumber: 'MRK-27-002', entryPassword: 'bio-201-entry' });
+const afterQueue = await memberCall('GET', `/api/cgm/classes/${classAId}/registrations?status=pending`, undefined, amaToken);
+const afterRow = (afterQueue.json?.data || []).find((row) => row.indexNumber === 'MRK-27-002');
+const afterApprove = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${afterRow.id}/approve`, {}, amaToken);
+check('after the reset new passkeys start with rx30 again',
+  String(afterApprove.json?.data?.passkey || '').startsWith('rx30'), String(afterApprove.json?.data?.passkey));
+const untouchedLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'MRK-27-001', passkey: 'bio1qq' });
+check('the reset never rewrote the earlier student\'s marked passkey', untouchedLogin.status === 200, `status ${untouchedLogin.status}`);
+
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
