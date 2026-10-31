@@ -632,7 +632,7 @@ check('the claim created exactly one membership for the bound identity',
 section('7. Grouping activities & assignment');
 const activityA = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
   name: 'Lab Session 1', type: 'practical',
-  config: { method: 'automatic', groupCount: 4, capacity: 10, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  config: { method: 'automatic', groupCount: 4, capacity: 100, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
 }, amaToken);
 const activityAId = activityA.json?.data?.activityId ?? activityA.json?.data?.activity?.id ?? activityA.json?.data?.id;
 check('an automatic (method A) activity is created as a draft', Boolean(activityAId), activityA.text?.slice(0, 160));
@@ -691,7 +691,7 @@ const sessionsToUse = [];
 // Method C: hybrid — self first, organizer finishes after the deadline.
 const activityC = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
   name: 'Project Pods', type: 'project',
-  config: { method: 'hybrid', groupCount: 2, capacity: 20, genderRule: 'none', overflow: 'organizer', leaderMethod: 'appointment', selfDeadline: new Date(Date.now() - 3600_000).toISOString(), announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  config: { method: 'hybrid', groupCount: 2, capacity: 100, genderRule: 'none', overflow: 'organizer', leaderMethod: 'appointment', selfDeadline: new Date(Date.now() - 3600_000).toISOString(), announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
 }, amaToken);
 const activityCId = activityC.json?.data?.activityId ?? activityC.json?.data?.activity?.id ?? activityC.json?.data?.id;
 await memberCall('POST', `/api/cgm/activities/${activityCId}/lifecycle`, { action: 'open' }, amaToken);
@@ -1254,7 +1254,7 @@ sqlite.prepare("UPDATE cgm_students SET phone = '+233203333333', email = 'akosua
 const makeContactActivity = async (name, visibility) => {
   const created = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
     name, type: 'tutorial',
-    config: { method: 'automatic', groupCount: 1, capacity: 30, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', contactVisibility: visibility, announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+    config: { method: 'automatic', groupCount: 1, capacity: 100, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', contactVisibility: visibility, announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
   }, amaToken);
   const id = created.json?.data?.activityId ?? created.json?.data?.activity?.id ?? created.json?.data?.id;
   await memberCall('POST', `/api/cgm/activities/${id}/lifecycle`, { action: 'publish' }, amaToken);
@@ -1463,7 +1463,7 @@ check('two simultaneous votes from one voter yield exactly one ballot', raceBall
 // --- Concurrent move approvals keep exactly one active group -------------------
 const moveRaceActivity = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
   name: 'Move Race Pods', type: 'tutorial',
-  config: { method: 'hybrid', groupCount: 3, capacity: 10, genderRule: 'none', overflow: 'organizer', leaderMethod: 'appointment', selfDeadline: new Date(Date.now() - 3600_000).toISOString(), announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  config: { method: 'hybrid', groupCount: 3, capacity: 100, genderRule: 'none', overflow: 'organizer', leaderMethod: 'appointment', selfDeadline: new Date(Date.now() - 3600_000).toISOString(), announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
 }, amaToken);
 const moveRaceId = moveRaceActivity.json?.data?.activityId ?? moveRaceActivity.json?.data?.activity?.id ?? moveRaceActivity.json?.data?.id;
 await memberCall('POST', `/api/cgm/activities/${moveRaceId}/lifecycle`, { action: 'open' }, amaToken);
@@ -2728,8 +2728,12 @@ await memberCall('POST', `/api/cgm/activities/${editActivityId}/lifecycle`, { ac
 const editOpen = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { config: { groupCount: 4 } }, amaToken);
 check('an open activity can still restructure its groups before publishing', editOpen.status === 200, `status ${editOpen.status}`);
 await memberCall('POST', `/api/cgm/activities/${editActivityId}/lifecycle`, { action: 'publish' }, amaToken);
-const editStructure = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { config: { groupCount: 6 } }, amaToken);
-check('a published activity refuses structural edits that would silently change assignments', editStructure.status === 409, `status ${editStructure.status}`);
+const editPlan = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { config: { groupCount: 6 } }, amaToken);
+check('a published activity with no placements still accepts a plan change (groups re-sync to it)',
+  editPlan.status === 200, `status ${editPlan.status}`);
+const editStructure = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { config: { method: 'automatic' } }, amaToken);
+check('a published activity refuses structural edits that would silently change assignments (method stays frozen)',
+  editStructure.status === 409, `status ${editStructure.status}`);
 const editLogistics = await memberCall('PATCH', `/api/cgm/activities/${editActivityId}`, { description: 'Logistics copy edit' }, amaToken);
 check('a published activity still accepts everyday edits (description)', editLogistics.status === 200, `status ${editLogistics.status}`);
 
@@ -3292,6 +3296,66 @@ check('the Groups page can no longer change the plan — read-only planned strip
   /cgm-planned-groups/.test(wsSrc) && /cgm-edit-activity-settings/.test(wsSrc) && /cgm-gen-count/.test(wsSrc) === false);
 check('creating empty groups fills exactly the planned shortfall from the activity settings',
   /const missing = planned \? Math\.max\(1, planned - \(data\.groups \|\| \[\]\)\.length\) : 0;/.test(wsSrc));
+
+// ---------------------------------------------------------------------------
+// 35. Plan coordination: groups already defined at publish, editable plan until
+// the first placement, save re-syncs groups to the plan
+// ---------------------------------------------------------------------------
+section('35. Plan coordination: publish defines groups, plan edits sync, freeze once placed');
+
+// -- Publishing a planned activity DEFINES its groups automatically ----------
+const autoDefined = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Auto Defined Pods', type: 'tutorial',
+  config: { method: 'random', groupCount: 6, groupNaming: 'letters', capacity: 15, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const autoDefinedId = autoDefined.json?.data?.activityId ?? autoDefined.json?.data?.activity?.id ?? autoDefined.json?.data?.id;
+// publish straight from draft — no manual group staging anywhere
+const autoPublish = await memberCall('POST', `/api/cgm/activities/${autoDefinedId}/lifecycle`, { action: 'publish' }, amaToken);
+const autoGroups = ((await memberCall('GET', `/api/cgm/activities/${autoDefinedId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+check('publishing a planned random activity creates its six groups already (no manual staging)',
+  autoPublish.status === 200 && JSON.stringify(autoGroups) === JSON.stringify(['Group A', 'Group B', 'Group C', 'Group D', 'Group E', 'Group F']),
+  `status ${autoPublish.status} ${JSON.stringify(autoGroups)}`);
+
+// -- Plan edits on a PUBLISHED activity work while nobody is placed ----------
+const planEdit = await memberCall('PATCH', `/api/cgm/activities/${autoDefinedId}`, {
+  name: 'Auto Defined Pods', config: { groupCount: 4 },
+}, amaToken);
+const afterEdit = ((await memberCall('GET', `/api/cgm/activities/${autoDefinedId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+check('a published activity with zero placements can change its plan (edit + instant republish)',
+  planEdit.status === 200, `status ${planEdit.status} ${planEdit.text?.slice(0, 120)}`);
+check('the plan change synced the real groups: now four, still lettered',
+  JSON.stringify(afterEdit) === JSON.stringify(['Group A', 'Group B', 'Group C', 'Group D']), JSON.stringify(afterEdit));
+
+// -- Custom names rename the existing groups positionally --------------------
+const customEdit = await memberCall('PATCH', `/api/cgm/activities/${autoDefinedId}`, {
+  config: { groupNaming: 'custom', groupNames: ['Mint Pod', 'Gold Pod', 'Silver Pod', 'Bronze Pod'] },
+}, amaToken);
+const afterCustom = ((await memberCall('GET', `/api/cgm/activities/${autoDefinedId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+check('saving custom names renames the existing groups in place (no drift)',
+  customEdit.status === 200 && JSON.stringify(afterCustom) === JSON.stringify(['Mint Pod', 'Gold Pod', 'Silver Pod', 'Bronze Pod']),
+  `status ${customEdit.status} ${JSON.stringify(afterCustom)}`);
+
+// -- Once a student is placed, the freeze holds again ------------------------
+const freezeStudent = await freshFmtRosterStudent(41, 'Freeze Farida');
+const freeStudentId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', freezeStudent.indexNumber.toLowerCase())?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${autoDefinedId}/assign-student`, { studentId: freeStudentId, groupId: (await memberCall('GET', `/api/cgm/activities/${autoDefinedId}`, undefined, amaToken)).json?.data?.groups?.[0]?.id }, amaToken);
+const frozenEdit = await memberCall('PATCH', `/api/cgm/activities/${autoDefinedId}`, {
+  config: { groupCount: 8 },
+}, amaToken);
+check('with a placement on record the plan locks again (students already see it)',
+  frozenEdit.status === 409, `status ${frozenEdit.status}`);
+const methodEdit = await memberCall('PATCH', `/api/cgm/activities/${autoDefinedId}`, {
+  config: { method: 'self' },
+}, amaToken);
+check('the method itself stays frozen after publish even with the carve-out', methodEdit.status === 409, `status ${methodEdit.status}`);
+
+// -- Source pins: the crash guard and the per-group name editor --------------
+const wsFinal = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+check('the Groups→activity-settings jump guards the loading state (no blank workspace)',
+  /if \(!openActivityId \|\| !rows\) return;/.test(wsFinal));
+check('the activity form edits the names of EXACTLY the planned groups (per-group inputs + preview)',
+  /cgm-group-name-editor/.test(wsFinal) && /Name of group \$\{index \+ 1\}/.test(wsFinal)
+  && /Will be created as \{previewLabels\.slice\(0, 6\)\.join\(', '\)\}/.test(wsFinal));
 
 // ---------------------------------------------------------------------------
 

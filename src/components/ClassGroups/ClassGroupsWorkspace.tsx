@@ -1177,7 +1177,9 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
 
   // A Groups-page request lands here: open the activity's own editor prefilled.
   useEffect(() => {
-    if (!openActivityId) return;
+    // `rows` starts as null (loading sentinel) — wait for the list before
+    // resolving the request, never crash the workspace.
+    if (!openActivityId || !rows) return;
     const row = rows.find((entry: any) => Number(entry.id) === Number(openActivityId));
     if (row) { startEdit(row); onEditConsumed(); }
   }, [openActivityId, rows]);
@@ -1218,6 +1220,24 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
   const capacityWarning = groupsNum >= 2 && plannedStudents > 0 && form.capacity && Number(form.capacity) < maxPerGroup
     ? ` Capacity ${form.capacity} is below the needed maximum ${maxPerGroup} — up to ${plannedStudents - Number(form.capacity) * groupsNum} student(s) would not fit.`
     : '';
+
+  // Mirror of the server's groupLabel: previews (and names) exactly what the
+  // saved plan will create, so the activity settings are the single source.
+  const planLabels = (count: number, naming: string, names: string[]) => {
+    const labels: string[] = [];
+    for (let position = 1; position <= count; position += 1) {
+      if (naming === 'custom' && names[position - 1]) { labels.push(names[position - 1]); continue; }
+      if (naming === 'letters') {
+        let rest = position; let label = '';
+        while (rest > 0) { const remainder = (rest - 1) % 26; label = String.fromCharCode(65 + remainder) + label; rest = Math.floor((rest - 1) / 26); }
+        labels.push(`Group ${label}`);
+      } else labels.push(`Group ${position}`);
+    }
+    return labels;
+  };
+  const customNameList = form.groupNames.split(',').map((name) => name.trim());
+  const customSlots = Math.max(1, groupsNum || 1, customNameList.length);
+  const previewLabels = planLabels(groupsNum >= 2 ? groupsNum : 0, form.groupNaming, customNameList);
 
   // Editing opens the same form, prefilled from the saved configuration.
   const toLocalInput = (iso: unknown) => {
@@ -1293,8 +1313,11 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
               }
               if (form.selfDeadline) config.selfDeadline = new Date(form.selfDeadline).toISOString();
               if (editing) {
-                await cgm.updateActivity(Number(editing.id), { name: form.name, type: form.type, description: form.description, config });
-                setMessage(`${form.name} was updated.`);
+                const saved = await cgm.updateActivity(Number(editing.id), { name: form.name, type: form.type, description: form.description, config });
+                const created = Number((saved as any)?.data?.groupsCreated || 0);
+                const renamed = Number((saved as any)?.data?.groupsRenamed || 0);
+                const archived = Number((saved as any)?.data?.groupsArchived || 0);
+                setMessage(`${form.name} was updated.${created || renamed || archived ? ` Groups now match the plan (${created} created, ${renamed} renamed${archived ? `, ${archived} empty group(s) archived` : ''}).` : ''}`);
                 setEditing(null);
               } else {
                 await cgm.createActivity(classId, { name: form.name, type: form.type, description: form.description, config });
@@ -1326,16 +1349,26 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
                 <option value="letters">Lettered — Group A, Group B, Group C…</option>
                 <option value="custom">Custom names…</option>
               </select>
-              {form.groupNaming === 'custom' && (
-                <input
-                  id="cgm-act-names"
-                  className={`${inputClass} mt-2`}
-                  placeholder="e.g. EPA Mint, EPA Gold, EPA Silver (comma-separated, in order)"
-                  value={form.groupNames}
-                  onChange={(event) => setForm({ ...form, groupNames: event.target.value })}
-                />
+              {form.groupNaming === 'custom' ? (
+                <div id="cgm-act-names" className="mt-2 space-y-1.5" data-testid="cgm-group-name-editor">
+                  {Array.from({ length: customSlots }).map((_, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <span className="w-14 shrink-0 text-[10px] font-black uppercase tracking-wider text-slate-400">Group {index + 1}</span>
+                      <input
+                        className={inputClass}
+                        placeholder={`Name of group ${index + 1}`}
+                        aria-label={`Name of group ${index + 1}`}
+                        value={customNameList[index] || ''}
+                        onChange={(event) => { const next = [...customNameList]; while (next.length <= index) next.push(''); next[index] = event.target.value; setForm({ ...form, groupNames: next.join(', ') }); }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : groupsNum >= 2 && (
+                <p className="mt-1 text-[11px] font-medium text-emerald-700">Will be created as {previewLabels.slice(0, 6).join(', ')}{previewLabels.length > 6 ? ` … (${previewLabels.length} total)` : ''}.</p>
               )}
             </div>
+            <p className="sm:col-span-2 rounded-xl bg-slate-50 px-3 py-2 text-[11px] font-medium text-slate-500">The plan — number of groups, their names, capacity — can change any time until the first student is placed; afterwards it locks to protect what students already see. Saving re-creates and renames the groups to match, so the Groups page always follows these settings.</p>
             <div>
               <label className={label} htmlFor="cgm-act-max">Maximum per group (calculated)</label>
               <input id="cgm-act-max" readOnly disabled value={groupsNum >= 2 && plannedStudents > 0 ? String(maxPerGroup) : '—'} className={`${inputClass} mt-1 cursor-not-allowed bg-slate-50 font-black text-slate-700`} />

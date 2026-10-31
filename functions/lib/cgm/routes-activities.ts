@@ -204,10 +204,24 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     // deadline extensions and everyday logistics may change. Draft and open
     // activities stay fully editable; duplicating is the way to restructure.
     const STRUCTURE_FIELDS = ['method', 'groupCount', 'targetGroupSize', 'capacity', 'genderRule', 'overflow'] as const;
+    const GROUP_PLAN_FIELDS = ['groupCount', 'targetGroupSize', 'capacity', 'groupNaming', 'groupNames'] as const;
     if (['published', 'active'].includes(activity.status) && body.config && typeof body.config === 'object') {
       const changed = STRUCTURE_FIELDS.filter((key) => JSON.stringify((current as any)[key] ?? null) !== JSON.stringify((config as any)[key] ?? null));
       if (changed.length) {
-        return bad(c, `A published activity cannot change ${changed.join(', ')} — group assignments students already see would silently change. Extend deadlines instead, or duplicate the activity with the new structure.`, 409);
+        // The GROUP PLAN (count, target size, capacity, naming) stays editable
+        // on a published activity until the FIRST student is placed — with no
+        // placements there is nothing students already see that could change,
+        // and the save re-syncs the real groups to the new plan below. Once
+        // anyone is placed (or the change touches method/gender/overflow),
+        // the freeze holds exactly as before.
+        const placedRows = await asRows<{ c: number }>(c.env.DB.prepare(
+          `SELECT COUNT(*) AS c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'`
+        ).bind(activityId));
+        const placed = Number(placedRows[0]?.c || 0);
+        const planOnly = changed.every((key) => (GROUP_PLAN_FIELDS as readonly string[]).includes(key));
+        if (placed > 0 || !planOnly) {
+          return bad(c, `A published activity cannot change ${changed.join(', ')} — group assignments students already see would silently change. Extend deadlines instead, or duplicate the activity with the new structure.`, 409);
+        }
       }
     }
     const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
@@ -229,12 +243,21 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         }
       }
     }
+    // The plan just changed (or was re-saved): make the real groups match it —
+    // missing groups are created with the plan's names and capacity, every
+    // group carries its planned name. This is what makes an edited plan
+    // "republish" instantly instead of drifting from the Groups page.
+    let synced: { created: number; renamed: number; archived: number } = { created: 0, renamed: 0, archived: 0 };
+    if (config.groupCount || config.groupNaming !== 'numbers' || (config.groupNames || []).length) {
+      synced = await syncGroupsToPlan(c.env.DB, activityId, config);
+    }
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.activity.updated', entityType: 'activity', entityId: activityId,
       classId: Number(activity.class_id), activityId,
+      context: { groupsCreated: synced.created, groupsRenamed: synced.renamed, groupsArchived: synced.archived },
     });
-    return c.json({ success: true });
+    return c.json({ success: true, data: { groupsCreated: synced.created, groupsRenamed: synced.renamed, groupsArchived: synced.archived } });
   });
 
   app.post('/api/cgm/activities/:id/lifecycle', async (c: any) => {
@@ -304,6 +327,15 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       ).bind(activityId, action === 'publish' ? 'publication' : action === 'complete' ? 'completion' : action === 'archive' ? 'archive' : 'cancellation',
         JSON.stringify({ groups, assignments, leaders, electionOutcomes, status: rule.to, reason: reason || null }),
         member.name).run();
+    }
+
+    // Going live with a planned group structure: the groups students will
+    // draw into or pick from are ALREADY DEFINED — created here with the
+    // plan's names (Group 1…/Group A…/custom) and capacity, so nobody has to
+    // stage them separately and the Groups page opens fully formed.
+    if (['open', 'publish', 'resume', 'reopen'].includes(action)) {
+      const liveConfig = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+      if (liveConfig.groupCount) await syncGroupsToPlan(c.env.DB, activityId, liveConfig);
     }
 
     if (action === 'cancel') {
@@ -436,16 +468,76 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       "SELECT COUNT(*) AS c FROM cgm_groups WHERE activity_id = ? AND status = 'active'"
     ).bind(activityId));
     const startPosition = Number(existing[0]?.c || 0);
+    // The plan rules: no creation beyond the planned number of groups — the
+    // publish/open sync already staged them, so a repeat call is a no-op
+    // instead of doubling the groups behind the organizer's back.
+    let toCreate = count;
+    if (groupConfig.groupCount) {
+      const room = Math.max(0, Number(groupConfig.groupCount) - startPosition);
+      if (room === 0) return c.json({ success: true, data: { added: 0, capped: true } });
+      toCreate = Math.min(toCreate, room);
+    }
     const batch: D1PreparedStatement[] = [];
-    for (let i = 0; i < count; i += 1) {
+    for (let i = 0; i < toCreate; i += 1) {
       batch.push(c.env.DB.prepare(
         'INSERT INTO cgm_groups (activity_id, position, name, capacity) VALUES (?, ?, ?, ?)'
       ).bind(activityId, startPosition + i + 1,
         groupLabel(startPosition + i + 1, groupConfig.groupNaming, groupConfig.groupNames), capacity));
     }
     await c.env.DB.batch(batch);
-    return c.json({ success: true, data: { added: count } });
+    return c.json({ success: true, data: { added: toCreate, capped: toCreate < count } });
   });
+
+  /**
+   * Sync the activity's real groups to its saved plan: the planned number of
+   * groups exists (missing ones created with the plan's capacity) and every
+   * group carries its plan name (Group 1…, Group A…, or the organizer's
+   * custom list, positionally). Runs when a random-planned activity is
+   * published/opened — the groups students draw into are ALREADY DEFINED —
+   * and whenever an organizer saves a plan change, so the Groups page can
+   * never drift from the activity settings.
+   */
+  const syncGroupsToPlan = async (db: D1Database, activityId: number, planConfig: ReturnType<typeof sanitizeActivityConfig>) => {
+    const existing = await asRows<any>(db.prepare(
+      `SELECT id, name, position FROM cgm_groups WHERE activity_id = ? AND status = 'active' ORDER BY position`
+    ).bind(activityId));
+    const planned = planConfig.groupCount ? Number(planConfig.groupCount) : null;
+    let created = 0;
+    if (planned && existing.length < planned) {
+      const capacity = planConfig.capacity ?? null;
+      const batch: D1PreparedStatement[] = [];
+      for (let position = existing.length + 1; position <= planned; position += 1) {
+        batch.push(db.prepare(
+          'INSERT INTO cgm_groups (activity_id, position, name, capacity) VALUES (?, ?, ?, ?)'
+        ).bind(activityId, position, groupLabel(position, planConfig.groupNaming, planConfig.groupNames), capacity));
+      }
+      await db.batch(batch);
+      created = batch.length;
+    }
+    let renamed = 0;
+    for (const group of existing) {
+      const plannedName = groupLabel(Number(group.position), planConfig.groupNaming, planConfig.groupNames);
+      if (String(group.name || '') !== plannedName) {
+        await db.prepare('UPDATE cgm_groups SET name = ? WHERE id = ?').bind(plannedName, Number(group.id)).run();
+        renamed += 1;
+      }
+    }
+    // A smaller plan archives the surplus — but only groups with no members;
+    // a populated group is never dropped by a plan change.
+    let archived = 0;
+    if (planned && existing.length > planned) {
+      for (const group of existing.slice(planned)) {
+        const sizeRows = await asRows<{ c: number }>(db.prepare(
+          `SELECT COUNT(*) AS c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
+        ).bind(Number(group.id)));
+        if (Number(sizeRows[0]?.c || 0) === 0) {
+          await db.prepare("UPDATE cgm_groups SET status = 'archived' WHERE id = ?").bind(Number(group.id)).run();
+          archived += 1;
+        }
+      }
+    }
+    return { created, renamed, archived };
+  };
 
   const eligibleStudentsFor = async (db: D1Database, activityId: number, eligibility: string, classId: number) => {
     if (eligibility === 'selected') {

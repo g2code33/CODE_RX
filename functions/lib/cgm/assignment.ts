@@ -84,7 +84,10 @@ const groupSizes = (plan: PlacementPlan[], groups: AssignableGroup[]) => {
 const balancedTargetOrder = (plan: PlacementPlan[], groups: AssignableGroup[], rng: Rng) => {
   const sizes = groupSizes(plan, groups);
   return shuffled(groups, rng)
-    .filter((group) => freeSeats(group) > 0)
+    // LIVE seat check: the plan grows as students are placed, so a group is a
+    // candidate only while its RUNNING size (initial + placed so far) is below
+    // its hard capacity — never the stale pre-plan count.
+    .filter((group) => group.capacity === null || (sizes.get(group.groupId) || group.currentSize) < group.capacity)
     .sort((a, b) => {
       const sizeDelta = (sizes.get(a.groupId) || 0) - (sizes.get(b.groupId) || 0);
       if (sizeDelta !== 0) return sizeDelta - 0; // smaller first

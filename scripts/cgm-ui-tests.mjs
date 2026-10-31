@@ -616,6 +616,12 @@ check('group naming is decided in the activity form: numbered / lettered / custo
 check('the Groups page shows a read-only planned strip and routes plan changes to the activity settings',
   /cgm-planned-groups/.test(forcedWorkspace) && /cgm-edit-activity-settings/.test(forcedWorkspace)
   && /Change in activity settings/.test(forcedWorkspace) && /cgm-gen-count/.test(forcedWorkspace) === false);
+check('the activity form edits exactly the planned groups one by one (per-group name editor + will-be-created preview)',
+  /cgm-group-name-editor/.test(forcedWorkspace) && /Name of group \$\{index \+ 1\}/.test(forcedWorkspace)
+  && /Will be created as/.test(forcedWorkspace));
+check('the plan is honestly labelled editable-until-placed and saving re-syncs the groups',
+  /can change any time until the first student is placed/.test(forcedWorkspace)
+  && /Groups now match the plan/.test(forcedWorkspace));
 check('every group member row carries a Swap… control fed from the other groups\' members',
   /aria-label=\{`Swap \$\{member\.full_name\} with a member of another group`\}/.test(forcedWorkspace)
   && /cgm\.swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(forcedWorkspace)
