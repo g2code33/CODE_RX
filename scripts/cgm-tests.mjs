@@ -3231,6 +3231,69 @@ check('the profile shows fixed identity fields with their real values (camelCase
   && /const currentValue = \(displayKey: string\)/.test(portalSrc3));
 
 // ---------------------------------------------------------------------------
+// 34. Group naming: numbered / lettered / custom — set in the activity, honoured everywhere
+// ---------------------------------------------------------------------------
+section('34. Group naming scheme from the activity settings');
+
+// -- Letters: Group A, Group B, Group C, Group D ------------------------------
+const lettered = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Lettered Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 4, groupNaming: 'letters', capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const letteredId = lettered.json?.data?.activityId ?? lettered.json?.data?.activity?.id ?? lettered.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${letteredId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${letteredId}/groups`, { count: 4, capacity: 10 }, amaToken);
+const letteredNames = ((await memberCall('GET', `/api/cgm/activities/${letteredId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+check("lettered naming creates 'Group A' through 'Group D'", JSON.stringify(letteredNames) === JSON.stringify(['Group A', 'Group B', 'Group C', 'Group D']), JSON.stringify(letteredNames));
+
+// -- Custom: the organizer's own names, in order ------------------------------
+const customised = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Custom Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 4, groupNaming: 'custom', groupNames: ['EPA Mint', 'EPA Gold', 'EPA Silver'], capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const customisedId = customised.json?.data?.activityId ?? customised.json?.data?.activity?.id ?? customised.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${customisedId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${customisedId}/groups`, { count: 4, capacity: 10 }, amaToken);
+const customNames = ((await memberCall('GET', `/api/cgm/activities/${customisedId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+check("custom naming uses the organizer's names in order and falls back numbered beyond the list",
+  JSON.stringify(customNames) === JSON.stringify(['EPA Mint', 'EPA Gold', 'EPA Silver', 'Group 4']), JSON.stringify(customNames));
+
+// -- Default stays numbered; an invalid scheme falls back to numbers ----------
+const numbered = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Numbered Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 2, groupNaming: 'roman', capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const numberedId = numbered.json?.data?.activityId ?? numbered.json?.data?.activity?.id ?? numbered.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${numberedId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${numberedId}/groups`, { count: 2, capacity: 10 }, amaToken);
+const numberedNames = ((await memberCall('GET', `/api/cgm/activities/${numberedId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+const storedNaming = JSON.parse(q1('SELECT config_json FROM cgm_activities WHERE id = ?', numberedId)?.config_json || '{}').groupNaming;
+check('an invalid naming scheme falls back to numbered, and the groups are named Group 1, Group 2',
+  storedNaming === 'numbers' && JSON.stringify(numberedNames) === JSON.stringify(['Group 1', 'Group 2']),
+  `${storedNaming} ${JSON.stringify(numberedNames)}`);
+
+// -- The balanced engine names the groups it creates with the same scheme -----
+const autoLetter = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Auto Lettered', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 3, groupNaming: 'letters', capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const autoLetterId = autoLetter.json?.data?.activityId ?? autoLetter.json?.data?.activity?.id ?? autoLetter.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${autoLetterId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${autoLetterId}/generate`, {}, amaToken);
+const autoNames = ((await memberCall('GET', `/api/cgm/activities/${autoLetterId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => String(g.name));
+check("automatic assignment creates its missing groups with the activity's scheme too", JSON.stringify(autoNames) === JSON.stringify(['Group A', 'Group B', 'Group C']), JSON.stringify(autoNames));
+
+// -- Source pins: the form owns naming; the Groups page only follows it -------
+const wsSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+check("the activity form owns group naming: numbered / lettered / custom with a comma-separated name list",
+  /cgm-act-naming/.test(wsSrc) && /Numbered — Group 1, Group 2, Group 3…/.test(wsSrc)
+  && /Lettered — Group A, Group B, Group C…/.test(wsSrc) && /cgm-act-names/.test(wsSrc));
+check('the Groups page can no longer change the plan — read-only planned strip plus a jump to the activity settings',
+  /cgm-planned-groups/.test(wsSrc) && /cgm-edit-activity-settings/.test(wsSrc) && /cgm-gen-count/.test(wsSrc) === false);
+check('creating empty groups fills exactly the planned shortfall from the activity settings',
+  /const missing = planned \? Math\.max\(1, planned - \(data\.groups \|\| \[\]\)\.length\) : 0;/.test(wsSrc));
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 

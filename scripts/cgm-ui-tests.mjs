@@ -610,6 +610,12 @@ check('the organizer finish button names the random mode so stragglers can be sw
 check("a 'Create empty groups only' button exists so forced-random activities get groups WITHOUT placing anyone",
   /cgm-create-empty-groups/.test(forcedWorkspace) && /Create empty groups only/.test(forcedWorkspace)
   && /addGroups\(Number\(activityId\), \{ count/.test(forcedWorkspace));
+check('group naming is decided in the activity form: numbered / lettered / custom list',
+  /cgm-act-naming/.test(forcedWorkspace) && /Numbered — Group 1, Group 2, Group 3…/.test(forcedWorkspace)
+  && /Lettered — Group A, Group B, Group C…/.test(forcedWorkspace) && /cgm-act-names/.test(forcedWorkspace));
+check('the Groups page shows a read-only planned strip and routes plan changes to the activity settings',
+  /cgm-planned-groups/.test(forcedWorkspace) && /cgm-edit-activity-settings/.test(forcedWorkspace)
+  && /Change in activity settings/.test(forcedWorkspace) && /cgm-gen-count/.test(forcedWorkspace) === false);
 check('every group member row carries a Swap… control fed from the other groups\' members',
   /aria-label=\{`Swap \$\{member\.full_name\} with a member of another group`\}/.test(forcedWorkspace)
   && /cgm\.swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(forcedWorkspace)

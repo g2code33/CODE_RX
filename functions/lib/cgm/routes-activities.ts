@@ -24,6 +24,7 @@ import {
   ATTENDANCE_STATUSES,
   lookupKey,
   phoneKey,
+  groupLabel,
   sanitizeActivityConfig,
   sanitizeLeaderPermissions,
   sanitizeClassPermissions,
@@ -427,6 +428,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const body = await readBody(c);
     const count = Math.max(1, Math.min(50, Math.floor(Number(body.count || 1))));
     const capacity = body.capacity ? Math.max(1, Math.min(200, Math.floor(Number(body.capacity)))) : null;
+    // Names come from the activity's own naming scheme (set in the activity
+    // settings): Group 1…, Group A…, or the organizer's custom list — so the
+    // Groups page and the activity form can never disagree.
+    const groupConfig = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
     const existing = await asRows<{ c: number }>(c.env.DB.prepare(
       "SELECT COUNT(*) AS c FROM cgm_groups WHERE activity_id = ? AND status = 'active'"
     ).bind(activityId));
@@ -435,7 +440,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     for (let i = 0; i < count; i += 1) {
       batch.push(c.env.DB.prepare(
         'INSERT INTO cgm_groups (activity_id, position, name, capacity) VALUES (?, ?, ?, ?)'
-      ).bind(activityId, startPosition + i + 1, body.name ? `${clean(body.name, 60)} ${startPosition + i + 1}` : null, capacity));
+      ).bind(activityId, startPosition + i + 1,
+        groupLabel(startPosition + i + 1, groupConfig.groupNaming, groupConfig.groupNames), capacity));
     }
     await c.env.DB.batch(batch);
     return c.json({ success: true, data: { added: count } });
@@ -497,8 +503,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const batch: D1PreparedStatement[] = [];
       for (let i = 0; i < needed; i += 1) {
         batch.push(c.env.DB.prepare(
-          'INSERT INTO cgm_groups (activity_id, position, capacity) VALUES (?, ?, ?)'
-        ).bind(activityId, startPosition + i + 1, capacity));
+          'INSERT INTO cgm_groups (activity_id, position, name, capacity) VALUES (?, ?, ?, ?)'
+        ).bind(activityId, startPosition + i + 1,
+          groupLabel(startPosition + i + 1, config.groupNaming, config.groupNames), capacity));
       }
       await c.env.DB.batch(batch);
       groups = await asRows<any>(c.env.DB.prepare(

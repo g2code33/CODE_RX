@@ -60,6 +60,10 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
   const [classes, setClasses] = useState<any[]>([]);
   const [activeClassId, setActiveClassId] = useState<number | null>(null);
   const [area, setArea] = useState<Area>('overview');
+  // A request from the Groups page to edit an activity in its own settings —
+  // group counts and target sizes live ONLY in the activity editor, so every
+  // change happens there and reflects uniformly here.
+  const [editActivityRequest, setEditActivityRequest] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [navOpen, setNavOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
@@ -206,8 +210,8 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'classes' && <ClassesArea classes={classes} activeClassId={activeClassId} onSwitch={setActiveClassId} onCreated={() => void refresh()} />}
           {activeClass && area === 'students' && can('view_roster') && <StudentsArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} canImport={can('import_roster')} sensitive={activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has('view_sensitive_profiles')} onChanged={() => void refresh()} />}
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
-          {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} />}
-          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} onChanged={() => void refresh()} />}
+          {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} openActivityId={editActivityRequest} onEditConsumed={() => setEditActivityRequest(null)} />}
+          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} />}
           {activeClass && area === 'elections' && can('manage_elections') && <ElectionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} />}
           {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -1134,7 +1138,7 @@ const InvitationsArea = ({ classId, className, classCode }: { classId: number; c
 // Activities + groups + elections
 // ---------------------------------------------------------------------------
 
-const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: () => void }) => {
+const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: { classId: number; onChanged: () => void; openActivityId: number | null; onEditConsumed: () => void }) => {
   const [rows, setRows] = useState<any[] | null>(null);
   const [open, setOpen] = useState(false);
   // The activity being edited (null = creating a new one). Drafts and open
@@ -1147,6 +1151,7 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
   const [form, setForm] = useState({
     name: '', type: 'tutorial', description: '',
     method: 'automatic', groupCount: '', targetGroupSize: '', capacity: '',
+    groupNaming: 'numbers', groupNames: '',
     genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'block',
     selfDeadline: '', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true,
     electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
@@ -1169,6 +1174,13 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
     });
   }, [classId]);
   useEffect(() => { void load(); }, [load]);
+
+  // A Groups-page request lands here: open the activity's own editor prefilled.
+  useEffect(() => {
+    if (!openActivityId) return;
+    const row = rows.find((entry: any) => Number(entry.id) === Number(openActivityId));
+    if (row) { startEdit(row); onEditConsumed(); }
+  }, [openActivityId, rows]);
 
   const plannedStudents = sizeBase ? (sizeBase.roster > 0 ? sizeBase.roster : sizeBase.members) : 0;
   const activeNow = sizeBase ? sizeBase.members : 0;
@@ -1226,6 +1238,8 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
       groupCount: config.groupCount != null ? String(config.groupCount) : '',
       targetGroupSize: config.targetGroupSize != null ? String(config.targetGroupSize) : '',
       capacity: config.capacity != null ? String(config.capacity) : '',
+      groupNaming: String(config.groupNaming || 'numbers'),
+      groupNames: Array.isArray(config.groupNames) ? config.groupNames.join(', ') : '',
       genderRule: String(config.genderRule || 'none'),
       repeatRule: String(config.repeatRule || 'random'),
       leaderMethod: String(config.leaderMethod || 'appointment'),
@@ -1272,6 +1286,11 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
               if (form.groupCount) config.groupCount = Number(form.groupCount);
               if (form.targetGroupSize) config.targetGroupSize = Number(form.targetGroupSize);
               if (form.capacity) config.capacity = Number(form.capacity);
+              config.groupNaming = form.groupNaming;
+              if (form.groupNaming === 'custom') {
+                const names = form.groupNames.split(',').map((name) => name.trim()).filter(Boolean);
+                if (names.length) config.groupNames = names;
+              }
               if (form.selfDeadline) config.selfDeadline = new Date(form.selfDeadline).toISOString();
               if (editing) {
                 await cgm.updateActivity(Number(editing.id), { name: form.name, type: form.type, description: form.description, config });
@@ -1301,6 +1320,22 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
               </select>
             </div>
             <div><label className={label} htmlFor="cgm-act-groups">Number of groups</label><input id="cgm-act-groups" type="number" min="2" max="50" className={`${inputClass} mt-1`} value={form.groupCount} onChange={(event) => setGroupCount(event.target.value)} /></div>
+            <div><label className={label} htmlFor="cgm-act-naming">Group names</label>
+              <select id="cgm-act-naming" className={`${inputClass} mt-1`} value={form.groupNaming} onChange={(event) => setForm({ ...form, groupNaming: event.target.value })}>
+                <option value="numbers">Numbered — Group 1, Group 2, Group 3…</option>
+                <option value="letters">Lettered — Group A, Group B, Group C…</option>
+                <option value="custom">Custom names…</option>
+              </select>
+              {form.groupNaming === 'custom' && (
+                <input
+                  id="cgm-act-names"
+                  className={`${inputClass} mt-2`}
+                  placeholder="e.g. EPA Mint, EPA Gold, EPA Silver (comma-separated, in order)"
+                  value={form.groupNames}
+                  onChange={(event) => setForm({ ...form, groupNames: event.target.value })}
+                />
+              )}
+            </div>
             <div>
               <label className={label} htmlFor="cgm-act-max">Maximum per group (calculated)</label>
               <input id="cgm-act-max" readOnly disabled value={groupsNum >= 2 && plannedStudents > 0 ? String(maxPerGroup) : '—'} className={`${inputClass} mt-1 cursor-not-allowed bg-slate-50 font-black text-slate-700`} />
@@ -1458,15 +1493,13 @@ const ActivityLifecycleButtons = ({ activity, onChanged }: { activity: any; onCh
   );
 };
 
-const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, onChanged }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; onChanged: () => void }) => {
+const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, onChanged, onEditActivity }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
   const [activityId, setActivityId] = useState<number | null>(null);
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [genCount, setGenCount] = useState('');
-  const [genSize, setGenSize] = useState('');
 
   useEffect(() => { void cgm.activities(classId).then((rows) => { setActivities(rows as any[]); }).catch(() => setActivities([])); }, [classId]);
 
@@ -1517,18 +1550,29 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
           {canGenerate && (
             <div className={card}>
               <p className={label}>Automatic assignment</p>
+              {(() => {
+                const planned = data.config.groupCount ? Number(data.config.groupCount) : null;
+                const existingCount = (data.groups || []).length;
+                const namingLabel = data.config.groupNaming === 'letters' ? 'Group A, Group B, Group C…'
+                  : data.config.groupNaming === 'custom' ? `custom names${(data.config.groupNames || []).length ? ` (${data.config.groupNames.slice(0, 3).join(', ')}${data.config.groupNames.length > 3 ? '…' : ''})` : ''}`
+                  : 'Group 1, Group 2, Group 3…';
+                return (
+                  <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600" data-testid="cgm-planned-groups">
+                    Planned: <span className="font-black text-slate-900">{planned ? `${planned} group${planned === 1 ? '' : 's'}` : 'no fixed number (size decided when placing)'}</span>
+                    {planned ? <> · created so far: <span className="font-black text-slate-900">{existingCount}</span></> : null}
+                    {' '}· names: <span className="font-black text-slate-900">{namingLabel}</span>
+                    {data.config.capacity ? <> · capacity per group: <span className="font-black text-slate-900">{Number(data.config.capacity)}</span></> : null}
+                    <span className="mt-1 block font-medium text-slate-400">Set in the activity settings — this page follows them.</span>
+                  </div>
+                );
+              })()}
               <div className="mt-3 flex flex-wrap items-end gap-2">
-                <div><label className={label} htmlFor="cgm-gen-count">Number of groups</label><input id="cgm-gen-count" type="number" min="2" className={`${inputClass} mt-1 w-40`} value={genCount} onChange={(event) => setGenCount(event.target.value)} placeholder={String(data.config.groupCount || 'auto')} /></div>
-                <div><label className={label} htmlFor="cgm-gen-size">…or target size</label><input id="cgm-gen-size" type="number" min="2" className={`${inputClass} mt-1 w-40`} value={genSize} onChange={(event) => setGenSize(event.target.value)} placeholder={String(data.config.targetGroupSize || 'auto')} /></div>
                 <button
                   type="button"
                   disabled={busy}
                   className="cgm-primary-button"
                   onClick={() => void run(async () => {
-                    const result = await cgm.generateGroups(Number(activityId), {
-                      ...(genCount ? { groupCount: Number(genCount) } : {}),
-                      ...(genSize ? { targetSize: Number(genSize) } : {}),
-                    });
+                    const result = await cgm.generateGroups(Number(activityId), {});
                     const warnings = (result as any)?.warnings || [];
                     setMessage(`Placed ${(result as any)?.placed} student(s).${(result as any)?.unplaced ? ` ${(result as any)?.unplaced} could not fit.` : ''}${warnings.length ? ` ${warnings.join(' ')}` : ''}`);
                     return result;
@@ -1537,9 +1581,11 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                   {busy ? 'Working…' : 'Assign students'}
                 </button>
                 <button type="button" disabled={busy} className="mini-button" data-testid="cgm-create-empty-groups" onClick={() => void run(async () => {
-                  const count = Math.max(1, Math.floor(Number(genCount) || Number(data.config.groupCount) || 2));
-                  await cgm.addGroups(Number(activityId), { count, ...(data.config.capacity ? { capacity: Number(data.config.capacity) } : {}) });
-                  setMessage(`Created ${count} empty group(s) with the activity's capacity — nobody placed yet.`);
+                  const planned = Number(data.config.groupCount) || 0;
+                  const missing = planned ? Math.max(1, planned - (data.groups || []).length) : 0;
+                  if (!missing) { setMessage('All planned groups already exist — nothing to create.'); return; }
+                  await cgm.addGroups(Number(activityId), { count: missing, ...(data.config.capacity ? { capacity: Number(data.config.capacity) } : {}) });
+                  setMessage(`Created ${missing} empty group(s) (${planned - missing + 1}…${planned} of the planned ${planned}) — nobody placed yet.`);
                 })}>
                   Create empty groups only
                 </button>
@@ -1548,6 +1594,9 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                     {data.config.method === 'random' ? 'Assign remaining (random mode)' : 'Assign remaining (hybrid)'}
                   </button>
                 )}
+                <button type="button" disabled={busy} className="mini-button" data-testid="cgm-edit-activity-settings" onClick={() => onEditActivity(Number(activityId))}>
+                  ✎ Change in activity settings
+                </button>
               </div>
               <p className="mt-2 text-[11px] font-medium text-slate-400">Balanced sizes, hard capacity limits, and the gender/repeat rules configured for this activity. Published assignments are never reshuffled.</p>
             </div>

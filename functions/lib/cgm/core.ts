@@ -549,6 +549,8 @@ export interface ActivityConfig {
   method: AssignmentMethod;
   groupCount: number | null;
   targetGroupSize: number | null;
+  groupNaming: 'numbers' | 'letters' | 'custom';
+  groupNames: string[];
   capacity: number | null;
   genderRule: GenderRule;
   repeatRule: RepeatRule;
@@ -580,6 +582,8 @@ export const defaultActivityConfig = (): ActivityConfig => ({
   method: 'automatic',
   groupCount: null,
   targetGroupSize: null,
+  groupNaming: 'numbers',
+  groupNames: [],
   capacity: null,
   genderRule: 'none',
   repeatRule: 'random',
@@ -618,6 +622,28 @@ const countIn = (value: unknown, min: number, max: number): number | null => {
   return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : null;
 };
 
+/**
+ * Group display labels. Every group gets a real, persistent name at creation:
+ * 'numbers' → Group 1, Group 2 …; 'letters' → Group A, Group B … (bijective
+ * base-26, so group 27 is AA); 'custom' → the organizer's own names in order,
+ * falling back to the numbered style for positions without a name.
+ */
+export const groupLabel = (position: number, naming: string, customNames: string[]): string => {
+  const custom = customNames[position - 1];
+  if (naming === 'custom' && custom) return custom;
+  if (naming === 'letters') {
+    let rest = Math.max(1, Math.floor(position));
+    let label = '';
+    while (rest > 0) {
+      const remainder = (rest - 1) % 26;
+      label = String.fromCharCode(65 + remainder) + label;
+      rest = Math.floor((rest - 1) / 26);
+    }
+    return `Group ${label}`;
+  }
+  return `Group ${Math.max(1, Math.floor(position))}`;
+};
+
 export const sanitizeActivityConfig = (value: unknown): ActivityConfig => {
   const raw = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const defaults = defaultActivityConfig();
@@ -627,6 +653,10 @@ export const sanitizeActivityConfig = (value: unknown): ActivityConfig => {
     method: pick(raw.method, ASSIGNMENT_METHODS, defaults.method),
     groupCount: countIn(raw.groupCount, 2, 99),
     targetGroupSize: countIn(raw.targetGroupSize, 2, 200),
+    groupNaming: pick(raw.groupNaming, ['numbers', 'letters', 'custom'] as const, 'numbers'),
+    groupNames: Array.isArray(raw.groupNames)
+      ? raw.groupNames.slice(0, 50).map((name) => String(name).trim().slice(0, 60)).filter(Boolean)
+      : [],
     capacity: countIn(raw.capacity, 1, 200),
     genderRule: pick(raw.genderRule, GENDER_RULES, defaults.genderRule),
     repeatRule: pick(raw.repeatRule, REPEAT_RULES, defaults.repeatRule),
