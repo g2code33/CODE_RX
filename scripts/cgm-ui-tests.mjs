@@ -612,7 +612,19 @@ check('the reveal reproduces the reference composition (title panel, orbital car
   && /'Processing…', 'Random Selection…', 'Complete!'/.test(reveal)
   && /cgmSparkle/.test(reveal) && /cgmConfetti/.test(portalCss) && /cgmOrbit/.test(reveal));
 check('group labels are fully dynamic — the winner name renders from the server payload, never a hardcoded label',
-  /\{winner\?\.name\}/.test(reveal) && !/Group C/.test(reveal) && /const winnerIndex = Math\.max\(0, safeGroups\.findIndex/.test(reveal));
+  /\{resolved\.name\}/.test(reveal) && !/Group C/.test(reveal) && /resolveRevealWinner\(/.test(reveal));
+check('the winner id is validated against the renderable groups — a stale list NEVER promotes the first card',
+  /known: false/.test(reveal) && !/Math\.max\(0, safeGroups\.findIndex/.test(reveal)
+  && /groupName\?:/.test(reveal) && /resolved\.name/.test(reveal));
+check('the carousel is centred on the MEASURED lane, never viewport units (desktop drift fixed)',
+  /laneRef/.test(reveal) && /getBoundingClientRect/.test(reveal)
+  && /laneTransform\(laneW, cardW, gap, landingIndex, progress\)/.test(reveal) && !/50vw/.test(reveal));
+check('sound state syncs through a live ref — enabling sound mid-animation is heard',
+  /soundRef\.current = next/.test(reveal) && /soundRef\.current\) chime/.test(reveal)
+  && /soundRef\.current\) \{ chime\(660/.test(reveal));
+check('the confetti palette is clean and reduced motion skips the confetti field',
+  /'\#f59e0b', '\#fbbf24', '\#059669'/.test(reveal) && !/' \#f59e0b'/.test(reveal)
+  && /!reducedMotion && confetti\.map/.test(reveal));
 check('animation quality: rAF ease-out deceleration, golden centre ring, light rays, skip + reduced-motion + sound-off-by-default',
   /requestAnimationFrame/.test(reveal) && /easeOutQuart/.test(reveal) && /border-amber-400 bg-amber-200\/10/.test(reveal)
   && /Skip animation/.test(reveal) && /prefers-reduced-motion: reduce/.test(reveal)

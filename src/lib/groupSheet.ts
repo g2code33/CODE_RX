@@ -369,12 +369,12 @@ export const printGroupSheet = (sheet: GroupSheet): void => {
 <div class="band"><h1>CODE Rx SOCIETY — Class &amp; Group Management</h1><p>${escapeHtml(sheet.className)} · ${escapeHtml(sheet.activityName)} · ${escapeHtml(sheet.dateLabel)}</p></div>
 <h2>${escapeHtml(sheet.groupName)}</h2>
 <p class="count">${sheet.rows.length} member(s)</p>
-${showTopic ? `<div class="block"><h3>Group topic</h3><p>${escapeHtml(sheet.topic)}</p></div>` : ''}
+${showTopic ? `<div class="block"><h3>Group topic</h3><p>${escapeHtml(sheet.topic ?? '')}</p></div>` : ''}
 <table><thead><tr>${sheet.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>
 <tbody>${tableRows.map((row) => row.blank
   ? `<tr class="blank">${sheet.columns.map(() => `<td class="fill"></td>`).join('')}</tr>`
   : `<tr>${row.cells.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>
-${aobRows.length ? `<div class="block green"><h3>AOB / Other business</h3><p>${escapeHtml(sheet.aob)}</p></div>` : ''}
+${aobRows.length ? `<div class="block green"><h3>AOB / Other business</h3><p>${escapeHtml(sheet.aob ?? '')}</p></div>` : ''}
 <footer>${escapeHtml(sheet.footer)}</footer>
 </body></html>`;
   const frame = document.createElement('iframe');

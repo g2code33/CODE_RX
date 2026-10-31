@@ -2513,6 +2513,7 @@ const PublishDialog = ({
         }
 
         try {
+          if (!documentId) throw new Error('the filed document has no id yet');
           const delivery = await clientAccessCenter.prepareDelivery(documentId, true);
           const kilobytes = Math.max(1, Math.round(Number(delivery.data?.sizeBytes || 0) / 1024));
           stampNote = ` Stamped client copy: ${delivery.data?.label || 'client copy'} (${kilobytes} KB, ${delivery.data?.cached ? 'cached' : 'newly rendered'}).`;
@@ -2543,6 +2544,7 @@ const PublishDialog = ({
 
         // Force refresh stamped artifact so the new writing or replaced document is reflected
         try {
+          if (!documentId) throw new Error('no filed document id');
           await clientAccessCenter.prepareDelivery(documentId, true);
         } catch {
           // stamped copy will render on preview

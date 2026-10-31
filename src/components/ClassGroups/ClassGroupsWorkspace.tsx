@@ -1618,11 +1618,11 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
     // Blank columns: spliced at the organizer's chosen position (highest first
     // so earlier positions stay valid), adding an empty cell to every row.
     const sheetColumns = [...columns];
-    const sheetRows = rows.map((cells) => [...cells]);
+    const sheetRows = rows.map((cells: string[]) => [...cells]);
     [...blankCols].sort((a, b) => b.position - a.position).forEach((blank) => {
       const at = Math.min(Math.max(1, blank.position), sheetColumns.length + 1) - 1;
       sheetColumns.splice(at, 0, blank.label || '');
-      sheetRows.forEach((cells) => cells.splice(at, 0, ''));
+      sheetRows.forEach((cells: string[]) => cells.splice(at, 0, ''));
     });
     // Blank rows: handed to the renderer as ruled write-in bands.
     const memberCount = sheetRows.length;

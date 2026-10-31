@@ -1155,6 +1155,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
         <RandomGroupReveal
           groups={reveal.groups}
           winnerId={reveal.winnerId}
+          groupName={reveal.groupName}
           activityName={data?.activity?.name}
           onClose={() => { setReveal(null); if (activityId) void load(activityId); onChanged(); setWaPage(true); }}
         />
@@ -1281,7 +1282,6 @@ const LeaderApplyView = ({ electionId, onClear }: { electionId: number; onClear?
     } catch (failure: any) { setMessage(failure?.message || 'Could not record your candidacy.'); }
     finally { setBusy(false); }
   };
-  const isCandidate = (detail.candidates || []).length >= 0 && detail.myCandidate === true;
   return (
     <div className={`${card} border-emerald-300 ring-2 ring-emerald-100`} data-testid="cgm-leader-apply">
       <p className="mb-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">You opened a stand-as-leader link — volunteer to lead your group here.</p>
