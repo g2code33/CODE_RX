@@ -1087,6 +1087,65 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     };
   };
 
+  // Read-only file inspection for the import screen: detects the columns,
+  // returns the FIRST 4 ROWS as a reference table and the suggested mapping —
+  // so the organizer links columns to real data before anything is imported.
+  app.post('/api/cgm/classes/:id/roster/preview', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const guard = await requireClassPermission(c, member, classId, 'import_roster');
+    if (!guard.ok) return guard.response;
+
+    const form = await c.req.parseBody();
+    const file = form.file as File | undefined;
+    if (!file) return bad(c, 'Choose a file to inspect.');
+    if (file.size > 2 * 1024 * 1024) return bad(c, 'Keep roster files under 2 MB.', 413);
+    const lower = (file.name || '').toLowerCase();
+    let format = 'csv';
+    let rows: Record<string, unknown>[] = [];
+    let headers: string[] = [];
+    if (lower.endsWith('.json') || file.type === 'application/json') {
+      format = 'json';
+      rows = parseJsonRows(await file.text());
+      headers = rows.length ? Object.keys(rows[0]) : [];
+    } else if (lower.endsWith('.xlsx') || lower.endsWith('.xls') || file.type.includes('spreadsheet')) {
+      format = 'xlsx';
+      rows = await parseXlsxRows(await file.arrayBuffer());
+      headers = rows.length ? Object.keys(rows[0]) : [];
+    } else {
+      const table = parseCsv(await file.text());
+      headers = (table[0] || []).map((header) => header.trim());
+      rows = table.slice(1).map((cells) => {
+        const row: Record<string, unknown> = {};
+        headers.forEach((header, i) => { row[header] = cells[i] ?? ''; });
+        return row;
+      });
+    }
+    if (!rows.length) return bad(c, 'The file has no rows to import.');
+    const suggestions = suggestMapping(headers) as Partial<Record<RosterField, string>>;
+    // Column peek: the first non-empty value of each column, so the mapping
+    // dropdown shows exactly what lives in the file behind every header.
+    const columnPeek: Record<string, string> = {};
+    for (const header of headers) {
+      const found = rows.find((row) => String(row[header] ?? '').trim() !== '');
+      columnPeek[header] = String(found ? found[header] : '').slice(0, 40);
+    }
+    return c.json({
+      success: true,
+      data: {
+        format,
+        fileName: file.name || 'roster',
+        headers,
+        columnPeek,
+        totalRows: rows.length,
+        sampleRows: rows.slice(0, 4),
+        suggestedMapping: suggestions,
+        requiredFields: ['full_name', 'index_number'],
+      },
+    });
+  });
+
   app.post('/api/cgm/classes/:id/roster/import', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);

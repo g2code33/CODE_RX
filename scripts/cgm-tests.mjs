@@ -2143,6 +2143,71 @@ check('removing a membership keeps the permanent identity intact',
 check('the removed membership keeps its history row with a reason',
   q1('SELECT status, removal_reason FROM cgm_class_members WHERE id = ?', trMembershipId)?.status === 'removed');
 
+
+// ===========================================================================
+// 26. Roster file inspection: the import screen reads the file BEFORE any
+//     import — columns, the first four rows for reference, per-column data
+//     peeks and suggested linking.
+// ===========================================================================
+section('26. Roster file inspection (preview before import)');
+
+const rosterCountBefore = q1('SELECT COUNT(*) c FROM cgm_roster_entries WHERE class_id = ?', classAId).c;
+const pvCsv = [
+  'Student Name,Exam Index,Contact,Sex,Mail',
+  'Preview Ama,PRE-001,0244000099,female,ama.pv@example.com',
+  'Preview Kofi,PRE-002,0244000098,male,kofi.pv@example.com',
+  'Preview Akosua,PRE-003,0244000097,female,akosua.pv@example.com',
+  'Preview Yaw,PRE-004,0244000096,male,yaw.pv@example.com',
+  'Preview Abena,PRE-005,0244000095,female,abena.pv@example.com',
+  'Preview Kojo,PRE-006,0244000094,male,kojo.pv@example.com',
+].join('\n');
+const pvForm = new FormData();
+pvForm.append('file', new File([pvCsv], 'class-list.csv', { type: 'text/csv' }));
+const pv = await formCall('POST', `/api/cgm/classes/${classAId}/roster/preview`, pvForm, amaToken);
+check('the import screen can inspect a file without importing it', pv.status === 200, `status ${pv.status} ${pv.text?.slice(0, 140)}`);
+check('the file columns are reported exactly as the file names them',
+  JSON.stringify(pv.json?.data?.headers) === JSON.stringify(['Student Name', 'Exam Index', 'Contact', 'Sex', 'Mail']), JSON.stringify(pv.json?.data?.headers));
+check('exactly the first FOUR rows are returned for reference', (pv.json?.data?.sampleRows || []).length === 4, String((pv.json?.data?.sampleRows || []).length));
+check('the total row count is detected', pv.json?.data?.totalRows === 6, String(pv.json?.data?.totalRows));
+check('the reference rows are the FIRST rows of the file',
+  pv.json?.data?.sampleRows?.[0]['Student Name'] === 'Preview Ama' && pv.json?.data?.sampleRows?.[3]['Student Name'] === 'Preview Yaw');
+check('every column carries a peek of the data inside it',
+  pv.json?.data?.columnPeek?.['Exam Index'] === 'PRE-001' && pv.json?.data?.columnPeek?.['Sex'] === 'female', JSON.stringify(pv.json?.data?.columnPeek || {}));
+check('columns are linked to their fields from the header names',
+  pv.json?.data?.suggestedMapping?.full_name === 'Student Name' && pv.json?.data?.suggestedMapping?.index_number === 'Exam Index'
+  && pv.json?.data?.suggestedMapping?.phone === 'Contact' && pv.json?.data?.suggestedMapping?.gender === 'Sex',
+  JSON.stringify(pv.json?.data?.suggestedMapping || {}));
+check('the required fields are declared to the screen',
+  JSON.stringify(pv.json?.data?.requiredFields) === JSON.stringify(['full_name', 'index_number']));
+check('inspection writes nothing to the roster',
+  q1('SELECT COUNT(*) c FROM cgm_roster_entries WHERE class_id = ?', classAId).c === rosterCountBefore);
+
+const pvXlsx = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(pvXlsx, XLSX.utils.json_to_sheet([
+  { 'Full Name': 'Xlsx One', 'Index': 'XLS-001' }, { 'Full Name': 'Xlsx Two', 'Index': 'XLS-002' },
+  { 'Full Name': 'Xlsx Three', 'Index': 'XLS-003' },
+]), 'Sheet1');
+const pvXlsxBits = XLSX.write(pvXlsx, { type: 'buffer', bookType: 'xlsx' });
+const pvXlsxForm = new FormData();
+pvXlsxForm.append('file', new File([pvXlsxBits], 'class-list.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+const pvXlsxOut = await formCall('POST', `/api/cgm/classes/${classAId}/roster/preview`, pvXlsxForm, amaToken);
+check('an Excel file inspects through the same screen', pvXlsxOut.status === 200 && pvXlsxOut.json?.data?.format === 'xlsx', `status ${pvXlsxOut.status}`);
+check('the Excel columns are linked automatically',
+  pvXlsxOut.json?.data?.suggestedMapping?.full_name === 'Full Name' && pvXlsxOut.json?.data?.suggestedMapping?.index_number === 'Index', JSON.stringify(pvXlsxOut.json?.data?.suggestedMapping || {}));
+check('the Excel reference shows at most four rows', (pvXlsxOut.json?.data?.sampleRows || []).length === 3);
+
+const pvJsonForm = new FormData();
+pvJsonForm.append('file', new File([JSON.stringify([{ name: 'Json One', id: 'JSN-001' }, { name: 'Json Two', id: 'JSN-002' }])], 'list.json', { type: 'application/json' }));
+const pvJsonOut = await formCall('POST', `/api/cgm/classes/${classAId}/roster/preview`, pvJsonForm, amaToken);
+check('a JSON file inspects through the same screen', pvJsonOut.status === 200 && pvJsonOut.json?.data?.format === 'json' && pvJsonOut.json?.data?.headers.join(',') === 'name,id');
+
+const pvNone = await formCall('POST', `/api/cgm/classes/${classAId}/roster/preview`, new FormData(), amaToken);
+check('inspecting with no file is refused clearly', pvNone.status === 400, `status ${pvNone.status}`);
+const pvDenied = await formCall('POST', `/api/cgm/classes/${classAId}/roster/preview`, (() => { const f = new FormData(); f.append('file', new File([pvCsv], 'x.csv', { type: 'text/csv' })); return f; })(), applyToken);
+check('a member without import permission cannot inspect the file', pvDenied.status === 403, `status ${pvDenied.status}`);
+const pvUnknown = await formCall('POST', '/api/cgm/classes/999999/roster/preview', (() => { const f = new FormData(); f.append('file', new File([pvCsv], 'x.csv', { type: 'text/csv' })); return f; })(), amaToken);
+check('inspection respects class access', [403, 404].includes(pvUnknown.status), `status ${pvUnknown.status}`);
+
 // ---------------------------------------------------------------------------
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

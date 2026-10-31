@@ -179,6 +179,22 @@ export async function downloadReport(classId: number, kind: string, format: 'csv
 }
 
 /** Roster file upload with mapping/policy (multipart). */
+/** Read-only inspection of a roster file: columns, first 4 rows, suggestions. */
+export async function previewRosterFile(classId: number, file: File) {
+  const { getToken } = await import('./cloudflare');
+  const form = new FormData();
+  form.append('file', file);
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}/api/cgm/classes/${classId}/roster/preview`, {
+    method: 'POST', headers, body: form, credentials: 'omit',
+  });
+  const json = await response.json().catch(() => null);
+  if (!response.ok) throw new CgmError(json?.error || 'The file could not be read.', response.status);
+  return json?.data ?? json;
+}
+
 export async function importRosterFile(
   classId: number,
   file: File,

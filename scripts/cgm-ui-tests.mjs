@@ -120,7 +120,8 @@ section('6. Organizer workspace behaviours');
 check('roster import supports the three formats and duplicate policies',
   /\.xlsx/.test(workspace) && /\.csv/.test(workspace) && /\.json/.test(workspace)
   && /'skip'|value="skip"/.test(workspace) && /value="update"/.test(workspace) && /value="flag"/.test(workspace));
-check('the import flow validates first, then imports', /Validate file/.test(workspace) && /Import roster/.test(workspace));
+check('the import flow validates before it imports: the file is inspected on choose and rows can be re-checked',
+  /previewRosterFile/.test(workspace) && /Check rows for problems/.test(workspace) && /Import \$\{info\?\.totalRows/.test(workspace));
 check('invitations show the code and QR exactly once at creation',
   /shown only now/.test(workspace) && /QRCode|toDataURL/.test(workspace));
 check('general and individual invitations are distinct flows',
@@ -448,6 +449,18 @@ check('the post-claim dashboard refresh compares session tokens, never object id
   /session\.token === studentSession\.read\(\)\?\.token/.test(studentPortal));
 check('an organizer with classes can still create a new class from My Classes',
   /New class/.test(workspace) && (workspace.match(/<CreateClassForm/g) || []).length === 2 && /defaultOpen \? \{ onCreated/.test(workspace) === false || Boolean(/defaultOpen/.test(workspace)));
+
+check('choosing a file inspects it immediately: columns, total rows and the first four rows for reference',
+  /previewRosterFile/.test(workspace) && /First \{Math\.min\(4,/.test(workspace)
+  && /for reference while you link the columns/.test(workspace));
+check('the linking selects come from the file with a peek of the data inside each column',
+  /columnPeek/.test(workspace) && /e\.g\. \$\{String\(peek\[header\]\)\.slice\(0, 18\)\}/.test(workspace));
+check('columns are linked automatically from the header names and the link says so',
+  /setMapping\(\{ \.\.\.\(result\.suggestedMapping \|\| \{\}\) \}\);/.test(workspace)
+  && /Linked automatically from your file/.test(workspace));
+check('required columns block the import with a clear call to action',
+  /missingRequired\.length > 0/.test(workspace) && /Map \$\{missingRequired/.test(workspace)
+  && /requiredFields/.test(workspace));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import * as QRCode from 'qrcode';
 import {
-  cgm, downloadReport, downloadRosterTemplate, importRosterFile,
+  cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
 import { appDialog } from '../AppDialog';
 import { ConnectionBanner } from './ConnectionBanner';
@@ -587,35 +587,46 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
   const [file, setFile] = useState<File | null>(null);
   const [policy, setPolicy] = useState('skip');
   const [mapping, setMapping] = useState<Record<string, string>>({});
-  const [headers, setHeaders] = useState<string[]>([]);
+  const [info, setInfo] = useState<any>(null);
   const [preview, setPreview] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fields: Array<[string, string]> = [
-    ['full_name', 'Full name *'], ['index_number', 'Index number *'], ['university_id', 'University ID'],
-    ['phone', 'Phone'], ['gender', 'Gender'], ['email', 'Email'],
+    ['full_name', 'Full name'], ['index_number', 'Index number'],
+    ['university_id', 'University ID'], ['phone', 'Phone'],
+    ['gender', 'Gender'], ['email', 'Email'],
   ];
+  const headers: string[] = info?.headers || [];
+  const peek: Record<string, string> = info?.columnPeek || {};
+  const suggested: Record<string, string> = info?.suggestedMapping || {};
+  // Which columns must be linked before an import is allowed — declared by
+  // the server's file inspection.
+  const requiredFields: string[] = info?.requiredFields || ['full_name', 'index_number'];
+  const missingRequired = fields.filter(([field]) => requiredFields.includes(field) && !mapping[field]);
+
+  // Inspecting the file is automatic: the moment a file is chosen it is read,
+  // the first 4 rows appear as a reference table, and the columns are linked
+  // to their fields from the header names.
+  const inspect = async (chosen: File) => {
+    setBusy(true); setError(null); setPreview(null); setInfo(null);
+    try {
+      const result = await previewRosterFile(classId, chosen);
+      setInfo(result);
+      setMapping({ ...(result.suggestedMapping || {}) });
+    } catch (failure: any) { setError(failure?.message || 'The file could not be read.'); }
+    finally { setBusy(false); }
+  };
 
   const runPreview = async () => {
     if (!file) return;
     setBusy(true); setError(null);
     try {
       const result = await importRosterFile(classId, file, mapping, policy, true);
-      setHeaders(result.suggestedMapping ? Object.keys(result.sample?.[0] || {}) : []);
       setPreview(result);
-      const suggested = result.suggestedMapping || {};
-      setMapping((current) => ({ ...suggested, ...current }));
-    } catch (failure: any) {
-      const data = failure?.data;
-      if (data?.needsMapping) {
-        setHeaders(data.headers || []);
-        setMapping(data.suggestedMapping || {});
-        setError('Map the columns below, then import.');
-      } else {
-        setError(failure?.message || 'The file could not be read.');
-      }
-    } finally { setBusy(false); }
+      setError('File checked — review the summary below, then import.');
+    } catch (failure: any) { setError(failure?.message || 'The file could not be checked.'); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -637,34 +648,90 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
           ))}
         </span>
       </div>
-      <p className="mt-1 text-xs font-medium text-slate-500">Excel .xlsx, CSV .csv or JSON .json — every format runs the same validation and duplicate checks.</p>
+      <p className="mt-1 text-xs font-medium text-slate-500">Excel .xlsx, CSV .csv or JSON .json — pick a file and it is read immediately: the first four rows appear below and the columns are linked to their fields automatically.</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <input type="file" accept=".xlsx,.xls,.csv,.json" onChange={(event) => { setFile(event.target.files?.[0] || null); setPreview(null); }} className="text-xs" aria-label="Roster file" />
+        <input
+          type="file"
+          accept=".xlsx,.xls,.csv,.json"
+          onChange={(event) => { const chosen = event.target.files?.[0] || null; setFile(chosen); void inspect(chosen as File); }}
+          className="text-xs"
+          aria-label="Roster file"
+        />
         <select value={policy} onChange={(event) => setPolicy(event.target.value)} className="mini-button" aria-label="Duplicate policy">
           <option value="skip">Skip duplicates</option>
           <option value="update">Update existing rows</option>
           <option value="flag">Flag for review</option>
         </select>
-        <button type="button" disabled={!file || busy} onClick={() => void runPreview()} className="mini-button">{busy ? 'Reading…' : 'Validate file'}</button>
+        {file && <button type="button" disabled={busy} onClick={() => void inspect(file)} className="mini-button">{busy ? 'Reading…' : 'Re-read file'}</button>}
+        {file && headers.length > 0 && <button type="button" disabled={busy} onClick={() => void runPreview()} className="mini-button">Check rows for problems</button>}
       </div>
 
+      {file && (
+        <p className="mt-2 text-xs font-bold text-emerald-700">
+          {info ? `${info.fileName} · ${String(info.format).toUpperCase()} · ${info.totalRows} rows detected` : busy ? 'Reading the file…' : ''}
+        </p>
+      )}
+
       {headers.length > 0 && (
-        <div className="mt-4 grid gap-2 sm:grid-cols-3">
-          {fields.map(([field, text]) => (
-            <div key={field}>
-              <label className={label} htmlFor={`map-${field}`}>{text}</label>
-              <select
-                id={`map-${field}`}
-                className={`${inputClass} mt-1`}
-                value={mapping[field] || ''}
-                onChange={(event) => setMapping((current) => ({ ...current, [field]: event.target.value }))}
-              >
-                <option value="">— not mapped —</option>
-                {headers.map((header) => <option key={header} value={header}>{header}</option>)}
-              </select>
+        <>
+          <div className="mt-4">
+            <p className={label}>First {Math.min(4, (info?.sampleRows || []).length)} rows of your file — for reference while you link the columns</p>
+            <div className="mt-2 overflow-x-auto rounded-xl border border-amber-200">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-amber-50 text-[10px] font-black uppercase tracking-wider text-amber-700">
+                    <th className="px-2 py-2">#</th>
+                    {headers.map((header) => <th key={header} className="px-2 py-2 whitespace-nowrap">{header}</th>)}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                  {(info?.sampleRows || []).map((row: Record<string, unknown>, index: number) => (
+                    <tr key={index}>
+                      <td className="px-2 py-1.5 text-slate-400">{index + 1}</td>
+                      {headers.map((header) => <td key={header} className="px-2 py-1.5 whitespace-nowrap">{String(row[header] ?? '').slice(0, 32) || <span className="text-slate-300">—</span>}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          ))}
-        </div>
+          </div>
+
+          <div className="mt-4">
+            <p className={label}>Link the columns — chosen from your file, with a peek at the data inside</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              {fields.map(([field, text]) => {
+                const required = requiredFields.includes(field);
+                const isSuggested = Boolean(suggested[field]);
+                return (
+                  <div key={field}>
+                    <label className={label} htmlFor={`map-${field}`}>
+                      {text}{required && <span className="ml-1 text-amber-600">*</span>}
+                      {required && !mapping[field] && <span className="ml-1 text-red-500">— required</span>}
+                    </label>
+                    <select
+                      id={`map-${field}`}
+                      className={`${inputClass} mt-1`}
+                      value={mapping[field] || ''}
+                      onChange={(event) => setMapping((current) => {
+                        const next = { ...current };
+                        if (event.target.value) next[field] = event.target.value; else delete next[field];
+                        return next;
+                      })}
+                    >
+                      <option value="">— not mapped —</option>
+                      {headers.map((header) => (
+                        <option key={header} value={header}>
+                          {header}{suggested[field] === header ? '  ✓ suggested' : ''}{peek[header] ? `  · e.g. ${String(peek[header]).slice(0, 18)}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {isSuggested && mapping[field] === suggested[field] && <p className="mt-0.5 text-[10px] font-bold text-emerald-600">Linked automatically from your file</p>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
       )}
 
       {preview && (
@@ -674,11 +741,11 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
         </div>
       )}
 
-      {error && <div className="mt-3"><Banner tone={preview ? 'info' : 'error'}>{error}</Banner></div>}
+      {error && <div className="mt-3"><Banner tone={preview ? 'info' : (headers.length ? 'info' : 'error')}>{error}</Banner></div>}
 
       <button
         type="button"
-        disabled={!file || busy || !mapping.full_name || !mapping.index_number}
+        disabled={!file || busy || missingRequired.length > 0}
         className="cgm-primary-button mt-4"
         onClick={async () => {
           setBusy(true); setError(null);
@@ -689,7 +756,7 @@ const RosterImport = ({ classId, onDone }: { classId: number; onDone: (result: a
           finally { setBusy(false); }
         }}
       >
-        {busy ? 'Importing…' : 'Import roster'}
+        {busy ? 'Importing…' : missingRequired.length ? `Map ${missingRequired.map(([, text]) => text).join(' & ')} to import` : `Import ${info?.totalRows ?? ''} rows`}
       </button>
     </div>
   );
