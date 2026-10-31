@@ -361,7 +361,7 @@ const SignaturePad = ({
     redrawAll();
   };
 
-  const stopDrawing = (event?: ReactPointerEvent<HTMLCanvasElement>) => {
+  const stopDrawing = () => {
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
     const stroke = currentStrokeRef.current;

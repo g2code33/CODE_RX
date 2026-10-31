@@ -3129,7 +3129,7 @@ check('the portal calls the draw API FIRST and only then opens the reveal',
 check('the reveal honours reduced motion, offers Skip, and keeps sound OFF by default',
   /prefers-reduced-motion: reduce/.test(revealSrc) && /Skip animation/.test(revealSrc) && /useState\(false\); \/\/ OFF by default/.test(revealSrc));
 check('the reveal shows the dynamic group name from the database (never a hardcoded label)',
-  /\{winner\?\.name\}/.test(revealSrc) && !/Group C/.test(revealSrc));
+  /\{resolved\.name\}/.test(revealSrc) && !/Group C/.test(revealSrc));
 check('the premium overlay carries the reference composition without any gambling language',
   /RANDOM GROUP SELECTION/i.test(revealSrc) && /All groups have an equal chance/.test(revealSrc)
   && /Selecting your group…/.test(revealSrc) && /Congratulations!/.test(revealSrc)
@@ -3137,6 +3137,153 @@ check('the premium overlay carries the reference composition without any gamblin
   && !/\b(casino|bets?|betting|jackpot|gambl\w*|wager\w*)\b/i.test(revealSrc.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ')));
 
 // ---------------------------------------------------------------------------
+// -- Reveal core units: winner validation + measured-lane centring -----------
+await build({ entryPoints: [path.join(ROOT, 'src/components/ClassGroups/RandomGroupReveal.tsx')], outfile: path.join(CACHE, 'reveal.mjs'), bundle: true, format: 'esm', platform: 'node', target: 'es2022', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"test"' }, logLevel: 'silent', external: ['node:*'] });
+const revealCore = await import(path.join(CACHE, 'reveal.mjs'));
+const resolveRevealWinner = revealCore.resolveRevealWinner;
+const laneTransform = revealCore.laneTransform;
+
+const revealPods = [{ id: 7, name: 'Pod Alpha' }, { id: 9, name: 'Pod Beta' }, { id: 12, name: 'Pod Gamma' }];
+check('the reveal core resolves the true winner by id',
+  resolveRevealWinner(revealPods, 9).known === true && resolveRevealWinner(revealPods, 9).index === 1
+  && resolveRevealWinner(revealPods, 9).name === 'Pod Beta');
+check('an invalid winner id is NEVER mapped to the first group',
+  resolveRevealWinner(revealPods, 99).known === false && resolveRevealWinner(revealPods, 99).index === -1
+  && resolveRevealWinner(revealPods, 99).name !== 'Pod Alpha');
+check('the invalid case shows the group NAME the server returned with the draw',
+  resolveRevealWinner(revealPods, 99, 'Spectrum Crew').name === 'Spectrum Crew');
+check('with no server name either, the fallback label stays honest (Group <id>)',
+  resolveRevealWinner(revealPods, 99).name === 'Group 99');
+check('very long winner names pass through the reveal core untouched',
+  resolveRevealWinner([{ id: 3, name: 'W'.repeat(180) }], 3).name.length === 180);
+
+const winnerCentreAfter = (lane, card, gap, landing) => {
+  const m = /translateX\((-?[0-9.]+)px\)/.exec(laneTransform(lane, card, gap, landing, 1));
+  return Number(m[1]) + landing * (card + gap) + card / 2;
+};
+check('desktop wide (2560px window, 744px lane): the winner card centre lands EXACTLY on the lane centre',
+  winnerCentreAfter(744, 148, 18, 7) === 372 && winnerCentreAfter(744, 148, 18, 0) === 372);
+check('mobile (375px window, 331px lane): the winner card centre lands on the lane centre too',
+  winnerCentreAfter(331, 96, 18, 4) === 165.5);
+check('the strip starts centred on the first card and clamps progress beyond the end',
+  /translateX\(372px\)/.test(laneTransform(744, 148, 18, 7, 0))
+  && laneTransform(744, 148, 18, 7, 1.9) === laneTransform(744, 148, 18, 7, 1));
+
+// -- Draws at 2, 3, 5, 10 and 20 groups: capacity, waitlist, validity --------
+let drawStudentNo = 101;
+const nextDrawStudent = (label) => freshFmtRosterStudent(drawStudentNo++, label);
+for (const gridCount of [2, 3, 5, 10, 20]) {
+  const gridAct = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+    name: `Draw Grid ${gridCount}`, type: 'tutorial',
+    config: { method: 'self', groupCount: gridCount, capacity: 1, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, amaToken);
+  const gridActId = gridAct.json?.data?.activityId ?? gridAct.json?.data?.activity?.id ?? gridAct.json?.data?.id;
+  await memberCall('POST', `/api/cgm/activities/${gridActId}/lifecycle`, { action: 'open' }, amaToken);
+  await memberCall('POST', `/api/cgm/activities/${gridActId}/groups`, { count: gridCount, capacity: 1 }, amaToken);
+  const gridIds = ((await memberCall('GET', `/api/cgm/activities/${gridActId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => Number(g.id));
+  const gridPlaced = [];
+  let gridWaitlisted = 0;
+  for (let seat = 0; seat < gridCount + 1; seat += 1) {
+    const seatStudent = await nextDrawStudent(`Grid ${gridCount} Seat ${seat}`);
+    const seatDraw = await studentCall('POST', `/api/cgm/student/activities/${gridActId}/random-draw`, {}, seatStudent.session);
+    if (seatDraw.status === 200 && Number(seatDraw.json?.data?.groupId)) gridPlaced.push(Number(seatDraw.json.data.groupId));
+    else if (seatDraw.status === 200 && seatDraw.json?.data?.waitlisted) gridWaitlisted += 1;
+  }
+  check(`a ${gridCount}-group activity places exactly ${gridCount} students — one per distinct group — and waitlists the extra`,
+    gridIds.length === gridCount && gridPlaced.length === gridCount && gridWaitlisted === 1
+    && gridPlaced.every((id) => gridIds.includes(id)) && new Set(gridPlaced).size === gridCount
+    && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", gridActId).c) === gridCount,
+    `placed=${gridPlaced.length} waitlisted=${gridWaitlisted}`);
+}
+
+// -- Concurrent race for the last seat: exactly one winner -------------------
+const raceAct = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Race Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 1, capacity: 1, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const raceActId = raceAct.json?.data?.activityId ?? raceAct.json?.data?.activity?.id ?? raceAct.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${raceActId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${raceActId}/groups`, { count: 1, capacity: 1 }, amaToken);
+const racerA = await nextDrawStudent('Race Racer A');
+const racerB = await nextDrawStudent('Race Racer B');
+const [raceLeft, raceRight] = await Promise.all([
+  studentCall('POST', `/api/cgm/student/activities/${raceActId}/random-draw`, {}, racerA.session),
+  studentCall('POST', `/api/cgm/student/activities/${raceActId}/random-draw`, {}, racerB.session),
+]);
+const lastSeatAssigned = Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", raceActId).c);
+const raceWinners = [raceLeft, raceRight].filter((r) => Number(r.json?.data?.groupId) > 0).length;
+check('a concurrent last-seat race ends with exactly ONE assigned student, the other waitlisted or refused — never two seats',
+  lastSeatAssigned === 1 && raceWinners === 1
+  && [raceLeft, raceRight].every((r) => r.status === 200 || r.status === 409)
+  && [raceLeft, raceRight].some((r) => r.json?.data?.waitlisted === true || r.status === 409),
+  `assigned=${lastSeatAssigned} winners=${raceWinners} statuses=${raceLeft.status}/${raceRight.status}`);
+
+// -- Very long custom group names survive the whole draw pipeline ------------
+const longPodName = 'U'.repeat(60); // the sanitizer's per-name maximum
+const longAct = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Long Name Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 2, capacity: 1, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all', groupNaming: 'custom', groupNames: [longPodName, 'Short Pod'] },
+}, amaToken);
+const longActId = longAct.json?.data?.activityId ?? longAct.json?.data?.activity?.id ?? longAct.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${longActId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${longActId}/groups`, { count: 2, capacity: 1 }, amaToken);
+const longStudent = await nextDrawStudent('Long Name Drawer');
+const longDraw = await studentCall('POST', `/api/cgm/student/activities/${longActId}/random-draw`, {}, longStudent.session);
+const longGroups = ((await memberCall('GET', `/api/cgm/activities/${longActId}`, undefined, amaToken)).json?.data?.groups || []);
+const drawnRow = longGroups.find((g) => Number(g.id) === Number(longDraw.json?.data?.groupId));
+check('custom group names (a 60-character maximum name included) round-trip through the draw answer untouched',
+  longDraw.status === 200 && Array.isArray(longGroups) && longGroups.length === 2
+  && String(longGroups.find((g) => Number(g.position) === 1)?.name || '') === longPodName
+  && drawnRow && String(longDraw.json?.data?.groupName || '') === String(drawnRow.name),
+  `answer=${String(longDraw.json?.data?.groupName || '').length}c stored=${String(drawnRow?.name || '').length}c`);
+
+// -- Cross-class IDOR battery: the fmt-class organizer vs PHANTOM's class ----
+// classBId is governed ONLY by PHANTOM — ama holds no role on it. Every
+// ama attempt on that class's resources must fail with 401/403/404 and never
+// succeed; the same routes must answer for PHANTOM (failures are permission,
+// not breakage).
+const classBStatus = String(q1('SELECT status FROM cgm_classes WHERE id = ?', classBId)?.status || '');
+if (classBStatus !== 'active') {
+  await memberCall('POST', `/api/cgm/phantom/classes/${classBId}/approve`, {}, phantomToken);
+}
+const idorAct = await memberCall('POST', `/api/cgm/classes/${classBId}/activities`, {
+  name: 'Class B Only', type: 'tutorial',
+  config: { method: 'self', groupCount: 2, capacity: 5, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, phantomToken);
+const idorActId = idorAct.json?.data?.activityId ?? idorAct.json?.data?.activity?.id ?? idorAct.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${idorActId}/lifecycle`, { action: 'open' }, phantomToken);
+await memberCall('POST', `/api/cgm/activities/${idorActId}/groups`, { count: 2, capacity: 5 }, phantomToken);
+const idorInvite = await memberCall('POST', `/api/cgm/classes/${classBId}/invitations`, { kind: 'general', maxUses: 3 }, phantomToken);
+const idorInviteId = Number(idorInvite.json?.data?.invitation?.id || idorInvite.json?.data?.id || 0);
+check('PHANTOM stages a full rival-class surface (activity open, groups, invitation)',
+  Boolean(idorActId) && idorInvite.status === 200 && idorInviteId > 0
+  && String(q1('SELECT status FROM cgm_classes WHERE id = ?', classBId)?.status) === 'active',
+  `act=${idorAct.status} invite=${idorInvite.status} id=${idorInviteId}`);
+const amaAttack = async (method, urlPath, body) => memberCall(method, urlPath, body, amaToken);
+const idorProbes = [
+  ['GET', `/api/cgm/activities/${idorActId}`, undefined],
+  ['POST', `/api/cgm/activities/${idorActId}/groups`, { count: 1, capacity: 5 }],
+  ['POST', `/api/cgm/activities/${idorActId}/announcements`, { title: 'Intruder', body: 'should fail' }],
+  ['POST', `/api/cgm/classes/${classBId}/registrations/999999/approve`, {}],
+  ['POST', `/api/cgm/invitations/${idorInviteId}/revoke`, {}],
+  ['POST', `/api/cgm/invitations/${idorInviteId}/regenerate`, {}],
+];
+const idorResults = [];
+for (const [method, urlPath, body] of idorProbes) {
+  const attempt = await amaAttack(method, urlPath, body);
+  idorResults.push(`${method} ${urlPath.split('/').slice(3, 6).join('/')} -> ${attempt.status}`);
+  if (attempt.status === 200 && attempt.json?.success === true) idorResults.push('LEAK!');
+}
+check('cross-class IDOR: every outsider attempt on another class fails with 401/403/404 and leaks nothing',
+  idorResults.every((line) => /-> (401|403|404)$/.test(line)) && !idorResults.some((line) => line.includes('LEAK!')),
+  idorResults.join(' | '));
+const phantomReadback = await memberCall('GET', `/api/cgm/activities/${idorActId}`, undefined, phantomToken);
+const phantomInviteList = await memberCall('GET', `/api/cgm/classes/${classBId}/invitations`, undefined, phantomToken);
+check('the same routes answer for the rightful team — the refusals were permission, not breakage',
+  phantomReadback.status === 200 && phantomReadback.json?.success === true
+  && phantomInviteList.status === 200 && Number(phantomInviteList.json?.data?.length || phantomInviteList.json?.data?.items?.length || 0) >= 1,
+  `read=${phantomReadback.status} invites=${phantomInviteList.status}`);
+
 // 33. Forced random mode + organizer finish + PHANTOM-regulated direct swaps
 // ---------------------------------------------------------------------------
 section('33. Forced random method, organizer finish, direct member swaps');

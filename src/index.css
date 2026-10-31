@@ -2262,6 +2262,15 @@ h3.vault-rich-text {
   background: linear-gradient(180deg, #f4faf6 0%, #f8fafc 220px);
 }
 
+/* Class & Group consoles are dense working surfaces: pinch-zoom and
+   double-tap zoom are disabled there (the viewport meta is tightened by
+   useCgmNoZoom while a surface is mounted; this covers the gestures the
+   meta cannot reach, e.g. double-tap on some Android browsers). */
+.cgm-shell,
+.cgm-auth-wrap {
+  touch-action: pan-y;
+}
+
 .cgm-topbar {
   display: flex;
   align-items: center;

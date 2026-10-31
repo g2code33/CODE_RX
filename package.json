@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "test:client-portal": "node --experimental-sqlite scripts/client-portal-tests.mjs",
     "test:client-portal-ui": "node scripts/client-portal-ui-tests.mjs",

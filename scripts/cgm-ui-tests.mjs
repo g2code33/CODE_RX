@@ -42,7 +42,7 @@ check('the navbar carries the dedicated Class & Groups door to #class-groups',
   /href="#class-groups"/.test(navbar) && /Classes &amp; Groups|Classes & Groups/.test(navbar));
 const classGroupsEntry = src('src/components/ClassGroupsEntry.tsx');
 check('the Class & Groups door is a compact icon button beside the client access door (no header text pills)',
-  /href="#class-groups"/.test(classGroupsEntry) && /Users className/.test(classGroupsEntry)
+  /href="#class-groups"/.test(classGroupsEntry) && /CGP\.jpg/.test(classGroupsEntry)
   && /<ClassGroupsEntry variant="icon" \/>/.test(navbar) && /<ClientPortalEntry variant="icon" \/>/.test(navbar)
   && !/variant="chip"/.test(navbar)
   && navbar.indexOf('<ClassGroupsEntry') < navbar.indexOf('<ClientPortalEntry'));
@@ -97,10 +97,26 @@ check('the student portal covers classes, groups, elections, attendance, calenda
     .every((label) => studentPortal.includes(label)));
 check('profile changes go through the approval workflow with a reason',
   /requestProfileChange/.test(studentPortal) && /reason/i.test(studentPortal));
+check('the Request-a-group-change card carries a SMALL idea icon that reveals the expectation note and folds back on any click',
+  /cgm-group-change-tip-toggle/.test(studentPortal) && /data-testid="cgm-group-change-tip"/.test(studentPortal)
+  && studentPortal.includes('kindly accept your group and work in harmony')
+  && studentPortal.includes("onClick={() => setOpen(true)}")
+  && studentPortal.includes("onClick={() => setOpen(false)}")
+  && /!open && \(/.test(studentPortal));
 check('the student group page shows the group topic + agenda BEFORE Request a group change',
   /cgm-student-topic-agenda/.test(studentPortal) && /Our topic &amp; agenda/.test(studentPortal)
   && studentPortal.indexOf('cgm-student-topic-agenda') < studentPortal.indexOf('Request a group change')
   && /myGroup\.topic/.test(studentPortal) && /myGroup\.agenda/.test(studentPortal));
+check('the CGP logo replaces the icon everywhere: navbar door, organizer topbar, student header',
+  /CGP\.jpg/.test(classGroupsEntry) && !/Users className/.test(classGroupsEntry)
+  && (workspace.match(/CGP\.jpg/g) || []).length >= 1
+  && (studentPortal.match(/CGP\.jpg/g) || []).length >= 1
+  && !/bg-emerald-600 text-white"><GraduationCap className="h-5 w-5"/.test(workspace)
+  && !/bg-emerald-600 text-white"><GraduationCap className="h-5 w-5"/.test(studentPortal));
+check('zooming is prevented inside Class & Group: viewport guard hook + touch-action pan-y',
+  /useCgmNoZoom/.test(workspace) && /useCgmNoZoom/.test(studentPortal)
+  && /user-scalable=no/.test(src('src/components/ClassGroups/noZoom.ts'))
+  && /touch-action: pan-y/.test(src('src/index.css')));
 check('student class doors are unique navigation cards (stable accent + monogram + Open affordance) and the welcome board has a Continue-to-groups CTA',
   /ClassNavCard/.test(studentPortal) && /accentForClass/.test(studentPortal) && /monogramOf/.test(studentPortal)
   && /cgm-continue-groups/.test(studentPortal) && /Continue to choose group/.test(studentPortal)
@@ -602,7 +618,19 @@ check('the reveal reproduces the reference composition (title panel, orbital car
   && /'Processing…', 'Random Selection…', 'Complete!'/.test(reveal)
   && /cgmSparkle/.test(reveal) && /cgmConfetti/.test(portalCss) && /cgmOrbit/.test(reveal));
 check('group labels are fully dynamic — the winner name renders from the server payload, never a hardcoded label',
-  /\{winner\?\.name\}/.test(reveal) && !/Group C/.test(reveal) && /const winnerIndex = Math\.max\(0, safeGroups\.findIndex/.test(reveal));
+  /\{resolved\.name\}/.test(reveal) && !/Group C/.test(reveal) && /resolveRevealWinner\(/.test(reveal));
+check('the winner id is validated against the renderable groups — a stale list NEVER promotes the first card',
+  /known: false/.test(reveal) && !/Math\.max\(0, safeGroups\.findIndex/.test(reveal)
+  && /groupName\?:/.test(reveal) && /resolved\.name/.test(reveal));
+check('the carousel is centred on the MEASURED lane, never viewport units (desktop drift fixed)',
+  /laneRef/.test(reveal) && /getBoundingClientRect/.test(reveal)
+  && /laneTransform\(laneW, cardW, gap, landingIndex, progress\)/.test(reveal) && !/50vw/.test(reveal));
+check('sound state syncs through a live ref — enabling sound mid-animation is heard',
+  /soundRef\.current = next/.test(reveal) && /soundRef\.current\) chime/.test(reveal)
+  && /soundRef\.current\) \{ chime\(660/.test(reveal));
+check('the confetti palette is clean and reduced motion skips the confetti field',
+  /'\#f59e0b', '\#fbbf24', '\#059669'/.test(reveal) && !/' \#f59e0b'/.test(reveal)
+  && /!reducedMotion && confetti\.map/.test(reveal));
 check('animation quality: rAF ease-out deceleration, golden centre ring, light rays, skip + reduced-motion + sound-off-by-default',
   /requestAnimationFrame/.test(reveal) && /easeOutQuart/.test(reveal) && /border-amber-400 bg-amber-200\/10/.test(reveal)
   && /Skip animation/.test(reveal) && /prefers-reduced-motion: reduce/.test(reveal)

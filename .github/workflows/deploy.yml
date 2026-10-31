@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: TypeScript verification
+        run: npm run typecheck
+
       - name: CGM backend tests (real worker + SQLite)
         run: npm run test:cgm
 

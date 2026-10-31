@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, Compass, GraduationCap,
-  LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
+  LayoutDashboard, Lightbulb, LogOut, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
 import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { QrBlock } from './ClassGroupsWorkspace';
+import { useCgmNoZoom } from './noZoom';
 
 /**
  * CODE Rx — Student Portal.
@@ -360,6 +361,7 @@ const readContinuation = (): InviteContinuation | null => {
 const clearContinuation = () => { try { sessionStorage.removeItem(INVITE_CONTINUATION_KEY); } catch { /* private mode */ } };
 
 export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: { inviteCode: string | null; voteTarget?: number | null; leaderTarget?: number | null; onExit: () => void }) => {
+  useCgmNoZoom();
   const [session, setSession] = useState<CgmStudentSession | null>(() => studentSession.read());
   const [me, setMe] = useState<any>(null);
   const [section, setSection] = useState<Section>('home');
@@ -436,7 +438,7 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
           <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
             <Users className="h-4 w-4" />
           </button>
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-600 text-white"><GraduationCap className="h-5 w-5" /></span>
+          <img src="/CGP.jpg" alt="Classes & Groups" className="h-9 w-9 rounded-xl object-cover object-[50%_38%] shadow-sm ring-1 ring-emerald-900/20" loading="lazy" decoding="async" />
           <div>
             <p className="text-sm font-black text-slate-900">CODE Rx Student Portal</p>
             <p className="text-[11px] font-semibold text-slate-400">{me?.student?.fullName || '…'} · {me?.student?.indexNumber || ''}</p>
@@ -1144,7 +1146,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
 
       {myGroup && (
         <div className={card}>
-          <p className={label}>Request a group change</p>
+          <GroupChangeTip />
           <MoveRequestCard groups={(data.groups || []).filter((group: any) => Number(group.id) !== Number(myGroup.group_id))} busy={busy} onSubmit={(toGroupId, reason) => runAction(async () => { const result = await cgmStudent.requestMove(Number(myGroup.group_id), toGroupId, reason); return String((result as any)?.message || 'Request sent.'); })} />
         </div>
       )}
@@ -1153,11 +1155,52 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
         <RandomGroupReveal
           groups={reveal.groups}
           winnerId={reveal.winnerId}
+          groupName={reveal.groupName}
           activityName={data?.activity?.name}
           onClose={() => { setReveal(null); if (activityId) void load(activityId); onChanged(); setWaPage(true); }}
         />
       )}
     </div>
+  );
+};
+
+/**
+ * The small idea icon on the Request-a-group-change card. Pressing it reveals
+ * one honest expectation-setting note; pressing the note (anywhere) folds it
+ * back to the icon.
+ */
+const GroupChangeTip = () => {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <p className={label}>Request a group change</p>
+        {!open && (
+          <button
+            type="button"
+            data-testid="cgm-group-change-tip-toggle"
+            aria-label="An important note about group change requests"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-600 transition hover:bg-amber-100"
+            onClick={() => setOpen(true)}
+          >
+            <Lightbulb className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+      {open && (
+        <button
+          type="button"
+          data-testid="cgm-group-change-tip"
+          className="mt-2 flex w-full items-start gap-2 rounded-xl bg-amber-50 px-3 py-2 text-left ring-1 ring-amber-200 transition hover:bg-amber-100"
+          onClick={() => setOpen(false)}
+        >
+          <Lightbulb className="mt-0.5 h-3 w-3 shrink-0 text-amber-500" />
+          <span className="text-[11px] font-semibold leading-snug text-amber-800">
+            A request does not guarantee a successful change of group — kindly accept your group and work in harmony.
+          </span>
+        </button>
+      )}
+    </>
   );
 };
 
@@ -1279,7 +1322,6 @@ const LeaderApplyView = ({ electionId, onClear }: { electionId: number; onClear?
     } catch (failure: any) { setMessage(failure?.message || 'Could not record your candidacy.'); }
     finally { setBusy(false); }
   };
-  const isCandidate = (detail.candidates || []).length >= 0 && detail.myCandidate === true;
   return (
     <div className={`${card} border-emerald-300 ring-2 ring-emerald-100`} data-testid="cgm-leader-apply">
       <p className="mb-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">You opened a stand-as-leader link — volunteer to lead your group here.</p>

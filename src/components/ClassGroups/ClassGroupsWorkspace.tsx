@@ -8,6 +8,7 @@ import {
   cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
+import { useCgmNoZoom } from './noZoom';
 import { appDialog } from '../AppDialog';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
@@ -57,6 +58,7 @@ const formatDate = (value: unknown) => {
 };
 
 export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
+  useCgmNoZoom();
   const [status, setStatus] = useState<any>(null);
   const [classes, setClasses] = useState<any[]>([]);
   const [activeClassId, setActiveClassId] = useState<number | null>(null);
@@ -146,7 +148,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           >
             <Users className="h-4 w-4" />
           </button>
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-600 text-white"><GraduationCap className="h-5 w-5" /></span>
+          <img src="/CGP.jpg" alt="Classes & Groups" className="h-9 w-9 rounded-xl object-cover object-[50%_38%] shadow-sm ring-1 ring-emerald-900/20" loading="lazy" decoding="async" />
           <div>
             <p className="text-sm font-black text-slate-900">CODE Rx — Class &amp; Group Management</p>
             <p className="text-[11px] font-semibold text-slate-400">
@@ -1616,11 +1618,11 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
     // Blank columns: spliced at the organizer's chosen position (highest first
     // so earlier positions stay valid), adding an empty cell to every row.
     const sheetColumns = [...columns];
-    const sheetRows = rows.map((cells) => [...cells]);
+    const sheetRows = rows.map((cells: string[]) => [...cells]);
     [...blankCols].sort((a, b) => b.position - a.position).forEach((blank) => {
       const at = Math.min(Math.max(1, blank.position), sheetColumns.length + 1) - 1;
       sheetColumns.splice(at, 0, blank.label || '');
-      sheetRows.forEach((cells) => cells.splice(at, 0, ''));
+      sheetRows.forEach((cells: string[]) => cells.splice(at, 0, ''));
     });
     // Blank rows: handed to the renderer as ruled write-in bands.
     const memberCount = sheetRows.length;

@@ -11,7 +11,10 @@ classless-workspace panes, My Classes list fix, §30 module-policy console +
 draft overrides) and the post-implementation hardening pass
 (`88f11b7` → `37907aa`: verification-token gating, passkey notification
 scrub, lockout completion, invitation continuation, browser-level journey
-gate, CI deploy gate). **Everything below is verified against the code and the
+gate, CI deploy gate), and the batch-2 + follow-up series (`7e74623`…`ae64c5c`:
+WhatsApp deep links, sheet topic toggle, passkey request flow, nav collapse +
+sections drawer, student wayfinding, group topic & agenda for students, the
+CGP.jpg brand mark on every Class & Group surface and the section zoom lock). **Everything below is verified against the code and the
 test suites — nothing is aspirational.**
 
 ---
@@ -34,6 +37,11 @@ test suites — nothing is aspirational.**
 | Member sheet | **print or download every member of a group** from its workspace: the **Member sheet** panel lets the organizer pick the columns (Full name always; Index number, Role, Joined via optional; **Phone / Email / Gender appear only when the viewer holds `view_sensitive_profiles`** — the dossier itself strips those columns otherwise), type a **group agenda** (saved on the group via `PATCH`, re-shown every visit) and **AOB** (per-sheet only), insert **blank columns at any position** (optional header, splices a write-in cell into every member row) and **blank write-in row batches at any position** (ruled lines in all three outputs, never counted as members), then **Print** (hidden-iframe), **Download PNG** (1240-px canvas) or **Download PDF** (genuine multi-page A4 document, agenda preamble on page one, table header repeated on continuation pages) — all dependency-free (`src/lib/groupSheet.ts`, byte-level unit-tested through an esbuild bundle); every sheet carries the CODE Rx header band, class · activity · date line, big title with the member count, the saved topic and agenda, the striped member table and an AOB block |
 | Workspace hub | **the group workspace is a hub**: the overview shows all nine section cards at a glance, a **hamburger (☰ All sections)** opens a slide-in drawer — **from the left edge, overlaying the page, only inside a group** — listing overview + nine sections with hints, and every section — Members, Member sheet, Leadership, Elections, Announcements, Notify, WhatsApp, Settings, History — **opens as a full page of its own** with a back-to-overview escape and the most detailed view of that part: Members with search, seats/leaders/joined-via stats and per-member index + via chips; Elections with the lifecycle explained plus anonymity and opened dates; Announcements as a full feed with authors and dates; Settings with the identity facts grid + topic + agenda + capacity; History as a full timestamped list (dossier events cap raised 15 → 40). The **main nav (Overview, My Classes, …) is itself a collapsible hamburger** on desktop now: opening a group auto-collapses it so the group's sections drawer leads, and Back to groups restores it |
 | Group topic & agenda for students | **every member sees their group's topic and agenda on their own group page** — the activity dashboard payload carries `g.topic` + `g.agenda` on `myAssignment`, and an **Our topic & agenda** card (amber topic block + green agenda block, honest empty states) sits directly **before Request a group change**, so whatever the organizer saves in the workspace is what the whole group lives by |
+| Random-selection hardening | **production-readiness pass on the draw reveal**: the carousel strip is centred on the **measured lane width** (`laneTransform` + a ref + `getBoundingClientRect`, so the winning card lands exactly under the golden ring on wide desktops where the lane is narrower than the window — viewport units removed); the **winner id is validated** against the renderable groups (`resolveRevealWinner`) and an invalid id NEVER promotes the first card — the honest panel shows the group **name the server returned with the draw**; **sound flips live mid-animation** (a ref the rAF loop reads, no stale closure); the confetti palette typo is fixed and unused strip calculations are gone; reduced motion additionally skips the confetti field |
+| Production-readiness audit | **all 163 module routes re-audited for guards** (student / organizer / PHANTOM / public-token) — zero unauthenticated surfaces; new cross-class IDOR battery + draw batteries at 2/3/5/10/20 groups + concurrent last-seat race (see §5); TypeScript is now a CI gate (`npm run typecheck`, 0 errors — nine latent errors fixed properly, none suppressed) |
+| CGP brand mark | **every Class & Group surface now wears the society's own CGP.jpg emblem** — the navbar door beside Client Access (both the 36-px icon door and the labelled chip variant render the artwork instead of a generic glyph), the organizer workspace topbar tile and the student portal header tile (each a rounded 36-px crop of the emblem with a soft emerald ring). The asset ships from `public/CGP.jpg` (single copy, byte-identical when served), loads lazy + async like every other image, and carries no alt text where it is purely decorative |
+| No zoom in Class & Group | **pinch-zoom and double-tap zoom are disabled inside the section**: while any Class & Group surface is mounted a guard hook tightens the viewport meta to `maximum-scale=1.0, user-scalable=no` and swallows double-taps, `touch-action: pan-y` covers the gestures some Android browsers reach past the meta, and **unmounting restores the exact previous viewport** — the rest of the site zooms exactly as before |
+| Group-change expectations tip | **the Request-a-group-change card carries a small idea icon**: tapping the lightbulb reveals one honest note — *"A request does not guarantee a successful change of group — kindly accept your group and work in harmony."* — and tapping the note anywhere folds it straight back to the icon (self-contained `GroupChangeTip`, amber tip language, `cgm-group-change-tip-toggle` / `cgm-group-change-tip`) |
 | Student wayfinding | **class doors are unique navigation buttons**: every class card (on the welcome board AND My Classes) carries its own stable accent colour — colour rail, monogram tile, coloured status pill and an always-visible **Open →** affordance derived from the class code, so students navigate by sight; the welcome board adds a one-tap **Continue to choose group** gradient CTA (the only one on the board) that opens My Groups directly |
 | Student WhatsApp join | **the moment a student gets a group** — by choosing it, auto-placement, or closing the random-draw reveal — they land on a dedicated **join page**: the group's QR code (downloadable PNG), a **Copy link** button (clipboard API with textarea fallback), an **Open chat** link and the one-tap **Join WhatsApp group** button (click recorded, never treated as join-proof); before the organizer saves a link the page says so honestly; the group card's button opens the same page. The Groups-page **per-card WhatsApp editor is gone** (it never worked and duplicated the workspace) — all link management lives in the workspace's WhatsApp section |
 | Passkey requests | **passkeys are always system-generated — students never invent one**: a student proves the CURRENT passkey and sends a change request; the organizer sees it in the Students area, **Approve & notify** (opening a Generate button for exactly that student, announced by a direct notification) or **Decline** (they are told too); Generate allocates the next unique passkey from the same atomic global sequence registration uses — the class mark is kept, the suffix is never user-chosen so it can never clash — shown once with sessions revoked and a fresh session issued. The old choose-your-own self-change route is gone (404). Table `cgm_passkey_requests`; audits `cgm.passkey.change_requested / request_approved / request_declined / generated`, never carrying a passkey value |
@@ -175,12 +183,26 @@ the three test harnesses. **150 API routes** (76 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (38 sections) | `npm run test:cgm` | **715/715** |
-| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **260/260** |
-| Browser journeys (jsdom + wrangler pages dev, 41 checks) | `npm run test:cgm-browser` | **41/41** |
+| Module API (38 sections) | `npm run test:cgm` | **733/733** |
+| Module UI (markup-level, 21 sections) | `npm run test:cgm-ui` | **267/267** |
+| Browser journeys (jsdom + wrangler pages dev, 43 checks) | `npm run test:cgm-browser` | **43/43** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
 | Raw delivery pipeline | `npm run test:raw-delivery` | 27/27 |
+| TypeScript verification | `npm run typecheck` | **0 errors** |
+
+The production-readiness hardening pass (revealed-random draw + full-module
+audit) added, at real coverage: draws exercised at **2 / 3 / 5 / 10 / 20
+groups** (every seat placed once, the extra student waitlisted), a
+**concurrent last-seat race** through `Promise.all` (exactly one assignment),
+a **60-character custom group name** round-trip, **reveal-core units**
+(`resolveRevealWinner` + `laneTransform`) covering invalid winner ids, honest
+server-name fallbacks, 180-char names and lane-centred geometry at desktop
+(2560 px window / 744 px lane) and mobile (375 px / 331 px), and a
+**cross-class IDOR battery** (six outsider probes against a PHANTOM-only
+class: activity read, group create, announcement, registration approve,
+invitation revoke/regenerate — all 401/403/404, nothing leaked, while the
+rightful team reads 200).
 
 §22 covers the five module policies in every mode; §23 the security
 corrections (verification-token gating + resend + expiry + single-use, passkey
@@ -308,6 +330,19 @@ revoked; suspended classes still accepted student actions.
    are removed. Until the secret exists, creating or regenerating an
    individual invitation answers 503 with these instructions; every other
    flow (general invitations, claims, migration survival) is unaffected.
+   The value is parsed strictly (JSON object, `v1`-style versions, every key
+   base64 of EXACTLY 32 bytes — a 32-**character** string is only 24 bytes
+   and silently disables the whole ring), so check a candidate OFFLINE first:
+   `node scripts/verify-invitation-key.mjs '{"v1":"…"}'` prints VALID or the
+   exact failed rule and never echoes the key. Secrets bind at deploy time —
+   set the secret, THEN deploy/push.
+   **DONE + verified in production (2026-10-31):** an INDIVIDUAL invitation
+   was created successfully on `coderxsociety.pages.dev` (organizer → Class
+   invitations → Individual → Create): the seal accepted a `{"v1": …}` key,
+   the token link `#class-invite/<64-hex>` was issued, stored SEALED and
+   re-displayed with its QR — creation, storage and the decrypt round-trip
+   all work against the live production secret. This checklist item is
+   closed; only live email delivery remains outside sandbox verification.
 4. **R2:** the existing `BUCKET` binding is reused; no new bucket.
 5. **EmailJS:** set `EMAILJS_TEMPLATE_ID_GENERAL` (plus the existing
    `EMAILJS_*` service keys) for organizer-verification and notification
@@ -323,8 +358,9 @@ revoked; suspended classes still accepted student actions.
 7. **PWA:** `public/sw.js` cache is `code-rx-v7` (bump on the next shell change);
    the SW caches the shell only and never `/api/*`; `manifest.webmanifest`
    unchanged.
-8. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, all six test
-   suites, the browser journey gate and the production build on every push/PR;
+8. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, the TypeScript
+   verification (`npm run typecheck`), all six test suites, the browser
+   journey gate and the production build on every push/PR;
    the deploy job runs only on `main`, only with `CLOUDFLARE_API_TOKEN` +
    `CLOUDFLARE_ACCOUNT_ID` present (checked via the secrets context), and the
    summary step reports **completed / skipped (credentials unavailable) /
@@ -344,8 +380,10 @@ revoked; suspended classes still accepted student actions.
    dev `CGM_INVITATION_KEYS` value from `.dev.vars`; the random-draw reveal
    ANIMATION itself was reviewed at the markup/CSS level and exercised only
    through the local preview — no production student has drawn a group yet; **NOT verified in
-   production from this branch** = the Cloudflare Pages deploy of this work,
-   the production `CGM_INVITATION_KEYS` secret, and live email delivery.
+   production from this branch** = the Cloudflare Pages deploy of this work
+   (the maintainer pulls and deploys; individual invitations were created
+   successfully on production on 2026-10-31, which also proves the
+   production `CGM_INVITATION_KEYS` secret), and live email delivery.
    **Deploy order matters:** set the production `CGM_INVITATION_KEYS` secret
    BEFORE pulling/deploying this branch, otherwise individual-invitation
    creation and regeneration answer 503 until it exists (everything else,
@@ -378,7 +416,7 @@ src/lib/cgm.ts                         # typed client, duplicate guard, offline 
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 715 API-level checks, 38 sections
-scripts/cgm-ui-tests.mjs               # 260 markup-level checks, 21 sections
-scripts/cgm-browser-check.mjs          # 34 jsdom browser journeys vs wrangler dev
+scripts/cgm-tests.mjs                  # 733 API-level checks, 38 sections
+scripts/cgm-ui-tests.mjs               # 267 markup-level checks, 21 sections
+scripts/cgm-browser-check.mjs          # 43 jsdom browser checks vs wrangler dev
 ```
