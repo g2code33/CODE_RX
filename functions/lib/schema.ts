@@ -1167,6 +1167,11 @@ ${CGM_INDEXES}
 // These are intentionally separate from CREATE TABLE so live D1 databases
 // created by older versions receive non-destructive columns. Duplicate-column
 // errors are safely ignored by runSafeMigrations below.
+//
+// DISCIPLINE: runSafeMigrations only executes when VAULT_SCHEMA_VERSION
+// changes, and a live production database keeps its old stamp forever —
+// a fresh deploy alone does NOT apply new entries here. EVERY new entry
+// MUST ship with a VAULT_SCHEMA_VERSION bump in the same commit.
 const SAFE_MIGRATIONS = [
   { table: 'client_documents', column: 'presentation_customization', sql: 'ALTER TABLE client_documents ADD COLUMN presentation_customization TEXT' },
   { table: 'community_conversations', column: 'telegram_chat_id', sql: 'ALTER TABLE community_conversations ADD COLUMN telegram_chat_id TEXT' },
@@ -1257,7 +1262,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx22-invitation-sealing';
+const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx23-group-agenda-column';
 
 
 // Role codes stay stable for member history and permissions. Their visible

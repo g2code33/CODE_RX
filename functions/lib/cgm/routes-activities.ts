@@ -1071,6 +1071,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const groupId = Number(c.req.param('id'));
+    if (!Number.isInteger(groupId) || groupId <= 0) return bad(c, 'Group not found.', 404);
     const group = await groupCore(c.env.DB, groupId);
     if (!group) return bad(c, 'Group not found.', 404);
     const guard = await requireClassPermission(c, member, Number(group.class_id), 'view_roster');
@@ -1148,6 +1149,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const groupId = Number(c.req.param('id'));
+    if (!Number.isInteger(groupId) || groupId <= 0) return bad(c, 'Group not found.', 404);
     const group = await groupCore(c.env.DB, groupId);
     if (!group) return bad(c, 'Group not found.', 404);
     const guard = await requireClassPermission(c, member, Number(group.class_id), 'manage_activities');
@@ -2044,7 +2046,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (!guard.ok) return guard.response;
     const body = await readBody(c);
     const url = clean(body.url, 500);
-    if (!/^https:\/\/chat\.whatsapp\.com\/[\w-]+$/.test(url)) {
+    if (!/^https:\/\/chat\.whatsapp\.com\/[\w-]+(\?.*)?$/.test(url)) {
       return bad(c, 'Paste a valid WhatsApp group invite link (https://chat.whatsapp.com/…).');
     }
     const existing = await asRows<{ id: number }>(c.env.DB.prepare(

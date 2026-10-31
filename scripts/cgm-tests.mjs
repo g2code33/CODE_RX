@@ -3598,6 +3598,22 @@ check('the student join page shows QR, copy link, open chat and the big Join but
   && /Copy link/.test(studentPortalSrc) && /Open chat/.test(studentPortalSrc)
   && /setWaPage\(true\)/.test(studentPortalSrc) && /cgm-student-whatsapp-empty/.test(studentPortalSrc));
 
+
+// -- Production-heal + link validator + id hardening (live-site incidents) ----
+const queryLink = await memberCall('POST', `/api/cgm/groups/${joinGroupId}/whatsapp`, { url: 'https://chat.whatsapp.com/IwhaquwLTDT6Ng7uD8yUCP?s=cl&p=i&mlu=4&ilr=4&iam=2' }, amaToken);
+check('a WhatsApp invite link WITH its query string is accepted (the shape WhatsApp copies)',
+  queryLink.status === 200, `status ${queryLink.status} ${queryLink.text?.slice(0, 120)}`);
+const stillRejects = await memberCall('POST', `/api/cgm/groups/${joinGroupId}/whatsapp`, { url: 'https://chat.whatsapp.com/' }, amaToken);
+check('an invite link with no link id is still refused', stillRejects.status === 400, `status ${stillRejects.status}`);
+const colonGet = await memberCall('GET', '/api/cgm/groups/1:1', undefined, phantomToken);
+const colonPatch = await memberCall('PATCH', '/api/cgm/groups/1:1', { topic: 'x' }, phantomToken);
+check('a non-numeric group id answers 404 instead of a D1 500',
+  colonGet.status === 404 && colonPatch.status === 404, `get ${colonGet.status} patch ${colonPatch.status}`);
+const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
+check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
+  /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
+  && /VAULT_SCHEMA_VERSION = '2026-10-31-code-rx23-/.test(schemaSrc));
+
 // ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
