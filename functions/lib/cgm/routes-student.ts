@@ -33,6 +33,7 @@ import type { Hono } from 'hono';
 import {
   LOGIN_IDENTIFIER_KEYS,
   allocateStudentPasskey,
+  secureUniformIndex,
   sequenceForSuffix,
   lookupKey,
   indexKeyVariants,
@@ -853,6 +854,120 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     });
 
     return c.json({ success: true, data: { groupId: Number(target.id), groupName: groupLabel } });
+  });
+
+  /**
+   * Random draw: the student taps one button and the SERVER chooses their
+   * group with cryptographically secure, exactly-equal probability among the
+   * groups that still have room (never modulo bias). The result is computed
+   * and PERSISTED here — before any client animation plays — through the
+   * same guarded atomic INSERT as every other assignment. The reveal screen
+   * is pure theatre over an already-final answer.
+   */
+  app.post('/api/cgm/student/activities/:id/random-draw', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    if (!throttle(c, 30, 300)) return bad(c, 'Too many requests. Slow down and try again.', 429);
+    const activityId = Number(c.req.param('id'));
+    const context = await studentActivityContext(c, student, activityId);
+    if (!context.ok) return bad(c, context.error, 404);
+    const { activity } = context;
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    if (!['open', 'published', 'active'].includes(activity.status)) return bad(c, 'This activity is not open for assignment.', 409);
+    if (config.method === 'automatic') return bad(c, 'Assignments for this activity are made by your organizer.', 409);
+    if (config.method === 'hybrid' && config.selfDeadline && new Date(config.selfDeadline).getTime() < Date.now()) {
+      return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
+    }
+    if (!await isEligible(c.env.DB, activity.id, student.id, config.eligibility)) return bad(c, 'You are not eligible for this activity.', 403);
+    if (config.genderRule && config.genderRule !== 'none' && (student as any).gender === 'unknown') {
+      return bad(c, 'This activity balances groups by gender. Set your gender in your class page first, then take your draw.', 428);
+    }
+
+    const existing = await asRows<{ id: number }>(c.env.DB.prepare(
+      `SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'`
+    ).bind(activity.id, student.id));
+    if (existing[0]) return bad(c, 'You are already in a group for this activity.', 409);
+
+    const openGroups = async () => (await asRows<any>(c.env.DB.prepare(
+      `SELECT g.id, g.name, g.position, g.capacity,
+              (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+       FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
+         AND (g.capacity IS NULL OR (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') < g.capacity)
+       ORDER BY g.position`
+    ).bind(activity.id)));
+
+    // Exactly-equal chance for every eligible group, then the guarded atomic
+    // seat claim (capacity races lose and re-draw once among what remains).
+    let candidates = await openGroups();
+    if (!candidates.length) {
+      if (config.overflow === 'waitlist') {
+        await c.env.DB.prepare(
+          `INSERT OR IGNORE INTO cgm_activity_waitlist (activity_id, student_id) VALUES (?, ?)`
+        ).bind(activity.id, student.id).run();
+        await notifyStudent(c.env.DB, student.id, 'groups', 'Added to the waiting list',
+          `All groups in ${activity.name} are full. You are on the waiting list and will be placed when a seat opens.`);
+        return c.json({ success: true, data: { waitlisted: true, message: 'All groups are full. You have been added to the waiting list.' } });
+      }
+      return bad(c, 'Every group is full.', 409);
+    }
+    let winner = candidates[secureUniformIndex(candidates.length)];
+    // `assigned_via` is CHECK-constrained to the legacy set; the draw marks
+    // itself through the history reason ("random draw") and the dedicated
+    // audit action below instead of a new enum value (no table rebuild).
+    let placed = await insertAssignmentGuarded(c.env.DB, {
+      activityId: Number(activity.id), groupId: Number(winner.id), studentId: student.id,
+      via: 'self', label: student.full_name,
+    });
+    if (!placed) {
+      const nowAssigned = await asRows<{ id: number }>(c.env.DB.prepare(
+        `SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(activity.id, student.id));
+      if (nowAssigned[0]) return bad(c, 'You are already in a group for this activity.', 409);
+      candidates = await openGroups();
+      if (candidates.length) {
+        winner = candidates[secureUniformIndex(candidates.length)];
+        placed = await insertAssignmentGuarded(c.env.DB, {
+          activityId: Number(activity.id), groupId: Number(winner.id), studentId: student.id,
+          via: 'self', label: student.full_name,
+        });
+      }
+      if (!placed) {
+        if (config.overflow === 'waitlist') {
+          await c.env.DB.prepare(
+            `INSERT OR IGNORE INTO cgm_activity_waitlist (activity_id, student_id) VALUES (?, ?)`
+          ).bind(activity.id, student.id).run();
+          await notifyStudent(c.env.DB, student.id, 'groups', 'Added to the waiting list',
+            `All groups in ${activity.name} are full. You are on the waiting list and will be placed when a seat opens.`);
+          return c.json({ success: true, data: { waitlisted: true, message: 'All groups are full. You have been added to the waiting list.' } });
+        }
+        return bad(c, 'That seat just filled up. Take another draw in a moment.', 409);
+      }
+    }
+
+    await c.env.DB.prepare(
+      `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
+       VALUES (?, ?, ?, 'assigned', ?, 'random draw')`
+    ).bind(activity.id, student.id, Number(winner.id), student.full_name).run();
+
+    const groupLabel = winner.name || `Group ${winner.position}`;
+    await notifyStudent(c.env.DB, student.id, 'groups', 'Your group was drawn',
+      `The random draw placed you in ${groupLabel} for ${activity.name}.`);
+    const leaders = await asRows<{ student_id: number }>(c.env.DB.prepare(
+      `SELECT student_id FROM cgm_leadership_appointments WHERE group_id = ? AND status = 'active' AND role = 'leader'`
+    ).bind(Number(winner.id)));
+    for (const leader of leaders) {
+      if (Number(leader.student_id) !== student.id) {
+        await notifyStudent(c.env.DB, Number(leader.student_id), 'groups', 'New group member',
+          `${student.full_name} was drawn into your group in ${activity.name}.`);
+      }
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
+      action: 'cgm.assignment.random_draw', entityType: 'activity', entityId: activity.id, activityId: activity.id,
+      classId: Number(activity.class_id), context: { groupId: Number(winner.id), method: 'secure_uniform' },
+    });
+
+    return c.json({ success: true, data: { groupId: Number(winner.id), groupName: groupLabel, draw: true } });
   });
 
   app.post('/api/cgm/student/activities/:id/contest', async (c: any) => {

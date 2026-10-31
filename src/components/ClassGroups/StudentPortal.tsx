@@ -4,6 +4,7 @@ import {
   LayoutDashboard, LogOut, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
+import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 
 /**
@@ -764,6 +765,11 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Random Group Selection: the SERVER draws and persists first, the reveal
+  // overlay then plays over the already-final answer.
+  const [reveal, setReveal] = useState<null | { groups: Array<{ id: number; name: string }>; winnerId: number; groupName: string }>(null);
+  const [drawBusy, setDrawBusy] = useState(false);
+  const [drawError, setDrawError] = useState<string | null>(null);
 
   useEffect(() => { setActivityId(openActivityId); }, [openActivityId]);
 
@@ -902,9 +908,34 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
               </button>
             ))}
           </div>
-          <button type="button" disabled={busy} onClick={() => void runAction(async () => { await cgmStudent.selfAssign(Number(data.activity.id)); return 'You have been placed in a group.'; })} className="cgm-primary-button mt-3">
-            Assign me automatically
-          </button>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" disabled={busy} onClick={() => void runAction(async () => { await cgmStudent.selfAssign(Number(data.activity.id)); return 'You have been placed in a group.'; })} className="cgm-primary-button">
+              Assign me automatically
+            </button>
+            <button
+              type="button"
+              disabled={busy || drawBusy}
+              data-testid="cgm-random-open"
+              onClick={() => {
+                setDrawBusy(true); setDrawError(null);
+                cgmStudent.randomDraw(Number(data.activity.id))
+                  .then((result: any) => {
+                    // The draw is FINAL on the server before the reveal opens.
+                    setReveal({
+                      groups: (data.groups || []).map((group: any) => ({ id: Number(group.id), name: String(group.name) })),
+                      winnerId: Number(result.groupId),
+                      groupName: String(result.groupName || ''),
+                    });
+                  })
+                  .catch((failure: any) => setDrawError(failure?.message || 'The random draw failed. Try again.'))
+                  .finally(() => setDrawBusy(false));
+              }}
+              className="rounded-xl border-2 border-amber-300 bg-gradient-to-b from-amber-50 to-white px-5 py-2.5 text-sm font-black text-amber-700 shadow-[0_8px_20px_-6px_rgba(251,191,36,0.55)] transition hover:from-amber-100 disabled:opacity-50"
+            >
+              {drawBusy ? 'Drawing…' : '✨ Random selection — let the system pick'}
+            </button>
+          </div>
+          {drawError && <p role="alert" className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{drawError}</p>}
         </div>
       ) : null}
 
@@ -924,6 +955,15 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
           <p className={label}>Request a group change</p>
           <MoveRequestCard groups={(data.groups || []).filter((group: any) => Number(group.id) !== Number(myGroup.group_id))} busy={busy} onSubmit={(toGroupId, reason) => runAction(async () => { const result = await cgmStudent.requestMove(Number(myGroup.group_id), toGroupId, reason); return String((result as any)?.message || 'Request sent.'); })} />
         </div>
+      )}
+
+      {reveal && (
+        <RandomGroupReveal
+          groups={reveal.groups}
+          winnerId={reveal.winnerId}
+          activityName={data?.activity?.name}
+          onClose={() => { setReveal(null); if (activityId) void load(activityId); onChanged(); }}
+        />
       )}
     </div>
   );

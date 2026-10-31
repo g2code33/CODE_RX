@@ -222,6 +222,28 @@ export const indexKeyVariants = (value: unknown): string[] => {
 };
 
 
+/**
+ * Cryptographically secure uniform index in [0, n) WITHOUT modulo bias:
+ * 32-bit words are rejection-sampled above the largest multiple of n, so
+ * every index has exactly equal probability (worst-case rejection chance
+ * stays under 50%). `nextUint32` is injectable for deterministic tests;
+ * production uses WebCrypto `getRandomValues`. This powers the student
+ * random group draw — deliberately separate from the organizer's balanced
+ * class-wide assignment engine.
+ */
+export const secureUniformIndex = (
+  n: number,
+  nextUint32: () => number = () => crypto.getRandomValues(new Uint32Array(1))[0],
+): number => {
+  const size = Math.floor(Number(n));
+  if (!(size >= 1)) return 0;
+  if (size === 1) return 0;
+  const limit = Math.floor(0x100000000 / size) * size;
+  let value = nextUint32();
+  while (value >= limit) value = nextUint32();
+  return value % size;
+};
+
 /** Phone lookup key: digits only, Ghana local/00 forms raised to 233. */
 export const phoneKey = (value: unknown): string | null => {
   let digits = String(value || '').replace(/\D/g, '');

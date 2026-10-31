@@ -29,6 +29,7 @@ test suites — nothing is aspirational.**
 | Roster | ONE pipeline for xlsx / csv / json: validation, column mapping with suggestions, preview, duplicate policies (skip/update/flag/reject), per-row errors, summary, downloadable **sample templates in all three formats**; **file-first import** — the file is inspected on choose (format, headers, first 4 rows shown for reference) and the mapping options are labelled with values read straight from that file, so a link always relates exactly to the upload; **rows stay editable after the upload** (name, index, phone, gender inline; a registered student's index is locked to protect their sign-in) and **select-all mass actions** remove unregistered rows or suspend/remove members in bulk |
 | Invitations | general (link + code, expiry, max uses, disable / revoke / regenerate, click tracking); **the token is stored, so the link, QR and PNG download stay available any time** — the QR is rendered by the module's own dependency-free encoder (ISO 18004 byte mode, level M, verified against an independent reference across versions 1–40) and downloads as a PNG stamped with the class name on top and the shared class entry password underneath; signing-in halves are index number / phone and individual (identity-bound, single-use); tokens stored only as `cgm-invite:`-hashed verifiers |
 | Activities | many per class, each with own config / eligibility / groups / history / leadership / elections / WhatsApp / attendance / announcements / deadlines / status; **editable after creation** — drafts and open activities open the same form prefilled (name, type, description and every config field); once published the structure is frozen server-side (deadline extensions and everyday edits stay open; duplicating restructures); **automatic group sizing from the TOTAL ROSTER** — the organizer types only the number of groups (nothing ever rewrites it): the form shows the roster total, the even base share, the surplus split (e.g. 56 students · 6 groups → 2 groups of 10 + 4 of 9), the maximum per group, and auto-fills the hard capacity with that maximum (warns if a manual capacity would leave students out); timezone default Africa/Accra |
+| Random selection | **Random Group Selection** — a per-student "let the system pick" button in My Groups: the SERVER draws the winner with `secureUniformIndex` (cryptographic rejection sampling over 32-bit words — zero modulo bias, exactly uniform across every open group), and **the assignment is persisted BEFORE any animation plays** — the reveal only replays what the database already decided, so skipping it, closing it, or reloading lands on the identical group; recorded with event reason "random draw" + audit `cgm.assignment.random_draw` (stored as `via='self'` — the schema's CHECK makes a dedicated value a destructive rebuild); the reveal is a premium full-screen overlay in the module's emerald + gold + ivory language (blurred blue-white atmosphere with gold/green sparkles, white title panel with green border, golden orbital carousel of group cards easing to a stop dead-centre with glow + rays + confetti, dark-emerald "Selecting your group…" status pill, white "Congratulations! You are assigned to …" panel, 3-stage progress Processing… / Random Selection… / Complete!); group names are fully DYNAMIC from the database (2 to 20+ groups via a recycled strip, the winner's full name never truncated); Skip animation, `prefers-reduced-motion`, sound **off by default**, Escape closes, navigation never blocked; equal-probability draw is deliberately SEPARATE from the balanced class-assignment engine |
 | Assignment | methods A (organizer-auto) / B (self-service) / C (hybrid with deadline); balanced sizes, hard capacity, randomized tie-breaks, idempotent regenerate, **capacity races closed by an atomic guarded INSERT**; gender balanced/separate/none with never-infer semantics; overflow waitlist/block/organizer; moves with approval + capacity re-check + seat restoration; late students placed without reshuffle |
 | Elections | group-level, members only; **the organizer generates a voting link (copy + downloadable stamped QR) that signs the student in and lands straight on the ballot**; students get a real My Elections list and persistent sign-in; anonymous (salted pseudonym ballots) or public; one vote per voter **enforced by a unique index and an atomic participation+ballot batch**; optional vote change (default off); configurable nomination/voting windows; tie-break chosen upfront (runoff / appointment / secure random / manual); results hidden until close; official announcement; cancel/restart with reason |
 | Leadership | automatic / appointment / student contest (statement, windows, withdrawal before deadline, fallback); **leader sign-up links** — while nominations are open the organizer shares a copyable + QR-stamped `#leader-apply/<election>` link that signs the volunteer in and records their candidacy in one step (idempotent, feeds the ballot); per-activity leader/assistant permissions; succession = automatic (senior assistant) / appointment (membership-validated) / fresh anonymous election |
@@ -47,10 +48,9 @@ test suites — nothing is aspirational.**
 
 **Code size:** ~14,200 lines across the backend (`functions/class-group-routes.ts`,
 `functions/lib/cgm/{core,service,schema,assignment,parse,pdf,invite-crypto,routes-activities,routes-organizer,routes-student}.ts`),
-the client (`src/lib/cgm.ts`, `src/components/ClassGroups/{ClassGroupsWorkspace,StudentPortal,PhantomClasses,ConnectionBanner}.tsx`),
-the client (`src/lib/cgm.ts`, `src/components/ClassGroups/{ClassGroupsWorkspace,StudentPortal,PhantomClasses,ConnectionBanner}.tsx`),
-the three test harnesses. **148 API routes** (75 activities/groups/elections/announcements,
-45 organizer/class/PHANTOM/policies, 27 student). **41 `cgm_` tables, 52 indexes
+the client (`src/lib/cgm.ts`, `src/components/ClassGroups/{ClassGroupsWorkspace,StudentPortal,RandomGroupReveal,PhantomClasses,ConnectionBanner}.tsx`),
+the three test harnesses. **149 API routes** (75 activities/groups/elections/announcements,
+45 organizer/class/PHANTOM/policies, 28 student). **41 `cgm_` tables, 52 indexes
 (35 + 17 unique).**
 
 ---
@@ -161,8 +161,8 @@ the three test harnesses. **148 API routes** (75 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (32 sections) | `npm run test:cgm` | **616/616** |
-| Module UI (markup-level, 18 sections) | `npm run test:cgm-ui` | **226/226** |
+| Module API (33 sections) | `npm run test:cgm` | **633/633** |
+| Module UI (markup-level, 19 sections) | `npm run test:cgm-ui` | **233/233** |
 | Browser journeys (jsdom + wrangler pages dev, 25 checks) | `npm run test:cgm-browser` | **25/25** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
@@ -177,6 +177,12 @@ authorized-only retrieval, tamper detection, missing-key fail-safe, migration
 survival + idempotence, regeneration invalidation, identity binding,
 exactly-once and concurrent-claim races, no-inflation guarantees, and the
 expired/disabled/revoked matrix);
+§32 the random-draw battery (sampler degeneracy + rejection-path + a
+4,000-draw crypto uniformity window, unauthenticated 401, a real draw persisting
+exactly one active assignment with event reason + audit row, duplicate-draw 409,
+eleven draws all landing inside real pods with no student doubled, the one-seat
+activity that crowns a winner and waitlists the loser, plus source pins that the
+reveal is composed from the reference and free of any gambling vocabulary);
 §24 the invitation continuation journey (all twelve acceptance scenarios);
 §25 policy transitions with pending rows + data retention; §30 the Task-12
 batch (scattered passkey tiers with the legacy-suffix skip rule, tolerant
@@ -269,10 +275,14 @@ revoked; suspended classes still accepted student actions.
    future Android client without change.
 10. **Verified where (honest separation):** implemented + verified by the
    automated suites in this branch = everything in §5 **including invitation
-   sealing, the seal migration and the atomic-claim races**; implemented +
+   sealing, the seal migration, the atomic-claim races and the whole §32
+   random-draw battery** (uniformity window, persistence-before-reveal pins,
+   duplicate-draw 409, waitlist overflow); implemented +
    manually verified in the LOCAL preview stack (wrangler pages dev + local
    D1 + jsdom) = the browser journeys and the wrangler dev flows, with the
-   dev `CGM_INVITATION_KEYS` value from `.dev.vars`; **NOT verified in
+   dev `CGM_INVITATION_KEYS` value from `.dev.vars`; the random-draw reveal
+   ANIMATION itself was reviewed at the markup/CSS level and exercised only
+   through the local preview — no production student has drawn a group yet; **NOT verified in
    production from this branch** = the Cloudflare Pages deploy of this work,
    the production `CGM_INVITATION_KEYS` secret, and live email delivery.
    **Deploy order matters:** set the production `CGM_INVITATION_KEYS` secret
@@ -305,8 +315,9 @@ functions/lib/cgm/routes-organizer.ts  # 45 organizer/class/PHANTOM/policy route
 functions/lib/cgm/routes-activities.ts # 75 activity/group/election/announcement/PHANTOM routes
 src/lib/cgm.ts                         # typed client, duplicate guard, offline errors
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
+                                       # RandomGroupReveal (premium random-selection overlay),
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 579 API-level checks, 30 sections
-scripts/cgm-ui-tests.mjs               # 226 markup-level checks, 18 sections
+scripts/cgm-tests.mjs                  # 633 API-level checks, 33 sections
+scripts/cgm-ui-tests.mjs               # 233 markup-level checks, 19 sections
 scripts/cgm-browser-check.mjs          # 25 jsdom browser journeys vs wrangler dev
 ```

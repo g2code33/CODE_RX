@@ -2222,6 +2222,33 @@ h3.vault-rich-text {
    CODE Rx — Class & Group Management (CGM) shared chrome
    ============================================================ */
 
+/* Random Group Selection reveal — premium overlay animations */
+@keyframes cgmSparkle {
+  0%, 100% { opacity: 0.15; transform: scale(0.7) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1.18) rotate(24deg); }
+}
+@keyframes cgmOrbit {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+@keyframes cgmRay {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+@keyframes cgmConfetti {
+  0% { transform: translate3d(0, -10vh, 0) rotate(0deg); opacity: 0; }
+  8% { opacity: 1; }
+  100% { transform: translate3d(var(--drift, 0px), 112vh, 0) rotate(720deg); opacity: 0.9; }
+}
+@keyframes cgmPop {
+  0% { transform: scale(0.55); opacity: 0; }
+  62% { transform: scale(1.07); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cgm-reveal-anim { animation: none !important; }
+}
+
 .cgm-auth-wrap {
   max-width: 30rem;
   margin: 0 auto;

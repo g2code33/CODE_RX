@@ -564,6 +564,37 @@ check('the group count input is the only writer of groupCount (nothing changes i
   /onChange=\{\(event\) => setGroupCount\(event\.target\.value\)\}/.test(workspace)
   && !/cgm-act-size/.test(workspace));
 
+// ---------------------------------------------------------------------------
+// 19. Random Group Selection: premium reveal over a server-persisted draw
+// ---------------------------------------------------------------------------
+section('19. Random Group Selection reveal (premium overlay)');
+const reveal = src('src/components/ClassGroups/RandomGroupReveal.tsx');
+const portalUi = src('src/components/ClassGroups/StudentPortal.tsx');
+const cgmClient = src('src/lib/cgm.ts');
+const portalCss = src('src/index.css');
+
+check('the random draw API is a real student call', /randomDraw: \(activityId: number\)/.test(cgmClient) && /activities\/\$\{activityId\}\/random-draw/.test(cgmClient));
+check('the portal draws FIRST (server persists) and only then opens the reveal overlay',
+  /cgmStudent\.randomDraw\(Number\(data\.activity\.id\)\)[\s\S]{0,420}setReveal\(\{/.test(portalUi)
+  && /<RandomGroupReveal/.test(portalUi) && /cgm-random-open/.test(portalUi));
+check('the reveal reproduces the reference composition (title panel, orbital carousel, status pill, result panel, 3-stage track)',
+  /Random Group Selection/.test(reveal) && /All groups have an equal chance of being selected/.test(reveal)
+  && /Selecting your group…/.test(reveal) && /Please wait while we make a random selection…/.test(reveal)
+  && /Congratulations!/.test(reveal) && /You are assigned to/.test(reveal)
+  && /'Processing…', 'Random Selection…', 'Complete!'/.test(reveal)
+  && /cgmSparkle/.test(reveal) && /cgmConfetti/.test(portalCss) && /cgmOrbit/.test(reveal));
+check('group labels are fully dynamic — the winner name renders from the server payload, never a hardcoded label',
+  /\{winner\?\.name\}/.test(reveal) && !/Group C/.test(reveal) && /const winnerIndex = Math\.max\(0, safeGroups\.findIndex/.test(reveal));
+check('animation quality: rAF ease-out deceleration, golden centre ring, light rays, skip + reduced-motion + sound-off-by-default',
+  /requestAnimationFrame/.test(reveal) && /easeOutQuart/.test(reveal) && /border-amber-400 bg-amber-200\/10/.test(reveal)
+  && /Skip animation/.test(reveal) && /prefers-reduced-motion: reduce/.test(reveal)
+  && /useState\(false\); \/\/ OFF by default/.test(reveal) && /AudioContext/.test(reveal));
+check('the experience is premium-professional with zero gambling vocabulary',
+  !/\b(casino|bets?|betting|jackpot|gambl\w*|wager\w*)\b/i.test(reveal.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ')));
+check('the carousel adapts to any group count with a recycled strip and measured card width',
+  /const passes = Math\.max\(2, Math\.ceil\(12 \/ safeGroups\.length\)\)/.test(reveal)
+  && /Math\.min\(148, Math\.max\(96, window\.innerWidth \* 0\.235\)\)/.test(reveal));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

@@ -512,6 +512,8 @@ export const cgmStudent = {
   activity: (activityId: number) => studentCall(`/api/cgm/student/activities/${activityId}`),
   selfAssign: (activityId: number, groupId?: number) =>
     studentCall(`/api/cgm/student/activities/${activityId}/assign`, { method: 'POST', body: groupId ? { groupId } : {} }),
+  randomDraw: (activityId: number) =>
+    studentCall(`/api/cgm/student/activities/${activityId}/random-draw`, { method: 'POST', body: {} }),
   contest: (activityId: number, statement?: string) =>
     studentCall(`/api/cgm/student/activities/${activityId}/contest`, { method: 'POST', body: { statement } }),
   withdrawCandidate: (candidateId: number) =>

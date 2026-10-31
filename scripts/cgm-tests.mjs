@@ -2999,6 +2999,105 @@ check('the classmates payload exposes names plus visibility-gated phone/email on
   /classmates\.map\(\(row\) => \(\{[\s\S]{0,220}/.exec(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-student.ts'), 'utf8'))?.[0]?.includes('visibleFields.includes') === true);
 
 // ---------------------------------------------------------------------------
+// 32. Random Group Selection: secure equal-probability draw + premium reveal
+// ---------------------------------------------------------------------------
+section('32. Random draw: secure uniform sampling, persistence before reveal');
+
+// -- The rejection sampler is exactly uniform (no modulo bias) ----------------
+const { secureUniformIndex } = worker;
+check('the sampler exists and is exported for verification', typeof secureUniformIndex === 'function');
+check('the sampler handles degenerate sizes safely', secureUniformIndex(1, () => 123456789) === 0 && secureUniformIndex(0) === 0);
+// Deterministic rejection check: the first word is >= limit (rejected), the
+// second maps to bucket 1.
+const limit5 = Math.floor(0x100000000 / 5) * 5;
+const rejectionSamplerCalls = [];
+const rejectionDraw = secureUniformIndex(5, () => { rejectionSamplerCalls.push(1); return rejectionSamplerCalls.length === 1 ? 0xffffffff : 1; });
+check('words above the largest multiple of n are rejected, never wrapped (no modulo bias)',
+  rejectionDraw === 1 && rejectionSamplerCalls.length === 2 && (0xffffffff % 5) !== 1);
+// Statistical uniformity with real crypto randomness: 4000 draws over 4
+// buckets (expected 1000 each, sigma ~27) — bounds are 5+ sigma wide.
+const buckets = [0, 0, 0, 0];
+for (let i = 0; i < 4000; i += 1) buckets[secureUniformIndex(4)] += 1;
+check('4000 crypto draws over 4 buckets are statistically uniform',
+  buckets.every((count) => count >= 850 && count <= 1150), JSON.stringify(buckets));
+
+// -- Endpoint: the server draws, persists and reports the same group ----------
+const drawPods = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Lucky Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 3, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const drawPodsId = drawPods.json?.data?.activityId ?? drawPods.json?.data?.activity?.id ?? drawPods.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${drawPodsId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${drawPodsId}/groups`, { count: 3, capacity: 10 }, amaToken);
+const drawPodGroups = ((await memberCall('GET', `/api/cgm/activities/${drawPodsId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => Number(g.id));
+check('the lucky-draw activity opened with three pods', drawPodGroups.length === 3, `pods=${drawPodGroups.join(',')}`);
+
+const noSessionDraw = await call('POST', `/api/cgm/student/activities/${drawPodsId}/random-draw`, {});
+check('the random draw needs a student session', noSessionDraw.status === 401, `status ${noSessionDraw.status}`);
+
+const drawer = await freshFmtRosterStudent(11, 'Drawer Danso');
+const drawerDraw = await studentCall('POST', `/api/cgm/student/activities/${drawPodsId}/random-draw`, {}, drawer.session);
+check('a student can draw: the server assigns a real pod with an equal-chance pick',
+  drawerDraw.status === 200 && drawPodGroups.includes(Number(drawerDraw.json?.data?.groupId)) && drawerDraw.json?.data?.draw === true,
+  `status ${drawerDraw.status} ${drawerDraw.text?.slice(0, 120)}`);
+const drawerId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', drawer.indexNumber.toLowerCase())?.id || 0);
+check('the drawn seat is persisted (active membership in exactly one pod)',
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", drawPodsId, drawerId).c === 1);
+check('the draw is recorded in the assignment history and the audit trail',
+  q1("SELECT COUNT(*) c FROM cgm_assignment_events WHERE activity_id = ? AND student_id = ? AND reason = 'random draw'", drawPodsId, drawerId).c === 1
+  && q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.assignment.random_draw'").c >= 1,
+  `events=${q1("SELECT COUNT(*) c FROM cgm_assignment_events WHERE activity_id = ? AND student_id = ?", drawPodsId, drawerId).c}`);
+const drawerRedraw = await studentCall('POST', `/api/cgm/student/activities/${drawPodsId}/random-draw`, {}, drawer.session);
+check('a second draw is refused — the first result stands (no duplicates)',
+  drawerRedraw.status === 409 && q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", drawPodsId, drawerId).c === 1);
+
+// Draw ten more students: every landed pod must be one of the three pods.
+const drawCrowd = [];
+for (let n = 12; n <= 21; n += 1) {
+  const member = await freshFmtRosterStudent(n, `Draw Crowd ${n}`);
+  const result = await studentCall('POST', `/api/cgm/student/activities/${drawPodsId}/random-draw`, {}, member.session);
+  if (result.status === 200) drawCrowd.push(Number(result.json?.data?.groupId));
+}
+check('eleven students land only in real pods, none placed twice',
+  drawCrowd.every((groupId) => drawPodGroups.includes(groupId))
+  && q1("SELECT COUNT(*) c FROM (SELECT student_id FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active' GROUP BY student_id HAVING COUNT(*) > 1)", drawPodsId).c === 0,
+  `drawn=${drawCrowd.length}`);
+
+// Full pods + overflow=waitlist: the draw waitlists instead of inventing seats.
+const tightPods = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Tight Pods', type: 'tutorial',
+  config: { method: 'self', groupCount: 1, capacity: 1, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const tightPodsId = tightPods.json?.data?.activityId ?? tightPods.json?.data?.activity?.id ?? tightPods.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${tightPodsId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${tightPodsId}/groups`, { count: 1, capacity: 1 }, amaToken);
+const tightWinner = await freshFmtRosterStudent(22, 'Tight Winner');
+const tightLoser = await freshFmtRosterStudent(23, 'Tight Loser');
+const tightWinDraw = await studentCall('POST', `/api/cgm/student/activities/${tightPodsId}/random-draw`, {}, tightWinner.session);
+const tightLoseDraw = await studentCall('POST', `/api/cgm/student/activities/${tightPodsId}/random-draw`, {}, tightLoser.session);
+check('with one seat, one draw wins and the other lands on the waiting list',
+  tightWinDraw.status === 200 && tightLoseDraw.status === 200 && tightLoseDraw.json?.data?.waitlisted === true
+  && Number(q1("SELECT COUNT(*) c FROM cgm_activity_waitlist WHERE activity_id = ? AND status = 'waiting'", tightPodsId).c) === 1,
+  `win=${tightWinDraw.status}/${tightWinDraw.json?.data?.groupId} lose=${tightLoseDraw.status}/${JSON.stringify(tightLoseDraw.json?.data || {})}`);
+
+// The reveal is the client theatre; the source pins prove result-first flow.
+const revealSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/RandomGroupReveal.tsx'), 'utf8');
+const portalSrc2 = readFileSync(path.join(ROOT, 'src/components/ClassGroups/StudentPortal.tsx'), 'utf8');
+check('the reveal component states plainly that the backend already persisted the result',
+  /backend has ALREADY chosen and persisted/.test(revealSrc));
+check('the portal calls the draw API FIRST and only then opens the reveal',
+  /randomDraw\(Number\(data\.activity\.id\)\)[\s\S]{0,420}setReveal\(\{/.test(portalSrc2));
+check('the reveal honours reduced motion, offers Skip, and keeps sound OFF by default',
+  /prefers-reduced-motion: reduce/.test(revealSrc) && /Skip animation/.test(revealSrc) && /useState\(false\); \/\/ OFF by default/.test(revealSrc));
+check('the reveal shows the dynamic group name from the database (never a hardcoded label)',
+  /\{winner\?\.name\}/.test(revealSrc) && !/Group C/.test(revealSrc));
+check('the premium overlay carries the reference composition without any gambling language',
+  /RANDOM GROUP SELECTION/i.test(revealSrc) && /All groups have an equal chance/.test(revealSrc)
+  && /Selecting your group…/.test(revealSrc) && /Congratulations!/.test(revealSrc)
+  && /You are assigned to/.test(revealSrc) && /Processing…/.test(revealSrc) && /Complete!/.test(revealSrc)
+  && !/\b(casino|bets?|betting|jackpot|gambl\w*|wager\w*)\b/i.test(revealSrc.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ')));
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 
