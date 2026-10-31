@@ -211,7 +211,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'students' && can('view_roster') && <StudentsArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} canImport={can('import_roster')} sensitive={activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has('view_sensitive_profiles')} onChanged={() => void refresh()} />}
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} openActivityId={editActivityRequest} onEditConsumed={() => setEditActivityRequest(null)} />}
-          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} />}
+          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} />}
           {activeClass && area === 'elections' && can('manage_elections') && <ElectionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} />}
           {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -1484,6 +1484,286 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
   );
 };
 
+/**
+ * The GROUP WORKSPACE — one full page dedicated to a single group: topic,
+ * members, leadership, elections, announcements, direct notifications,
+ * WhatsApp, settings and history. Everything about THIS group, in one place.
+ */
+const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onBack }: {
+  groupId: number; activityId: number; classId: number; allGroups: any[];
+  canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean;
+  onChanged: () => void; onBack: () => void;
+}) => {
+  const [detail, setDetail] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [topic, setTopic] = useState<string | null>(null);
+  const [capacity, setCapacity] = useState('');
+  const [notifyTitle, setNotifyTitle] = useState('');
+  const [notifyBody, setNotifyBody] = useState('');
+  const [announceTitle, setAnnounceTitle] = useState('');
+  const [announceBody, setAnnounceBody] = useState('');
+  const [announcePinned, setAnnouncePinned] = useState(false);
+  const [electionTitle, setElectionTitle] = useState('');
+  const [waUrl, setWaUrl] = useState<string | null>(null);
+  const [showQr, setShowQr] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const result: any = await cgm.groupDetail(groupId);
+      setDetail(result?.data || result);
+      setError(null);
+    } catch (failure: any) { setError(failure?.message || 'This group could not be loaded.'); }
+  }, [groupId]);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (detail) { setTopic(detail.group?.topic ?? ''); setCapacity(detail.group?.capacity != null ? String(detail.group.capacity) : ''); setWaUrl(detail.whatsapp?.url ?? ''); } }, [detail]);
+
+  const run = async (work: () => Promise<any>, done?: string) => {
+    setBusy(true); setMessage(null); setError(null);
+    try { await work(); if (done) setMessage(done); await load(); onChanged(); }
+    catch (failure: any) { setError(failure?.message || 'That did not work.'); }
+    finally { setBusy(false); }
+  };
+
+  if (!detail) {
+    return (
+      <div className="space-y-4">
+        <button type="button" className="mini-button" onClick={onBack}>← Back to groups</button>
+        <div className={card}>{error ? <p className="text-sm font-bold text-red-600">{error}</p> : 'Loading the group workspace…'}</div>
+      </div>
+    );
+  }
+
+  const { group, activity } = detail;
+  const others = allGroups.filter((entry: any) => Number(entry.id) !== Number(groupId));
+  const rolesOf = (raw: any) => String(raw || '').split(',').filter(Boolean).map((pair) => pair.split(':')[0]);
+
+  return (
+    <div className="space-y-5" data-testid="cgm-group-workspace">
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="mini-button" onClick={onBack}>← Back to groups</button>
+        {message && <Banner tone="success">{message}</Banner>}
+        {error && <Banner tone="error">{error}</Banner>}
+      </div>
+
+      {/* Header: identity + topic */}
+      <div className="rounded-2xl border-2 border-emerald-200 bg-gradient-to-r from-emerald-50 via-white to-amber-50/60 p-5">
+        <p className={label}>{activity?.name || 'Activity'} · group workspace</p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <h2 className="text-2xl font-black text-slate-900">{group.name}</h2>
+          <span className="rounded-full bg-emerald-600 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-white">{group.size}{group.capacity ? ` / ${group.capacity}` : ''} members</span>
+          {activity?.status && <span className="rounded-full bg-slate-200 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-slate-600">{activity.status}</span>}
+          {activity?.method === 'random' && <span className="rounded-full bg-amber-200 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-amber-800">Random draw</span>}
+        </div>
+        {canManage ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <input className={`${inputClass} max-w-md flex-1`} placeholder="Group topic — what this group is working on (e.g. 'UV-Vis of aspirin')" value={topic ?? ''} onChange={(event) => setTopic(event.target.value)} aria-label="Group topic" />
+            <button type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.updateGroup(groupId, { topic: topic ?? '' }), 'Topic saved.')}>Save topic</button>
+          </div>
+        ) : group.topic ? <p className="mt-2 text-sm font-bold text-emerald-800">Topic: {group.topic}</p> : null}
+        {group.topic && canManage && <p className="mt-1 text-[11px] font-medium text-emerald-700">Current topic: {group.topic}</p>}
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {/* Members */}
+        <div className={card}>
+          <p className={label}>Members ({group.size})</p>
+          <ul className="mt-3 space-y-1.5">
+            {detail.members.map((row: any) => {
+              const roles = rolesOf(row.roles);
+              return (
+                <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate font-black text-slate-700">{row.full_name}</span>
+                      {roles.includes('leader') && <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Leader</span>}
+                      {roles.includes('assistant') && <span className="rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Assistant</span>}
+                    </span>
+                    <span className="flex shrink-0 gap-1">
+                      {canMove && others.length > 0 && (
+                        <select className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Move ${row.full_name}`} onChange={(event) => { const target = Number(event.target.value); if (target) void run(() => cgm.assignStudent(Number(activityId), Number(row.id), target), 'Member moved.'); }}>
+                          <option value="">Move…</option>
+                          {others.map((other: any) => <option key={other.id} value={other.id}>{other.name}</option>)}
+                        </select>
+                      )}
+                      {canMove && (detail.otherMembers || []).length > 0 && (
+                        <select className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700" value="" aria-label={`Swap ${row.full_name}`} onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(row.id), partner), 'Members swapped.'); }}>
+                          <option value="">Swap…</option>
+                          {detail.otherMembers.map((partner: any) => <option key={partner.id} value={partner.id}>{partner.full_name} ({partner.group_name})</option>)}
+                        </select>
+                      )}
+                      {canRemove && (
+                        <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.removeAssignment(Number(row.assignment_id)), 'Member removed.')} title="Remove from group">✕</button>
+                      )}
+                    </span>
+                  </div>
+                </li>
+              );
+            })}
+            {!detail.members.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No members yet.</li>}
+          </ul>
+          {canMove && (detail.unassigned || []).length > 0 && (
+            <div className="mt-3 border-t border-slate-100 pt-3">
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a student</p>
+              <select className={`${inputClass} mt-1.5`} value="" aria-label="Add a student to this group" onChange={(event) => { const studentId = Number(event.target.value); if (studentId) void run(() => cgm.assignStudent(Number(activityId), studentId, groupId), 'Student added to the group.'); }}>
+                <option value="">Choose an unassigned student…</option>
+                {detail.unassigned.map((student: any) => <option key={student.id} value={student.id}>{student.full_name}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {/* Leadership */}
+        <div className={card}>
+          <p className={label}>Leadership</p>
+          <ul className="mt-3 space-y-1.5">
+            {detail.leadership.filter((seat: any) => seat.status === 'active').map((seat: any) => (
+              <li key={seat.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                <span className="font-bold text-slate-700">{seat.full_name} <span className="ml-1 rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">{seat.role}</span></span>
+                {canAppoint && <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.endLeadership(Number(seat.id)), 'Leadership ended.')}>End</button>}
+              </li>
+            ))}
+            {!detail.leadership.some((seat: any) => seat.status === 'active') && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No leader appointed yet.</li>}
+          </ul>
+          {canAppoint && group.size > 0 && (
+            <div className="mt-3 border-t border-slate-100 pt-3">
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Appoint from members</p>
+              <div className="mt-1.5 flex gap-2">
+                <select className={inputClass} id="cgm-appoint-role" aria-label="Role to appoint" defaultValue="leader">
+                  <option value="leader">Leader</option>
+                  <option value="assistant">Assistant</option>
+                </select>
+                <select className={`${inputClass} flex-1`} id="cgm-appoint-member" aria-label="Member to appoint" value="" onChange={(event) => { const studentId = Number(event.target.value); const role = (window.document.getElementById('cgm-appoint-role') as HTMLSelectElement).value; if (studentId) void run(() => cgm.appointLeader(groupId, { studentId, role }), 'Appointed.'); }}>
+                  <option value="">Choose member…</option>
+                  {detail.members.map((row: any) => <option key={row.id} value={row.id}>{row.full_name}</option>)}
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Elections */}
+        <div className={card}>
+          <p className={label}>Elections in this group</p>
+          <ul className="mt-3 space-y-1.5">
+            {detail.elections.map((election: any) => (
+              <li key={election.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate font-bold text-slate-700">{election.title}</span>
+                  <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[9px] font-black uppercase text-slate-600">{election.status}</span>
+                </div>
+                <p className="mt-0.5 text-[10px] text-slate-400">{election.candidates} candidate(s) · {election.ballots} ballot(s) · {election.role}</p>
+                {canManage && (
+                  <div className="mt-1 flex gap-1">
+                    {election.status === 'nominating' && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'open-voting'), 'Voting opened.')}>Open voting</button>}
+                    {election.status === 'voting' && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'close'), 'Voting closed.')}>Close</button>}
+                    {['completed', 'closed'].includes(String(election.status)) && <button type="button" className="mini-button" disabled={busy} onClick={() => void run(() => cgm.electionAction(Number(election.id), 'restart'), 'Election restarted.')}>Restart</button>}
+                  </div>
+                )}
+              </li>
+            ))}
+            {!detail.elections.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">No elections yet.</li>}
+          </ul>
+          {canAppoint && (
+            <form className="mt-3 space-y-2 border-t border-slate-100 pt-3" onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgm.createElection(groupId, { title: electionTitle || `Group leadership election`, role: 'leader', anonymity: 'anonymous', visibility: 'group', allowVoteChange: false, tieBreak: 'runoff' }); setElectionTitle(''); }, 'Election created — nominations are open.'); }}>
+              <input className={inputClass} placeholder="Election title" aria-label="Election title" value={electionTitle} onChange={(event) => setElectionTitle(event.target.value)} />
+              <button type="submit" disabled={busy} className="mini-button">Create election (opens nominations)</button>
+            </form>
+          )}
+        </div>
+
+        {/* Announcements + notify */}
+        <div className={card}>
+          <p className={label}>Announcements</p>
+          {canAnnounce && (
+            <form className="mt-3 space-y-2" onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgm.createAnnouncement(Number(classId), { title: announceTitle, body: announceBody, pinned: announcePinned, activityId: Number(activityId), groupId }); setAnnounceTitle(''); setAnnounceBody(''); setAnnouncePinned(false); }, 'Announcement posted to this group.'); }}>
+              <input className={inputClass} required placeholder="Title" aria-label="Announcement title" value={announceTitle} onChange={(event) => setAnnounceTitle(event.target.value)} />
+              <textarea className={`${inputClass} min-h-16`} required placeholder="Message to this group…" aria-label="Announcement body" value={announceBody} onChange={(event) => setAnnounceBody(event.target.value)} />
+              <label className="flex items-center gap-2 text-[11px] font-bold text-slate-500"><input type="checkbox" checked={announcePinned} onChange={(event) => setAnnouncePinned(event.target.checked)} /> Pin to the top</label>
+              <button type="submit" disabled={busy} className="mini-button">Post to {group.name}</button>
+            </form>
+          )}
+          <ul className="mt-3 space-y-1.5">
+            {detail.announcements.slice(0, 5).map((row: any) => (
+              <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate font-bold text-slate-700">{row.pinned ? '📌 ' : ''}{row.title}</span>
+                  {Number(row.group_id) === Number(groupId) && <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-emerald-700">This group</span>}
+                </div>
+                <p className="mt-0.5 line-clamp-2 text-[11px] text-slate-500">{row.body}</p>
+              </li>
+            ))}
+            {!detail.announcements.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Nothing announced yet.</li>}
+          </ul>
+        </div>
+
+        {/* Direct notification */}
+        {canAnnounce && (
+          <div className={card}>
+            <p className={label}>Notify members directly</p>
+            <form className="mt-3 space-y-2" onSubmit={(event) => { event.preventDefault(); void run(async () => { const result: any = await cgm.notifyGroup(groupId, { title: notifyTitle || undefined, message: notifyBody }); setNotifyTitle(''); setNotifyBody(''); return result; }, 'Notification sent to every member.'); }}>
+              <input className={inputClass} placeholder="Title (optional)" aria-label="Notification title" value={notifyTitle} onChange={(event) => setNotifyTitle(event.target.value)} />
+              <textarea className={`${inputClass} min-h-16`} required placeholder="Message — lands in every member's notifications" aria-label="Notification message" value={notifyBody} onChange={(event) => setNotifyBody(event.target.value)} />
+              <button type="submit" disabled={busy} className="mini-button">Send to {group.size} member(s)</button>
+            </form>
+          </div>
+        )}
+
+        {/* WhatsApp */}
+        <div className={card}>
+          <p className={label}>WhatsApp group</p>
+          {canManageWhatsapp ? (
+            <div className="mt-3 space-y-2">
+              <input className={inputClass} placeholder="Paste the WhatsApp invite link…" value={waUrl ?? ''} onChange={(event) => setWaUrl(event.target.value)} aria-label="WhatsApp invite link" />
+              <div className="flex flex-wrap gap-1.5">
+                <button type="button" disabled={busy} className="mini-button" onClick={() => { if (waUrl) void run(() => cgm.setWhatsApp(groupId, waUrl), 'WhatsApp link saved.'); }}>Save link</button>
+                {waUrl && <a className="mini-button" href={waUrl} target="_blank" rel="noopener noreferrer">Open chat ↗</a>}
+                {waUrl && <button type="button" className="mini-button" onClick={() => setShowQr((current) => !current)}>{showQr ? 'Hide QR' : 'Show QR'}</button>}
+                {detail.whatsapp && ['disable', 'enable', 'revoke'].map((action) => (
+                  <button key={action} type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.whatsappAction(groupId, action as any), `Link ${action}d.`)}>{action[0].toUpperCase() + action.slice(1)}</button>
+                ))}
+              </div>
+              {detail.whatsapp && <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{detail.whatsapp.status} · {detail.whatsapp.click_count} member click(s) — clicks are not proof of joining</p>}
+              {showQr && waUrl && <QrBlock url={waUrl} headerText={String(group.name)} footerText="WhatsApp group invite" downloadName={`${String(group.name || 'group').replace(/[^A-Za-z0-9-]+/g, '-')}-whatsapp-qr.png`} downloadable small />}
+            </div>
+          ) : detail.whatsapp ? (
+            <a className="break-all text-xs font-bold text-emerald-700 underline" href={detail.whatsapp.url} target="_blank" rel="noopener noreferrer">{detail.whatsapp.url}</a>
+          ) : <p className="mt-2 text-[11px] text-slate-400">No WhatsApp link yet.</p>}
+        </div>
+
+        {/* Settings */}
+        {canManage && (
+          <div className={card}>
+            <p className={label}>Group settings</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div>
+                <label className={label} htmlFor="cgm-group-capacity">Capacity for THIS group</label>
+                <input id="cgm-group-capacity" type="number" min="1" max="200" className={`${inputClass} mt-1 w-32`} value={capacity} onChange={(event) => setCapacity(event.target.value)} />
+              </div>
+              <button type="button" disabled={busy} className="mini-button" onClick={() => void run(() => cgm.updateGroup(groupId, { capacity: Number(capacity) }), 'Capacity saved.')}>Save capacity</button>
+            </div>
+            <p className="mt-2 text-[11px] font-medium text-slate-400">The plan in the activity settings creates and names the groups; this only tunes this group's capacity (never below its current size).</p>
+          </div>
+        )}
+
+        {/* History */}
+        <div className={card}>
+          <p className={label}>Recent history</p>
+          <ul className="mt-3 space-y-1">
+            {detail.events.slice(0, 8).map((row: any) => (
+              <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-1.5 text-[11px] text-slate-600">
+                <span className="font-bold text-slate-800">{row.full_name}</span> — {row.action}{row.reason ? ` · ${row.reason}` : ''}{row.actor_label ? ` · by ${row.actor_label}` : ''}
+              </li>
+            ))}
+            {!detail.events.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Nothing recorded yet.</li>}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ActivityLifecycleButtons = ({ activity, onChanged }: { activity: any; onChanged: () => void }) => {
   const actions: Array<[string, string]> = [];
   const status = String(activity.status);
@@ -1526,13 +1806,14 @@ const ActivityLifecycleButtons = ({ activity, onChanged }: { activity: any; onCh
   );
 };
 
-const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, onChanged, onEditActivity }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void }) => {
+const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onEditActivity }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
   const [activityId, setActivityId] = useState<number | null>(null);
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [openGroupId, setOpenGroupId] = useState<number | null>(null);
 
   useEffect(() => { void cgm.activities(classId).then((rows) => { setActivities(rows as any[]); }).catch(() => setActivities([])); }, [classId]);
 
@@ -1565,6 +1846,21 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
   const showWhatsappQr = (groupId: number, url: string) => {
     setQrByGroup((current) => ({ ...current, [groupId]: url }));
   };
+
+  if (openGroupId && activityId) {
+    return (
+      <GroupDetail
+        groupId={openGroupId}
+        activityId={activityId}
+        classId={classId}
+        allGroups={(data?.groups || []) as any[]}
+        canMove={canMove} canRemove={canRemove} canManageWhatsapp={canManageWhatsapp}
+        canAppoint={canAppoint} canAnnounce={canAnnounce} canManage={canManage}
+        onChanged={() => void load(activityId)}
+        onBack={() => setOpenGroupId(null)}
+      />
+    );
+  }
 
   return (
     <div className="space-y-5">
@@ -1636,7 +1932,10 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
             {(data.groups || []).map((group: any) => (
               <div key={group.id} className={card}>
                 <div className="flex items-center justify-between">
-                  <p className="font-black text-slate-900">{group.name}</p>
+                  <button type="button" data-testid="cgm-open-group" onClick={() => setOpenGroupId(Number(group.id))} className="group/name flex min-w-0 items-center gap-1.5 text-left" title={`Open the ${group.name} workspace`}>
+                    <span className="truncate font-black text-slate-900 group-hover/name:text-emerald-700">{group.name}</span>
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                  </button>
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{group.size}{group.capacity ? `/${group.capacity}` : ''}</span>
                 </div>
                 <ul className="mt-2 space-y-1.5">

@@ -1060,6 +1060,151 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
   // -------------------------------------------------------------------------
   // Leadership: appointments, assistants, permissions, succession
   // -------------------------------------------------------------------------
+  /**
+   * Group workspace dossier: EVERYTHING about one group for its dedicated
+   * management page — identity + topic, the parent activity's shape, members
+   * (with leadership roles), active leadership, this group's elections,
+   * announcements aimed at the group plus the activity-wide feed, the
+   * WhatsApp link, the group's recent history, and who could still be added.
+   */
+  app.get('/api/cgm/groups/:id', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const groupId = Number(c.req.param('id'));
+    const group = await groupCore(c.env.DB, groupId);
+    if (!group) return bad(c, 'Group not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(group.class_id), 'view_roster');
+    if (!guard.ok) return guard.response;
+    const activity = await activityCore(c.env.DB, Number(group.activity_id));
+    const config = activity ? sanitizeActivityConfig(JSON.parse(activity.config_json || '{}')) : null;
+    const groupRow = (await asRows<any>(c.env.DB.prepare(
+      `SELECT g.*, (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+       FROM cgm_groups g WHERE g.id = ?`
+    ).bind(groupId)))[0];
+    const members = await asRows<any>(c.env.DB.prepare(
+      `SELECT s.id, s.full_name, s.index_number, ga.id AS assignment_id, ga.assigned_via,
+              (SELECT GROUP_CONCAT(l.role || ':' || l.id) FROM cgm_leadership_appointments l
+               WHERE l.group_id = ? AND l.student_id = s.id AND l.status = 'active') AS roles
+       FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id
+       WHERE ga.group_id = ? AND ga.status = 'active' ORDER BY s.full_name`
+    ).bind(groupId, groupId));
+    const leadership = await asRows<any>(c.env.DB.prepare(
+      `SELECT l.id, l.role, l.status, l.student_id, s.full_name FROM cgm_leadership_appointments l
+       JOIN cgm_students s ON s.id = l.student_id WHERE l.group_id = ? ORDER BY l.status, l.id`
+    ).bind(groupId));
+    const elections = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.id, e.title, e.status, e.role, e.anonymity, e.created_at,
+              (SELECT COUNT(*) FROM cgm_candidates ec WHERE ec.election_id = e.id AND ec.status = 'active') AS candidates,
+              (SELECT COUNT(*) FROM cgm_election_ballots b WHERE b.election_id = e.id) AS ballots
+       FROM cgm_elections e WHERE e.group_id = ? ORDER BY e.id DESC LIMIT 20`
+    ).bind(groupId));
+    const announcements = await asRows<any>(c.env.DB.prepare(
+      `SELECT id, title, body, author_label, pinned, group_id, created_at FROM cgm_announcements
+       WHERE status = 'published' AND activity_id = ? AND (group_id = ? OR group_id IS NULL)
+       ORDER BY pinned DESC, id DESC LIMIT 20`
+    ).bind(Number(group.activity_id), groupId));
+    const whatsapp = (await asRows<any>(c.env.DB.prepare(
+      `SELECT id, url, status, click_count, created_at FROM cgm_whatsapp_links WHERE group_id = ? ORDER BY id DESC LIMIT 1`
+    ).bind(groupId)))[0] || null;
+    const events = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.*, s.full_name FROM cgm_assignment_events e JOIN cgm_students s ON s.id = e.student_id
+       WHERE e.activity_id = ? AND (e.to_group_id = ? OR e.from_group_id = ?) ORDER BY e.id DESC LIMIT 15`
+    ).bind(Number(group.activity_id), groupId, groupId));
+    const unassigned = await asRows<any>(c.env.DB.prepare(
+      `SELECT s.id, s.full_name FROM cgm_activity_eligible e JOIN cgm_students s ON s.id = e.student_id
+       WHERE e.activity_id = ? AND NOT EXISTS
+         (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
+       ORDER BY s.full_name`
+    ).bind(Number(group.activity_id), Number(group.activity_id)));
+    const otherMembers = await asRows<any>(c.env.DB.prepare(
+      `SELECT s.id, s.full_name, ga.group_id, g.name AS group_name
+       FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id JOIN cgm_groups g ON g.id = ga.group_id
+       WHERE ga.activity_id = ? AND ga.status = 'active' AND ga.group_id != ? ORDER BY s.full_name`
+    ).bind(Number(group.activity_id), groupId));
+    return c.json({
+      success: true,
+      data: {
+        group: {
+          id: Number(groupRow.id), name: groupRow.name || `Group ${groupRow.position}`, position: Number(groupRow.position),
+          topic: groupRow.topic || '', capacity: groupRow.capacity === null || groupRow.capacity === undefined ? null : Number(groupRow.capacity),
+          size: Number(groupRow.size), status: groupRow.status,
+        },
+        activity: activity ? {
+          id: Number(activity.id), name: activity.name, status: activity.status,
+          method: config?.method, className: activity.class_name,
+        } : null,
+        members, leadership, elections, announcements, whatsapp, events, unassigned, otherMembers,
+      },
+    });
+  });
+
+  /** Group settings: the topic and a per-group capacity that never drops
+   * below the members already inside. Names stay owned by the activity plan. */
+  app.patch('/api/cgm/groups/:id', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const groupId = Number(c.req.param('id'));
+    const group = await groupCore(c.env.DB, groupId);
+    if (!group) return bad(c, 'Group not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(group.class_id), 'manage_activities');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const updates: string[] = [];
+    const values: any[] = [];
+    if (body.topic !== undefined) {
+      const topic = cleanOrNull(body.topic, 200);
+      updates.push('topic = ?');
+      values.push(topic);
+    }
+    if (body.capacity !== undefined) {
+      const capacity = body.capacity === null ? null : Math.max(1, Math.min(200, Math.floor(Number(body.capacity))));
+      if (capacity === null || Number.isNaN(capacity)) return bad(c, 'Give a capacity between 1 and 200.');
+      const sizeRows = await asRows<{ c: number }>(c.env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
+      ).bind(groupId));
+      if (capacity < Number(sizeRows[0]?.c || 0)) return bad(c, `The group already has ${Number(sizeRows[0]?.c || 0)} member(s) — capacity cannot be smaller.`, 409);
+      updates.push('capacity = ?');
+      values.push(capacity);
+    }
+    if (!updates.length) return bad(c, 'Nothing to update.');
+    await c.env.DB.prepare(`UPDATE cgm_groups SET ${updates.join(', ')} WHERE id = ?`).bind(...values, groupId).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.group.updated', entityType: 'group', entityId: groupId,
+      classId: Number(group.class_id), activityId: Number(group.activity_id),
+      context: { topic: body.topic !== undefined ? cleanOrNull(body.topic, 200) : undefined, capacity: body.capacity !== undefined ? body.capacity : undefined },
+    });
+    return c.json({ success: true });
+  });
+
+  /** Notify every member of this group, right now. */
+  app.post('/api/cgm/groups/:id/notify', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const groupId = Number(c.req.param('id'));
+    const group = await groupCore(c.env.DB, groupId);
+    if (!group) return bad(c, 'Group not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(group.class_id), 'manage_announcements');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const title = clean(body.title, 120) || 'A message from your organizer';
+    const message = clean(body.message, 600);
+    if (!message) return bad(c, 'Write the message to send.');
+    const members = await asRows<{ student_id: number }>(c.env.DB.prepare(
+      `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
+    ).bind(groupId));
+    for (const row of members) {
+      await notifyStudent(c.env.DB, Number(row.student_id), 'groups', title, message);
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.group.notified', entityType: 'group', entityId: groupId,
+      classId: Number(group.class_id), activityId: Number(group.activity_id),
+      context: { recipients: members.length, title },
+    });
+    return c.json({ success: true, data: { recipients: members.length } });
+  });
+
   app.post('/api/cgm/groups/:id/leaders', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);

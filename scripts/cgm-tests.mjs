@@ -3363,6 +3363,74 @@ check('the activity form edits the names of EXACTLY the planned groups (per-grou
   && /Will be created as \{previewLabels\.slice\(0, 6\)\.join\(', '\)\}/.test(wsFinal));
 
 // ---------------------------------------------------------------------------
+// 36. Group workspace: one dossier endpoint powering a full per-group page
+// ---------------------------------------------------------------------------
+section('36. Group workspace dossier, topic/capacity settings, direct notify');
+
+// swapLab's two pods already hold swapperA (pod 0) and swapperB (pod 1).
+const labGroups = ((await memberCall('GET', `/api/cgm/activities/${swapLabId}`, undefined, amaToken)).json?.data?.groups || []);
+const podA = Number(labGroups[0].id);
+const podB = Number(labGroups[1].id);
+const dossier = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, amaToken);
+const d = dossier.json?.data || {};
+const podAoccupant = Number((d.members || [])[0]?.id || 0);
+const podBoccupant = Number((d.otherMembers || [])[0]?.id || 0);
+check('the group dossier returns identity, activity shape, members and siblings',
+  dossier.status === 200 && Number(d.group?.id) === podA && d.activity?.name === 'Swap Lab'
+  && (d.members || []).length === 1 && (d.otherMembers || []).length === 1
+  && [swapperAId, swapperBId].includes(podAoccupant) && [swapperAId, swapperBId].includes(podBoccupant)
+  && podAoccupant !== podBoccupant,
+  `status ${dossier.status} members=${(d.members || []).length} others=${(d.otherMembers || []).length}`);
+check('a student cannot open an organizer group dossier', [401, 403].includes((await studentCall('GET', `/api/cgm/groups/${podA}`, undefined, swapperA.session)).status));
+
+const topicSave = await memberCall('PATCH', `/api/cgm/groups/${podA}`, { topic: 'Titration curves' }, amaToken);
+const dossierAfterTopic = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, amaToken);
+check('the organizer saves the group topic and it comes back on the dossier',
+  topicSave.status === 200 && dossierAfterTopic.json?.data?.group?.topic === 'Titration curves', `status ${topicSave.status}`);
+
+const podBSecond = await freshFmtRosterStudent(42, 'Pod B Kwabena');
+await memberCall('POST', `/api/cgm/activities/${swapLabId}/assign-student`, { studentId: podBSecond.studentId, groupId: podB }, amaToken);
+const tinyCapacity = await memberCall('PATCH', `/api/cgm/groups/${podB}`, { capacity: 1 }, amaToken);
+const okCapacity = await memberCall('PATCH', `/api/cgm/groups/${podB}`, { capacity: 5 }, amaToken);
+check('capacity can never drop below the members already inside (then saves)',
+  tinyCapacity.status === 409 && okCapacity.status === 200, `tiny=${tinyCapacity.status} ok=${okCapacity.status} ${tinyCapacity.text?.slice(0, 100)}`);
+
+const notifyRun = await memberCall('POST', `/api/cgm/groups/${podA}/notify`, { title: 'Lab prep', message: 'Bring your goggles tomorrow.' }, amaToken);
+const notifiedCount = Number(q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND title = 'Lab prep'", podAoccupant).c);
+const notifyOutsider = podAoccupant === swapperAId ? swapperBId : swapperAId;
+check('notify sends to every member of THIS group only (and is audited)',
+  notifyRun.status === 200 && Number(notifyRun.json?.data?.recipients) === 1 && notifiedCount === 1
+  && Number(q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND title = 'Lab prep'", notifyOutsider).c) === 0
+  && Number(q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.group.notified'").c) >= 1,
+  `status ${notifyRun.status} recipients=${notifyRun.json?.data?.recipients} got=${notifiedCount}`);
+
+const labAnnouncement = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/announcements`, { title: 'Pod A briefing', body: 'Pod A only: bring your charts.', activityId: swapLabId, groupId: podA }, amaToken);
+const dossierWithAnn = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, amaToken);
+check('group-scoped announcements exist and surface on the group dossier',
+  labAnnouncement.status === 200 && (dossierWithAnn.json?.data?.announcements || []).some((row) => row.title === 'Pod A briefing' && Number(row.group_id) === podA),
+  `status ${labAnnouncement.status}`);
+
+const podElection = await memberCall('POST', `/api/cgm/groups/${podA}/elections`, { title: 'Pod A leader', role: 'leader', anonymity: 'anonymous', visibility: 'group', allowVoteChange: false, tieBreak: 'runoff' }, amaToken);
+const dossierWithElection = await memberCall('GET', `/api/cgm/groups/${podA}`, undefined, amaToken);
+check('creating an election on the group lists it on the dossier with live counts',
+  podElection.status === 200 && (dossierWithElection.json?.data?.elections || []).some((row) => row.title === 'Pod A leader' && row.status === 'nominating'),
+  `status ${podElection.status}`);
+
+// -- Source pins: the workspace page exists and is comprehensive -------------
+const wsGroup = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+const cgmClientGroup = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
+check('every group card opens a dedicated workspace (cgm-open-group → cgm-group-workspace)',
+  /cgm-open-group/.test(wsGroup) && /cgm-group-workspace/.test(wsGroup));
+check('the workspace covers members, leadership, elections, announcements, notify, WhatsApp, settings, history, topic',
+  /const GroupDetail = /.test(wsGroup) && /Save topic/.test(wsGroup) && /Notify members directly/.test(wsGroup)
+  && /Post to \{group\.name\}/.test(wsGroup) && /Open chat ↗/.test(wsGroup) && /Save capacity/.test(wsGroup)
+  && /Appoint from members/.test(wsGroup) && /Create election \(opens nominations\)/.test(wsGroup)
+  && /Recent history/.test(wsGroup) && /Add a student/.test(wsGroup));
+check('the client library exposes the dossier, settings and notify calls',
+  /groupDetail: \(groupId: number\)/.test(cgmClientGroup) && /updateGroup: \(groupId: number, body/.test(cgmClientGroup)
+  && /notifyGroup: \(groupId: number, body/.test(cgmClientGroup));
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 

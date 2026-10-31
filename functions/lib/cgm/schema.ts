@@ -295,6 +295,7 @@ CREATE TABLE IF NOT EXISTS cgm_groups (
   activity_id INTEGER NOT NULL,
   position INTEGER NOT NULL,
   name TEXT,
+  topic TEXT,
   capacity INTEGER,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived')),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

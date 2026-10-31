@@ -634,6 +634,15 @@ check('forced random mode gives students ONLY the fair draw — no pick grid, no
   /const forcedRandom = data\.activity\.config\?\.method === 'random'/.test(forcedPortal)
   && /Your organizer set this activity to random selection — every group has an exactly equal chance/.test(forcedPortal)
   && (forcedPortal.match(/!forcedRandom && /g) || []).length >= 2);
+check('every group card opens a full per-group workspace covering everything about that group',
+  /cgm-open-group/.test(forcedWorkspace) && /const GroupDetail = /.test(forcedWorkspace)
+  && /cgm-group-workspace/.test(forcedWorkspace) && /Save topic/.test(forcedWorkspace)
+  && /Notify members directly/.test(forcedWorkspace) && /Open chat ↗/.test(forcedWorkspace)
+  && /Save capacity/.test(forcedWorkspace) && /Recent history/.test(forcedWorkspace));
+check('the workspace manages THIS group only — dossier, sibling members for swaps, group-scoped announcements',
+  /groupDetail: \(groupId: number\)/.test(forcedClient) && /notifyGroup: \(groupId: number, body/.test(forcedClient)
+  && /updateGroup: \(groupId: number, body/.test(forcedClient)
+  && /createAnnouncement\(Number\(classId\), \{ title: announceTitle, body: announceBody, pinned: announcePinned, activityId: Number\(activityId\), groupId \}/.test(forcedWorkspace.replace(/\s+/g, ' ')));
 check('the swap route enforces capacity-safe in-place exchange, gender-separate protection and audit',
   /swap-students/.test(src('functions/lib/cgm/routes-activities.ts'))
   && /Gender-separate groups cannot exchange students of different genders/.test(src('functions/lib/cgm/routes-activities.ts'))

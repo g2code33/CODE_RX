@@ -1188,6 +1188,9 @@ const SAFE_MIGRATIONS = [
   // Invitations keep their token so organizers can copy, share and
   // re-download the QR any time (replaces the show-once flow).
   { table: 'cgm_invitations', column: 'token_value', sql: 'ALTER TABLE cgm_invitations ADD COLUMN token_value TEXT' },
+  // Group workspace: a per-group topic the organizer (and later leaders)
+  // set — shown on the group page and to the group's members.
+  { table: 'cgm_groups', column: 'topic', sql: 'ALTER TABLE cgm_groups ADD COLUMN topic TEXT' },
   // Invitation hardening: individual invitation secrets are sealed with
   // AES-256-GCM (token_enc = "v1.<iv>.<ciphertext+tag>") so a database export
   // alone can never re-issue a personal invitation link. token_key_version

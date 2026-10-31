@@ -432,6 +432,12 @@ export const cgm = {
   // whatsapp
   setWhatsApp: (groupId: number, url: string) =>
     memberCall(`/api/cgm/groups/${groupId}/whatsapp`, { method: 'POST', body: { url } }),
+  groupDetail: (groupId: number) =>
+    memberCall(`/api/cgm/groups/${groupId}`),
+  updateGroup: (groupId: number, body: Record<string, unknown>) =>
+    memberCall(`/api/cgm/groups/${groupId}`, { method: 'PATCH', body }),
+  notifyGroup: (groupId: number, body: Record<string, unknown>) =>
+    memberCall(`/api/cgm/groups/${groupId}/notify`, { method: 'POST', body }),
   whatsappAction: (groupId: number, action: 'disable' | 'enable' | 'revoke') =>
     memberCall(`/api/cgm/groups/${groupId}/whatsapp/${action}`, { method: 'POST', body: {} }),
 
