@@ -68,12 +68,19 @@ function App() {
     const hash = window.location.hash;
     if (hash.startsWith('#class-groups/phantom')) return 'phantom';
     if (hash.startsWith('#class-groups/student') || hash.startsWith('#class-invite/')) return 'student';
+    if (hash.startsWith('#student-vote/')) return 'student';
     if (hash.startsWith('#class-groups')) return 'workspace';
     return null;
   });
   const [classInviteCode, setClassInviteCode] = useState<string | null>(() => {
     const hash = window.location.hash;
     return hash.startsWith('#class-invite/') ? decodeURIComponent(hash.replace('#class-invite/', '').trim()) || null : null;
+  });
+  // A organizer-generated voting link (#student-vote/<id>) lands the student
+  // straight on that election once they are signed in.
+  const [studentVoteTarget, setStudentVoteTarget] = useState<number | null>(() => {
+    const hash = window.location.hash;
+    return hash.startsWith('#student-vote/') ? Number(decodeURIComponent(hash.replace('#student-vote/', '').trim())) || null : null;
   });
 
   // Auto-clear corrupted localStorage data. Schema gaps are repaired below.
@@ -188,7 +195,7 @@ function App() {
         }
         return;
       }
-      if (window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/')) {
+      if (window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/') || window.location.hash.startsWith('#student-vote/')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(false);
         setIsSharedVaultView(false);
@@ -198,8 +205,15 @@ function App() {
         setIsMemberVault(false);
         setActiveTab('home');
         const hash = window.location.hash;
+        if (hash.startsWith('#student-vote/')) {
+          setClassInviteCode(null);
+          setStudentVoteTarget(Number(decodeURIComponent(hash.replace('#student-vote/', '').trim())) || null);
+          setClassGroupsView('student');
+          return;
+        }
         if (hash.startsWith('#class-invite/')) {
           setClassInviteCode(decodeURIComponent(hash.replace('#class-invite/', '').trim()) || null);
+          setStudentVoteTarget(null);
           setClassGroupsView('student');
           return;
         }
@@ -476,7 +490,7 @@ function App() {
 
   // Class & Group Management workspaces: standalone, like the client portal.
   if (classGroupsView === 'student') {
-    return <StudentPortal inviteCode={classInviteCode} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); }} />;
+    return <StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); }} />;
   }
   if (classGroupsView === 'phantom') {
     return <PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />;

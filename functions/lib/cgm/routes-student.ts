@@ -111,7 +111,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!classCode || !indexNumber || !entryPassword) return bad(c, GENERIC_REGISTER_FAILURE, 400);
 
     const classRows = await asRows<any>(c.env.DB.prepare(
-      `SELECT id, name, code, institution, institution_key, passkey_prefix, entry_password_verifier FROM cgm_classes WHERE code = ? AND status = 'active'`
+      `SELECT id, name, code, institution, institution_key, passkey_prefix, entry_password_verifier, settings_json FROM cgm_classes WHERE code = ? AND status = 'active'`
     ).bind(classCode));
     const klass = classRows[0];
     // Anti-enumeration: unknown class, unknown index and wrong password all
@@ -158,8 +158,14 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
 
     // Policy override: automatic registration approves on the spot — the
     // identity, passkey and membership are created exactly as the organizer
-    // approval path would, and the passkey is shown once here.
-    if (await modulePolicy(c.env.DB, 'student_registration_mode') === 'auto') {
+    // approval path would, and the passkey is shown once here. Two switches:
+    // PHANTOM's module-wide 'auto' applies to every class; otherwise the
+    // CLASS decides through its own registration mode (Settings).
+    const classRegistrationMode = (() => {
+      try { return sanitizeClassSettings(JSON.parse(klass.settings_json || '{}')).registrationMode; }
+      catch { return 'approval' as const; }
+    })();
+    if (await modulePolicy(c.env.DB, 'student_registration_mode') === 'auto' || classRegistrationMode === 'auto') {
       const fullEntry = (await asRows<any>(c.env.DB.prepare('SELECT * FROM cgm_roster_entries WHERE id = ?').bind(entry.id)))[0];
       const fullClass = (await asRows<any>(c.env.DB.prepare('SELECT institution, institution_key, name FROM cgm_classes WHERE id = ?').bind(klass.id)))[0];
       const requestId = Number(((await asRows<{ id: number }>(c.env.DB.prepare(
@@ -489,6 +495,23 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
        WHERE r.student_id = ? AND a.class_id = ? GROUP BY r.status`
     ).bind(student.id, classId));
 
+    // Classmates: the roster lives here too. Names are always visible;
+    // phone and email appear ONLY when the organizer set them visible for
+    // classmates in Settings ("allow viewing when set") — index numbers and
+    // gender are identity/sign-in data and never leave with the list.
+    const classSettingsRow = await asRows<{ settings_json: string | null }>(c.env.DB.prepare(
+      'SELECT settings_json FROM cgm_classes WHERE id = ?'
+    ).bind(classId));
+    const visibleFields = sanitizeClassSettings((() => {
+      try { return JSON.parse(classSettingsRow[0]?.settings_json || '{}'); } catch { return {}; }
+    })()).studentVisibleFields;
+    const classmates = await asRows<any>(c.env.DB.prepare(
+      `SELECT s.id, s.full_name, s.phone, s.email FROM cgm_class_members m
+       JOIN cgm_students s ON s.id = m.student_id
+       WHERE m.class_id = ? AND m.status = 'active'
+       ORDER BY s.full_name LIMIT 1000`
+    ).bind(classId));
+
     // §12 read tracking: opening the class dashboard counts as reading the
     // announcements it shows. One row per student per announcement, ever.
     if (announcements.length) {
@@ -524,6 +547,11 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         })),
         leaders,
         attendanceSummary: attendance,
+        classmates: classmates.map((row) => ({
+          studentId: Number(row.id), fullName: row.full_name,
+          phone: visibleFields.includes('phone') ? row.phone : undefined,
+          email: visibleFields.includes('email') ? row.email : undefined,
+        })),
       },
     });
   });
@@ -873,6 +901,51 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       action: 'cgm.candidate.withdrawn', entityType: 'election', entityId: candidate.election_id,
     });
     return c.json({ success: true });
+  });
+
+  // Every election across the student's classes and groups — the "My
+  // Elections" view and the target of the organizer's voting link.
+  app.get('/api/cgm/student/elections', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    const memberships = await asRows<{ class_id: number; code: string; name: string }>(c.env.DB.prepare(
+      `SELECT m.class_id, cl.code, cl.name FROM cgm_class_members m
+       JOIN cgm_classes cl ON cl.id = m.class_id
+       WHERE m.student_id = ? AND m.status = 'active' AND cl.status = 'active'`
+    ).bind(student.id));
+    if (!memberships.length) return c.json({ success: true, data: [] });
+    const classIds = memberships.map((row) => Number(row.class_id));
+    const elections = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.id, e.activity_id, e.group_id, e.title, e.role, e.status, e.anonymity, e.visibility,
+              a.name AS activity_name, a.class_id
+       FROM cgm_elections e
+       JOIN cgm_activities a ON a.id = e.activity_id
+       WHERE a.class_id IN (${classIds.map(() => '?').join(',')})
+         AND e.status IN ('nominating','voting','closed')
+         AND (e.visibility != 'group' OR e.group_id IN (
+           SELECT ga.group_id FROM cgm_group_assignments ga
+           WHERE ga.student_id = ? AND ga.activity_id = e.activity_id AND ga.status = 'active'
+         ))
+       ORDER BY CASE e.status WHEN 'voting' THEN 0 WHEN 'nominating' THEN 1 ELSE 2 END, e.created_at DESC
+       LIMIT 100`
+    ).bind(...classIds, student.id));
+    const electionIds = elections.map((row) => Number(row.id));
+    const participation = electionIds.length ? await asRows<{ election_id: number }>(c.env.DB.prepare(
+      `SELECT election_id FROM cgm_election_participation
+       WHERE student_id = ? AND election_id IN (${electionIds.map(() => '?').join(',')})`
+    ).bind(student.id, ...electionIds)) : [];
+    const votedIds = new Set(participation.map((row) => Number(row.election_id)));
+    const classByid = new Map(memberships.map((row) => [Number(row.class_id), row]));
+    return c.json({
+      success: true,
+      data: elections.map((row) => ({
+        id: Number(row.id), activityId: Number(row.activity_id), groupId: Number(row.group_id),
+        title: row.title, role: row.role, status: row.status, anonymity: row.anonymity,
+        visibility: row.visibility, activityName: row.activity_name,
+        className: classByid.get(Number(row.class_id))?.name || '', classCode: classByid.get(Number(row.class_id))?.code || '',
+        voted: votedIds.has(Number(row.id)),
+      })),
+    });
   });
 
   app.get('/api/cgm/student/elections/:id', async (c: any) => {

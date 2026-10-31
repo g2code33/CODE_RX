@@ -350,8 +350,14 @@ export interface ClassSettings {
   studentVisibleFields: string[];
   /** Sensitive fields only organizers with view_sensitive_profiles see. */
   sensitiveFields: string[];
-  /** Whether joining through an invitation needs organizer approval. */
+  /** Whether joining through an invitation needs organizer approval.
+   * false = automatic: the invitation walks the student straight in. */
   membershipApprovalRequired: boolean;
+  /** Roster registrations: 'approval' (default) or 'auto' — the organizer may
+   * let correct roster + entry-password registrations issue the passkey on
+   * the spot. The module-wide policy still caps this (closed wins, PHANTOM's
+   * auto applies to every class). */
+  registrationMode: 'approval' | 'auto';
   /** Registration approval delegation: who approves new student identities. */
   registrationApprovals: 'organizers' | 'phantom';
   /** Currently active login format for the class. */
@@ -386,6 +392,7 @@ export const defaultClassSettings = (): ClassSettings => ({
   studentVisibleFields: ['full_name'],
   sensitiveFields: ['index_number', 'phone', 'email'],
   membershipApprovalRequired: true,
+  registrationMode: 'approval',
   registrationApprovals: 'organizers',
   loginFormat: { ...DEFAULT_LOGIN_FORMAT },
   pendingLoginFormat: null,
@@ -402,6 +409,7 @@ export const sanitizeClassSettings = (value: unknown): ClassSettings => {
     studentVisibleFields: visible.length ? [...new Set(visible)] : defaults.studentVisibleFields,
     sensitiveFields: defaults.sensitiveFields,
     membershipApprovalRequired: raw.membershipApprovalRequired !== false,
+    registrationMode: raw.registrationMode === 'auto' ? 'auto' : 'approval',
     registrationApprovals: raw.registrationApprovals === 'phantom' ? 'phantom' : 'organizers',
     loginFormat: sanitizeLoginFormat(raw.loginFormat),
     pendingLoginFormat: raw.pendingLoginFormat && typeof raw.pendingLoginFormat === 'object'

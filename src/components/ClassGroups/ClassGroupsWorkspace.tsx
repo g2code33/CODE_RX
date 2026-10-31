@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Archive, Bell, CalendarDays, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
-  Megaphone, Plus, RefreshCw, Settings, ShieldCheck, UserCheck, Users, Vote, FileText, X,
+  Megaphone, Plus, RefreshCw, Settings, ShieldCheck, UserCheck, Users, Vote, FileText, X, LogOut,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
   cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
 import { appDialog } from '../AppDialog';
+import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
 
 /**
@@ -146,6 +147,14 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
             </select>
           )}
           <button type="button" className="mini-button" onClick={() => { void refresh(); }} aria-label="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
+          <button
+            type="button"
+            className="mini-button"
+            onClick={() => { memberAuth.logout(); onExit(); }}
+            title="End this session on this device"
+          >
+            <LogOut className="mr-1 inline h-3.5 w-3.5" /> Sign out
+          </button>
           <button type="button" className="mini-button" onClick={onExit}>Exit</button>
         </div>
       </header>
@@ -1140,11 +1149,44 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
     electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
   });
 
+  // The roster decides the sensible sizes: the moment the organizer types a
+  // number of groups (or a target size), the other field fills itself from
+  // the class size — the organizer just keeps or adjusts the suggestion.
+  const [sizeBase, setSizeBase] = useState<{ roster: number; members: number } | null>(null);
+  const lastSized = useRef<'groups' | 'size' | null>(null);
+
   const load = useCallback(async () => {
     setRows(await cgm.activities(classId).catch(() => []));
     setTemplates(await cgm.templates(classId).catch(() => []));
+    const rosterData = await cgm.roster(classId).catch(() => null);
+    const memberData = await cgm.members(classId).catch(() => null);
+    setSizeBase({
+      roster: (rosterData?.data || rosterData || []).length || 0,
+      members: (memberData?.data || memberData || []).filter((row: any) => row.status === 'active').length || 0,
+    });
   }, [classId]);
   useEffect(() => { void load(); }, [load]);
+
+  const plannedStudents = sizeBase ? (sizeBase.members > 0 ? sizeBase.members : sizeBase.roster) : 0;
+  const sizeSource = sizeBase ? (sizeBase.members > 0 ? 'active members' : 'students on the roster') : 'students';
+  const applyGroupMath = (field: 'groups' | 'size', raw: string) => {
+    lastSized.current = field;
+    const value = Math.max(1, Math.floor(Number(raw) || 0));
+    if (field === 'groups' && value > 0 && plannedStudents > 0) {
+      const perGroup = Math.ceil(plannedStudents / value);
+      setForm((current) => ({ ...current, groupCount: raw, targetGroupSize: String(perGroup), capacity: current.capacity || String(perGroup) }));
+    } else if (field === 'size' && value > 0 && plannedStudents > 0) {
+      const groups = Math.max(1, Math.ceil(plannedStudents / value));
+      setForm((current) => ({ ...current, targetGroupSize: raw, groupCount: String(groups) }));
+    } else {
+      setForm((current) => ({ ...current, [field === 'groups' ? 'groupCount' : 'targetGroupSize']: raw }));
+    }
+  };
+  const groupMathHint = plannedStudents > 0 && form.groupCount && Number(form.groupCount) > 0
+    ? `${plannedStudents} ${sizeSource} ÷ ${form.groupCount} groups ≈ ${Math.ceil(plannedStudents / Number(form.groupCount))} per group — keep it or adjust freely.`
+    : plannedStudents > 0
+      ? `${plannedStudents} ${sizeSource} detected — type the number of groups and the sizes fill themselves in.`
+      : null;
 
   return (
     <div className="space-y-5">
@@ -1191,8 +1233,9 @@ const ActivitiesArea = ({ classId, onChanged }: { classId: number; onChanged: ()
                 <option value="hybrid">Hybrid (self first, organizer finishes)</option>
               </select>
             </div>
-            <div><label className={label} htmlFor="cgm-act-groups">Number of groups</label><input id="cgm-act-groups" type="number" min="2" max="50" className={`${inputClass} mt-1`} value={form.groupCount} onChange={(event) => setForm({ ...form, groupCount: event.target.value })} /></div>
-            <div><label className={label} htmlFor="cgm-act-size">…or target group size</label><input id="cgm-act-size" type="number" min="2" className={`${inputClass} mt-1`} value={form.targetGroupSize} onChange={(event) => setForm({ ...form, targetGroupSize: event.target.value })} /></div>
+            <div><label className={label} htmlFor="cgm-act-groups">Number of groups</label><input id="cgm-act-groups" type="number" min="2" max="50" className={`${inputClass} mt-1`} value={form.groupCount} onChange={(event) => applyGroupMath('groups', event.target.value)} /></div>
+            <div><label className={label} htmlFor="cgm-act-size">…or target group size</label><input id="cgm-act-size" type="number" min="2" className={`${inputClass} mt-1`} value={form.targetGroupSize} onChange={(event) => applyGroupMath('size', event.target.value)} /></div>
+            {groupMathHint && <p className="sm:col-span-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-800">{groupMathHint}</p>}
             <div><label className={label} htmlFor="cgm-act-cap">Group capacity (hard limit)</label><input id="cgm-act-cap" type="number" min="1" className={`${inputClass} mt-1`} value={form.capacity} onChange={(event) => setForm({ ...form, capacity: event.target.value })} /></div>
             <div><label className={label} htmlFor="cgm-act-gender">Gender rule</label>
               <select id="cgm-act-gender" className={`${inputClass} mt-1`} value={form.genderRule} onChange={(event) => setForm({ ...form, genderRule: event.target.value })}>
@@ -1650,6 +1693,13 @@ const ElectionManager = ({ data, onAction, busy }: { data: any; onAction: (actio
   const { election, candidates, participation } = data;
   const hasTie = Boolean(election.results?.outcome?.tie) && !election.results?.outcome?.resolved;
   const tiedIds: number[] = election.results?.outcome?.tiedCandidateIds || [];
+  const [showVotingLink, setShowVotingLink] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  // The voting link signs the student in and drops them straight on this
+  // ballot — share it as text or as the stamped QR image.
+  const votingLink = `${origin}/#student-vote/${election.id}`;
+  const linkReady = ['nominating', 'voting'].includes(String(election.status));
   return (
     <div className={card}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1673,6 +1723,7 @@ const ElectionManager = ({ data, onAction, busy }: { data: any; onAction: (actio
           {election.status === 'closed' && election.results?.outcome?.winner && !election.results?.outcome?.announced && (
             <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void onAction('announce')}>Announce winner</button>
           )}
+          {linkReady && <button type="button" className="mini-button" onClick={() => setShowVotingLink((value) => !value)}>{showVotingLink ? 'Hide voting link' : 'Voting link'}</button>}
           {['nominating', 'voting'].includes(election.status) && (
             <button type="button" disabled={busy} className="mini-button text-red-600" onClick={async () => {
               const reason = await appDialog.prompt({ title: 'Cancel this election?', label: 'Reason for cancelling', multiline: true, confirmLabel: 'Cancel election' });
@@ -1690,6 +1741,30 @@ const ElectionManager = ({ data, onAction, busy }: { data: any; onAction: (actio
         ))}
         {!candidates.length && <li className="text-[11px] text-slate-400">No candidates yet.</li>}
       </ul>
+      {showVotingLink && (
+        <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
+          <p className="text-xs font-black uppercase tracking-wider text-emerald-700">Voting link — sign in, then straight to this ballot</p>
+          <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{votingLink}</p>
+          <div className="mt-2 flex flex-wrap items-start gap-3">
+            <button
+              type="button"
+              className="mini-button"
+              onClick={async () => { setCopied(await copyToClipboard(votingLink)); }}
+            >
+              {copied ? 'Copied ✓' : 'Copy link'}
+            </button>
+            <QrBlock
+              url={votingLink}
+              headerText={String(election.title || 'Class election')}
+              footerText="Scan → sign in → vote"
+              downloadName={`election-${election.id}-voting-qr.png`}
+              downloadable
+              small
+            />
+          </div>
+          <p className="mt-2 text-[11px] font-medium text-slate-400">Students follow the link, sign in with their passkey, and land directly on this election to vote.</p>
+        </div>
+      )}
     </div>
   );
 };
@@ -2390,6 +2465,7 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
   const [entryPassword, setEntryPassword] = useState('');
   const [visibleFields, setVisibleFields] = useState<Set<string>>(new Set());
   const [approvalRequired, setApprovalRequired] = useState(true);
+  const [registrationMode, setRegistrationMode] = useState<'approval' | 'auto'>('approval');
   const [identifiers, setIdentifiers] = useState<Set<string>>(new Set(['index_number']));
   const [allowChange, setAllowChange] = useState(false);
   const [passkeyPrefix, setPasskeyPrefix] = useState('rx30');
@@ -2404,6 +2480,7 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
     if (data?.settings) {
       setVisibleFields(new Set(data.settings.studentVisibleFields || []));
       setApprovalRequired(data.settings.membershipApprovalRequired !== false);
+      setRegistrationMode(data.settings.registrationMode === 'auto' ? 'auto' : 'approval');
       setIdentifiers(new Set(data.settings.loginFormat?.identifiers || ['index_number']));
       setAllowChange(Boolean(data.settings.loginFormat?.allowStudentPasskeyChange));
     }
@@ -2536,10 +2613,34 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
             </label>
           ))}
         </div>
-        <label className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-600">
-          <input type="checkbox" checked={approvalRequired} onChange={(event) => setApprovalRequired(event.target.checked)} />
-          Membership requests need organizer approval
-        </label>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <span className="text-[11px] font-black uppercase tracking-wider text-slate-400">Student registrations</span>
+            <select
+              className={`${inputClass} mt-1`}
+              value={registrationMode}
+              onChange={(event) => setRegistrationMode(event.target.value === 'auto' ? 'auto' : 'approval')}
+              aria-label="Student registration mode"
+            >
+              <option value="approval">Organizer approval (default)</option>
+              <option value="auto">Automatic — passkey issued on the spot</option>
+            </select>
+            <span className="mt-1 block text-[11px] font-medium text-slate-400">Roster index + correct entry password → {registrationMode === 'auto' ? 'joined instantly with their passkey.' : 'waits in your Approvals queue.'}</span>
+          </label>
+          <label className="block">
+            <span className="text-[11px] font-black uppercase tracking-wider text-slate-400">Membership requests</span>
+            <select
+              className={`${inputClass} mt-1`}
+              value={approvalRequired ? 'approval' : 'auto'}
+              onChange={(event) => setApprovalRequired(event.target.value !== 'auto')}
+              aria-label="Membership request mode"
+            >
+              <option value="approval">Organizer approval (default)</option>
+              <option value="auto">Automatic — students join straight away</option>
+            </select>
+            <span className="mt-1 block text-[11px] font-medium text-slate-400">Applies when students open an invitation link: {approvalRequired ? 'their request waits for you.' : 'they walk straight in.'}</span>
+          </label>
+        </div>
         <button
           type="button"
           className="cgm-primary-button mt-3"
@@ -2548,6 +2649,7 @@ const SettingsArea = ({ classId, onChanged }: { classId: number; onChanged: () =
               await cgm.updateSettings(classId, {
                 studentVisibleFields: [...visibleFields],
                 membershipApprovalRequired: approvalRequired,
+                registrationMode,
                 loginFormat: { identifiers: [...identifiers], allowStudentPasskeyChange: allowChange },
               });
               setMessage('Settings saved.');

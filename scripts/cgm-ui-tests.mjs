@@ -511,6 +511,47 @@ check('the student sign-in halves are the index number or the phone only',
   /index_number: 'Index number',/.test(studentPortal) && !/university/i.test(studentPortal)
   && /index_number: 'Index number',\n  phone: 'Telephone number',/.test(src('functions/lib/cgm/core.ts')));
 
+section('18. Automation in Settings, classmates, voting links, session persistence');
+
+const studentClient = src('src/lib/cgm.ts');
+
+check('Settings offers Approval/Automatic for registrations AND membership requests',
+  /aria-label="Student registration mode"/.test(workspace) && /aria-label="Membership request mode"/.test(workspace)
+  && /passkey issued on the spot/.test(workspace) && /walk straight in/.test(workspace)
+  && /registrationMode/.test(workspace) && /registrationMode: 'approval' \| 'auto'/.test(src('functions/lib/cgm/core.ts')));
+
+check('automatic registration is applied server-side (class switch under the module cap)',
+  /classRegistrationMode === 'auto'/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /student_registration_mode'\) === 'auto' \|\| classRegistrationMode/.test(src('functions/lib/cgm/routes-student.ts')));
+
+check('students see classmates with contacts only when the organizer set them visible',
+  /Classmates \(/.test(studentPortal) && /made visible to classmates/.test(studentPortal)
+  && /visibleFields\.includes\('phone'\)/.test(src('functions/lib/cgm/routes-student.ts')));
+
+check('every open election has a voting link that signs students in and lands on the ballot',
+  /#student-vote\//.test(workspace) && /Voting link/.test(workspace) && /Copy link/.test(workspace)
+  && /Scan → sign in → vote/.test(workspace)
+  && /student\/elections'\)/.test(studentClient));
+
+check('the voting link opens the student portal straight on the ballot after sign-in',
+  /#student-vote\//.test(app) && /voteTarget/.test(app) && /voteTarget/.test(studentPortal)
+  && /You opened a voting link/.test(studentPortal));
+
+check('My Elections is a real list with vote actions, not a pointer',
+  /MyElectionsView/.test(studentPortal) && /electionsList/.test(studentClient) && /Vote now/.test(studentPortal));
+
+check('the student login status persists (localStorage session with expiry, sign out clears it)',
+  /localStorage\.setItem\(STUDENT_SESSION_KEY/.test(studentClient)
+  && /localStorage\.removeItem\(STUDENT_SESSION_KEY/.test(studentClient)
+  && /Sign out/.test(studentPortal));
+
+check('the organizer workspace has its own Sign out beside Exit',
+  /memberAuth\.logout\(\)/.test(workspace) && /End this session on this device/.test(workspace));
+
+check('group planning uses the roster: typing groups fills the size from the class roll',
+  /applyGroupMath/.test(workspace) && /per group — keep it or adjust freely/.test(workspace)
+  && /students on the roster/.test(workspace) && /active members/.test(workspace));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

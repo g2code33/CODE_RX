@@ -307,7 +307,7 @@ const readContinuation = (): InviteContinuation | null => {
 };
 const clearContinuation = () => { try { sessionStorage.removeItem(INVITE_CONTINUATION_KEY); } catch { /* private mode */ } };
 
-export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | null; onExit: () => void }) => {
+export const StudentPortal = ({ inviteCode, voteTarget, onExit }: { inviteCode: string | null; voteTarget?: number | null; onExit: () => void }) => {
   const [session, setSession] = useState<CgmStudentSession | null>(() => studentSession.read());
   const [me, setMe] = useState<any>(null);
   const [section, setSection] = useState<Section>('home');
@@ -360,6 +360,12 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
   }, [pendingInvite, refreshMe]);
 
   useEffect(() => { if (session) void refreshMe(); else setLoading(false); }, [session, refreshMe]);
+  // An organizer's voting link sends the student straight to the election
+  // after sign-in.
+  // The focus can be cleared locally without touching the link that opened us.
+  const [voteFocus, setVoteFocus] = useState<number | 'cleared' | null>(null);
+  const effectiveVoteFocus = voteFocus === 'cleared' ? null : (voteFocus ?? voteTarget ?? null);
+  useEffect(() => { if (voteTarget) setSection('elections'); }, [voteTarget]);
 
   if (!session) {
     return <AuthScreen inviteCode={inviteCode} onAuthenticated={(next) => { setSession(next); void refreshMe(); void continueInvite(next); }} />;
@@ -422,7 +428,7 @@ export const StudentPortal = ({ inviteCode, onExit }: { inviteCode: string | nul
             ? <ClassDetailView classId={openClassId} onBack={() => setOpenClassId(null)} onOpenActivity={(id) => { setOpenActivityId(id); setSection('groups'); }} />
             : <MyClassesView me={me} onOpen={(id) => setOpenClassId(id)} onRefresh={refreshMe} inviteCode={inviteCode} />)}
           {!loading && section === 'groups' && <MyGroupsView me={me} openActivityId={openActivityId} onOpenActivity={setOpenActivityId} onChanged={refreshMe} />}
-          {!loading && section === 'elections' && <MyElectionsView />}
+          {!loading && section === 'elections' && <MyElectionsView focusElectionId={effectiveVoteFocus} onClearFocus={() => setVoteFocus('cleared')} />}
           {!loading && section === 'attendance' && <AttendanceView />}
           {!loading && section === 'calendar' && <CalendarView />}
           {!loading && section === 'notifications' && <NotificationsView onChanged={refreshMe} />}
@@ -571,6 +577,23 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity }: { classId: number;
           ))}
         </div>
       </div>
+
+      {(data.classmates || []).length > 0 && (
+        <div className={card}>
+          <p className={label}>Classmates ({(data.classmates || []).length})</p>
+          <p className="mt-1 text-xs font-medium text-slate-500">Contact details appear only for fields your organizer made visible to classmates.</p>
+          <ul className="mt-3 grid gap-1.5 sm:grid-cols-2">
+            {(data.classmates || []).map((member: any) => (
+              <li key={member.studentId} className="rounded-xl bg-slate-50 px-4 py-2.5">
+                <p className="text-sm font-bold text-slate-700">{member.fullName}</p>
+                {(member.phone || member.email) && (
+                  <p className="text-[11px] font-semibold text-slate-400">{[member.phone, member.email].filter(Boolean).join(' · ')}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {(data.activities || []).length > 0 && (
         <div className={card}>
@@ -902,7 +925,102 @@ const ElectionRow = ({ election, candidates, voted, busy, onContest, onVote, onR
   );
 };
 
-const MyElectionsView = () => <div className={card}><p className={label}>My elections</p><p className="mt-2 text-xs font-medium text-slate-500">Elections appear inside each activity. Open one of your activities to contest or vote.</p></div>;
+const ElectionVoteCard = ({ electionId, focused }: { electionId: number; focused?: boolean }) => {
+  const [detail, setDetail] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try { setDetail(await cgmStudent.election(electionId)); setError(null); }
+    catch (failure: any) { setError(failure?.message || 'This election could not be opened.'); }
+  }, [electionId]);
+  useEffect(() => { void load(); }, [load]);
+  if (error) return <div className={card}><p className="text-sm font-bold text-red-600">{error}</p></div>;
+  if (!detail) return <div className={card}><p className="text-sm font-semibold text-slate-400">Opening the ballot…</p></div>;
+  const election = detail.election || {};
+  const candidates: any[] = detail.candidates || [];
+  return (
+    <div className={`${card} ${focused ? 'border-emerald-300 ring-2 ring-emerald-100' : ''}`}>
+      {focused && <p className="mb-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">You opened a voting link — this is the ballot. Pick one candidate below.</p>}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-black text-slate-900">{election.title || 'Election'}</p>
+        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-slate-500">{election.status}</span>
+      </div>
+      <p className="mt-1 text-[11px] font-semibold text-slate-400">
+        {election.role} · {election.anonymity === 'anonymous' ? 'Anonymous ballot' : 'Public roll'}{detail.voted ? ' · you have voted' : ''}
+      </p>
+      {message && <p role="status" className="mt-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">{message}</p>}
+      {election.status === 'closed' && detail.results && (
+        <p className="mt-2 text-xs font-semibold text-slate-500">Voting closed — results appear in your activity once announced.</p>
+      )}
+      <ul className="mt-3 space-y-2">
+        {candidates.map((candidate: any) => (
+          <li key={candidate.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 px-4 py-2.5">
+            <span className="text-sm font-bold text-slate-700">{candidate.fullName}{candidate.statement ? <span className="ml-2 text-[11px] font-medium text-slate-400">{candidate.statement}</span> : null}</span>
+            {election.status === 'voting' && detail.canVote && (
+              <button
+                type="button"
+                disabled={busy || detail.voted}
+                className="cgm-primary-button !px-3 !py-1.5 text-[11px]"
+                onClick={async () => {
+                  setBusy(true); setMessage(null);
+                  try { const result: any = await cgmStudent.vote(electionId, Number(candidate.id)); setMessage(String(result?.message || 'Vote recorded.')); await load(); }
+                  catch (failure: any) { setMessage(failure?.message || 'The vote failed.'); }
+                  finally { setBusy(false); }
+                }}
+              >
+                {detail.voted ? 'Voted' : 'Vote'}
+              </button>
+            )}
+          </li>
+        ))}
+        {!candidates.length && <li className="text-xs font-medium text-slate-400">No candidates yet.</li>}
+      </ul>
+      {!detail.canVote && election.status === 'voting' && <p className="mt-2 text-[11px] font-medium text-slate-400">Voting is open, but this ballot is scoped to its group members.</p>}
+    </div>
+  );
+};
+
+const MyElectionsView = ({ focusElectionId, onClearFocus }: { focusElectionId?: number | null; onClearFocus?: () => void }) => {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [openId, setOpenId] = useState<number | null>(focusElectionId || null);
+  useEffect(() => { void cgmStudent.electionsList().then((data: any) => setRows((data.data || data) as any[])).catch(() => setRows([])); }, []);
+  return (
+    <div className="space-y-4">
+      {focusElectionId ? (
+        <div>
+          <ElectionVoteCard electionId={Number(focusElectionId)} focused />
+          {onClearFocus && <button type="button" className="mini-button mt-2" onClick={onClearFocus}>Back to all my elections</button>}
+        </div>
+      ) : null}
+      <div className={card}>
+        <p className={label}>My elections</p>
+        {rows === null && <p className="mt-2 text-xs font-semibold text-slate-400">Loading…</p>}
+        {rows?.length === 0 && <p className="mt-2 text-xs font-medium text-slate-500">No elections yet — they appear here the moment your organizer opens one.</p>}
+        <ul className="mt-3 divide-y divide-slate-100">
+          {(rows || []).filter((row) => Number(row.id) !== Number(focusElectionId)).map((row) => (
+            <li key={row.id} className="py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-black text-slate-800">{row.title || 'Election'}</p>
+                  <p className="text-[11px] font-semibold text-slate-400">{row.className} · {row.activityName} · {row.role}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {row.voted && <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">voted</span>}
+                  <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${row.status === 'voting' ? 'bg-emerald-600 text-white' : row.status === 'nominating' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{row.status}</span>
+                  <button type="button" className="mini-button" onClick={() => setOpenId(openId === Number(row.id) ? null : Number(row.id))}>
+                    {row.status === 'voting' && !row.voted ? 'Vote now' : openId === Number(row.id) ? 'Hide' : 'Open'}
+                  </button>
+                </div>
+              </div>
+              {openId === Number(row.id) && <div className="mt-3"><ElectionVoteCard electionId={Number(row.id)} /></div>}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+};
 
 const AttendanceView = () => {
   const [rows, setRows] = useState<any[] | null>(null);

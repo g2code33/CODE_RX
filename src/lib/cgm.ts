@@ -17,29 +17,44 @@ export interface CgmStudentSession {
 }
 
 export const studentSession = {
+  /** The student stays signed in across visits: the session lives in
+   * localStorage (its own expiry is still honoured) and any older
+   * sessionStorage copy is migrated so nobody is logged out by the upgrade. */
   read(): CgmStudentSession | null {
+    const parse = (raw: string | null): CgmStudentSession | null => {
+      try {
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as CgmStudentSession;
+        if (!parsed?.token) return null;
+        if (parsed.expiresAt && new Date(parsed.expiresAt.replace(' UTC', 'Z')).getTime() <= Date.now()) return null;
+        return parsed;
+      } catch { return null; }
+    };
     try {
-      const raw = sessionStorage.getItem(STUDENT_SESSION_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw) as CgmStudentSession;
-      if (!parsed?.token) return null;
-      if (parsed.expiresAt && new Date(parsed.expiresAt.replace(' UTC', 'Z')).getTime() <= Date.now()) {
-        sessionStorage.removeItem(STUDENT_SESSION_KEY);
-        return null;
+      const stored = parse(localStorage.getItem(STUDENT_SESSION_KEY))
+        || parse(sessionStorage.getItem(STUDENT_SESSION_KEY));
+      // Migrate an old sessionStorage session so a module upgrade never
+      // signs the student out mid-term.
+      if (stored) {
+        try { localStorage.setItem(STUDENT_SESSION_KEY, JSON.stringify(stored)); } catch { /* private mode */ }
+        try { sessionStorage.removeItem(STUDENT_SESSION_KEY); } catch { /* nothing to clear */ }
       }
-      return parsed;
-    } catch {
-      return null;
-    }
+      return stored;
+    } catch { return null; }
   },
   write(session: CgmStudentSession) {
     try {
-      sessionStorage.setItem(STUDENT_SESSION_KEY, JSON.stringify(session));
+      localStorage.setItem(STUDENT_SESSION_KEY, JSON.stringify(session));
     } catch {
       /* private mode: the session still works until reload */
     }
   },
   clear() {
+    try {
+      localStorage.removeItem(STUDENT_SESSION_KEY);
+    } catch {
+      /* nothing to clear */
+    }
     try {
       sessionStorage.removeItem(STUDENT_SESSION_KEY);
     } catch {
@@ -475,6 +490,7 @@ export const cgmStudent = {
     studentCall(`/api/cgm/student/activities/${activityId}/contest`, { method: 'POST', body: { statement } }),
   withdrawCandidate: (candidateId: number) =>
     studentCall(`/api/cgm/student/candidates/${candidateId}/withdraw`, { method: 'POST', body: {} }),
+  electionsList: () => studentCall('/api/cgm/student/elections'),
   election: (electionId: number) => studentCall(`/api/cgm/student/elections/${electionId}`),
   vote: (electionId: number, candidateId: number) =>
     studentCall(`/api/cgm/student/elections/${electionId}/vote`, { method: 'POST', body: { candidateId } }),

@@ -2441,7 +2441,121 @@ check('the UI renders the QR as inline SVG (no external QR runtime)',
   readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8').includes('import { encodeQr } from')
   && !readFileSync(path.join(ROOT, 'package.json'), 'utf8').includes('"qrcode"'));
 
+
+// ===========================================================================
+// 29. Organizer automation in Settings (registrations + memberships set to
+//     automatic), classmates honour "visible when set", and the student
+//     elections list that the voting link lands on
+// ===========================================================================
+section('29. Automation in Settings, classmates when set, voting-link elections');
+
+// -- A fresh class with an auto-registration switch ---------------------------
+const zooClass = await memberCall('POST', '/api/cgm/classes', { name: 'ZOO 101 Auto Section', institution: 'Accra Technical University' }, amaToken);
+const zooClassId = zooClass.json?.data?.classId ?? zooClass.json?.data?.class?.id ?? zooClass.json?.data?.id;
+const zooCode = zooClass.json?.data?.code ?? zooClass.json?.data?.class?.code;
+await memberCall('POST', `/api/cgm/classes/${zooClassId}/entry-password`, { entryPassword: 'zoo-101-entry' }, amaToken);
+await memberCall('POST', `/api/cgm/phantom/classes/${zooClassId}/approve`, {}, phantomToken);
+const zooCsv = [
+  'Full Name,Index Number,Phone,Gender',
+  'Adwoa Zoo, ZOO-101-001,0245000001,female',
+  'Benjamin Zoo, ZOO-101-002,0245000002,male',
+].join('\n');
+const zooForm = new FormData();
+zooForm.append('file', new File([zooCsv], 'zoo.csv', { type: 'text/csv' }));
+zooForm.append('mapping', JSON.stringify({ full_name: 'Full Name', index_number: 'Index Number', phone: 'Phone', gender: 'Gender' }));
+zooForm.append('policy', 'skip');
+const zooImport = await formCall('POST', `/api/cgm/classes/${zooClassId}/roster/import`, zooForm, amaToken);
+check('the §29 roster imports', zooImport.status === 200, zooImport.text?.slice(0, 140));
+
+// The organizer flips BOTH automation switches in Settings.
+const autoSettings = await memberCall('POST', `/api/cgm/classes/${zooClassId}/settings`, {
+  registrationMode: 'auto',
+  membershipApprovalRequired: false,
+}, amaToken);
+check('the organizer can set registrations and memberships to automatic',
+  autoSettings.status === 200 && autoSettings.json?.data?.settings?.registrationMode === 'auto' && autoSettings.json?.data?.settings?.membershipApprovalRequired === false,
+  autoSettings.text?.slice(0, 140));
+const stillApproval = await memberCall('GET', `/api/cgm/classes/${classAId}`, undefined, amaToken);
+check('the switch is per class — classA keeps organizer approval',
+  stillApproval.json?.data?.settings?.registrationMode !== 'auto' && stillApproval.json?.data?.settings?.membershipApprovalRequired !== false,
+  JSON.stringify(stillApproval.json?.data?.settings?.registrationMode));
+
+// -- Automatic registration issues the passkey on the spot --------------------
+const autoReg = await call('POST', '/api/cgm/student/register', { classCode: zooCode, indexNumber: 'ZOO-101-001', entryPassword: 'zoo-101-entry' });
+check('with the class set to automatic, registration issues the passkey immediately',
+  autoReg.status === 200 && /^[a-z0-9]{2,10}[a-z]{1,2}$/.test(String(autoReg.json?.data?.passkey || '')),
+  autoReg.text?.slice(0, 160));
+check('the automatic registration left nothing in the approvals queue',
+  q1("SELECT COUNT(*) c FROM cgm_registration_requests r JOIN cgm_roster_entries re ON re.id = r.roster_entry_id WHERE re.class_id = ? AND r.status = 'pending'", zooClassId).c === 0);
+check('the automatic registration created the membership too',
+  q1("SELECT COUNT(*) c FROM cgm_class_members m JOIN cgm_students s ON s.id = m.student_id WHERE m.class_id = ? AND s.index_number_key = 'zoo-101-001' AND m.status = 'active'", zooClassId).c === 1);
+const autoReg2 = await call('POST', '/api/cgm/student/register', { classCode: zooCode, indexNumber: 'ZOO-101-002', entryPassword: 'zoo-101-entry' });
+check('a second automatic registration also walks straight through', autoReg2.status === 200 && Boolean(autoReg2.json?.data?.passkey), autoReg2.text?.slice(0, 120));
+
+// -- Classmates honour the class visibility setting ("viewing when set") ------
+const adwoaLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'ZOO-101-001', passkey: String(autoReg.json?.data?.passkey) });
+const adwoaSession = adwoaLogin.json?.data?.session?.token;
+check('the automatically registered student signs in', Boolean(adwoaSession), `status ${adwoaLogin.status}`);
+const classmatesBefore = await studentCall('GET', `/api/cgm/student/classes/${zooClassId}`, undefined, adwoaSession);
+const classmatesDefault = classmatesBefore.json?.data?.classmates || [];
+check('classmates are listed with names by default and contacts stay private',
+  classmatesDefault.length === 2
+  && classmatesDefault.every((row) => row.fullName && row.phone === undefined && row.email === undefined),
+  JSON.stringify(classmatesDefault).slice(0, 160));
+await memberCall('POST', `/api/cgm/classes/${zooClassId}/settings`, { studentVisibleFields: ['full_name', 'phone'] }, amaToken);
+const classmatesAfter = await studentCall('GET', `/api/cgm/student/classes/${zooClassId}`, undefined, adwoaSession);
+const classmatesVisible = classmatesAfter.json?.data?.classmates || [];
+const benjamin = classmatesVisible.find((row) => row.fullName === 'Benjamin Zoo');
+check('when the organizer sets phone visible, classmates can actually view it',
+  Boolean(benjamin?.phone), JSON.stringify(benjamin || {}).slice(0, 120));
+check('index numbers and gender never reach the classmates list even when contacts open',
+  classmatesVisible.every((row) => row.index_number === undefined && row.indexNumber === undefined && row.gender === undefined));
+
+// -- The student elections list (the target of the organizer voting link) ------
+const zooActivity = await memberCall('POST', `/api/cgm/classes/${zooClassId}/activities`, {
+  name: 'Zoo Field Practical', type: 'practical',
+  config: { method: 'automatic', groupCount: 2, capacity: 10, genderRule: 'none', overflow: 'block', leaderMethod: 'election', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const zooActivityId = zooActivity.json?.data?.activityId ?? zooActivity.json?.data?.activity?.id ?? zooActivity.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${zooActivityId}/lifecycle`, { action: 'publish' }, amaToken);
+const zooGenerate = await memberCall('POST', `/api/cgm/activities/${zooActivityId}/generate`, {}, amaToken);
+check('the zoo practical assigns both students into its group', zooGenerate.status === 200 && Number(zooGenerate.json?.data?.unplaced || 0) === 0, zooGenerate.text?.slice(0, 120));
+const zooDetail = await memberCall('GET', `/api/cgm/activities/${zooActivityId}`, undefined, amaToken);
+const adwoaStudentId = q1("SELECT id FROM cgm_students WHERE index_number_key = 'zoo-101-001'").id;
+const zooGroupId = Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", zooActivityId, adwoaStudentId)?.group_id);
+check('the election is created on the group Adwoa actually landed in', Number.isInteger(zooGroupId) && zooGroupId > 0, `group=${zooGroupId}`);
+const zooElection = await memberCall('POST', `/api/cgm/groups/${zooGroupId}/elections`, { title: 'Field lead', role: 'leader', anonymity: 'anonymous', visibility: 'class', allowVoteChange: false, tieBreak: 'random' }, amaToken);
+const zooElectionId = zooElection.json?.data?.electionId ?? zooElection.json?.data?.election?.id ?? zooElection.json?.data?.id;
+check('the zoo election exists', Boolean(zooElectionId), zooElection.text?.slice(0, 120));
+const listBeforeVote = await studentCall('GET', '/api/cgm/student/elections', undefined, adwoaSession);
+const listedElection = (listBeforeVote.json?.data || []).find((row) => Number(row.id) === Number(zooElectionId));
+check('the student elections list contains the election with its class and voted flag',
+  Boolean(listedElection) && listedElection.className === 'ZOO 101 Auto Section' && listedElection.voted === false,
+  JSON.stringify((listBeforeVote.json?.data || []).slice(0, 1)).slice(0, 200));
+const adwoaContest = await studentCall('POST', `/api/cgm/student/activities/${zooActivityId}/contest`, { statement: 'I will keep the field team sharp.' }, adwoaSession);
+check('a member contests before the voting window opens', adwoaContest.status === 200, `status ${adwoaContest.status} ${adwoaContest.text?.slice(0, 120)}`);
+const openZooVote = await memberCall('POST', `/api/cgm/elections/${zooElectionId}/open-voting`, {}, amaToken);
+check('voting opens for the zoo election', openZooVote.status === 200, `status ${openZooVote.status}`);
+const zooBallot = await studentCall('GET', `/api/cgm/student/elections/${zooElectionId}`, undefined, adwoaSession);
+check('the voting-link target resolves straight to the ballot with candidates',
+  zooBallot.status === 200 && zooBallot.json?.data?.canVote === true && (zooBallot.json?.data?.candidates || []).length >= 1,
+  zooBallot.text?.slice(0, 160));
+const zooCandidateId = Number((zooBallot.json?.data?.candidates || [])[0]?.id);
+const zooVote = await studentCall('POST', `/api/cgm/student/elections/${zooElectionId}/vote`, { candidateId: zooCandidateId }, adwoaSession);
+check('the student votes right from the linked ballot', zooVote.status === 200, `status ${zooVote.status} ${zooVote.text?.slice(0, 120)}`);
+const listAfterVote = await studentCall('GET', '/api/cgm/student/elections', undefined, adwoaSession);
+const listedAfter = (listAfterVote.json?.data || []).find((row) => Number(row.id) === Number(zooElectionId));
+check('after voting the list shows the election as voted', Boolean(listedAfter?.voted));
+
+// The student session storage keeps the student signed in across visits.
+const portalSource = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
+check('the student session is persisted in localStorage (login status survives a browser restart)',
+  /localStorage\.setItem\(STUDENT_SESSION_KEY/.test(portalSource)
+  && /localStorage\.getItem\(STUDENT_SESSION_KEY/.test(portalSource)
+  && !/sessionStorage\.setItem\(STUDENT_SESSION_KEY/.test(portalSource));
+
 // ---------------------------------------------------------------------------
+
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

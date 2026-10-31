@@ -23,13 +23,13 @@ test suites — nothing is aspirational.**
 | Student identities | Separate from Society members; identified by **index number only** (university ID was removed entirely — roster, members, sign-in, register, profile fields, reports); register = index number + shared class entry password → pending → organizer approval → **permanent passkey shown once** (`rx30a…z → aa…az → ba…`, bijective base-26 over a–z, never reset or reused, `UNIQUE(passkey_sequence)`); the organizer may set a **per-class passkey mark** (the letters in front, e.g. `bio1`) in Settings — default stays `rx30`, issued passkeys are `<mark><suffix>` while the ONE global suffix sequence continues, and **existing passkeys are never rewritten** |
 | Student sign-in | **Passkey is the lookup key** (login resolves the student by its sequence); the organizer-controlled identifier (index number / university ID / phone) is the confirming half. 8 identifier failures → 20-minute lockout. Wrong passkey is an *anonymous* failure and can never count per account (anti-enumeration) |
 | Organizer lifecycle | Member applies → EmailJS verification link → PHANTOM approve / reject / correction / **suspend / reinstate / revoke** (with reason). No self-approval anywhere. Suspension revokes every team seat; reinstatement restores exactly what it revoked |
-| Classes | draft → configure → submit → PHANTOM approve/reject/correct/suspend/reinstate; `CRX-CLS-####` permanent ids; approval history table; sensitive post-approval edits route back to PHANTOM; entry password rotatable (stored only as a `cgm-entry:`-namespaced PBKDF2 verifier) |
+| Classes | draft → configure → submit → PHANTOM approve/reject/correct/suspend/reinstate; **Settings can run registrations and membership requests AUTOMATIC** (passkey on the spot / straight-in join; PHANTOM's module-wide policy still caps it); `CRX-CLS-####` permanent ids; approval history table; sensitive post-approval edits route back to PHANTOM; entry password rotatable (stored only as a `cgm-entry:`-namespaced PBKDF2 verifier) |
 | Team | primary organizer + co-organizers + assistants with granular per-class permissions; **ownership transfer propose → accept** swaps roles atomically; revocation is immediate; no self-grant; PHANTOM overrides everything |
 | Roster | ONE pipeline for xlsx / csv / json: validation, column mapping with suggestions, preview, duplicate policies (skip/update/flag/reject), per-row errors, summary, downloadable **sample templates in all three formats**; **file-first import** — the file is inspected on choose (format, headers, first 4 rows shown for reference) and the mapping options are labelled with values read straight from that file, so a link always relates exactly to the upload; **rows stay editable after the upload** (name, index, phone, gender inline; a registered student's index is locked to protect their sign-in) and **select-all mass actions** remove unregistered rows or suspend/remove members in bulk |
 | Invitations | general (link + code, expiry, max uses, disable / revoke / regenerate, click tracking); **the token is stored, so the link, QR and PNG download stay available any time** — the QR is rendered by the module's own dependency-free encoder (ISO 18004 byte mode, level M, verified against an independent reference across versions 1–40) and downloads as a PNG stamped with the class name on top and the shared class entry password underneath; signing-in halves are index number / phone and individual (identity-bound, single-use); tokens stored only as `cgm-invite:`-hashed verifiers |
 | Activities | many per class, each with own config / eligibility / groups / history / leadership / elections / WhatsApp / attendance / announcements / deadlines / status; timezone default Africa/Accra |
 | Assignment | methods A (organizer-auto) / B (self-service) / C (hybrid with deadline); balanced sizes, hard capacity, randomized tie-breaks, idempotent regenerate, **capacity races closed by an atomic guarded INSERT**; gender balanced/separate/none with never-infer semantics; overflow waitlist/block/organizer; moves with approval + capacity re-check + seat restoration; late students placed without reshuffle |
-| Elections | group-level, members only; anonymous (salted pseudonym ballots) or public; one vote per voter **enforced by a unique index and an atomic participation+ballot batch**; optional vote change (default off); configurable nomination/voting windows; tie-break chosen upfront (runoff / appointment / secure random / manual); results hidden until close; official announcement; cancel/restart with reason |
+| Elections | group-level, members only; **the organizer generates a voting link (copy + downloadable stamped QR) that signs the student in and lands straight on the ballot**; students get a real My Elections list and persistent sign-in; anonymous (salted pseudonym ballots) or public; one vote per voter **enforced by a unique index and an atomic participation+ballot batch**; optional vote change (default off); configurable nomination/voting windows; tie-break chosen upfront (runoff / appointment / secure random / manual); results hidden until close; official announcement; cancel/restart with reason |
 | Leadership | automatic / appointment / student contest (statement, windows, withdrawal before deadline, fallback); per-activity leader/assistant permissions; succession = automatic (senior assistant) / appointment (membership-validated) / fresh anonymous election |
 | Announcements | per activity/class; direct or approval modes; **R2 attachments** (≤5 MB, download gated to class members + team); pin, edit history, report → PHANTOM dispute queue, **read tracking with per-reader list**; no chat, no threads |
 | WhatsApp | manual organizer-pasted link per group; **one live link per group** (unique index), replace / disable / enable / revoke, QR preview, member-only click tracking that never counts as join proof |
@@ -133,9 +133,9 @@ the three test harnesses. **148 API routes** (75 activities/groups/elections/ann
 
 | Suite | Command | Result |
 |---|---|---|
-| Module API (28 sections) | `npm run test:cgm` | **518/518** |
-| Module UI (markup-level, 17 sections) | `npm run test:cgm-ui` | **214/214** |
-| Browser journeys (jsdom + wrangler pages dev, 19 checks) | `npm run test:cgm-browser` | **19/19** |
+| Module API (29 sections) | `npm run test:cgm` | **539/539** |
+| Module UI (markup-level, 18 sections) | `npm run test:cgm-ui` | **223/223** |
+| Browser journeys (jsdom + wrangler pages dev, 23 checks) | `npm run test:cgm-browser` | **23/23** |
 | Legacy portal API | `npm run test:client-portal` | 1620/1620 |
 | Legacy portal UI | `npm run test:client-portal-ui` | 695/695 |
 | Raw delivery pipeline | `npm run test:raw-delivery` | 27/27 |
@@ -249,7 +249,7 @@ functions/lib/cgm/routes-activities.ts # 75 activity/group/election/announcement
 src/lib/cgm.ts                         # typed client, duplicate guard, offline errors
 src/components/ClassGroups/            # ClassGroupsWorkspace (18 areas), StudentPortal,
                                        # PhantomClasses (oversight), ConnectionBanner
-scripts/cgm-tests.mjs                  # 518 API-level checks, 28 sections
+scripts/cgm-tests.mjs                  # 539 API-level checks, 29 sections
 scripts/cgm-ui-tests.mjs               # 200 markup-level checks, 17 sections
 scripts/cgm-browser-check.mjs          # 19 jsdom browser journeys vs wrangler dev
 ```

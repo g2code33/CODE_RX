@@ -308,6 +308,26 @@ let savedPasskey = '';
     await page.waitForFor('Welcome — you have joined the class.', 40_000), joinDebug());
   check('the newly joined class appears on the dashboard',
     await page.waitForFor('Browser Check Second', 20_000), page.body().slice(page.body().indexOf('CODE Rx Student Portal'), page.body().indexOf('CODE Rx Student Portal') + 300));
+  // Login status now survives browser restarts: the session lives in localStorage.
+  check('the student login status is saved for the next visit (localStorage session)',
+    Boolean(page.window.localStorage.getItem('codeRx_cgmStudentSession')),
+    String(page.window.localStorage.getItem('codeRx_cgmStudentSession') || 'absent').slice(0, 80));
+  check('the signed-in student sees their elections view from the portal navigation',
+    (() => { const electionsNav = page.buttonByText('My Elections'); electionsNav && electionsNav.click(); return Boolean(electionsNav); })()
+    && await page.waitForFor('My elections', 20_000), page.body().slice(0, 200));
+}
+
+// ---------------------------------------------------------------------------
+// 7. The voting link + sign-out affordances
+// ---------------------------------------------------------------------------
+{
+  // An organizer's voting link opens the student portal; after signing in the
+  // student lands straight on that ballot (here: an unknown id still proves
+  // the route boots the portal rather than the member workspace).
+  const page = await boot('#student-vote/424242');
+  check('a voting link boots the student portal sign-in', await page.waitForFor('Class & Group Management') && Boolean(page.inputByLabel('Permanent passkey')), page.body().slice(0, 160));
+  const organizerPage = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  check('the organizer workspace shows the Sign out button', await organizerPage.waitForFor('Sign out'), organizerPage.body().slice(0, 200));
 }
 
 // Restore the spec-default policies so the local database stays clean.
@@ -317,4 +337,6 @@ await api('PUT', '/api/cgm/phantom/policies', { policies: [
 ] }, phantomToken);
 
 console.log(`\nCGM BROWSER CHECKS: ${passed} passed, ${failures.length} failed`);
-if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }
+if (failures.length) { for (const f of failures) console.log(`  - ${f}`); }
+// Leave explicitly: the booted jsdom pages hold timers that would keep node alive.
+process.exit(failures.length ? 1 : 0);
