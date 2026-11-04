@@ -3893,6 +3893,15 @@ check('the activity member list carries the live group and assignment, so every 
   `row=${JSON.stringify({ group_id: placedRow.group_id, assignment_id: placedRow.assignment_id })}`);
 check('the same member carries the re-choose state through the activity payload',
   placedRow.rechoose_status === 'rejected', `state=${JSON.stringify(placedRow.rechoose_status ?? null)}`);
+// The organizer's Re-choose control belongs INSIDE a group, never on the
+// Groups board — the board stays compact (names, Move, Swap, ✕ only).
+const wsBoard = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+const boardSection = wsBoard.slice(wsBoard.indexOf('const GroupsArea = ('), wsBoard.indexOf('const ElectionsArea =', wsBoard.indexOf('const GroupsArea = (')));
+check('Re-choose is offered only inside the group workspace, not on the Groups board',
+  boardSection.length > 0 && !/RechooseControl|requestRechoose/.test(boardSection),
+  `board section chars ${boardSection.length}`);
+check('the group workspace member list is where Re-choose lives',
+  (wsBoard.match(/<RechooseControl/g) || []).length === 1);
 
 // -- One call returns the whole election board ---------------------------------
 const board = await memberCall('GET', `/api/cgm/activities/${rechooseLabId}/elections`, undefined, amaToken);

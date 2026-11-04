@@ -2422,9 +2422,9 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                 </div>
                 <ul className="mt-2 space-y-1.5">
                   {(data.members || []).filter((member: any) => Number(member.group_id) === Number(group.id)).map((member: any) => (
-                    <li key={member.student_id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
-                      <span className="font-bold text-slate-600">{member.full_name}</span>
-                      <span className="flex gap-1">
+                    <li key={member.student_id} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
+                      <span className="min-w-0 flex-1 truncate font-bold text-slate-600" title={member.full_name}>{member.full_name}</span>
+                      <span className="flex shrink-0 gap-1">
                         {canMove && (
                           <select
                             className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]"
@@ -2451,14 +2451,8 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                             )))}
                           </select>
                         )}
-                        {canRemove && member.assignment_id && (
-                          <RechooseControl
-                            status={member.rechoose_status ? String(member.rechoose_status) : null}
-                            memberName={String(member.full_name || 'this member')}
-                            busy={busy}
-                            onRequest={async (reason) => { await run(() => cgm.requestRechoose(Number(member.assignment_id), reason)); }}
-                          />
-                        )}
+                        {/* Re-choose lives inside the group workspace only — open
+                            the group to reach it, so this board stays compact. */}
                         {canRemove && (
                           <button type="button" className="rounded px-1.5 text-[10px] font-black text-red-500 hover:bg-red-50" onClick={() => { void run(async () => { if (member.assignment_id) await cgm.removeAssignment(Number(member.assignment_id)); }); }} title="Remove from activity">✕</button>
                         )}
