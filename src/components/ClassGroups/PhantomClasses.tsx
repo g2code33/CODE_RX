@@ -28,7 +28,7 @@ const formatWhen = (value: unknown) => {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
-type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'delegation' | 'disputes' | 'organizers' | 'audit';
+type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'rechoose' | 'delegation' | 'disputes' | 'organizers' | 'audit';
 
 const TABS: Array<[Tab, string]> = [
   ['overview', 'Overview'],
@@ -36,6 +36,7 @@ const TABS: Array<[Tab, string]> = [
   ['applications', 'Organizer applications'],
   ['classes', 'Class approvals'],
   ['sensitive', 'Sensitive changes'],
+  ['rechoose', 'Re-choose requests'],
   ['delegation', 'Registration delegation'],
   ['disputes', 'Disputes'],
   ['organizers', 'Organizer activity'],
@@ -150,6 +151,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
       applications: () => cgm.phantomOrganizerApplications(),
       classes: () => cgm.phantomClasses(),
       sensitive: () => cgm.phantomSensitiveChanges(),
+      rechoose: () => cgm.phantomRechooseRequests(),
       delegation: () => cgm.phantomDelegations(),
       disputes: () => cgm.phantomDisputes(),
       organizers: () => cgm.phantomOrganizerActivity(),
@@ -229,7 +231,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   ['Live activities', overview.counters?.activities_live],
                   ['Applications', overview.counters?.organizer_apps],
                   ['Audit (7d)', overview.counters?.audit_week],
-                  ['Open queues', Number(overview.queues?.applications || 0) + Number(overview.queues?.classes || 0) + Number(overview.queues?.sensitiveChanges || 0) + Number(overview.queues?.disputes || 0)],
+                  ['Open queues', Number(overview.queues?.applications || 0) + Number(overview.queues?.classes || 0) + Number(overview.queues?.sensitiveChanges || 0) + Number(overview.queues?.rechoose || 0) + Number(overview.queues?.disputes || 0)],
                 ].map(([text, value]) => (
                   <div key={String(text)} className="rounded-xl bg-slate-50 p-4">
                     <p className={label}>{text as string}</p>
@@ -311,6 +313,34 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   {row.status === 'rejected' && (
                     <div className="flex flex-wrap gap-1.5">
                       <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void act(() => cgm.phantomClassAction(Number(row.id), 'approve'), `${row.name} approved — invitations can go live.`)}>Approve now</button>
+                    </div>
+                  )}
+                </>
+              )}
+            />
+          )}
+
+          {tab === 'rechoose' && (
+            <ListBlock title="Re-choose requests — organizers asking members to start over" rows={rows.rechoose} emptyText="No re-choose requests await review."
+              render={(row) => (
+                <>
+                  <div className="min-w-0">
+                    <p className="text-sm font-black text-slate-800">{row.studentName} — choose a group again</p>
+                    <p className="text-[11px] font-semibold text-slate-400">
+                      {row.className}{row.classCode ? ` (${row.classCode})` : ''} · {row.activityName} · currently {row.groupName || 'unplaced'}
+                      {row.indexNumber ? ` · index ${row.indexNumber}` : ''} · {formatWhen(row.createdAt)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Requested by {row.requesterLabel || 'the organizer'}{row.requestedVia ? ` · original placement: ${String(row.requestedVia).replace(/_/g, ' ')}` : ''}
+                    </p>
+                    {row.reason && <p className="mt-1 text-xs italic text-slate-500">“{row.reason}”</p>}
+                    {row.status === 'approved' && <p className="mt-1 text-[11px] font-bold text-emerald-700">Released — the member can pick a group again.</p>}
+                    {row.status === 'rejected' && <p className="mt-1 text-[11px] font-bold text-red-600">Rejected{row.reviewReason ? ` — ${row.reviewReason}` : ''}.</p>}
+                  </div>
+                  {row.status === 'pending' && (
+                    <div className="flex flex-wrap gap-1.5">
+                      <button type="button" disabled={busy} data-testid="cgm-phantom-approve-rechoose" className="cgm-primary-button" onClick={() => void act(() => cgm.phantomDecideRechoose(Number(row.id), 'approve'), `${row.studentName} may now choose a group again.`)}>Approve</button>
+                      <button type="button" disabled={busy} className="mini-button text-red-600" onClick={async () => { const reason = await appDialog.prompt({ title: 'Reject this re-choose request', label: 'Rejection reason', multiline: true, confirmLabel: 'Reject' }); if (reason !== null) await act(() => cgm.phantomDecideRechoose(Number(row.id), 'reject', reason || undefined), 'Re-choose request rejected.'); }}>Reject</button>
                     </div>
                   )}
                 </>
@@ -439,6 +469,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
               {key === 'applications' && Number(overview?.queues?.applications || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.applications}</span>}
               {key === 'classes' && Number(overview?.queues?.classes || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.classes}</span>}
               {key === 'sensitive' && Number(overview?.queues?.sensitiveChanges || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.sensitiveChanges}</span>}
+              {key === 'rechoose' && Number(overview?.queues?.rechoose || 0) > 0 && <span className="rounded-full bg-sky-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.rechoose}</span>}
               {key === 'disputes' && Number(overview?.queues?.disputes || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.disputes}</span>}
             </button>
           ))}

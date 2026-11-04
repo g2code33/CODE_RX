@@ -386,6 +386,11 @@ export const cgm = {
     memberCall(`/api/cgm/assignments/${assignmentId}/remove`, { method: 'POST', body: { reason } }),
   reviewChangeRequest: (activityId: number, requestId: number, decision: 'approve' | 'reject', reviewReason?: string) =>
     memberCall(`/api/cgm/activities/${activityId}/change-requests/${requestId}/${decision}`, { method: 'POST', body: { reviewReason } }),
+  // Re-choose: an organizer REQUESTS that a member picks a group again; only
+  // PHANTOM's approval releases the seat and re-opens the choice.
+  requestRechoose: (assignmentId: number, reason?: string) =>
+    memberCall(`/api/cgm/assignments/${assignmentId}/rechoose`, { method: 'POST', body: { reason } }),
+  rechooseRequests: (activityId: number) => memberCall(`/api/cgm/activities/${activityId}/rechoose-requests`),
 
   // leadership
   leadership: (activityId: number) => memberCall(`/api/cgm/activities/${activityId}/leadership`),
@@ -487,6 +492,10 @@ export const cgm = {
     memberCall(`/api/cgm/phantom/sensitive-changes${status ? `?status=${status}` : ''}`),
   phantomDecideSensitiveChange: (id: number, decision: 'approve' | 'reject', reason?: string) =>
     memberCall(`/api/cgm/phantom/sensitive-changes/${id}/${decision}`, { method: 'POST', body: { reason } }),
+  phantomRechooseRequests: (status = 'pending') =>
+    memberCall(`/api/cgm/phantom/rechoose-requests${status ? `?status=${status}` : ''}`),
+  phantomDecideRechoose: (id: number, decision: 'approve' | 'reject', reason?: string) =>
+    memberCall(`/api/cgm/phantom/rechoose-requests/${id}/${decision}`, { method: 'POST', body: { reason } }),
   phantomDelegations: () => memberCall('/api/cgm/phantom/delegations'),
   phantomGrantDelegation: (body: { memberId: number; classId: number; maxBatch?: number }) =>
     memberCall('/api/cgm/phantom/delegations', { method: 'POST', body }),

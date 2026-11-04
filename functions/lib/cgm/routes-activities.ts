@@ -144,10 +144,18 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
        ORDER BY s.full_name`
     ).bind(activityId, activityId));
+    // The class members, each with their live placement in THIS activity (if
+    // any) and the state of their latest re-choose request, so the Groups tab
+    // can group them correctly and offer Re-choose without another round trip.
     const members = await asRows<any>(c.env.DB.prepare(
-      `SELECT s.id, s.full_name FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
+      `SELECT s.id, s.full_name, s.index_number,
+              ga.id AS assignment_id, ga.group_id,
+              (SELECT rc.status FROM cgm_rechoose_requests rc
+               WHERE rc.activity_id = ? AND rc.student_id = s.id ORDER BY rc.id DESC LIMIT 1) AS rechoose_status
+       FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
+       LEFT JOIN cgm_group_assignments ga ON ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active'
        WHERE cm.class_id = ? AND cm.status = 'active' ORDER BY s.full_name`
-    ).bind(Number(activity.class_id)));
+    ).bind(activityId, activityId, Number(activity.class_id)));
     const changeRequests = await asRows<any>(c.env.DB.prepare(
       `SELECT r.*, s.full_name FROM cgm_group_change_requests r JOIN cgm_students s ON s.id = r.student_id
        WHERE r.activity_id = ? ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END, r.created_at DESC LIMIT 100`
@@ -989,6 +997,82 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     return c.json({ success: true });
   });
 
+  /**
+   * RE-CHOOSE — the organizer asks that a member start over and pick a group
+   * again, exactly as if they had never chosen. It is deliberately a REQUEST,
+   * never an action: nothing is removed here. PHANTOM reviews it and only an
+   * approval releases the seat and re-opens the choice.
+   */
+  app.post('/api/cgm/assignments/:id/rechoose', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const assignmentId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT ga.*, a.class_id, a.name AS activity_name, s.full_name AS student_name
+       FROM cgm_group_assignments ga
+       JOIN cgm_activities a ON a.id = ga.activity_id
+       JOIN cgm_students s ON s.id = ga.student_id
+       WHERE ga.id = ? AND ga.status = 'active'`
+    ).bind(assignmentId));
+    const assignment = rows[0];
+    if (!assignment) return bad(c, 'That member is not in an active group assignment.', 404);
+    const guard = await requireClassPermission(c, member, Number(assignment.class_id), 'remove_students');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 500);
+    const existing = await asRows<any>(c.env.DB.prepare(
+      `SELECT id FROM cgm_rechoose_requests WHERE activity_id = ? AND student_id = ? AND status = 'pending'`
+    ).bind(Number(assignment.activity_id), Number(assignment.student_id)));
+    if (existing[0]) {
+      return c.json({ success: true, data: { id: Number(existing[0].id), status: 'pending', message: 'This member already has a re-choose request waiting for PHANTOM.' } });
+    }
+    const result = await c.env.DB.prepare(
+      `INSERT INTO cgm_rechoose_requests
+         (activity_id, group_id, student_id, assignment_id, from_via, reason, requested_by_profile_id, requester_label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(Number(assignment.activity_id), Number(assignment.group_id), Number(assignment.student_id),
+      assignmentId, assignment.assigned_via ? String(assignment.assigned_via) : null, reason,
+      member.profileId, member.name).run();
+    const requestId = Number(result.meta.last_row_id);
+    await notifyStudent(c.env.DB, Number(assignment.student_id), 'groups', 'Your organizer asked you to re-choose',
+      `Your organizer has asked that you choose your group again in ${assignment.activity_name}. PHANTOM reviews the request first — you will be told when it is approved.`);
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.rechoose.requested', entityType: 'rechoose_request', entityId: requestId,
+      classId: Number(assignment.class_id), activityId: Number(assignment.activity_id),
+      context: { studentId: Number(assignment.student_id), assignmentId, reason },
+    });
+    return c.json({ success: true, data: { id: requestId, status: 'pending', message: 'Re-choose requested — waiting for PHANTOM approval.' } });
+  });
+
+  app.get('/api/cgm/activities/:id/rechoose-requests', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'view_roster');
+    if (!guard.ok) return guard.response;
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, s.full_name AS student_name, s.index_number,
+              COALESCE(g.name, 'Group ' || g.position) AS group_name
+       FROM cgm_rechoose_requests r
+       JOIN cgm_students s ON s.id = r.student_id
+       LEFT JOIN cgm_groups g ON g.id = r.group_id
+       WHERE r.activity_id = ? ORDER BY r.created_at DESC LIMIT 200`
+    ).bind(activityId));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), studentId: Number(row.student_id), studentName: row.student_name,
+        indexNumber: row.index_number, groupId: row.group_id === null ? null : Number(row.group_id),
+        groupName: row.group_name, reason: row.reason, status: row.status,
+        requesterLabel: row.requester_label, reviewerLabel: row.reviewer_label,
+        reviewReason: row.review_reason, createdAt: row.created_at, reviewedAt: row.reviewed_at,
+      })),
+    });
+  });
+
   app.post('/api/cgm/activities/:id/change-requests/:requestId/:decision', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
@@ -1088,7 +1172,13 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const members = await asRows<any>(c.env.DB.prepare(
       `SELECT s.id, s.full_name, s.index_number${canSeeSensitive ? ', s.phone, s.email, s.gender' : ''}, ga.id AS assignment_id, ga.assigned_via,
               (SELECT GROUP_CONCAT(l.role || ':' || l.id) FROM cgm_leadership_appointments l
-               WHERE l.group_id = ? AND l.student_id = s.id AND l.status = 'active') AS roles
+               WHERE l.group_id = ? AND l.student_id = s.id AND l.status = 'active') AS roles,
+              (SELECT rc.status FROM cgm_rechoose_requests rc
+               WHERE rc.activity_id = ga.activity_id AND rc.student_id = s.id
+               ORDER BY rc.id DESC LIMIT 1) AS rechoose_status,
+              (SELECT rc.id FROM cgm_rechoose_requests rc
+               WHERE rc.activity_id = ga.activity_id AND rc.student_id = s.id
+               ORDER BY rc.id DESC LIMIT 1) AS rechoose_request_id
        FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id
        WHERE ga.group_id = ? AND ga.status = 'active' ORDER BY s.full_name`
     ).bind(groupId, groupId));
@@ -2555,7 +2645,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         (SELECT COUNT(*) FROM cgm_classes WHERE status = 'pending') AS classes,
         (SELECT COUNT(*) FROM cgm_profile_change_requests pcr JOIN cgm_students s ON s.id = pcr.student_id
            WHERE pcr.status = 'pending' AND pcr.field IN ('gender','index_number','phone')) AS sensitiveChanges,
-        (SELECT COUNT(*) FROM cgm_announcement_reports WHERE status = 'open') AS disputes`
+        (SELECT COUNT(*) FROM cgm_announcement_reports WHERE status = 'open') AS disputes,
+        (SELECT COUNT(*) FROM cgm_rechoose_requests WHERE status = 'pending') AS rechoose`
     ));
     const flag = await asRows<{ setting_value: string }>(c.env.DB.prepare(
       "SELECT setting_value FROM system_settings WHERE setting_key = 'class_groups_enabled'"
@@ -2858,6 +2949,116 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     });
     return c.json({ success: true });
   });
+
+  // -------------------------------------------------------------------------
+  // §30 — Re-choose requests (PHANTOM queue)
+  // -------------------------------------------------------------------------
+
+  app.get('/api/cgm/phantom/rechoose-requests', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const status = clean(c.req.query('status') || 'pending', 20);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, s.full_name AS student_name, s.index_number,
+              COALESCE(g.name, 'Group ' || g.position) AS group_name,
+              a.name AS activity_name, cl.name AS class_name, cl.code AS class_code
+       FROM cgm_rechoose_requests r
+       JOIN cgm_students s ON s.id = r.student_id
+       JOIN cgm_activities a ON a.id = r.activity_id
+       JOIN cgm_classes cl ON cl.id = a.class_id
+       LEFT JOIN cgm_groups g ON g.id = r.group_id
+       WHERE r.status = ? ORDER BY r.created_at DESC LIMIT 200`
+    ).bind(status));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), studentName: row.student_name, indexNumber: row.index_number,
+        groupName: row.group_name, activityName: row.activity_name,
+        className: row.class_name, classCode: row.class_code,
+        requestedVia: row.from_via, reason: row.reason, status: row.status,
+        requesterLabel: row.requester_label, reviewerLabel: row.reviewer_label,
+        reviewReason: row.review_reason, createdAt: row.created_at, reviewedAt: row.reviewed_at,
+      })),
+    });
+  });
+
+  const decideRechoose = async (c: any, approve: boolean): Promise<Response> => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    const id = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 400);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, s.full_name AS student_name, a.name AS activity_name, a.class_id
+       FROM cgm_rechoose_requests r
+       JOIN cgm_students s ON s.id = r.student_id
+       JOIN cgm_activities a ON a.id = r.activity_id
+       WHERE r.id = ? AND r.status = 'pending'`
+    ).bind(id));
+    const request = rows[0];
+    if (!request) return bad(c, 'Re-choose request not found or already reviewed.', 404);
+    if (!approve) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_rechoose_requests SET status = 'rejected', reviewed_by_profile_id = ?, reviewer_label = ?,
+         review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(member.profileId, `PHANTOM · ${member.name}`, reason, id).run();
+      await notifyStudent(c.env.DB, Number(request.student_id), 'groups',
+        'Re-choose not approved',
+        reason || `Your organizer's request for you to choose your group again in ${request.activity_name} was not approved. You stay in your current group.`);
+      await auditCgm(c.env.DB, {
+        actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.rechoose.phantom_rejected', entityType: 'rechoose_request', entityId: id,
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: { studentId: Number(request.student_id), reason },
+      });
+      return c.json({ success: true });
+    }
+    // Approval releases the seat and leaves the student free to choose again.
+    // The assignment is retired (never deleted) so history stays intact.
+    const activeAssignments = await asRows<any>(c.env.DB.prepare(
+      `SELECT id, group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'`
+    ).bind(Number(request.activity_id), Number(request.student_id)));
+    for (const assignment of activeAssignments) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP,
+         removal_reason = 're-choose approved by PHANTOM' WHERE id = ?`
+      ).bind(Number(assignment.id)).run();
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_assignment_events (activity_id, student_id, from_group_id, action, actor_label, reason)
+         VALUES (?, ?, ?, 'removed', ?, 're-choose approved by PHANTOM')`
+      ).bind(Number(request.activity_id), Number(request.student_id), Number(assignment.group_id),
+        `PHANTOM · ${member.name}`).run();
+      // A leader without a group cannot keep the seat.
+      const leadership = await asRows<any>(c.env.DB.prepare(
+        `SELECT id FROM cgm_leadership_appointments WHERE group_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(Number(assignment.group_id), Number(request.student_id)));
+      for (const row of leadership) {
+        await c.env.DB.prepare(
+          `UPDATE cgm_leadership_appointments SET status = 'ended', ended_at = CURRENT_TIMESTAMP,
+           end_reason = 'member re-choosing their group' WHERE id = ?`
+        ).bind(Number(row.id)).run();
+      }
+    }
+    await c.env.DB.prepare(
+      `UPDATE cgm_rechoose_requests SET status = 'approved', reviewed_by_profile_id = ?, reviewer_label = ?,
+       review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(member.profileId, `PHANTOM · ${member.name}`, reason, id).run();
+    await notifyStudent(c.env.DB, Number(request.student_id), 'groups',
+      'You can choose your group again',
+      `PHANTOM approved a fresh choice for you in ${request.activity_name}. Open the activity and pick your group again.`);
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.rechoose.phantom_approved', entityType: 'rechoose_request', entityId: id,
+      classId: Number(request.class_id), activityId: Number(request.activity_id),
+      context: { studentId: Number(request.student_id), released: activeAssignments.length, reason },
+    });
+    return c.json({ success: true });
+  };
+
+  app.post('/api/cgm/phantom/rechoose-requests/:id/approve', (c: any) => decideRechoose(c, true));
+
+  app.post('/api/cgm/phantom/rechoose-requests/:id/reject', (c: any) => decideRechoose(c, false));
 
   // -------------------------------------------------------------------------
   // §30 — Sensitive profile changes (PHANTOM queue)

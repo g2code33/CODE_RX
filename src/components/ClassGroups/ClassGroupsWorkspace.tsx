@@ -1536,6 +1536,45 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
  * members, leadership, elections, announcements, direct notifications,
  * WhatsApp, settings and history. Everything about THIS group, in one place.
  */
+/**
+ * RE-CHOOSE — the organizer's half of the request. Pressing it never moves the
+ * student; it files a request PHANTOM must approve before the seat is released
+ * and the student is invited to choose a group again as if fresh.
+ */
+const RechooseControl = ({ status, memberName, busy, onRequest }: {
+  status: string | null; memberName: string; busy: boolean;
+  onRequest: (reason: string) => Promise<void>;
+}) => {
+  if (status === 'approved') {
+    return <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-emerald-700" title="PHANTOM approved — this member can choose a group again">Re-choose ✓</span>;
+  }
+  if (status === 'pending') {
+    return <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-amber-700" title="Waiting for PHANTOM approval" data-testid="cgm-rechoose-pending">Awaiting PHANTOM…</span>;
+  }
+  return (
+    <button
+      type="button"
+      data-testid="cgm-rechoose-button"
+      disabled={busy}
+      className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-black text-sky-700 hover:bg-sky-100"
+      title="Ask PHANTOM to let this member choose their group again"
+      onClick={async () => {
+        const reason = await appDialog.prompt({
+          title: `Ask ${memberName} to choose again?`,
+          message: 'They will be able to pick a group again, exactly as if fresh. PHANTOM must approve this request first.',
+          label: 'Why should they re-choose?',
+          multiline: true,
+          confirmLabel: 'Send to PHANTOM',
+        });
+        if (reason === null || reason === undefined) return;
+        await onRequest(String(reason));
+      }}
+    >
+      Re-choose
+    </button>
+  );
+};
+
 const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onBack }: {
   groupId: number; activityId: number; classId: number; allGroups: any[];
   canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean;
@@ -1684,7 +1723,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
     <>
       {detailed && (
         <div className="space-y-2">
-          <p className="text-xs font-medium text-slate-500">Everyone currently in {group.name}. Move reassigns a member to another group, Swap exchanges two members across groups (sizes stay valid), ✕ removes the member from the activity, and unassigned students can be added below.</p>
+          <p className="text-xs font-medium text-slate-500">Everyone currently in {group.name}. Move reassigns a member to another group, Swap exchanges two members across groups (sizes stay valid), ✕ removes the member from the activity, and unassigned students can be added below. <span className="font-bold text-sky-700">Re-choose</span> asks PHANTOM to let that member start over and pick a group again, exactly as if fresh — nothing changes until PHANTOM approves.</p>
           <input className={inputClass} placeholder="Search members by name or index number…" aria-label="Search members" value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} />
           <p className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
             <span>{group.size}{group.capacity ? ` of ${group.capacity}` : ''} seats filled</span>
@@ -1719,7 +1758,12 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
                     </select>
                   )}
                   {canRemove && (
-                    <button type="button" className="rounded px-1.5 font-black text-red-500 hover:bg-red-50" onClick={() => void run(() => cgm.removeAssignment(Number(row.assignment_id)), 'Member removed.')} title="Remove from group">✕</button>
+                    <RechooseControl
+                      status={row.rechoose_status ? String(row.rechoose_status) : null}
+                      memberName={String(row.full_name || 'this member')}
+                      busy={busy}
+                      onRequest={async (reason) => { await run(() => cgm.requestRechoose(Number(row.assignment_id), reason), 'Re-choose requested — waiting for PHANTOM approval.'); }}
+                    />
                   )}
                 </span>
               </div>
@@ -2407,8 +2451,16 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                             )))}
                           </select>
                         )}
+                        {canRemove && member.assignment_id && (
+                          <RechooseControl
+                            status={member.rechoose_status ? String(member.rechoose_status) : null}
+                            memberName={String(member.full_name || 'this member')}
+                            busy={busy}
+                            onRequest={async (reason) => { await run(() => cgm.requestRechoose(Number(member.assignment_id), reason)); }}
+                          />
+                        )}
                         {canRemove && (
-                          <button type="button" className="rounded px-1.5 text-[10px] font-black text-red-500 hover:bg-red-50" onClick={() => { void run(async () => { const assignment = (data.assignmentsFlat || []).find((row: any) => Number(row.student_id) === Number(member.student_id)); if (assignment) await cgm.removeAssignment(Number(assignment.id)); }); }} title="Remove from activity">✕</button>
+                          <button type="button" className="rounded px-1.5 text-[10px] font-black text-red-500 hover:bg-red-50" onClick={() => { void run(async () => { if (member.assignment_id) await cgm.removeAssignment(Number(member.assignment_id)); }); }} title="Remove from activity">✕</button>
                         )}
                       </span>
                     </li>

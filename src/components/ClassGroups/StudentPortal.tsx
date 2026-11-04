@@ -1093,10 +1093,20 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
   if (!data) return <p className="text-sm font-semibold text-slate-400">Loading activity…</p>;
 
   const myGroup = data.myAssignment;
-  const canSelfAssign = ['open', 'published', 'active'].includes(data.activity.status) && data.activity.config.method !== 'automatic' && data.eligible && !myGroup;
+  // PHANTOM approved a FRESH choice for this student: the organizer's method and
+  // the deadline no longer hold, so the normal chooser re-opens as if new.
+  const rechooseOpen = Boolean((data as any).rechooseApproved) && !myGroup;
+  const canSelfAssign = data.eligible && !myGroup
+    && (rechooseOpen || (['open', 'published', 'active'].includes(data.activity.status) && data.activity.config.method !== 'automatic'));
   // Forced random mode: the organizer has set this activity to 'random' —
   // students cannot pick or auto-place; the fair server draw is the only way in.
   const forcedRandom = data.activity.config?.method === 'random';
+  const rechooseNotice = rechooseOpen ? (
+    <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3" data-testid="cgm-student-rechoose-notice">
+      <p className="text-xs font-black uppercase tracking-wider text-emerald-700">Choose again — approved</p>
+      <p className="mt-1 text-xs font-medium text-emerald-800">PHANTOM approved your organizer's request. Your previous group is released and you can pick a group again, exactly as if you were choosing for the first time.</p>
+    </div>
+  ) : null;
 
   const copyWhatsappLink = async () => {
     const url = String(data.whatsapp?.url || '');
@@ -1242,6 +1252,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
       ) : canSelfAssign ? (
         <div className={card}>
           <p className={label}>{forcedRandom ? 'Random selection' : 'Choose your group'}</p>
+          {rechooseNotice}
           {forcedRandom ? (
             <p className="mt-1 text-xs font-medium text-slate-500">Your organizer set this activity to random selection — every group has an exactly equal chance. Tap the button and the system fairly picks your group.</p>
           ) : (

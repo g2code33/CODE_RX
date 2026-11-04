@@ -1196,6 +1196,14 @@ const SAFE_MIGRATIONS = [
   // Group workspace: a per-group topic the organizer (and later leaders)
   // set — shown on the group page and to the group's members. The agenda
   // rides along on every printed/downloaded member sheet.
+  // Elections: nominator eligibility (ALL members vs a chosen list). Older
+  // databases never had these columns, so the ALTERs must ship with the
+  // version bump below — the CREATE TABLE only covers brand-new databases.
+  { table: 'cgm_elections', column: 'eligible_mode', sql: "ALTER TABLE cgm_elections ADD COLUMN eligible_mode TEXT NOT NULL DEFAULT 'all'" },
+  { table: 'cgm_elections', column: 'eligible_student_ids', sql: 'ALTER TABLE cgm_elections ADD COLUMN eligible_student_ids TEXT' },
+  // Group workspace: a per-group topic the organizer (and later leaders)
+  // set — shown on the group page and to the group's members. The agenda
+  // rides along on every printed/downloaded member sheet.
   { table: 'cgm_groups', column: 'topic', sql: 'ALTER TABLE cgm_groups ADD COLUMN topic TEXT' },
   { table: 'cgm_groups', column: 'agenda', sql: 'ALTER TABLE cgm_groups ADD COLUMN agenda TEXT' },
   // Invitation hardening: individual invitation secrets are sealed with
@@ -1262,7 +1270,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-10-31-code-rx24-passkey-requests';
+const VAULT_SCHEMA_VERSION = '2026-11-04-code-rx25-rechoose-requests';
 
 
 // Role codes stay stable for member history and permissions. Their visible

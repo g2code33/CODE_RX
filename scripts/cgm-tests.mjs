@@ -206,7 +206,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 42);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 43);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -3800,7 +3800,118 @@ check('a non-numeric group id answers 404 instead of a D1 500',
 const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
 check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
   /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
-  && /VAULT_SCHEMA_VERSION = '2026-10-31-code-rx2[34]-/.test(schemaSrc));
+  && /VAULT_SCHEMA_VERSION = '2026-11-04-code-rx25-/.test(schemaSrc));
+
+// ---------------------------------------------------------------------------
+// 39. Re-choose: organizer asks, PHANTOM approves, the member starts fresh
+// ---------------------------------------------------------------------------
+section('39. Re-choose: organizer request → PHANTOM approval → fresh choice');
+
+const rechooseLab = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, {
+  name: 'Re-choose Lab', type: 'tutorial',
+  config: { method: 'automatic', groupCount: 2, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const rechooseLabId = rechooseLab.json?.data?.activityId ?? rechooseLab.json?.data?.activity?.id ?? rechooseLab.json?.data?.id;
+await memberCall('POST', `/api/cgm/activities/${rechooseLabId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${rechooseLabId}/groups`, { count: 2, capacity: 10 }, amaToken);
+const rechooseGroups = ((await memberCall('GET', `/api/cgm/activities/${rechooseLabId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => Number(g.id));
+const rechooser = await freshFmtRosterStudent(45, 'Rechoose Rua');
+const rechooserId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', rechooser.indexNumber.toLowerCase())?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${rechooseLabId}/assign-student`, { studentId: rechooserId, groupId: rechooseGroups[0] }, amaToken);
+const rechooserAssignmentId = Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", rechooseLabId, rechooserId)?.id || 0);
+check('the fixture member holds one active assignment before any re-choose', rechooserAssignmentId > 0, `assignment ${rechooserAssignmentId}`);
+
+// -- The organizer can only ASK -------------------------------------------------
+const askRechoose = await memberCall('POST', `/api/cgm/assignments/${rechooserAssignmentId}/rechoose`, { reason: 'Chosen before the roster settled' }, amaToken);
+check('the organizer files a re-choose request and it starts as pending (nothing is moved yet)',
+  askRechoose.status === 200 && askRechoose.json?.data?.status === 'pending'
+  && q1("SELECT status FROM cgm_rechoose_requests WHERE activity_id = ? AND student_id = ?", rechooseLabId, rechooserId)?.status === 'pending',
+  `status ${askRechoose.status} ${askRechoose.text?.slice(0, 140)}`);
+check('requesting a re-choose leaves the member exactly where they were',
+  q1("SELECT status FROM cgm_group_assignments WHERE id = ?", rechooserAssignmentId)?.status === 'active');
+const duplicateAsk = await memberCall('POST', `/api/cgm/assignments/${rechooserAssignmentId}/rechoose`, { reason: 'again' }, amaToken);
+check('a second request for the same member reuses the pending one (no duplicate queue entries)',
+  duplicateAsk.status === 200 && q1("SELECT COUNT(*) c FROM cgm_rechoose_requests WHERE activity_id = ? AND student_id = ? AND status = 'pending'", rechooseLabId, rechooserId).c === 1,
+  JSON.stringify(duplicateAsk.json?.data || {}));
+const dossierAfterAsk = await memberCall('GET', `/api/cgm/groups/${rechooseGroups[0]}`, undefined, amaToken);
+const askedMember = (dossierAfterAsk.json?.data?.members || []).find((row) => Number(row.id) === rechooserId) || {};
+check('the group dossier carries the pending state so the organizer sees "awaiting PHANTOM"',
+  askedMember.rechoose_status === 'pending', JSON.stringify(askedMember.rechoose_status ?? null));
+
+// -- Only PHANTOM may decide ----------------------------------------------------
+const organizerApprove = await memberCall('POST', `/api/cgm/phantom/rechoose-requests/${askRechoose.json?.data?.id}/approve`, {}, amaToken);
+check('an organizer cannot approve their own re-choose request (PHANTOM required)',
+  organizerApprove.status === 403, `status ${organizerApprove.status}`);
+const phantomQueue = await memberCall('GET', '/api/cgm/phantom/rechoose-requests', undefined, phantomToken);
+check('the request lands in the PHANTOM queue with the member, class and activity named',
+  (phantomQueue.json?.data || []).some((row) => Number(row.id) === Number(askRechoose.json?.data?.id) && row.studentName === 'Rechoose Rua'),
+  `queue=${(phantomQueue.json?.data || []).length}`);
+
+// -- Approval: the seat is released and the choice re-opens ---------------------
+const phantomApproveRechoose = await memberCall('POST', `/api/cgm/phantom/rechoose-requests/${askRechoose.json?.data?.id}/approve`, {}, phantomToken);
+check('PHANTOM approval releases the seat (the old assignment is retired, never deleted)',
+  phantomApproveRechoose.status === 200
+  && q1('SELECT status FROM cgm_group_assignments WHERE id = ?', rechooserAssignmentId)?.status === 'removed',
+  `status ${phantomApproveRechoose.status} row=${JSON.stringify(q1('SELECT status, removal_reason FROM cgm_group_assignments WHERE id = ?', rechooserAssignmentId))}`);
+check('the approval is recorded in the audit trail with the PHANTOM actor',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.rechoose.phantom_approved'").c >= 1);
+const freshDash = await studentCall('GET', `/api/cgm/student/activities/${rechooseLabId}`, undefined, rechooser.session);
+check('the student dashboard now says a fresh choice is approved and shows no group',
+  freshDash.json?.data?.rechooseApproved === true && freshDash.json?.data?.myAssignment == null,
+  `approved=${freshDash.json?.data?.rechooseApproved} assignment=${JSON.stringify(freshDash.json?.data?.myAssignment ?? null)}`);
+
+// -- The "automatic" activity no longer blocks that one student -----------------
+const freshChoice = await studentCall('POST', `/api/cgm/student/activities/${rechooseLabId}/assign`, { groupId: rechooseGroups[1] }, rechooser.session);
+check('the approved member can choose a group again even though the activity is organizer-placed',
+  freshChoice.status === 200 && Number(freshChoice.json?.data?.groupId) === rechooseGroups[1],
+  `status ${freshChoice.status} ${freshChoice.text?.slice(0, 120)}`);
+const afterChoiceDash = await studentCall('GET', `/api/cgm/student/activities/${rechooseLabId}`, undefined, rechooser.session);
+check('the grant is spent the moment they land in a group (no standing override)',
+  afterChoiceDash.json?.data?.rechooseApproved === false && afterChoiceDash.json?.data?.myAssignment?.group_id === rechooseGroups[1],
+  `approved=${afterChoiceDash.json?.data?.rechooseApproved}`);
+check('the fresh choice is audited as a re-choice, and history keeps the old placement',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.assignment.rechosen'").c >= 1
+  && q1("SELECT COUNT(*) c FROM cgm_assignment_events WHERE activity_id = ? AND student_id = ?", rechooseLabId, rechooserId).c >= 2);
+
+// -- Rejection: nothing moves ---------------------------------------------------
+const secondAsk = await memberCall('POST', `/api/cgm/assignments/${Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", rechooseLabId, rechooserId)?.id || 0)}/rechoose`, {}, amaToken);
+check('a fresh request can be filed again after the previous one was used', secondAsk.status === 200, `status ${secondAsk.status}`);
+const phantomReject = await memberCall('POST', `/api/cgm/phantom/rechoose-requests/${secondAsk.json?.data?.id}/reject`, { reason: 'Keep the current arrangement' }, phantomToken);
+check('PHANTOM rejection keeps the member in their group (nothing is released)',
+  phantomReject.status === 200
+  && q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", rechooseLabId, rechooserId).c === 1
+  && q1('SELECT status FROM cgm_rechoose_requests WHERE id = ?', secondAsk.json?.data?.id)?.status === 'rejected');
+const rejectedStillBlocked = await studentCall('POST', `/api/cgm/student/activities/${rechooseLabId}/assign`, {}, rechooser.session);
+check('without an approved grant the normal rules still hold (they already have a group)',
+  rejectedStillBlocked.status === 409, `status ${rejectedStillBlocked.status}`);
+
+// -- The Groups tab can address any member of any group ------------------------
+const activityDetailAfter = await memberCall('GET', `/api/cgm/activities/${rechooseLabId}`, undefined, amaToken);
+const placedRow = (activityDetailAfter.json?.data?.members || []).find((row) => Number(row.id) === rechooserId) || {};
+check('the activity member list carries the live group and assignment, so every group card lists its real members',
+  Number(placedRow.group_id) === rechooseGroups[1] && Number(placedRow.assignment_id) > 0,
+  `row=${JSON.stringify({ group_id: placedRow.group_id, assignment_id: placedRow.assignment_id })}`);
+check('the same member carries the re-choose state through the activity payload',
+  placedRow.rechoose_status === 'rejected', `state=${JSON.stringify(placedRow.rechoose_status ?? null)}`);
+
+// -- Source pins: the button and the PHANTOM queue exist ------------------------
+const wsRechoose = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
+const phantomRechoose = readFileSync(path.join(ROOT, 'src/components/ClassGroups/PhantomClasses.tsx'), 'utf8');
+const portalRechoose = readFileSync(path.join(ROOT, 'src/components/ClassGroups/StudentPortal.tsx'), 'utf8');
+const cgmRechoose = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
+check('every member row carries a Re-choose control that files a PHANTOM request',
+  /data-testid="cgm-rechoose-button"/.test(wsRechoose) && /requestRechoose/.test(wsRechoose)
+  && /PHANTOM must approve this request first/.test(wsRechoose));
+check('the member row swaps the button for a pending/approved badge once the request is filed',
+  /cgm-rechoose-pending/.test(wsRechoose) && /Re-choose ✓/.test(wsRechoose));
+check('PHANTOM has a re-choose queue tab with approve and reject',
+  /'rechoose', 'Re-choose requests'/.test(phantomRechoose) && /cgm-phantom-approve-rechoose/.test(phantomRechoose)
+  && /phantomDecideRechoose/.test(phantomRechoose));
+check('the student portal announces the approved fresh choice',
+  /cgm-student-rechoose-notice/.test(portalRechoose) && /rechooseApproved/.test(portalRechoose));
+check('the client library exposes both halves of the re-choose flow',
+  /requestRechoose: \(assignmentId: number/.test(cgmRechoose)
+  && /phantomDecideRechoose: \(id: number/.test(cgmRechoose));
 
 // ---------------------------------------------------------------------------
 

@@ -600,6 +600,31 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     return Boolean(rows[0]);
   };
 
+  /**
+   * A RE-CHOOSE grant is the only way a student may pick a group after the
+   * window has closed, after the organizer locked assignments, or when the
+   * organizer has already placed everyone. It exists only once PHANTOM has
+   * approved the organizer's request, and it is spent the moment the student
+   * lands in a group.
+   */
+  const rechooseGrantFor = async (db: D1Database, activityId: number, studentId: number): Promise<number | null> => {
+    try {
+      const rows = await asRows<{ id: number }>(db.prepare(
+        `SELECT id FROM cgm_rechoose_requests
+         WHERE activity_id = ? AND student_id = ? AND status = 'approved' AND consumed_at IS NULL
+         ORDER BY id DESC LIMIT 1`
+      ).bind(activityId, studentId));
+      return rows[0] ? Number(rows[0].id) : null;
+    } catch { return null; }
+  };
+
+  const consumeRechooseGrant = async (db: D1Database, grantId: number | null) => {
+    if (!grantId) return;
+    try {
+      await db.prepare('UPDATE cgm_rechoose_requests SET consumed_at = CURRENT_TIMESTAMP WHERE id = ?').bind(grantId).run();
+    } catch { /* pre-migration database */ }
+  };
+
   app.get('/api/cgm/student/activities/:id', async (c: any) => {
     const student = await requireStudent(c);
     if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
@@ -611,6 +636,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (!visibleStatuses.includes(activity.status)) return bad(c, 'Activity not found.', 404);
 
     const eligible = await isEligible(c.env.DB, activity.id, student.id, config.eligibility);
+    const rechooseGrantId = await rechooseGrantFor(c.env.DB, activity.id, student.id);
     const myAssignment = await asRows<any>(c.env.DB.prepare(
       `SELECT ga.id AS assignment_id, g.id AS group_id, g.name AS group_name, g.position, g.capacity, g.topic, g.agenda
        FROM cgm_group_assignments ga JOIN cgm_groups g ON g.id = ga.group_id
@@ -711,6 +737,8 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         class: { name: activity.class_name, code: activity.class_code },
         eligible,
         myAssignment: myAssignment[0] || null,
+        // True only after PHANTOM approved a fresh choice for this student.
+        rechooseApproved: Boolean(rechooseGrantId),
         waitlisted: Boolean(waitlisted[0]),
         groups: groups.map((row) => ({
           id: Number(row.id), name: row.name || `Group ${row.position}`, position: Number(row.position),
@@ -742,10 +770,15 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const { activity } = context;
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
     if (!['open', 'published', 'active'].includes(activity.status)) return bad(c, 'This activity is not open for assignment.', 409);
-    if (config.method === 'automatic') return bad(c, 'Assignments for this activity are made by your organizer.', 409);
-    if (config.method === 'random') return bad(c, 'This activity is set to RANDOM selection — tap the Random selection button and the system will pick your group.', 409);
-    if (config.method === 'hybrid' && config.selfDeadline && new Date(config.selfDeadline).getTime() < Date.now()) {
-      return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
+    // A PHANTOM-approved re-choose re-opens the choice exactly as if the
+    // student had never been placed: lock method and deadline no longer apply.
+    const rechooseGrantId = await rechooseGrantFor(c.env.DB, activity.id, student.id);
+    if (!rechooseGrantId) {
+      if (config.method === 'automatic') return bad(c, 'Assignments for this activity are made by your organizer.', 409);
+      if (config.method === 'random') return bad(c, 'This activity is set to RANDOM selection — tap the Random selection button and the system will pick your group.', 409);
+      if (config.method === 'hybrid' && config.selfDeadline && new Date(config.selfDeadline).getTime() < Date.now()) {
+        return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
+      }
     }
     if (!await isEligible(c.env.DB, activity.id, student.id, config.eligibility)) return bad(c, 'You are not eligible for this activity.', 403);
     // Gender-balanced sampling needs the student's gender. If the organizer
@@ -851,9 +884,11 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
 
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
-      action: 'cgm.assignment.self', entityType: 'activity', entityId: activity.id, activityId: activity.id,
-      classId: Number(activity.class_id), context: { groupId: Number(target.id) },
+      action: rechooseGrantId ? 'cgm.assignment.rechosen' : 'cgm.assignment.self',
+      entityType: 'activity', entityId: activity.id, activityId: activity.id,
+      classId: Number(activity.class_id), context: { groupId: Number(target.id), rechoose: Boolean(rechooseGrantId) },
     });
+    await consumeRechooseGrant(c.env.DB, rechooseGrantId);
 
     return c.json({ success: true, data: { groupId: Number(target.id), groupName: groupLabel } });
   });
@@ -876,9 +911,12 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     const { activity } = context;
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
     if (!['open', 'published', 'active'].includes(activity.status)) return bad(c, 'This activity is not open for assignment.', 409);
-    if (config.method === 'automatic') return bad(c, 'Assignments for this activity are made by your organizer.', 409);
-    if (config.method === 'hybrid' && config.selfDeadline && new Date(config.selfDeadline).getTime() < Date.now()) {
-      return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
+    const rechooseGrantId = await rechooseGrantFor(c.env.DB, activity.id, student.id);
+    if (!rechooseGrantId) {
+      if (config.method === 'automatic') return bad(c, 'Assignments for this activity are made by your organizer.', 409);
+      if (config.method === 'hybrid' && config.selfDeadline && new Date(config.selfDeadline).getTime() < Date.now()) {
+        return bad(c, 'The self-assignment deadline for this activity has passed.', 409);
+      }
     }
     if (!await isEligible(c.env.DB, activity.id, student.id, config.eligibility)) return bad(c, 'You are not eligible for this activity.', 403);
     if (config.genderRule && config.genderRule !== 'none' && (student as any).gender === 'unknown') {
@@ -966,8 +1004,9 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
       action: 'cgm.assignment.random_draw', entityType: 'activity', entityId: activity.id, activityId: activity.id,
-      classId: Number(activity.class_id), context: { groupId: Number(winner.id), method: 'secure_uniform' },
+      classId: Number(activity.class_id), context: { groupId: Number(winner.id), method: 'secure_uniform', rechoose: Boolean(rechooseGrantId) },
     });
+    await consumeRechooseGrant(c.env.DB, rechooseGrantId);
 
     return c.json({ success: true, data: { groupId: Number(winner.id), groupName: groupLabel, draw: true } });
   });

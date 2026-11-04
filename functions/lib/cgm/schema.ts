@@ -350,6 +350,30 @@ CREATE TABLE IF NOT EXISTS cgm_group_change_requests (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+-- Re-choose requests: an organizer can ask that a member start over — pick a
+-- group again as if fresh. Nothing happens until PHANTOM approves the request,
+-- so an organizer can never silently reshuffle a student on their own.
+CREATE TABLE IF NOT EXISTS cgm_rechoose_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  activity_id INTEGER NOT NULL,
+  group_id INTEGER,
+  student_id INTEGER NOT NULL,
+  assignment_id INTEGER,
+  from_via TEXT,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+  requested_by_profile_id INTEGER,
+  requester_label TEXT,
+  reviewed_by_profile_id INTEGER,
+  reviewer_label TEXT,
+  review_reason TEXT,
+  consumed_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_activity_waitlist (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   activity_id INTEGER NOT NULL,
@@ -700,6 +724,10 @@ CREATE INDEX IF NOT EXISTS idx_cgm_snapshots_activity ON cgm_activity_snapshots(
 CREATE INDEX IF NOT EXISTS idx_cgm_templates_class ON cgm_activity_templates(class_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_student ON cgm_profile_change_requests(student_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_status ON cgm_profile_change_requests(status);
+CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_status ON cgm_rechoose_requests(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_student ON cgm_rechoose_requests(activity_id, student_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_activity ON cgm_rechoose_requests(activity_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_rechoose_pending ON cgm_rechoose_requests(activity_id, student_id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_cgm_organizer_apps_status ON cgm_organizer_applications(status);
 CREATE INDEX IF NOT EXISTS idx_cgm_organizer_apps_user ON cgm_organizer_applications(user_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_delegations_member ON cgm_approval_delegations(member_profile_id);
