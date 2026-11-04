@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useOutsideDismiss } from '../lib/useOutsideDismiss';
 import { ArrowLeft, ArrowUpRight, Home, Menu, Users, X } from 'lucide-react';
 import { NAV_LINKS } from '../data/mockData';
 import { MediaAsset } from '../data/editorSchema';
@@ -25,6 +26,8 @@ export const Navbar = ({
   media?: Record<string, MediaAsset>;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  // Tapping anywhere off the mobile menu closes it (Escape too).
+  useOutsideDismiss(isOpen, () => setIsOpen(false), '.brand-nav-dropdown, [aria-label="Close navigation"], [aria-label="Open navigation"]');
   const logo = getMedia(media, 'brand.logoSmall', { src: '/CODE%20RX11.png', alt: 'Code Rx Society' });
 
   const goHome = () => {

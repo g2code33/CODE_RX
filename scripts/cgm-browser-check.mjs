@@ -304,6 +304,18 @@ let savedPasskey = '';
   toggle && toggle.click();
   await page.wait(400);
   check('mobile navigation toggle opens the sidebar', toggle && before === 'false' && toggle.getAttribute('aria-expanded') === 'true', `aria-expanded ${before} → ${toggle?.getAttribute('aria-expanded')}`);
+  // Clicking ANYWHERE else closes it — the whole page is a dismiss target.
+  const elsewhere = page.window.document.querySelector('main') || page.window.document.body;
+  const down = new page.window.MouseEvent('pointerdown', { bubbles: true });
+  elsewhere.dispatchEvent(down);
+  await page.wait(300);
+  check('clicking anywhere outside closes the student hamburger',
+    toggle?.getAttribute('aria-expanded') === 'false', `aria-expanded ${toggle?.getAttribute('aria-expanded')}`);
+  // …and the toggle itself still toggles (it is not swallowed by the dismiss).
+  toggle && toggle.click();
+  await page.wait(200);
+  check('the hamburger itself still toggles after dismissing elsewhere',
+    toggle?.getAttribute('aria-expanded') === 'true', `aria-expanded ${toggle?.getAttribute('aria-expanded')}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -348,14 +360,17 @@ let savedPasskey = '';
 // ---------------------------------------------------------------------------
 // 8. The per-group workspace: a group card click opens the full group page
 // ---------------------------------------------------------------------------
+let wsActivityId = null;
+let wsClass = null;
 {
-  const wsClass = await makeClass(`Browser Check Group WS ${stamp}`);
+  wsClass = await makeClass(`Browser Check Group WS ${stamp}`);
   const wsActivity = await api('POST', `/api/cgm/classes/${wsClass.classId}/activities`, {
     name: `Browser Check Pods ${stamp}`, type: 'tutorial',
     config: { method: 'random', groupCount: 3, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
   }, phantomToken);
-  const wsActivityId = wsActivity.json?.data?.activityId ?? wsActivity.json?.data?.id;
+  wsActivityId = wsActivity.json?.data?.activityId ?? wsActivity.json?.data?.id;
   await api('POST', `/api/cgm/activities/${wsActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+  await api('POST', `/api/cgm/classes/${wsClass.classId}/entry-password`, { entryPassword: 'rechoose-entry' }, phantomToken);
 
   const page = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
   const groupsNav = page.buttonByText('Groups');
@@ -367,7 +382,16 @@ let savedPasskey = '';
   chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
   check('the planned groups appear after publishing (defined at publish time)',
     await page.waitForFor('Group 1', 20_000) && await page.waitForFor('Group 3', 5_000));
-  const groupCard = [...page.window.document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Group 1');
+  // The board is a status board: each card is the group name plus its seat
+  // count — no member lists — and the whole card opens the workspace.
+  const boardCards = [...page.window.document.querySelectorAll('[data-testid="cgm-groups-board"] [data-testid="cgm-open-group"]')];
+  check('the group board shows seat counts only — no member names on the board',
+    boardCards.length >= 3
+    && /\d+\/\d+|\d+\/∞/.test(boardCards[0].textContent)
+    && !/Move…/.test(boardCards[0].textContent) && !/Swap…/.test(boardCards[0].textContent)
+    && !boardCards.some((card) => /Browser One/.test(card.textContent)),
+    `cards=${boardCards.length} first="${String(boardCards[0]?.textContent || '').trim().slice(0, 90)}"`);
+  const groupCard = boardCards.find((el) => el.textContent.includes('Group 1')) || boardCards[0];
   groupCard && groupCard.click();
   check('clicking a group opens its dedicated workspace with every management section',
     await page.waitForFor('Back to groups', 20_000)
@@ -452,6 +476,129 @@ let savedPasskey = '';
   check('leaving the workspace returns to the group grid', await page.waitForFor('Create', 20_000) || await page.waitForFor('Choose an activity', 5_000));
   const sideNavAfter = page.window.document.querySelector('nav[aria-label="Workspace navigation"]');
   check('leaving the group restores the main nav', Boolean(sideNavAfter) && !sideNavAfter.className.includes('cgm-sidenav--collapsed'), String(sideNavAfter?.className || 'no nav'));
+
+  // Small screen: the main nav is a drawer, and any click outside closes it.
+  page.window.matchMedia = () => ({ matches: true, media: '(max-width: 860px)', onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } });
+  const navToggle = page.window.document.querySelector('[data-testid="cgm-nav-toggle"]');
+  navToggle && navToggle.click();
+  await page.wait(300);
+  const navDrawer = page.window.document.querySelector('nav[aria-label="Workspace navigation"]');
+  check('the class & groups hamburger opens the navigation drawer on a small screen',
+    Boolean(navDrawer) && navDrawer.className.includes('cgm-sidenav--open'), String(navDrawer?.className || 'no nav'));
+  const outside = page.window.document.querySelector('main') || page.window.document.body;
+  outside.dispatchEvent(new page.window.MouseEvent('pointerdown', { bubbles: true }));
+  await page.wait(300);
+  const navAfterDismiss = page.window.document.querySelector('nav[aria-label="Workspace navigation"]');
+  check('clicking anywhere outside closes the class & groups hamburger',
+    Boolean(navAfterDismiss) && !navAfterDismiss.className.includes('cgm-sidenav--open'), String(navAfterDismiss?.className || 'no nav'));
+}
+
+// ---------------------------------------------------------------------------
+// Re-choose: the organizer asks inside the group, PHANTOM approves, and only
+// then does the member start over. Driven entirely through the DOM.
+// ---------------------------------------------------------------------------
+{
+  const organizer = { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } };
+  let activityData = (await api('GET', `/api/cgm/activities/${wsActivityId}`, undefined, phantomToken)).json?.data || {};
+  // The workspace fixture class starts empty — give it one member so the
+  // organizer has somebody to ask to re-choose.
+  if (!(activityData.unassigned || []).length) {
+    const rcIndex = `BRW-${stamp}-RC`;
+    await api('POST', `/api/cgm/classes/${wsClass.classId}/roster/entries`, { fullName: 'Rechoose Ria', indexNumber: rcIndex }, phantomToken);
+    const registered = await fetch(`${BASE}/api/cgm/student/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.240' },
+      body: JSON.stringify({ classCode: wsClass.code, indexNumber: rcIndex, entryPassword: 'rechoose-entry' }),
+    });
+    // Registrations wait for review under the default policy — approve it so
+    // the identity becomes a real class member (this is the organizer's own
+    // approve-permission path, the same one the UI uses).
+    const queue = (await api('GET', `/api/cgm/classes/${wsClass.classId}/registrations`, undefined, phantomToken)).json?.data || [];
+    const pendingRc = queue.find((row) => row.indexNumber === rcIndex);
+    if (pendingRc) {
+      await api('POST', `/api/cgm/classes/${wsClass.classId}/registrations/${pendingRc.id}/approve`, {}, phantomToken);
+    }
+    activityData = (await api('GET', `/api/cgm/activities/${wsActivityId}`, undefined, phantomToken)).json?.data || {};
+    if (!(activityData.unassigned || []).length) {
+      console.log(`  debug: register=${registered.status} queued=${Boolean(pendingRc)} members=${(activityData.members || []).length}`);
+    }
+  }
+  const freeStudents = activityData.unassigned || [];
+  const targetGroup = (activityData.groups || [])[0];
+  if (!freeStudents.length || !targetGroup) {
+    check('the re-choose fixture has a placeable member and a group', false,
+      `unassigned=${freeStudents.length} groups=${(activityData.groups || []).length}`);
+  } else {
+    const placedStudent = freeStudents[0];
+    const placed = await api('POST', `/api/cgm/activities/${wsActivityId}/assign-student`,
+      { studentId: Number(placedStudent.id), groupId: Number(targetGroup.id) }, phantomToken);
+    check('the re-choose fixture places a member in the first group', placed.status === 200, `status ${placed.status}`);
+
+    const page = await boot('#class-groups', organizer);
+    const groupsNav = page.buttonByText('Groups');
+    groupsNav && groupsNav.click();
+    await page.waitForFor('Choose an activity', 20_000);
+    const chooser = page.window.document.querySelector('select[aria-label="Choose activity"]');
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+    if (chooser) { setter.call(chooser, String(wsActivityId)); chooser.dispatchEvent(new page.window.Event('change', { bubbles: true })); }
+    const card = await page.waitForElement(() => [...page.window.document.querySelectorAll('[data-testid="cgm-groups-board"] [data-testid="cgm-open-group"]')].find((el) => el.textContent.includes('Group 1')));
+    card && card.click();
+    const rechooseButton = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-rechoose-button"]'));
+    check('the member row inside the group carries a working Re-choose button',
+      Boolean(rechooseButton), page.body().slice(0, 160));
+    rechooseButton && rechooseButton.click();
+    const reasonBox = await page.waitForElement(() => page.window.document.querySelector('[id^="app-dialog-input-"]'));
+    check('Re-choose opens the real dialog (the standalone workspaces now mount the dialog host)',
+      Boolean(reasonBox) && /Ask .* to choose again\?/.test(page.body()),
+      page.body().slice(0, 200));
+    if (reasonBox) {
+      const taSetter = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value').set;
+      taSetter.call(reasonBox, 'Chosen before the roster settled');
+      reasonBox.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+    }
+    const sendToPhantom = await page.waitForElement(() => [...page.window.document.querySelectorAll('button')].find((el) => /Send to PHANTOM/i.test(el.textContent)));
+    sendToPhantom && sendToPhantom.click();
+    check('the request goes to pending and the row says it is awaiting PHANTOM',
+      await page.waitForFor('Re-choose requested — waiting for PHANTOM approval', 20_000)
+      && await page.waitForFor('Awaiting PHANTOM', 15_000),
+      page.body().slice(0, 220));
+    check('the member is still in the group while the request waits — nothing moved',
+      Boolean(await api('GET', `/api/cgm/activities/${wsActivityId}/rechoose-requests`, undefined, phantomToken))
+      && (await api('GET', `/api/cgm/activities/${wsActivityId}`, undefined, phantomToken)).json?.data?.members
+        ?.some((row) => Number(row.id) === Number(placedStudent.id) && Number(row.group_id) === Number(targetGroup.id))
+      && (await api('GET', `/api/cgm/activities/${wsActivityId}/rechoose-requests`, undefined, phantomToken)).json?.data
+        ?.some((row) => Number(row.studentId) === Number(placedStudent.id) && row.status === 'pending'));
+
+    // PHANTOM approves in its own console (Control Center → Class Groups).
+    const phantomPage = await boot('#class-groups/phantom', organizer);
+    const oversightTab = await phantomPage.waitForElement(() => phantomPage.buttonByText('Class Groups'));
+    oversightTab && oversightTab.click();
+    await phantomPage.waitForFor('Module settings', 20_000);
+    const rechooseTab = await phantomPage.waitForElement(() => phantomPage.buttonByText('Re-choose requests'));
+    rechooseTab && rechooseTab.click();
+    const approve = await phantomPage.waitForElement(() => phantomPage.window.document.querySelector('[data-testid="cgm-phantom-approve-rechoose"]'));
+    check('the pending request reaches the PHANTOM re-choose queue with a working Approve',
+      Boolean(approve) && /choose a group again/.test(phantomPage.body()), phantomPage.body().slice(0, 200));
+    approve && approve.click();
+    check('PHANTOM approval confirms and the request leaves the pending queue',
+      await phantomPage.waitForFor('may now choose a group again', 20_000)
+      && (await api('GET', '/api/cgm/phantom/rechoose-requests', undefined, phantomToken)).json?.data
+        ?.every((row) => Number(row.studentId) !== Number(placedStudent.id)),
+      phantomPage.body().slice(0, 200));
+
+    // Organizer reopens the group: the row now reports the approval.
+    const reopened = await boot('#class-groups', organizer);
+    const navAgain = reopened.buttonByText('Groups');
+    navAgain && navAgain.click();
+    await reopened.waitForFor('Choose an activity', 20_000);
+    const chooser2 = reopened.window.document.querySelector('select[aria-label="Choose activity"]');
+    if (chooser2) { setter.call(chooser2, String(wsActivityId)); chooser2.dispatchEvent(new reopened.window.Event('change', { bubbles: true })); }
+    const card2 = await reopened.waitForElement(() => [...reopened.window.document.querySelectorAll('[data-testid="cgm-groups-board"] [data-testid="cgm-open-group"]')].find((el) => el.textContent.includes('Group 1')));
+    card2 && card2.click();
+    check('after approval the group shows the member released to choose again',
+      await reopened.waitForFor('PHANTOM approved a fresh choice', 20_000)
+      && Boolean(reopened.window.document.querySelector('[data-testid="cgm-rechoose-approved"]')),
+      reopened.body().slice(0, 200));
+  }
 }
 
 // Restore the spec-default policies so the local database stays clean.

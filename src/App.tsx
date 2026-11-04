@@ -494,15 +494,21 @@ function App() {
     }
   };
 
+  // Standalone workspaces (Class & Groups, Student Portal, PHANTOM) return
+  // BEFORE the shell below, so they never mounted <AppDialogHost/>. Every
+  // appDialog prompt or confirmation inside them therefore waited forever and
+  // the buttons looked dead. Each standalone view mounts the dialog host too.
+  const withDialogs = (node: React.ReactNode) => (<>{node}<AppDialogHost /></>);
+
   // Class & Group Management workspaces: standalone, like the client portal.
   if (classGroupsView === 'student') {
-    return <StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} leaderTarget={studentLeaderTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); setStudentLeaderTarget(null); }} />;
+    return withDialogs(<StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} leaderTarget={studentLeaderTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); setStudentLeaderTarget(null); }} />);
   }
   if (classGroupsView === 'phantom') {
-    return <PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />;
+    return withDialogs(<PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />);
   }
   if (classGroupsView === 'workspace' && user) {
-    return <ClassGroupsWorkspace onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />;
+    return withDialogs(<ClassGroupsWorkspace onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />);
   }
 
   // The client portal is a standalone workspace: no public navbar, no member
@@ -549,7 +555,7 @@ function App() {
   // PHANTOM Vault already returns its standalone workspace from AdminPanel;
   // returning it directly here likewise removes the Admin shell completely.
   if (!isCommunityWorkspace && isAdmin && (adminWorkspace === 'vault' || adminWorkspace === 'phantom')) {
-    return <AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} onOpenCommunity={() => openCommunityHub('phantom')} onHome={goToPostLoginHome} user={user} />;
+    return <><AdminPanel siteContent={siteContent} setSiteContent={handleSetSiteContent} workspace={adminWorkspace} onWorkspaceChange={setAdminWorkspace} activeTab={activeTab} onNavigate={handleTabChange} onJoin={handleOpenJoin} onOpenCommunity={() => openCommunityHub('phantom')} onHome={goToPostLoginHome} user={user} /><AppDialogHost /></>;
   }
 
   const inImmersiveWorkspace = isCommunityWorkspace || (isAdmin && (adminWorkspace === 'builder' || adminWorkspace === 'vault' || adminWorkspace === 'phantom')) || (!isAdmin && isDashboard);

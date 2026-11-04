@@ -8,6 +8,7 @@ import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { QrBlock } from './ClassGroupsWorkspace';
 import { useCgmNoZoom } from './noZoom';
+import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet, type GroupSheet } from '../../lib/groupSheet';
 
 /**
@@ -515,6 +516,8 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
   const [openClassId, setOpenClassId] = useState<number | null>(null);
   const [openActivityId, setOpenActivityId] = useState<number | null>(null);
   const [navOpen, setNavOpen] = useState(false);
+  // Tapping/clicking anywhere off the navigation closes it; Escape closes too.
+  useOutsideDismiss(navOpen, () => setNavOpen(false), '.cgm-sidenav, .cgm-nav-toggle');
   const [loading, setLoading] = useState(true);
   const [pendingInvite, setPendingInvite] = useState<InviteContinuation | null>(() => (inviteCode ? toContinuation(inviteCode) : readContinuation()));
   const [inviteNotice, setInviteNotice] = useState<string | null>(null);

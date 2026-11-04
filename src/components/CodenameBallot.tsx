@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, ChevronRight, Eye, LockKeyhole, Menu, ShieldAlert, Sparkles, X } from 'lucide-react';
 import { db } from '../lib/cloudflare';
+import { useOutsideDismiss } from '../lib/useOutsideDismiss';
 
 type BallotPool = 'member' | 'founding';
 
@@ -8,6 +9,8 @@ export const CodenameBallot = ({ onClaimed, codenamePath = 'member' }: { onClaim
   const [ballot, setBallot] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  // The ballot help panel closes on any click outside it (Escape too).
+  useOutsideDismiss(navOpen, () => setNavOpen(false), '.rounded-2xl.border.border-emerald-100.bg-emerald-50');
   const [message, setMessage] = useState<{ type: 'error' | 'info'; text: string } | null>(null);
   const fallbackPool: BallotPool = codenamePath === 'custom_founding' ? 'founding' : 'member';
   const pool: BallotPool = ballot?.pool === 'founding' ? 'founding' : fallbackPool;

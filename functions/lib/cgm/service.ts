@@ -100,6 +100,44 @@ export const insertAssignmentGuarded = async (
 };
 
 /** Re-activates a row that a move deactivated before its insert was rejected. */
+/**
+ * Re-choose requests are a newer table. The schema bootstrap creates it on the
+ * next cold start, but a request that arrives against a warm database which was
+ * booted BEFORE the deploy must still work — so the routes ensure it once per
+ * isolate instead of failing with "no such table".
+ */
+let rechooseSchemaChecked = false;
+export const ensureRechooseSchema = async (db: D1Database) => {
+  if (rechooseSchemaChecked) return;
+  try {
+    await db.batch([
+      db.prepare(`CREATE TABLE IF NOT EXISTS cgm_rechoose_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        activity_id INTEGER NOT NULL,
+        group_id INTEGER,
+        student_id INTEGER NOT NULL,
+        assignment_id INTEGER,
+        from_via TEXT,
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+        requested_by_profile_id INTEGER,
+        requester_label TEXT,
+        reviewed_by_profile_id INTEGER,
+        reviewer_label TEXT,
+        review_reason TEXT,
+        consumed_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at DATETIME,
+        FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+        FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_status ON cgm_rechoose_requests(status, created_at)`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_student ON cgm_rechoose_requests(activity_id, student_id, status)`),
+    ]);
+    rechooseSchemaChecked = true;
+  } catch { /* already there, or the batch will retry next request */ }
+};
+
 export const restoreAssignment = async (
   db: D1Database,
   assignmentId: number,

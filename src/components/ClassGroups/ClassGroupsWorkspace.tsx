@@ -10,6 +10,7 @@ import {
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
 import { useCgmNoZoom } from './noZoom';
 import { appDialog } from '../AppDialog';
+import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
 
@@ -73,6 +74,9 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
   // desktop too. Opening a specific group auto-collapses it so the group's
   // own sections hamburger leads; leaving the group restores it.
   const [navCollapsed, setNavCollapsed] = useState(false);
+  // A click anywhere off the (mobile) navigation closes it — the whole page is
+  // a dismiss target, exactly like every other hamburger in the app.
+  useOutsideDismiss(navOpen, () => setNavOpen(false), '.cgm-sidenav, .cgm-nav-toggle');
   const [applyOpen, setApplyOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -1614,6 +1618,9 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   // renders that section as a full page of its own.
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // The sections drawer closes on any click outside it (its backdrop) and on
+  // Escape, so it never traps the organizer on the drawer.
+  useOutsideDismiss(menuOpen, () => setMenuOpen(false), '[data-testid="cgm-workspace-drawer"], [data-testid="cgm-workspace-menu"]');
   const [memberSearch, setMemberSearch] = useState('');
 
   const load = useCallback(async () => {
@@ -1777,6 +1784,20 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
         })}
         {!visibleMembers.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">{search ? 'No member matches that search.' : 'No members yet.'}</li>}
       </ul>
+      {(detail.rechooseApproved || []).length > 0 && (
+        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3" data-testid="cgm-rechoose-approved">
+          <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">PHANTOM approved a fresh choice</p>
+          <ul className="mt-1.5 space-y-1">
+            {(detail.rechooseApproved || []).map((row: any) => (
+              <li key={row.request_id ?? row.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-bold text-emerald-900">{row.full_name}</span>
+                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-emerald-700">Choosing again</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[10px] font-medium text-emerald-800/80">They have left this group and can pick a group again from their own portal. The permission is used up the moment they join one.</p>
+        </div>
+      )}
       {canMove && (detail.unassigned || []).length > 0 && (
         <div className="mt-3 border-t border-slate-100 pt-3">
           <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a student ({(detail.unassigned || []).length} waiting)</p>
@@ -2410,60 +2431,42 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {(data.groups || []).map((group: any) => (
-              <div key={group.id} className={card}>
-                <div className="flex items-center justify-between">
-                  <button type="button" data-testid="cgm-open-group" onClick={() => { setOpenGroupId(Number(group.id)); onGroupFocus?.(true); }} className="group/name flex min-w-0 items-center gap-1.5 text-left" title={`Open the ${group.name} workspace`}>
-                    <span className="truncate font-black text-slate-900 group-hover/name:text-emerald-700">{group.name}</span>
-                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                  </button>
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{group.size}{group.capacity ? `/${group.capacity}` : ''}</span>
-                </div>
-                <ul className="mt-2 space-y-1.5">
-                  {(data.members || []).filter((member: any) => Number(member.group_id) === Number(group.id)).map((member: any) => (
-                    <li key={member.student_id} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
-                      <span className="min-w-0 flex-1 truncate font-bold text-slate-600" title={member.full_name}>{member.full_name}</span>
-                      <span className="flex shrink-0 gap-1">
-                        {canMove && (
-                          <select
-                            className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]"
-                            value=""
-                            aria-label={`Move ${member.full_name}`}
-                            onChange={(event) => { const target = Number(event.target.value); if (target) void run(() => cgm.assignStudent(Number(activityId), Number(member.student_id), target)); }}
-                          >
-                            <option value="">Move…</option>
-                            {(data.groups || []).filter((other: any) => Number(other.id) !== Number(group.id)).map((other: any) => (
-                              <option key={other.id} value={other.id}>{other.name}</option>
-                            ))}
-                          </select>
-                        )}
-                        {canMove && (
-                          <select
-                            className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700"
-                            value=""
-                            aria-label={`Swap ${member.full_name} with a member of another group`}
-                            onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(member.student_id), partner)); }}
-                          >
-                            <option value="">Swap…</option>
-                            {(data.groups || []).filter((other: any) => Number(other.id) !== Number(group.id)).flatMap((other: any) => (data.members || []).filter((partner: any) => Number(partner.group_id) === Number(other.id)).map((partner: any) => (
-                              <option key={partner.student_id} value={partner.student_id}>{partner.full_name} ({other.name})</option>
-                            )))}
-                          </select>
-                        )}
-                        {/* Re-choose lives inside the group workspace only — open
-                            the group to reach it, so this board stays compact. */}
-                        {canRemove && (
-                          <button type="button" className="rounded px-1.5 text-[10px] font-black text-red-500 hover:bg-red-50" onClick={() => { void run(async () => { if (member.assignment_id) await cgm.removeAssignment(Number(member.assignment_id)); }); }} title="Remove from activity">✕</button>
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                  {!((data.members || []).some((member: any) => Number(member.group_id) === Number(group.id))) && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">Empty</li>}
-                </ul>
-                {/* WhatsApp lives in the group workspace now — open the group to manage it. */}
-              </div>
-            ))}
+          {/* The board is a STATUS board: how full each group is, nothing else.
+              Every member, Move, Swap, Re-choose and removal lives inside the
+              group's own workspace — click the group to work on its people. */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="cgm-groups-board">
+            {(data.groups || []).map((group: any) => {
+              const size = Number(group.size || 0);
+              const capacity = group.capacity === null || group.capacity === undefined ? null : Number(group.capacity);
+              const percent = capacity ? Math.min(100, Math.round((size / capacity) * 100)) : 0;
+              const full = capacity !== null && size >= capacity;
+              return (
+                <button
+                  key={group.id}
+                  type="button"
+                  data-testid="cgm-open-group"
+                  onClick={() => { setOpenGroupId(Number(group.id)); onGroupFocus?.(true); }}
+                  className={`${card} group/name text-left transition hover:border-emerald-300 hover:shadow-md`}
+                  title={`Open the ${group.name} workspace — members, move, swap, re-choose, elections`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 flex items-center gap-1.5">
+                      <span className="truncate font-black text-slate-900 group-hover/name:text-emerald-700">{group.name}</span>
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                    </span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-black ${full ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                      {size}/{capacity ?? '∞'}
+                    </span>
+                  </div>
+                  <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                    <span className={`block h-full rounded-full ${full ? 'bg-amber-400' : 'bg-emerald-500'}`} style={{ width: `${capacity ? percent : 12}%` }} />
+                  </div>
+                  <p className="mt-2 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                    {size === 0 ? 'Empty — open to add members' : `${size} member${size === 1 ? '' : 's'} · open to manage`}
+                  </p>
+                </button>
+              );
+            })}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">

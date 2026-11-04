@@ -3,6 +3,7 @@ import { ClipboardList, FileText, RefreshCw, ShieldCheck, Users } from 'lucide-r
 import { cgm } from '../../lib/cgm';
 import { ConnectionBanner } from './ConnectionBanner';
 import { appDialog } from '../AppDialog';
+import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 
 /**
  * CODE Rx — PHANTOM Control Center (Class & Group Management oversight).
@@ -143,6 +144,9 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
   const [rows, setRows] = useState<PhantomRows>({} as PhantomRows);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The section list is a drawer on small screens; any click off it closes it.
+  const [navOpen, setNavOpen] = useState(false);
+  useOutsideDismiss(navOpen, () => setNavOpen(false), '.cgm-sidenav, [data-testid="phantom-nav-toggle"]');
 
   const loadOverview = useCallback(async () => { setOverview(await cgm.phantomOverview().catch(() => null)); }, []);
   const loadTab = useCallback(async (which: Tab) => {
@@ -442,6 +446,16 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
       <ConnectionBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            data-testid="phantom-nav-toggle"
+            className="cgm-nav-toggle"
+            aria-expanded={navOpen}
+            aria-label="Toggle PHANTOM navigation"
+            onClick={() => setNavOpen((open) => !open)}
+          >
+            <ShieldCheck className="h-4 w-4" />
+          </button>
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-white"><ShieldCheck className="h-5 w-5" /></span>
           <div>
             <p className="text-sm font-black text-slate-900">PHANTOM — Class &amp; Group Oversight</p>
@@ -455,12 +469,12 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
       </header>
 
       <div className="cgm-body">
-        <nav className="cgm-sidenav" aria-label="PHANTOM sections">
+        <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''}`} aria-label="PHANTOM sections">
           {TABS.map(([key, text]) => (
             <button
               key={key}
               type="button"
-              onClick={() => setTab(key)}
+              onClick={() => { setTab(key); setNavOpen(false); }}
               aria-current={tab === key ? 'page' : undefined}
               className={`cgm-side-link ${tab === key ? 'cgm-side-link--active' : ''}`}
             >

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useOutsideDismiss } from '../lib/useOutsideDismiss';
 import { ArrowLeft, ChevronLeft, Home, LockKeyhole, Menu, MessageCircle, Plus, Send, X } from 'lucide-react';
 import { db, type AuthUser } from '../lib/cloudflare';
 import { appDialog } from './AppDialog';
@@ -69,6 +70,8 @@ export const CommunityHub = ({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Any click outside the Community menu closes it (Escape too).
+  useOutsideDismiss(menuOpen, () => setMenuOpen(false), '.community-tab, [aria-label="Close Community navigation"], [aria-label="Open Community navigation"]');
 
   const publicToken = guest?.token || '';
 

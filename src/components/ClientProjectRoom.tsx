@@ -23,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import { clientPortal, ClientPortalError } from '../lib/cloudflare';
+import { useOutsideDismiss } from '../lib/useOutsideDismiss';
 import { messageForFailure } from '../lib/accessKey';
 import {
   landingFor,
@@ -948,6 +949,13 @@ export const ClientProjectRoom = ({
     return () => { if (query.removeEventListener) query.removeEventListener('change', update); };
   }, []);
   const sectionsOpen = wideScreen ? !navFolded : navOpen;
+  // Clicking anywhere off the sections panel closes it, on any screen size —
+  // the same behaviour as every other menu in the app.
+  useOutsideDismiss(
+    sectionsOpen,
+    () => { if (wideScreen) setNavFolded(true); else setNavOpen(false); },
+    '#room-sections, [aria-controls="room-sections"]',
+  );
   const toggleSections = () => {
     if (wideScreen) setNavFolded((folded) => !folded);
     else setNavOpen((open) => !open);

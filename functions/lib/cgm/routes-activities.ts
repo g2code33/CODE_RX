@@ -32,6 +32,7 @@ import {
   type ClassPermission,
 } from './core';
 import {
+  ensureRechooseSchema,
   insertAssignmentGuarded,
   requireCgmPhantom,
   restoreAssignment,
@@ -130,6 +131,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const activityId = Number(c.req.param('id'));
     const activity = await activityCore(c.env.DB, activityId);
     if (!activity) return bad(c, 'Activity not found.', 404);
+    await ensureRechooseSchema(c.env.DB);
     const guard = await requireClassPermission(c, member, Number(activity.class_id), 'view_roster');
     if (!guard.ok) return guard.response;
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
@@ -138,12 +140,22 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
               (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
        FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active' ORDER BY g.position`
     ).bind(activityId));
-    const unassigned = await asRows<any>(c.env.DB.prepare(
-      `SELECT s.id, s.full_name, s.index_number FROM cgm_activity_eligible e JOIN cgm_students s ON s.id = e.student_id
-       WHERE e.activity_id = ? AND NOT EXISTS
-         (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
-       ORDER BY s.full_name`
-    ).bind(activityId, activityId));
+    // Who can still be placed. With eligibility 'selected' the eligible table
+    // is authoritative; with 'all' it is never filled, so the class roster is —
+    // otherwise the picker was silently empty for every open activity.
+    const unassigned = config.eligibility === 'selected'
+      ? await asRows<any>(c.env.DB.prepare(
+        `SELECT s.id, s.full_name, s.index_number FROM cgm_activity_eligible e JOIN cgm_students s ON s.id = e.student_id
+         WHERE e.activity_id = ? AND NOT EXISTS
+           (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
+         ORDER BY s.full_name`
+      ).bind(activityId, activityId))
+      : await asRows<any>(c.env.DB.prepare(
+        `SELECT s.id, s.full_name, s.index_number FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
+         WHERE cm.class_id = ? AND cm.status = 'active' AND NOT EXISTS
+           (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
+         ORDER BY s.full_name`
+      ).bind(Number(activity.class_id), activityId));
     // The class members, each with their live placement in THIS activity (if
     // any) and the state of their latest re-choose request, so the Groups tab
     // can group them correctly and offer Re-choose without another round trip.
@@ -1016,6 +1028,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(assignmentId));
     const assignment = rows[0];
     if (!assignment) return bad(c, 'That member is not in an active group assignment.', 404);
+    await ensureRechooseSchema(c.env.DB);
     const guard = await requireClassPermission(c, member, Number(assignment.class_id), 'remove_students');
     if (!guard.ok) return guard.response;
     const body = await readBody(c);
@@ -1169,6 +1182,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     // Sensitive contact columns ride only for viewers holding the
     // view-sensitive permission — the same rule the roster and reports use.
     const canSeeSensitive = Boolean(guard.context.permissions?.has('view_sensitive_profiles'));
+    // The re-choose columns ride along on this dossier; make sure the table is
+    // there before the query references it (a warm DB booted pre-deploy).
+    await ensureRechooseSchema(c.env.DB);
     const members = await asRows<any>(c.env.DB.prepare(
       `SELECT s.id, s.full_name, s.index_number${canSeeSensitive ? ', s.phone, s.email, s.gender' : ''}, ga.id AS assignment_id, ga.assigned_via,
               (SELECT GROUP_CONCAT(l.role || ':' || l.id) FROM cgm_leadership_appointments l
@@ -1204,12 +1220,30 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT e.*, s.full_name FROM cgm_assignment_events e JOIN cgm_students s ON s.id = e.student_id
        WHERE e.activity_id = ? AND (e.to_group_id = ? OR e.from_group_id = ?) ORDER BY e.id DESC LIMIT 40`
     ).bind(Number(group.activity_id), groupId, groupId));
-    const unassigned = await asRows<any>(c.env.DB.prepare(
-      `SELECT s.id, s.full_name FROM cgm_activity_eligible e JOIN cgm_students s ON s.id = e.student_id
-       WHERE e.activity_id = ? AND NOT EXISTS
-         (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
+    // Same rule as the activity page: 'all' means the whole class roster is the
+    // pool (the eligible table only holds rows for 'selected' activities).
+    const unassigned = config?.eligibility === 'selected'
+      ? await asRows<any>(c.env.DB.prepare(
+        `SELECT s.id, s.full_name FROM cgm_activity_eligible e JOIN cgm_students s ON s.id = e.student_id
+         WHERE e.activity_id = ? AND NOT EXISTS
+           (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
+         ORDER BY s.full_name`
+      ).bind(Number(group.activity_id), Number(group.activity_id)))
+      : await asRows<any>(c.env.DB.prepare(
+        `SELECT s.id, s.full_name FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
+         WHERE cm.class_id = ? AND cm.status = 'active' AND NOT EXISTS
+           (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active')
+         ORDER BY s.full_name`
+      ).bind(Number(group.class_id), Number(group.activity_id)));
+    // Members whose re-choose PHANTOM already approved: they have left this
+    // group and can pick again. Shown so the organizer can see the outcome
+    // instead of the row simply vanishing.
+    const rechooseApproved = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.id AS request_id, s.id, s.full_name, r.reviewed_at, r.reviewer_label
+       FROM cgm_rechoose_requests r JOIN cgm_students s ON s.id = r.student_id
+       WHERE r.activity_id = ? AND r.group_id = ? AND r.status = 'approved' AND r.consumed_at IS NULL
        ORDER BY s.full_name`
-    ).bind(Number(group.activity_id), Number(group.activity_id)));
+    ).bind(Number(group.activity_id), groupId));
     const otherMembers = await asRows<any>(c.env.DB.prepare(
       `SELECT s.id, s.full_name, ga.group_id, g.name AS group_name
        FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id JOIN cgm_groups g ON g.id = ga.group_id
@@ -1228,7 +1262,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           id: Number(activity.id), name: activity.name, status: activity.status,
           method: config?.method, className: activity.class_name,
         } : null,
-        members, leadership, elections, announcements, whatsapp, events, unassigned, otherMembers,
+        members, leadership, elections, announcements, whatsapp, events, unassigned, otherMembers, rechooseApproved,
       },
     });
   });
@@ -3026,6 +3060,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
   app.get('/api/cgm/phantom/rechoose-requests', async (c: any) => {
     const check = await requireCgmPhantom(c);
     if (check.error) return check.error;
+    await ensureRechooseSchema(c.env.DB);
     const status = clean(c.req.query('status') || 'pending', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT r.*, s.full_name AS student_name, s.index_number,
@@ -3056,6 +3091,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (check.error) return check.error;
     const member = check.member;
     const id = Number(c.req.param('id'));
+    await ensureRechooseSchema(c.env.DB);
     const body = await readBody(c);
     const reason = cleanOrNull(body.reason, 400);
     const rows = await asRows<any>(c.env.DB.prepare(

@@ -3407,7 +3407,8 @@ check('the Groups page is mode-aware: place-all only for organizer-auto, the fai
   && /the groups above already exist for the draw/.test(workspaceSrc));
 check('group creation can never exceed the plan (POST /groups caps at the planned count)',
   /const room = Math\.max\(0, Number\(groupConfig\.groupCount\) - startPosition\);/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-activities.ts'), 'utf8')));
-check('every member row carries a Swap… control that calls the swap API', /Swap…<\/option>/.test(workspaceSrc) && /swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(workspaceSrc));
+// Swapping lives inside the group workspace (the board is counts only).
+check('every member row inside the group workspace carries a Swap… control that calls the swap API', /Swap…<\/option>/.test(workspaceSrc) && /swapStudents\(Number\(activityId\), Number\(row\.id\), partner\)/.test(workspaceSrc));
 check('the client library exposes the swap endpoint', /swapStudents: \(activityId: number, studentIdA: number, studentIdB: number\)/.test(cgmClientSrc) && /swap-students/.test(cgmClientSrc));
 check('the student portal hides manual picking in forced random mode and explains the fair draw',
   /const forcedRandom = data\.activity\.config\?\.method === 'random'/.test(portalSrc3)

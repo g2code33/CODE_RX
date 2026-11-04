@@ -297,7 +297,7 @@ check('organizers manage one WhatsApp link per group (set, replace, disable, rev
 check('the WhatsApp link shows a QR and tracks clicks without claiming join-proof',
   /QrBlock/.test(workspace) && /click_count} member click\(s\)/.test(workspace) && /clicks are not proof of joining/.test(workspace));
 check('the group cards carry NO WhatsApp editor — the group workspace owns it',
-  !/Paste link…/.test(workspace) && !/qrByGroup/.test(workspace) && /WhatsApp lives in the group workspace/.test(workspace));
+  !/Paste link…/.test(workspace) && !/qrByGroup/.test(workspace) && /data-testid="cgm-groups-board"/.test(workspace));
 
 // Reports in three formats (spec §16)
 check('reports download as CSV, Excel or PDF from one control',
@@ -674,10 +674,13 @@ check('the activity form edits exactly the planned groups one by one (per-group 
 check('the plan is honestly labelled editable-until-placed and saving re-syncs the groups',
   /can change any time until the first student is placed/.test(forcedWorkspace)
   && /Groups now match the plan/.test(forcedWorkspace));
-check('every group member row carries a Swap… control fed from the other groups\' members',
-  /aria-label=\{`Swap \$\{member\.full_name\} with a member of another group`\}/.test(forcedWorkspace)
-  && /cgm\.swapStudents\(Number\(activityId\), Number\(member\.student_id\), partner\)/.test(forcedWorkspace)
-  && /Swap…<\/option>/.test(forcedWorkspace));
+// Swapping is a people operation, so it lives INSIDE the group workspace
+// (Members section) — the board itself only reports seat counts.
+check('every member row inside the group workspace carries a Swap… control fed from the other groups\' members',
+  /aria-label=\{`Swap \$\{row\.full_name\}`\}/.test(forcedWorkspace)
+  && /cgm\.swapStudents\(Number\(activityId\), Number\(row\.id\), partner\)/.test(forcedWorkspace)
+  && /Swap…<\/option>/.test(forcedWorkspace)
+  && /detail\.otherMembers\.map/.test(forcedWorkspace));
 check('the client library exposes the PHANTOM-regulated swap endpoint',
   /swapStudents: \(activityId: number, studentIdA: number, studentIdB: number\)/.test(forcedClient)
   && /swap-students/.test(forcedClient));
@@ -729,6 +732,67 @@ check('the profile shows every identity field with its real value — fixed inde
   && /\['full_name', 'Full name', 'fullName', true\]/.test(ccPortal)
   && /Not set yet/.test(ccPortal) && /Not provided/.test(ccPortal)
   && /const currentValue = \(displayKey: string\)/.test(ccPortal));
+
+// ---------------------------------------------------------------------------
+// 22. Dialogs inside standalone workspaces, the compact groups board, and
+//     every hamburger closing when you click anywhere else.
+// ---------------------------------------------------------------------------
+section('22. Standalone dialog host, compact board, dismissable hamburgers');
+const appSrc = src('src/App.tsx');
+const boardWs = src('src/components/ClassGroups/ClassGroupsWorkspace.tsx');
+
+// The CGM workspaces return BEFORE the app shell, so they used to render with
+// no <AppDialogHost/> — every appDialog.prompt() there waited forever and the
+// buttons looked broken (Re-choose, cancel election, resolve tie, PHANTOM).
+check('the standalone Class & Groups, Student and PHANTOM workspaces mount the dialog host themselves',
+  /const withDialogs = \(node: React\.ReactNode\) => \(<>\{node\}<AppDialogHost \/><\/>\)/.test(appSrc)
+  && /return withDialogs\(<StudentPortal/.test(appSrc)
+  && /return withDialogs\(<PhantomClassGroups/.test(appSrc)
+  && /return withDialogs\(<ClassGroupsWorkspace/.test(appSrc));
+check('the PHANTOM Vault early return also carries the dialog host',
+  /<AdminPanel siteContent=\{siteContent\}[^\n]*\/><AppDialogHost \/><\/>/.test(appSrc));
+check('Re-choose is driven by a real dialog, so it now resolves instead of hanging',
+  /const reason = await appDialog\.prompt\(\{\s*title: `Ask \$\{memberName\} to choose again\?`/.test(boardWs));
+
+// The Groups board is a status board: names + counts, nothing else.
+const groupsAreaSrc = boardWs.slice(boardWs.indexOf('const GroupsArea = ('), boardWs.indexOf('const ElectionsArea =', boardWs.indexOf('const GroupsArea = (')));
+const boardOnly = groupsAreaSrc.slice(groupsAreaSrc.indexOf('cgm-groups-board'), groupsAreaSrc.indexOf('Unassigned students'));
+check('the groups board shows only the group name and its filled seats — no member lists, no Move/Swap',
+  /data-testid="cgm-groups-board"/.test(groupsAreaSrc)
+  && /\{size\}\/\{capacity \?\? '∞'\}/.test(boardOnly)
+  && !/member\.full_name/.test(boardOnly) && !/Move…<\/option>/.test(boardOnly)
+  && !/Swap…<\/option>/.test(boardOnly) && !/RechooseControl/.test(boardOnly));
+check('opening a group card is how you reach the members',
+  /data-testid="cgm-open-group"/.test(boardOnly) && /setOpenGroupId/.test(boardOnly));
+
+// Every hamburger closes when you click anywhere else.
+const dismissHook = src('src/lib/useOutsideDismiss.ts');
+check('one shared hook closes a menu on any outside pointer or Escape',
+  /export const useOutsideDismiss/.test(dismissHook)
+  && /addEventListener\('pointerdown', onPointer, true\)/.test(dismissHook)
+  && /addEventListener\('keydown', onKey\)/.test(dismissHook)
+  && /event\.key === 'Escape'/.test(dismissHook));
+check('the student portal closes its navigation on any outside click',
+  /useOutsideDismiss\(navOpen, \(\) => setNavOpen\(false\), '\.cgm-sidenav, \.cgm-nav-toggle'\)/.test(src('src/components/ClassGroups/StudentPortal.tsx')));
+check('the class & groups workspace closes its navigation and its sections drawer on any outside click',
+  /useOutsideDismiss\(navOpen, \(\) => setNavOpen\(false\), '\.cgm-sidenav, \.cgm-nav-toggle'\)/.test(boardWs)
+  && /useOutsideDismiss\(menuOpen, \(\) => setMenuOpen\(false\), '\[data-testid="cgm-workspace-drawer"\]/.test(boardWs));
+check('the PHANTOM console gained a working navigation toggle that also dismisses',
+  /data-testid="phantom-nav-toggle"/.test(src('src/components/ClassGroups/PhantomClasses.tsx'))
+  && /useOutsideDismiss\(navOpen/.test(src('src/components/ClassGroups/PhantomClasses.tsx')));
+check('Community, the public navbar, the identity ballot and the client room dismiss the same way',
+  /useOutsideDismiss\(menuOpen/.test(src('src/components/CommunityHub.tsx'))
+  && /useOutsideDismiss\(isOpen/.test(src('src/components/Navbar.tsx'))
+  && /useOutsideDismiss\(navOpen/.test(src('src/components/CodenameBallot.tsx'))
+  && /useOutsideDismiss\(\s*sectionsOpen/.test(src('src/components/ClientProjectRoom.tsx')));
+
+check('a PHANTOM-approved re-choice is shown inside the group instead of the row vanishing',
+  /data-testid="cgm-rechoose-approved"/.test(boardWs) && /PHANTOM approved a fresh choice/.test(boardWs)
+  && /rechooseApproved/.test(boardWs));
+check('the add-student picker falls back to the class roster when eligibility is ALL',
+  /config\.eligibility === 'selected'/.test(src('functions/lib/cgm/routes-activities.ts'))
+  && /config\?\.eligibility === 'selected'/.test(src('functions/lib/cgm/routes-activities.ts'))
+  && /FROM cgm_class_members cm JOIN cgm_students s ON s\.id = cm\.student_id/.test(src('functions/lib/cgm/routes-activities.ts')));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
