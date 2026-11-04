@@ -360,6 +360,10 @@ export const cgm = {
   createActivity: (classId: number, body: Record<string, unknown>) =>
     memberCall(`/api/cgm/classes/${classId}/activities`, { method: 'POST', body }),
   activityDetail: (activityId: number) => memberCall(`/api/cgm/activities/${activityId}`),
+  // Every election in the activity in ONE call — the Elections board used to
+  // walk each group and then each election, which made one screen dozens of
+  // queries on a slow connection.
+  activityElections: (activityId: number) => memberCall(`/api/cgm/activities/${activityId}/elections`),
   updateActivity: (activityId: number, body: Record<string, unknown>) =>
     memberCall(`/api/cgm/activities/${activityId}`, { method: 'PATCH', body }),
   activityLifecycle: (activityId: number, action: string, reason?: string) =>

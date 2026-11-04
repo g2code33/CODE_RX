@@ -1709,6 +1709,75 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     });
   });
 
+  /**
+   * Every election in an activity, in ONE round trip. The Elections page needs
+   * the whole board at once; fetching each group's dossier and then each
+   * election in turn turned one screen into dozens of queries. Six queries
+   * total here, whatever the number of groups.
+   */
+  app.get('/api/cgm/activities/:id/elections', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'manage_elections');
+    if (!guard.ok) return guard.response;
+    const elections = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.*, g.name AS group_name, g.position AS group_position,
+              (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = e.group_id AND ga.status = 'active') AS group_size
+       FROM cgm_elections e JOIN cgm_groups g ON g.id = e.group_id
+       WHERE e.activity_id = ? ORDER BY e.id DESC LIMIT 200`
+    ).bind(activityId));
+    if (!elections.length) return c.json({ success: true, data: [] });
+    const [candidates, tally, participation] = await Promise.all([
+      asRows<any>(c.env.DB.prepare(
+        `SELECT c.*, s.full_name FROM cgm_candidates c JOIN cgm_students s ON s.id = c.student_id
+         JOIN cgm_elections e ON e.id = c.election_id
+         WHERE e.activity_id = ? ORDER BY c.nominated_at`
+      ).bind(activityId)),
+      asRows<any>(c.env.DB.prepare(
+        `SELECT b.election_id, b.candidate_id, COUNT(*) AS votes FROM cgm_election_ballots b
+         JOIN cgm_elections e ON e.id = b.election_id WHERE e.activity_id = ? GROUP BY b.election_id, b.candidate_id`
+      ).bind(activityId)),
+      asRows<any>(c.env.DB.prepare(
+        `SELECT p.election_id, COUNT(*) AS voted FROM cgm_election_participation p
+         JOIN cgm_elections e ON e.id = p.election_id WHERE e.activity_id = ? GROUP BY p.election_id`
+      ).bind(activityId)),
+    ]);
+    return c.json({
+      success: true,
+      data: elections.map((election) => {
+        const groupSize = Number(election.group_size || 0);
+        const voted = Number(participation.find((row) => Number(row.election_id) === Number(election.id))?.voted || 0);
+        const eligibleIds = (() => { try { return election.eligible_student_ids ? JSON.parse(election.eligible_student_ids) : null; } catch { return null; } })();
+        return {
+          election: {
+            id: Number(election.id), groupId: Number(election.group_id), activityId: Number(election.activity_id),
+            title: election.title, role: election.role, status: election.status,
+            anonymity: election.anonymity, visibility: election.visibility,
+            allowVoteChange: Number(election.allow_vote_change) === 1, tieBreak: election.tie_break_method,
+            nominationOpenAt: election.nomination_open_at, nominationCloseAt: election.nomination_close_at,
+            votingOpenAt: election.voting_open_at, votingCloseAt: election.voting_close_at,
+            eligibleMode: election.eligible_mode || 'all',
+            eligibleStudentIds: Array.isArray(eligibleIds) ? eligibleIds : null,
+            results: election.results_json ? JSON.parse(election.results_json) : null,
+            cancelledReason: election.cancelled_reason,
+            groupName: election.group_name || `Group ${election.group_position}`,
+          },
+          candidates: candidates
+            .filter((candidate) => Number(candidate.election_id) === Number(election.id))
+            .map((candidate) => ({
+              id: Number(candidate.id), studentId: Number(candidate.student_id), fullName: candidate.full_name,
+              statement: candidate.statement, status: candidate.status, nominatedAt: candidate.nominated_at,
+              votes: Number(tally.find((row) => Number(row.candidate_id) === Number(candidate.id))?.votes || 0),
+            })),
+          participation: { voted, groupSize, turnout: groupSize ? Math.round((voted / groupSize) * 100) : 0 },
+        };
+      }),
+    });
+  });
+
   const electionTransition = async (c: any, action: 'open-voting' | 'close' | 'cancel' | 'restart') => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);

@@ -2530,31 +2530,16 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
   useEffect(() => { void cgm.activities(classId).then((rows) => setActivities(rows as any[])).catch(() => setActivities([])); }, [classId]);
 
   const loadGroups = useCallback(async (id: number) => {
-    const data = await cgm.activityDetail(id).catch(() => null);
+    // Two calls, always: the activity itself and its election board. Every
+    // election here is the SAME record the Leadership surface creates, so the
+    // two surfaces never drift apart.
+    const [data, board] = await Promise.all([
+      cgm.activityDetail(id).catch(() => null),
+      (cgm as any).activityElections(id).catch(() => []),
+    ]);
     setDetail(data);
-    // Pull elections for every group in this activity so Elections ↔ Leadership stay in sync
-    if (data?.groups?.length) {
-      const all: any[] = [];
-      for (const g of data.groups) {
-        try {
-          const gd: any = await (cgm as any).groupDetail(Number(g.id));
-          const payload = gd?.data || gd;
-          const list = payload?.elections || [];
-          for (const e of list) {
-            // Skip if already collected (safety)
-            if (all.some(x => Number(x.election.id) === Number(e.id))) continue;
-            // Hydrate full detail so ElectionManager has candidates/participation
-            try {
-              const full: any = await cgm.electionDetail(Number(e.id));
-              all.push(full?.data || full);
-            } catch { all.push({ election: e, candidates: [], participation: { voted: 0, groupSize: Number(g.size || 0), turnout: 0 } }); }
-          }
-        } catch {}
-      }
-      // Also try activity-wide fallback via groupDetail already covers; sort newest first
-      all.sort((a, b) => Number(b.election.id) - Number(a.election.id));
-      setElections(all);
-    } else { setElections([]); }
+    const rows: any[] = Array.isArray(board) ? board : (board?.data || []);
+    setElections(rows.map((entry) => entry?.election ? entry : { election: entry, candidates: [], participation: { voted: 0, groupSize: 0, turnout: 0 } }));
   }, []);
   useEffect(() => { if (activityId) void loadGroups(activityId); else { setDetail(null); setElections([]); } }, [activityId, loadGroups]);
 

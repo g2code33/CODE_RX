@@ -3894,6 +3894,28 @@ check('the activity member list carries the live group and assignment, so every 
 check('the same member carries the re-choose state through the activity payload',
   placedRow.rechoose_status === 'rejected', `state=${JSON.stringify(placedRow.rechoose_status ?? null)}`);
 
+// -- One call returns the whole election board ---------------------------------
+const board = await memberCall('GET', `/api/cgm/activities/${rechooseLabId}/elections`, undefined, amaToken);
+check('the election board is one call for the whole activity (no per-group fan-out)',
+  board.status === 200 && Array.isArray(board.json?.data), `status ${board.status}`);
+const electionLabBoardGroup = rechooseGroups[1];
+const labElection = await memberCall('POST', `/api/cgm/groups/${electionLabBoardGroup}/elections`, {
+  title: 'Board Visibility Election', role: 'leader', anonymity: 'anonymous', visibility: 'group',
+  allowVoteChange: false, tieBreak: 'random', eligibleMode: 'custom', eligibleStudentIds: [rechooserId],
+}, amaToken);
+const boardAfter = await memberCall('GET', `/api/cgm/activities/${rechooseLabId}/elections`, undefined, amaToken);
+const boardEntry = (boardAfter.json?.data || []).find((row) => Number(row.election?.id) === Number(labElection.json?.data?.electionId)) || {};
+check('the board carries each election with its group, eligibility mode and participation',
+  boardEntry.election?.groupId === electionLabBoardGroup
+  && boardEntry.election?.eligibleMode === 'custom'
+  && Array.isArray(boardEntry.candidates) && typeof boardEntry.participation?.turnout === 'number',
+  JSON.stringify({ create: labElection.status, board: boardAfter.status, rows: (boardAfter.json?.data || []).length, mode: boardEntry.election?.eligibleMode, keys: Object.keys(boardEntry) }));
+const outsiderBoard = await studentCall('GET', `/api/cgm/activities/${rechooseLabId}/elections`, undefined, rechooser.session);
+check('the board is organizer-only (a student session is refused)',
+  outsiderBoard.status === 401 || outsiderBoard.status === 403, `status ${outsiderBoard.status}`);
+check('the client library exposes the single-call board', /activityElections: \(activityId: number\)/.test(readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8'))
+  && !/for \(const g of data\.groups\)/.test(readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8')));
+
 // -- Source pins: the button and the PHANTOM queue exist ------------------------
 const wsRechoose = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ClassGroupsWorkspace.tsx'), 'utf8');
 const phantomRechoose = readFileSync(path.join(ROOT, 'src/components/ClassGroups/PhantomClasses.tsx'), 'utf8');
