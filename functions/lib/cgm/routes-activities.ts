@@ -1387,12 +1387,24 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const bytes = new Uint8Array(16);
       crypto.getRandomValues(bytes);
       const salt = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-      const election = await c.env.DB.prepare(
-        `INSERT INTO cgm_elections
-         (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method, salt, created_by_profile_id)
-         VALUES (?, ?, ?, 'leader', 'anonymous', 'group', 0, ?, ?, ?)`
-      ).bind(activityId, groupId, 'Group leadership election', ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
-        salt, member.profileId).run();
+      // Try new schema with eligible fields; fall back for older DBs
+      let election: any;
+      try {
+        election = await c.env.DB.prepare(
+          `INSERT INTO cgm_elections
+           (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method, salt, eligible_mode, eligible_student_ids, created_by_profile_id)
+           VALUES (?, ?, ?, 'leader', 'anonymous', 'group', 0, ?, ?, 'all', NULL, ?)`
+        ).bind(activityId, groupId, 'Group leadership election', ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
+          salt, member.profileId).run();
+      } catch (e: any) {
+        if (String(e?.message || '').toLowerCase().includes('eligible')) throw e;
+        election = await c.env.DB.prepare(
+          `INSERT INTO cgm_elections
+           (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method, salt, created_by_profile_id)
+           VALUES (?, ?, ?, 'leader', 'anonymous', 'group', 0, ?, ?, ?)`
+        ).bind(activityId, groupId, 'Group leadership election', ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
+          salt, member.profileId).run();
+      }
       const members = await asRows<{ student_id: number }>(c.env.DB.prepare(
         `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
       ).bind(groupId));
@@ -1468,23 +1480,58 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const body = await readBody(c);
     const role = String(body.role || 'leader');
     if (!['leader', 'assistant'].includes(role)) return bad(c, 'Choose leader or assistant.');
+    const eligibleMode = String(body.eligibleMode || body.nominatorMode || 'all') === 'custom' ? 'custom' : 'all';
+    let eligibleIdsJson: string | null = null;
+    if (eligibleMode === 'custom') {
+      const rawIds = Array.isArray(body.eligibleStudentIds) ? body.eligibleStudentIds : (Array.isArray(body.nominatorIds) ? body.nominatorIds : []);
+      const ids = rawIds.map((v: any) => Number(v)).filter((n: number) => Number.isInteger(n) && n > 0);
+      if (!ids.length) return bad(c, 'Choose at least one member when customizing nominators.', 400);
+      // Validate they belong to the group
+      const groupMembers = await asRows<{ student_id: number }>(c.env.DB.prepare(
+        `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
+      ).bind(groupId));
+      const memberSet = new Set(groupMembers.map(r => Number(r.student_id)));
+      const invalid = ids.filter(id => !memberSet.has(id));
+      if (invalid.length) return bad(c, 'Some chosen nominators are not in this group.', 400);
+      eligibleIdsJson = JSON.stringify([...new Set(ids)]);
+    }
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     const salt = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    const result = await c.env.DB.prepare(
-      `INSERT INTO cgm_elections
-       (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method,
-        nomination_open_at, nomination_close_at, voting_open_at, voting_close_at, salt, created_by_profile_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(Number(group.activity_id), groupId, clean(body.title, 160) || `Group leadership election`,
-      role,
-      body.anonymity === 'public' ? 'public' : 'anonymous',
-      ['private', 'group', 'class'].includes(String(body.visibility)) ? String(body.visibility) : 'group',
-      body.allowVoteChange === true ? 1 : 0,
-      ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
-      cleanOrNull(body.nominationOpenAt, 30), cleanOrNull(body.nominationCloseAt, 30),
-      cleanOrNull(body.votingOpenAt, 30), cleanOrNull(body.votingCloseAt, 30),
-      salt, member.profileId).run();
+    let result: any;
+    try {
+      result = await c.env.DB.prepare(
+        `INSERT INTO cgm_elections
+         (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method,
+          nomination_open_at, nomination_close_at, voting_open_at, voting_close_at, salt, eligible_mode, eligible_student_ids, created_by_profile_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(Number(group.activity_id), groupId, clean(body.title, 160) || `Group leadership election`,
+        role,
+        body.anonymity === 'public' ? 'public' : 'anonymous',
+        ['private', 'group', 'class'].includes(String(body.visibility)) ? String(body.visibility) : 'group',
+        body.allowVoteChange === true ? 1 : 0,
+        ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
+        cleanOrNull(body.nominationOpenAt, 30), cleanOrNull(body.nominationCloseAt, 30),
+        cleanOrNull(body.votingOpenAt, 30), cleanOrNull(body.votingCloseAt, 30),
+        salt, eligibleMode, eligibleIdsJson, member.profileId).run();
+    } catch (e: any) {
+      // Fallback for DBs without new columns (pre-migration)
+      if (String(e?.message || '').toLowerCase().includes('eligible')) throw e;
+      result = await c.env.DB.prepare(
+        `INSERT INTO cgm_elections
+         (activity_id, group_id, title, role, anonymity, visibility, allow_vote_change, tie_break_method,
+          nomination_open_at, nomination_close_at, voting_open_at, voting_close_at, salt, created_by_profile_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(Number(group.activity_id), groupId, clean(body.title, 160) || `Group leadership election`,
+        role,
+        body.anonymity === 'public' ? 'public' : 'anonymous',
+        ['private', 'group', 'class'].includes(String(body.visibility)) ? String(body.visibility) : 'group',
+        body.allowVoteChange === true ? 1 : 0,
+        ['runoff', 'appointment', 'random', 'manual'].includes(String(body.tieBreak)) ? String(body.tieBreak) : 'random',
+        cleanOrNull(body.nominationOpenAt, 30), cleanOrNull(body.nominationCloseAt, 30),
+        cleanOrNull(body.votingOpenAt, 30), cleanOrNull(body.votingCloseAt, 30),
+        salt, member.profileId).run();
+    }
     // Tell the group.
     const members = await asRows<{ student_id: number }>(c.env.DB.prepare(
       `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
@@ -1540,6 +1587,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const tieBreaks = await asRows<any>(c.env.DB.prepare(
       `SELECT * FROM cgm_tie_breaks WHERE election_id = ? ORDER BY id DESC LIMIT 10`
     ).bind(electionId));
+    const eligibleIds = (() => { try { return election.eligible_student_ids ? JSON.parse(election.eligible_student_ids) : null; } catch { return null; } })();
     return c.json({
       success: true,
       data: {
@@ -1550,6 +1598,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           allowVoteChange: Number(election.allow_vote_change) === 1, tieBreak: election.tie_break_method,
           nominationOpenAt: election.nomination_open_at, nominationCloseAt: election.nomination_close_at,
           votingOpenAt: election.voting_open_at, votingCloseAt: election.voting_close_at,
+          eligibleMode: election.eligible_mode || 'all',
+          eligibleStudentIds: Array.isArray(eligibleIds) ? eligibleIds : null,
           results: election.results_json ? JSON.parse(election.results_json) : null,
           cancelledReason: election.cancelled_reason,
           groupName: election.group_name || `Group ${election.group_position}`,
@@ -1589,7 +1639,15 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         `SELECT COUNT(*) AS c FROM cgm_candidates WHERE election_id = ? AND status = 'active'`
       ).bind(electionId));
       if (Number(candidates[0]?.c || 0) === 0) return bad(c, 'No active candidates. Use organizer appointment instead.', 409);
-      await c.env.DB.prepare(`UPDATE cgm_elections SET status = 'voting', voting_open_at = COALESCE(voting_open_at, CURRENT_TIMESTAMP) WHERE id = ?`).bind(electionId).run();
+      const votingOpenAt = cleanOrNull(body.votingOpenAt, 30);
+      const votingCloseAt = cleanOrNull(body.votingCloseAt, 30);
+      if (votingOpenAt || votingCloseAt) {
+        await c.env.DB.prepare(
+          `UPDATE cgm_elections SET status = 'voting', voting_open_at = COALESCE(?, voting_open_at, CURRENT_TIMESTAMP), voting_close_at = COALESCE(?, voting_close_at) WHERE id = ?`
+        ).bind(votingOpenAt, votingCloseAt, electionId).run();
+      } else {
+        await c.env.DB.prepare(`UPDATE cgm_elections SET status = 'voting', voting_open_at = COALESCE(voting_open_at, CURRENT_TIMESTAMP) WHERE id = ?`).bind(electionId).run();
+      }
       const voters = await asRows<{ student_id: number }>(c.env.DB.prepare(
         `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
       ).bind(Number(election.group_id)));

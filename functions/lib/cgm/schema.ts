@@ -395,6 +395,8 @@ CREATE TABLE IF NOT EXISTS cgm_elections (
   voting_open_at DATETIME,
   voting_close_at DATETIME,
   salt TEXT NOT NULL DEFAULT '',
+  eligible_mode TEXT NOT NULL DEFAULT 'all' CHECK (eligible_mode IN ('all','custom')),
+  eligible_student_ids TEXT,
   results_json TEXT,
   cancelled_reason TEXT,
   decided_by_label TEXT,

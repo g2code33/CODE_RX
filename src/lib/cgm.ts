@@ -401,8 +401,8 @@ export const cgm = {
   createElection: (groupId: number, body: Record<string, unknown>) =>
     memberCall(`/api/cgm/groups/${groupId}/elections`, { method: 'POST', body }),
   electionDetail: (electionId: number) => memberCall(`/api/cgm/elections/${electionId}`),
-  electionAction: (electionId: number, action: 'open-voting' | 'close' | 'cancel' | 'restart', reason?: string) =>
-    memberCall(`/api/cgm/elections/${electionId}/${action}`, { method: 'POST', body: { reason } }),
+  electionAction: (electionId: number, action: 'open-voting' | 'close' | 'cancel' | 'restart', reason?: string, extra?: Record<string, unknown>) =>
+    memberCall(`/api/cgm/elections/${electionId}/${action}`, { method: 'POST', body: { reason, ...(extra || {}) } }),
   resolveTie: (electionId: number, winnerCandidateId: number, reason?: string) =>
     memberCall(`/api/cgm/elections/${electionId}/tiebreak`, { method: 'POST', body: { winnerCandidateId, reason } }),
   announceWinner: (electionId: number) =>

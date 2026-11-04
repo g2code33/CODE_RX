@@ -1000,6 +1000,17 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       election = null;
     }
     if (!election) return bad(c, 'There is no open nomination window for your group right now.', 409);
+    // Enforce nominator eligibility: if custom, only listed members may stand
+    try {
+      const mode = String((election as any).eligible_mode || 'all');
+      const idsRaw = (election as any).eligible_student_ids;
+      if (mode === 'custom' && idsRaw) {
+        const allowed: number[] = JSON.parse(String(idsRaw));
+        if (Array.isArray(allowed) && !allowed.map(Number).includes(Number(student.id))) {
+          return bad(c, 'You are not eligible to stand as a candidate in this election.', 403);
+        }
+      }
+    } catch {}
 
     const already = await asRows<{ id: number }>(c.env.DB.prepare(
       `SELECT id FROM cgm_candidates WHERE election_id = ? AND student_id = ?`
