@@ -1076,6 +1076,10 @@ check('the seen watermark is per PHANTOM account and per tab (row ids, not times
   /PRIMARY KEY\(member_profile_id, tab_key\)/.test(attentionLib)
   && /last_seen_id/.test(attentionLib)
   && /ON CONFLICT\(member_profile_id, tab_key\) DO UPDATE SET/.test(attentionLib));
+const communityHub = src('src/components/CommunityHub.tsx');
+check('the PHANTOM inbox lists the Class & Groups stream like every other channel',
+  /\['class_groups', '🏛️ Class & Groups'\]/.test(communityHub)
+  && (communityHub.match(/class_groups/g) || []).length >= 2);
 check('Class & Groups is a real inbox channel, so PHANTOM is notified as well as badged',
   /key: 'class_groups'/.test(src('functions/lib/phantom-inbox.ts'))
   && /channel: 'class_groups'/.test(activitiesRoute)

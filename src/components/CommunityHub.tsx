@@ -361,6 +361,7 @@ export const CommunityHub = ({
             ['forum_threads', '🗣️ Forum Discussions'],
             ['public_reports', '⚠️ Public Reports'],
             ['telegram', '✈️ Telegram'],
+            ['class_groups', '🏛️ Class & Groups'],
           ].map(([cKey, cLabel]) => {
             const ch = (inboxFeed.channels || []).find((c: any) => c.key === cKey);
             const unread = ch?.unread || 0;
@@ -412,6 +413,7 @@ export const CommunityHub = ({
                 ['private_messages', '👥 Member Messages'],
                 ['public_chat', '🌍 Public Chat'],
                 ['forum_threads', '🗣️ Discussions'],
+                ['class_groups', '🏛️ Class & Groups'],
               ].map(([cKey, cLabel]) => (
                 <button
                   key={cKey}
