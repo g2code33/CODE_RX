@@ -73,6 +73,15 @@ The counts come from the tables those tabs render (`applications`,
 `audit_logs`, `recycle_bin_items`) in one statement of scalar subqueries —
 `GET /api/phantom/attention`, `POST /api/phantom/attention/:key/seen`.
 
+## Reversible by default
+
+The organizer's own `Recycle Bin` (workspace navigation) keeps what every
+destructive action removed — a deleted election with its ballots, a removed
+member's seat, deleted roster rows, a taken-down announcement, a deleted
+template — and restoring re-inserts those exact rows. Deleting an election asks
+for a reason and is audited as `cgm.election.deleted`; reversing one is audited
+as `cgm.recycle.restored`. See `CLASS_GROUP_MANAGEMENT_REPORT.md`.
+
 ## One listing rule
 
 `src/components/RecentItems.tsx` (`LIST_PREVIEW = 5`) is the single list primitive:

@@ -420,3 +420,38 @@ scripts/cgm-tests.mjs                  # 733 API-level checks, 38 sections
 scripts/cgm-ui-tests.mjs               # 267 markup-level checks, 21 sections
 scripts/cgm-browser-check.mjs          # 43 jsdom browser checks vs wrangler dev
 ```
+
+## Elections & the Recycle Bin (2026-11-05)
+
+**ALL means everybody.** Choosing *ALL — every group member goes on the ballot*
+no longer waits for members to volunteer: creating the election enters every
+active member of the chosen group as a candidate in the same request
+(`candidatesSeeded` in the response), so the ballot is populated the moment the
+nominations open. Members can still withdraw, and members who join later can add
+themselves. *CUSTOMIZE* leaves the ballot to whoever stands and honours the
+hand-picked list.
+
+**Every election record can be deleted.** Close and Cancel stay exactly where
+they were; Delete is added beside them on every record, open or finished, and
+asks for a reason. The whole record — election, candidates, ballots,
+participation and tie-breaks — is snapshotted into the Recycle Bin before it is
+removed, then audited as `cgm.election.deleted`.
+
+**The organizer Recycle Bin** (`Recycle Bin` in the workspace navigation) makes
+the module's destructive actions reversible:
+
+| Action | What the bin keeps |
+| --- | --- |
+| Delete an election | `cgm_elections`, candidates, ballots, participation, tie-breaks |
+| Remove a member from a group | the `cgm_group_assignments` row (same seat, same activity) |
+| Remove a class membership | the `cgm_class_members` row |
+| Delete roster rows (single or bulk) | the `cgm_roster_entries` rows |
+| Take an announcement down | the `cgm_announcements` row (restores `published`) |
+| Delete an activity template | the `cgm_activity_templates` row |
+
+Restore is a re-insert of the snapshotted rows (`INSERT OR REPLACE`, ids
+preserved), so a restored election keeps the ballots cast in it; a change can
+only be reversed once, and every reversal is audited as `cgm.recycle.restored`.
+`GET /api/cgm/recycle-bin?classId=` and `POST /api/cgm/recycle-bin/:id/restore`
+are open to the primary organizer and to anyone trusted to remove students or
+edit the roster — whoever may delete may undo.

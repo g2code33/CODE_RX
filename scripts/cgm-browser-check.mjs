@@ -361,6 +361,22 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
 }
 
 // ---------------------------------------------------------------------------
+// 2b3. The organizer workspace carries a Recycle Bin, and an election record
+//      can be deleted from the page into it
+// ---------------------------------------------------------------------------
+{
+  const organizerToken = (await api('POST', '/api/auth/login', { identifier: EMAIL, password: PASSWORD })).json?.token;
+  const page = await boot('#class-groups', { memberToken: organizerToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('Class & Group Management', 20_000);
+  const binLink = await page.waitForElement(() => page.buttonByText('Recycle Bin'), 20_000);
+  check('the organizer navigation has a Recycle Bin', Boolean(binLink));
+  binLink && binLink.click();
+  const area = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-recycle-area"]'), 20_000);
+  check('it opens the real bin, with the promise that deletes are reversible',
+    Boolean(area) && /Restoring puts the records back exactly as/.test(page.body()));
+}
+
+// ---------------------------------------------------------------------------
 // 2c. Moves & swaps: PHANTOM decides membership changes, and a decision stays
 //     on the record after it is granted
 // ---------------------------------------------------------------------------

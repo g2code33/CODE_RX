@@ -10,6 +10,7 @@
 import type { Hono } from 'hono';
 import { recordPhantomInboxItem } from '../phantom-inbox';
 import { markPhantomTabSeen, phantomAttentionBoard } from './attention';
+import { listRecycle, recordRecycle, restoreRecycle, snapshotFromDb } from './recycle';
 import { createNotification } from '../notifications';
 import { cleanEmail } from '../validate';
 import { buildReportPdf } from './pdf';
@@ -64,6 +65,7 @@ import {
   organizerContextFor,
   readBody,
   requireClassPermission,
+  requireAnyClassPermission,
   requireModuleEnabled,
   studentFromRequest,
   throttle,
@@ -478,8 +480,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const templateId = Number(c.req.param('id'));
-    const rows = await asRows<{ id: number; class_id: number | null }>(c.env.DB.prepare(
-      'SELECT id, class_id FROM cgm_activity_templates WHERE id = ?'
+    const rows = await asRows<{ id: number; class_id: number | null; name: string }>(c.env.DB.prepare(
+      'SELECT id, class_id, name FROM cgm_activity_templates WHERE id = ?'
     ).bind(templateId));
     if (!rows[0]) return bad(c, 'Template not found.', 404);
     if (rows[0].class_id !== null) {
@@ -488,6 +490,16 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     } else if (!member.isPhantom) {
       return bad(c, 'Only PHANTOM manages platform templates.', 403);
     }
+    const payload = await snapshotFromDb(c.env.DB, [
+      { table: 'cgm_activity_templates', where: 'id = ?', params: [templateId] },
+    ]);
+    await recordRecycle(c.env.DB, {
+      classId: rows[0].class_id === null ? null : Number(rows[0].class_id),
+      entityType: 'template', entityId: templateId,
+      title: String((rows[0] as any).name || 'Activity template'),
+      detail: 'Deleted template',
+      payload, actorLabel: member.name, actorProfileId: member.profileId,
+    });
     await c.env.DB.prepare('DELETE FROM cgm_activity_templates WHERE id = ?').bind(templateId).run();
     return c.json({ success: true });
   });
@@ -1371,6 +1383,18 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT id FROM cgm_group_assignments WHERE id = ? AND status = 'active'`
     ).bind(assignmentId));
     if (!live[0]) return bad(c, 'That member is no longer in the group.', 409);
+    // The bin keeps the seat exactly as it was, so "reverse" means the member is
+    // back in the group they were taken out of — not a fresh placement.
+    await recordRecycle(c.env.DB, {
+      classId: Number(assignment.class_id), activityId: Number(assignment.activity_id), groupId: Number(assignment.group_id),
+      entityType: 'assignment', entityId: assignmentId,
+      title: `Removed from ${assignment.group_name || 'a group'}`,
+      detail: reason || 'No reason recorded',
+      payload: await snapshotFromDb(c.env.DB, [
+        { table: 'cgm_group_assignments', where: 'id = ?', params: [assignmentId] },
+      ]),
+      actorLabel: member.name, actorProfileId: member.profileId,
+    });
     await c.env.DB.prepare(
       `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = ? WHERE id = ?`
     ).bind(reason, assignmentId).run();
@@ -3094,6 +3118,21 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const members = await asRows<{ student_id: number }>(c.env.DB.prepare(
       `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
     ).bind(groupId));
+    const newElectionId = Number(result.meta.last_row_id);
+    // "ALL" means every member of this group is IN the election — they go on the
+    // ballot at creation instead of waiting for each one to volunteer. They can
+    // still withdraw, and CUSTOMIZE leaves the ballot to whoever stands.
+    let seeded = 0;
+    if (eligibleMode === 'all') {
+      for (const row of members) {
+        try {
+          await c.env.DB.prepare(
+            `INSERT INTO cgm_candidates (election_id, student_id, statement) VALUES (?, ?, NULL)`
+          ).bind(newElectionId, Number(row.student_id)).run();
+          seeded += 1;
+        } catch { /* already on the ballot */ }
+      }
+    }
     for (const row of members) {
       await notifyStudent(c.env.DB, Number(row.student_id), 'election', 'Group election created',
         `An election (${role === 'leader' ? 'leader' : 'assistant'}) was created for your group in ${group.activity_name}.`);
@@ -3104,7 +3143,90 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       classId: Number(group.class_id), activityId: Number(group.activity_id),
       context: { electionId: Number(result.meta.last_row_id), anonymity: body.anonymity || 'anonymous' },
     });
-    return c.json({ success: true, data: { electionId: Number(result.meta.last_row_id) } });
+    return c.json({ success: true, data: { electionId: newElectionId, eligibleMode, candidatesSeeded: seeded } });
+  });
+
+  /**
+   * Delete an election outright. The whole record — the election, its
+   * candidates, every ballot, the participation ledger and any tie-break — is
+   * snapshotted into the organizer's Recycle Bin first, so "delete" is a move,
+   * not a loss. A reason is required: the audit trail must say why.
+   */
+  app.delete('/api/cgm/elections/:id', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const electionId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.*, a.class_id FROM cgm_elections e JOIN cgm_activities a ON a.id = e.activity_id WHERE e.id = ?`
+    ).bind(electionId));
+    const election = rows[0];
+    if (!election) return bad(c, 'Election not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(election.class_id), 'manage_elections');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 500);
+    if (!reason) return bad(c, 'Record a reason when deleting an election.', 400);
+
+    const payload = await snapshotFromDb(c.env.DB, [
+      { table: 'cgm_elections', where: 'id = ?', params: [electionId] },
+      { table: 'cgm_candidates', where: 'election_id = ?', params: [electionId] },
+      { table: 'cgm_election_ballots', where: 'election_id = ?', params: [electionId] },
+      { table: 'cgm_election_participation', where: 'election_id = ?', params: [electionId] },
+      { table: 'cgm_tie_breaks', where: 'election_id = ?', params: [electionId] },
+    ]);
+    const binId = await recordRecycle(c.env.DB, {
+      classId: Number(election.class_id), activityId: Number(election.activity_id), groupId: Number(election.group_id),
+      entityType: 'election', entityId: electionId,
+      title: String(election.title || 'Election'),
+      detail: `${election.status} · ${election.role} · ${reason}`,
+      payload, actorLabel: member.name, actorProfileId: member.profileId,
+    });
+
+    await c.env.DB.prepare('DELETE FROM cgm_election_ballots WHERE election_id = ?').bind(electionId).run();
+    await c.env.DB.prepare('DELETE FROM cgm_election_participation WHERE election_id = ?').bind(electionId).run();
+    await c.env.DB.prepare('DELETE FROM cgm_tie_breaks WHERE election_id = ?').bind(electionId).run();
+    await c.env.DB.prepare('DELETE FROM cgm_candidates WHERE election_id = ?').bind(electionId).run();
+    await c.env.DB.prepare('DELETE FROM cgm_elections WHERE id = ?').bind(electionId).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.election.deleted', entityType: 'election', entityId: electionId,
+      classId: Number(election.class_id), activityId: Number(election.activity_id), context: { reason, recycleId: binId },
+    });
+    return c.json({ success: true, data: { deleted: true, recycleId: binId, message: 'Election deleted — it can be restored from the Recycle Bin.' } });
+  });
+
+  /** The organizer's Recycle Bin: every reversible action, newest first. */
+  app.get('/api/cgm/recycle-bin', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.query('classId') || 0);
+    if (!classId) return bad(c, 'Choose a class first.', 400);
+    const guard = await requireAnyClassPermission(c, member, classId, ['manage_class_settings', 'remove_students', 'edit_roster']);
+    if (!guard.ok) return guard.response;
+    return c.json({ success: true, data: await listRecycle(c.env.DB, classId, 200) });
+  });
+
+  app.post('/api/cgm/recycle-bin/:id/restore', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const binId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare('SELECT class_id FROM cgm_recycle WHERE id = ?').bind(binId));
+    if (!rows[0]) return bad(c, 'That recycle-bin entry no longer exists.', 404);
+    if (rows[0].class_id !== null) {
+      const guard = await requireAnyClassPermission(c, member, Number(rows[0].class_id), ['manage_class_settings', 'remove_students', 'edit_roster']);
+      if (!guard.ok) return guard.response;
+    } else if (!member.isPhantom) {
+      return bad(c, 'Only PHANTOM reverses platform-wide changes.', 403);
+    }
+    const result = await restoreRecycle(c.env.DB, binId, member.name);
+    if (!result.ok) return bad(c, result.error, result.status);
+    await auditCgm(c.env.DB, {
+      actorType: member.isPhantom ? 'phantom' : 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.recycle.restored', entityType: result.restored.entityType, entityId: result.restored.entityId,
+      classId: result.restored.classId === null ? undefined : Number(result.restored.classId),
+      context: { recycleId: binId, title: result.restored.title },
+    });
+    return c.json({ success: true, data: { restored: result.restored, message: `${result.restored.title} is back.` } });
   });
 
   app.get('/api/cgm/elections/:id', async (c: any) => {
@@ -3673,13 +3795,23 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const announcementId = Number(c.req.param('id'));
-    const rows = await asRows<{ id: number; class_id: number }>(c.env.DB.prepare(
-      'SELECT id, class_id FROM cgm_announcements WHERE id = ?'
+    const rows = await asRows<{ id: number; class_id: number; title: string }>(c.env.DB.prepare(
+      'SELECT id, class_id, title FROM cgm_announcements WHERE id = ?'
     ).bind(announcementId));
     const announcement = rows[0];
     if (!announcement) return bad(c, 'Announcement not found.', 404);
     const guard = await requireClassPermission(c, member, Number(announcement.class_id), 'manage_announcements');
     if (!guard.ok) return guard.response;
+    await recordRecycle(c.env.DB, {
+      classId: Number(announcement.class_id),
+      entityType: 'announcement', entityId: announcementId,
+      title: String((announcement as any).title || 'Announcement'),
+      detail: 'Taken down — restore puts it back as it was',
+      payload: await snapshotFromDb(c.env.DB, [
+        { table: 'cgm_announcements', where: 'id = ?', params: [announcementId] },
+      ]),
+      actorLabel: member.name, actorProfileId: member.profileId,
+    });
     await c.env.DB.prepare(`UPDATE cgm_announcements SET status = 'removed', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(announcementId).run();
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, Archive, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
-  Megaphone, Plus, RefreshCw, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
+  Megaphone, Plus, Recycle, RefreshCw, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
@@ -10,11 +10,11 @@ import {
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
 import { useCgmNoZoom } from './noZoom';
 import { appDialog } from '../AppDialog';
+import { RecentItems } from '../RecentItems';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
 import { ForceGetWorkspace } from './ForceGetWorkspace';
-import { RecentItems } from '../RecentItems';
 
 /**
  * CODE Rx — Class & Group Management (organizer workspace).
@@ -27,7 +27,7 @@ import { RecentItems } from '../RecentItems';
 type Area =
   | 'overview' | 'classes' | 'students' | 'invitations' | 'activities' | 'groups' | 'elections'
   | 'leadership' | 'attendance' | 'calendar' | 'announcements' | 'notifications' | 'reports'
-  | 'templates' | 'approvals' | 'permissions' | 'archives' | 'settings';
+  | 'templates' | 'approvals' | 'permissions' | 'archives' | 'recycle' | 'settings';
 
 const AREAS: Array<[Area, string, any]> = [
   ['overview', 'Overview', Activity],
@@ -47,6 +47,7 @@ const AREAS: Array<[Area, string, any]> = [
   ['approvals', 'Approvals', ListChecks],
   ['permissions', 'Permissions', ShieldCheck],
   ['archives', 'Archives', Archive],
+  ['recycle', 'Recycle Bin', Recycle],
   ['settings', 'Settings', Settings],
 ];
 
@@ -124,6 +125,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
       case 'approvals': return canApprovals;
       case 'permissions': return can('manage_class_settings');
       case 'archives': return can('archive_activities') || can('view_roster');
+      case 'recycle': return can('manage_class_settings') || can('remove_students') || can('edit_roster');
       case 'settings': return can('manage_class_settings');
       default: return true;
     }
@@ -246,6 +248,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'approvals' && <ApprovalsArea classId={Number(activeClass.id)} canRegistrations={can('approve_registrations') || delegated} canMemberships={can('approve_memberships')} canProfiles={can('review_profile_changes')} delegated={delegated} onChanged={() => void refresh()} />}
           {activeClass && area === 'permissions' && <PermissionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'archives' && <ArchivesArea classId={Number(activeClass.id)} />}
+          {activeClass && area === 'recycle' && <RecycleArea classId={Number(activeClass.id)} />}
           {activeClass && area === 'settings' && <SettingsArea classId={activeClass.id} onChanged={() => void refresh()} />}
         </main>
       </div>
@@ -2753,7 +2756,7 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
                   const raw = String((form.elements.namedItem(name) as HTMLInputElement).value || '');
                   return raw ? new Date(raw).toISOString() : undefined;
                 };
-                await cgm.createElection(groupId, {
+                const created: any = await cgm.createElection(groupId, {
                   title: String((form.elements.namedItem('title') as HTMLInputElement).value || `Group leadership election`),
                   role: String((form.elements.namedItem('role') as HTMLSelectElement).value),
                   anonymity: String((form.elements.namedItem('anonymity') as HTMLSelectElement).value),
@@ -2767,7 +2770,10 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
                   ...(windowValue('votingOpenAt') ? { votingOpenAt: windowValue('votingOpenAt') } : {}),
                   ...(windowValue('votingCloseAt') ? { votingCloseAt: windowValue('votingCloseAt') } : {}),
                 });
-                setMessage('Election created — nominations are open for this group.');
+                const seeded = Number(created?.candidatesSeeded ?? created?.data?.candidatesSeeded ?? 0);
+                setMessage(seeded
+                  ? `Election created — nominations are open and all ${seeded} member(s) of the group are on the ballot.`
+                  : 'Election created — nominations are open for this group.');
                 setChosenIds(new Set());
                 await refreshElections();
               } catch (failure: any) { setMessage(failure?.message || 'The election failed.'); }
@@ -2786,10 +2792,12 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
             <div className="sm:col-span-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-[11px] font-black uppercase tracking-wider text-slate-500">Who may be nominated?</p>
               <div className="mt-2 flex gap-2" role="group" aria-label="Nominators eligibility">
-                <button type="button" aria-pressed={nominatorMode === 'all'} onClick={() => setNominatorMode('all')} className={`flex-1 rounded-lg border px-3 py-2 text-xs font-black ${nominatorMode === 'all' ? 'border-emerald-400 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-600'}`}>ALL — every group member eligible as nominators</button>
-                <button type="button" aria-pressed={nominatorMode === 'custom'} onClick={() => setNominatorMode('custom')} className={`flex-1 rounded-lg border px-3 py-2 text-xs font-black ${nominatorMode === 'custom' ? 'border-sky-400 bg-sky-50 text-sky-800' : 'border-slate-200 bg-white text-slate-600'}`}>CUSTOMIZE — choose specific members as nominators</button>
+                <button type="button" aria-pressed={nominatorMode === 'all'} onClick={() => setNominatorMode('all')} className={`flex-1 rounded-lg border px-3 py-2 text-xs font-black ${nominatorMode === 'all' ? 'border-emerald-400 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-600'}`}>ALL — every group member goes on the ballot</button>
+                <button type="button" aria-pressed={nominatorMode === 'custom'} onClick={() => setNominatorMode('custom')} className={`flex-1 rounded-lg border px-3 py-2 text-xs font-black ${nominatorMode === 'custom' ? 'border-sky-400 bg-sky-50 text-sky-800' : 'border-slate-200 bg-white text-slate-600'}`}>CUSTOMIZE — choose who may stand</button>
               </div>
-              <p className="mt-2 text-[11px] font-medium text-slate-400" data-testid="cgm-nominator-hint">{nominatorMode === 'all' ? 'All current members of this group can be nominated and stand when nominations are open.' : 'Pick exactly who may be nominated — only checked members can stand as candidates.'}</p>
+              <p className="mt-2 text-[11px] font-medium text-slate-400" data-testid="cgm-nominator-hint">{nominatorMode === 'all'
+                  ? 'ALL puts every current member of the chosen group on the ballot the moment you create the election — nobody has to volunteer first. They can still withdraw, and members who join later can add themselves.'
+                  : 'Pick exactly who may be nominated — only checked members can stand as candidates.'}</p>
               {nominatorMode === 'custom' && (
                 <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2" data-testid="cgm-custom-nominators">
                   {!selectedGroupId && <p className="text-xs font-medium text-slate-400">Choose a group above to see its members.</p>}
@@ -2843,6 +2851,13 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
         }} onAction={async (action, extra) => {
           setBusy(true);
           try {
+            if (action === 'delete') {
+              await cgm.deleteElection(Number(entry.election.id), String(extra?.reason || 'Deleted by organizer'));
+              setElections((current) => current.filter((item) => Number(item.election.id) !== Number(entry.election.id)));
+              setMessage('Election deleted — it can be restored from the Recycle Bin.');
+              onChanged();
+              return;
+            }
             if (action === 'resolve') await cgm.resolveTie(Number(entry.election.id), Number(extra?.winner), extra?.reason);
             else if (action === 'open-voting' && (extra as any)?.votingOpenAt !== undefined) {
               await cgm.electionAction(Number(entry.election.id), action as any, extra?.reason, extra as any);
@@ -2908,6 +2923,26 @@ const ElectionManager = ({ data, onAction, onPrefillOpenVoting, busy }: { data: 
               if (reason) await onAction('cancel', { reason });
             }}>Cancel</button>
           )}
+          {/* Delete is offered on every record, open or finished: the whole
+              record goes to the Recycle Bin first, so it is reversible. */}
+          <button
+            type="button"
+            disabled={busy}
+            data-testid={`cgm-election-delete-${election.id}`}
+            className="mini-button text-red-700"
+            onClick={async () => {
+              const reason = await appDialog.prompt({
+                title: 'Delete this election?',
+                message: 'The election, its candidates, every ballot and its results are moved to the Recycle Bin. Nothing is lost — the Recycle Bin can put it all back.',
+                label: 'Why are you deleting it?',
+                multiline: true,
+                confirmLabel: 'Delete election',
+              });
+              if (reason) await onAction('delete', { reason });
+            }}
+          >
+            Delete
+          </button>
         </div>
       </div>
       <ul className="mt-3 space-y-1">
@@ -3616,6 +3651,100 @@ const PermissionsArea = ({ classId, onChanged }: { classId: number; onChanged: (
           </ul>
         </div>
       )}
+    </div>
+  );
+};
+
+/**
+ * The organizer's Recycle Bin. Every destructive action in this workspace —
+ * deleting an election, removing a member, dropping roster rows, taking an
+ * announcement down, deleting a template — is snapped into the bin first, so
+ * the organizer can reverse it instead of living with it.
+ */
+const RecycleArea = ({ classId }: { classId: number }) => {
+  const [items, setItems] = useState<any[]>([]);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const data: any = await cgm.recycleBin(classId);
+      setItems(Array.isArray(data) ? data : (data?.data || []));
+    } catch { setItems([]); }
+  }, [classId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const restore = async (item: any) => {
+    setBusyId(item.id);
+    setMessage(null);
+    try {
+      await cgm.restoreRecycle(Number(item.id));
+      setMessage(`${item.title} is back.`);
+      await load();
+    } catch (failure: any) {
+      setMessage(failure?.message || 'That change could not be reversed.');
+    } finally { setBusyId(null); }
+  };
+
+  const pending = items.filter((item) => !item.restored).length;
+  return (
+    <div className="space-y-4" data-testid="cgm-recycle-area">
+      <div className={card}>
+        <p className={label}>Recycle Bin</p>
+        <p className="mt-1 text-[11px] font-medium leading-5 text-slate-500">
+          Every delete and removal in this class is recorded here first. Restoring puts the records back exactly as
+          they were — the same ids, the same group seats, the same ballots — so nothing the organizer did by mistake
+          has to be permanent.
+        </p>
+        {message && <p role="status" className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{message}</p>}
+      </div>
+
+      <div className={card}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className={label}>Deleted items</p>
+          <p className="text-[11px] font-black uppercase tracking-wider text-slate-400">
+            {pending === 0 ? 'nothing waiting to be reversed' : `${pending} can be reversed`} · {items.length} total
+          </p>
+        </div>
+        {items.length === 0 && (
+          <p className="mt-3 rounded-xl border border-dashed border-slate-200 px-3 py-6 text-center text-xs font-semibold text-slate-400">
+            Nothing has been deleted in this class yet.
+          </p>
+        )}
+        <div className="mt-3">
+          <RecentItems
+            items={items}
+            label="deleted items"
+            testId="cgm-recycle-list"
+            render={(item) => (
+              <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-black text-slate-700">{item.title || item.entityType.replace(/_/g, ' ')}</p>
+                  <p className="text-[11px] font-semibold text-slate-400">
+                    {String(item.entityType).replace(/_/g, ' ')} · {item.rowCount} record(s) · {formatWhen(item.deletedAt)}
+                    {item.actor ? ` · ${item.actor}` : ''}
+                    {item.restored ? ` · restored${item.restoredBy ? ` by ${item.restoredBy}` : ''}` : ''}
+                  </p>
+                  {item.detail && <p className="text-[11px] text-slate-400">{item.detail}</p>}
+                </div>
+                {item.restored
+                  ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-emerald-700">Restored</span>
+                  : (
+                    <button
+                      type="button"
+                      className="mini-button"
+                      data-testid={`cgm-recycle-restore-${item.id}`}
+                      disabled={busyId === item.id}
+                      onClick={() => void restore(item)}
+                    >
+                      {busyId === item.id ? 'Restoring…' : 'Restore'}
+                    </button>
+                  )}
+              </div>
+            )}
+          />
+        </div>
+      </div>
     </div>
   );
 };

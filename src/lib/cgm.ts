@@ -551,6 +551,13 @@ export const cgm = {
     memberCall(`/api/cgm/elections/${electionId}/tiebreak`, { method: 'POST', body: { winnerCandidateId, reason } }),
   announceWinner: (electionId: number) =>
     memberCall(`/api/cgm/elections/${electionId}/announce`, { method: 'POST', body: {} }),
+  /** Delete is a move, not a loss: the whole record goes to the Recycle Bin. */
+  deleteElection: (electionId: number, reason: string) =>
+    memberCall(`/api/cgm/elections/${electionId}`, { method: 'DELETE', body: { reason } }),
+
+  // recycle bin — every destructive organizer action, reversible
+  recycleBin: (classId: number) => memberCall(`/api/cgm/recycle-bin?classId=${classId}`),
+  restoreRecycle: (id: number) => memberCall(`/api/cgm/recycle-bin/${id}/restore`, { method: 'POST', body: {} }),
 
   // announcements
   announcements: (classId: number) => memberCall(`/api/cgm/classes/${classId}/announcements`),

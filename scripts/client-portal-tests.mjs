@@ -779,8 +779,10 @@ const main = async () => {
   // 2026-11-04 added cgm_rechoose_requests (43rd CGM table) and 2026-11-05
   // adds the three FORCE GET tables (44-46): an organizer's proposed
   // destinations only ever take effect after PHANTOM approves them.
+  // 2026-11-05 also adds cgm_recycle (51st CGM table): every destructive
+  // organizer action keeps the rows it removed, so it can be reversed.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 50, `${allTables.length} user tables`);
+    allTables.length === 63 + 11 + 3 + 51, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',

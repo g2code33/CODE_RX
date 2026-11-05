@@ -1288,6 +1288,49 @@ check('the class-groups panel tells the control center when a section is opened'
   && /onAttentionChange\?\.\(\);/.test(phantomPanel)
   && /onAttentionChange=\{loadNavAttention\}/.test(controlCenter));
 
+section('33. Elections use every member, and every delete can be reversed');
+
+const recycleLib = src('functions/lib/cgm/recycle.ts');
+const organizerRoutes = src('functions/lib/cgm/routes-organizer.ts');
+
+check('ALL puts the whole group on the ballot instead of waiting for volunteers',
+  /if \(eligibleMode === 'all'\) \{/.test(activitiesRoute)
+  && /INSERT INTO cgm_candidates \(election_id, student_id, statement\) VALUES \(\?, \?, NULL\)/.test(activitiesRoute)
+  && /candidatesSeeded: seeded/.test(activitiesRoute));
+check('the ALL choice says what it does, in the form itself',
+  /ALL puts every current member of the chosen group on the ballot the moment you create the election/.test(workspace)
+  && /every group member goes on the ballot/.test(workspace)
+  && /all \$\{seeded\} member\(s\) of the group are on the ballot/.test(workspace));
+check('an election record can be deleted from the page, with a reason',
+  /data-testid=\{`cgm-election-delete-\$\{election\.id\}`\}/.test(workspace)
+  && /Delete election/.test(workspace)
+  && /cgm\.deleteElection\(Number\(entry\.election\.id\), String\(extra\?\.reason/.test(workspace));
+check('Close and Cancel stay exactly where they were',
+  /onAction\('close'\)/.test(workspace) && /onAction\('cancel', \{ reason \}\)/.test(workspace));
+check('the delete route snapshots the whole record before removing it',
+  /app\.delete\('\/api\/cgm\/elections\/:id',/.test(activitiesRoute)
+  && /\{ table: 'cgm_elections', where: 'id = \?', params: \[electionId\] \}/.test(activitiesRoute)
+  && /\{ table: 'cgm_election_ballots', where: 'election_id = \?', params: \[electionId\] \}/.test(activitiesRoute)
+  && /Record a reason when deleting an election\./.test(activitiesRoute));
+check('the Recycle Bin reverses roster rows, members, announcements and templates too',
+  /entityType: 'roster_entry'/.test(organizerRoutes)
+  && /entityType: 'membership'/.test(organizerRoutes)
+  && /entityType: 'announcement'/.test(activitiesRoute)
+  && /entityType: 'template'/.test(activitiesRoute)
+  && /entityType: 'assignment'/.test(activitiesRoute));
+check('restoring is a re-insert of the snapshotted rows, once',
+  /INSERT OR REPLACE INTO \$\{group\.table\}/.test(recycleLib)
+  && /RESTORABLE_TABLES/.test(recycleLib)
+  && /That change was already reversed\./.test(recycleLib)
+  && /app\.post\('\/api\/cgm\/recycle-bin\/:id\/restore',/.test(activitiesRoute));
+check('the Recycle Bin is its own page in the organizer navigation',
+  /\['recycle', 'Recycle Bin', Recycle\]/.test(workspace)
+  && /<RecycleArea classId=\{Number\(activeClass\.id\)\} \/>/.test(workspace)
+  && /data-testid="cgm-recycle-area"/.test(workspace)
+  && /data-testid=\{`cgm-recycle-restore-\$\{item\.id\}`\}/.test(workspace));
+check('its list obeys the one listing rule',
+  /<RecentItems\s+items=\{items\}\s+label="deleted items"\s+testId="cgm-recycle-list"/.test(workspace));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

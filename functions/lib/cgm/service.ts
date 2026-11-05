@@ -588,6 +588,27 @@ export type ClassPermissionGuard =
   | { ok: true; context: ClassOrganizerContext }
   | { ok: false; response: Response };
 
+/**
+ * Same guard, but any one of several permissions opens the door. The Recycle
+ * Bin is like that: whoever is trusted to delete a roster row or remove a member
+ * is trusted to take that delete back.
+ */
+export const requireAnyClassPermission = async (
+  c: Context<{ Bindings: Env }>,
+  member: MemberIdentity,
+  classId: number,
+  permissions: ClassPermission[],
+): Promise<ClassPermissionGuard> => {
+  const context = await organizerContextFor(c.env.DB, member, classId);
+  if (member.isPhantom) {
+    return { ok: true, context: { classId, organizerRowId: null, role: null, permissions: new Set(CLASS_PERMISSIONS) } };
+  }
+  if (!context.role || !permissions.some((permission) => context.permissions.has(permission))) {
+    return { ok: false, response: c.json({ success: false, error: 'You are not authorized for this class action.' }, 403) };
+  }
+  return { ok: true, context };
+};
+
 export const requireClassPermission = async (
   c: Context<{ Bindings: Env }>,
   member: MemberIdentity,

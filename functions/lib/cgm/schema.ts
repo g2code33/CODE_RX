@@ -656,6 +656,23 @@ CREATE TABLE IF NOT EXISTS cgm_phantom_attention (
   FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
 );
 
+CREATE TABLE IF NOT EXISTS cgm_recycle (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER,
+  activity_id INTEGER,
+  group_id INTEGER,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER,
+  title TEXT NOT NULL DEFAULT '',
+  detail TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  actor_label TEXT,
+  actor_profile_id INTEGER,
+  deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  restored_at DATETIME,
+  restored_by_label TEXT
+);
+
 CREATE TABLE IF NOT EXISTS cgm_announcement_reports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   announcement_id INTEGER NOT NULL,

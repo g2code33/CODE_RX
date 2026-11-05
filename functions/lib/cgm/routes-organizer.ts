@@ -59,6 +59,7 @@ import {
 import { hashPassword } from '../auth';
 import { allocateStudentPasskey, sanitizePasskeyPrefix } from './core';
 import { convertReservationsForEntry, releaseReservationsForEntries } from './forceGet';
+import { recordRecycle, snapshotFromDb } from './recycle';
 import {
   asRows,
   auditCgm,
@@ -1421,6 +1422,16 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     // A seat held by a Force Get approval belongs to this roster row: releasing
     // it first keeps the delete legal and tells PHANTOM the seat is gone.
     await releaseReservationsForEntries(c.env.DB, [entryId], { label: member.name, profileId: member.profileId });
+    await recordRecycle(c.env.DB, {
+      classId,
+      entityType: 'roster_entry', entityId: entryId,
+      title: 'Roster row removed',
+      detail: 'Reversing this puts the row back in the roster',
+      payload: await snapshotFromDb(c.env.DB, [
+        { table: 'cgm_roster_entries', where: 'id = ?', params: [entryId] },
+      ]),
+      actorLabel: member.name, actorProfileId: member.profileId,
+    });
     await c.env.DB.prepare('DELETE FROM cgm_roster_entries WHERE id = ? AND class_id = ?').bind(entryId, classId).run();
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
@@ -1452,6 +1463,16 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     let deleted = 0;
     if (deletable.length) {
       await releaseReservationsForEntries(c.env.DB, deletable, { label: member.name, profileId: member.profileId });
+      await recordRecycle(c.env.DB, {
+        classId,
+        entityType: 'roster_entry', entityId: null,
+        title: `${deletable.length} roster row(s) removed`,
+        detail: 'Reversing this puts the rows back in the roster',
+        payload: await snapshotFromDb(c.env.DB, [
+          { table: 'cgm_roster_entries', where: `class_id = ? AND id IN (${deletable.map(() => '?').join(', ')})`, params: [classId, ...deletable] },
+        ]),
+        actorLabel: member.name, actorProfileId: member.profileId,
+      });
       const deletePlaceholders = deletable.map(() => '?').join(', ');
       const result = await c.env.DB.prepare(
         `DELETE FROM cgm_roster_entries WHERE class_id = ? AND id IN (${deletePlaceholders})`
@@ -1813,6 +1834,15 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const body = await readBody(c);
     const reason = cleanOrNull(body.reason, 500);
     if (action === 'remove') {
+      await recordRecycle(c.env.DB, {
+        classId, entityType: 'membership', entityId: memberId,
+        title: 'Member removed from the class',
+        detail: reason || 'No reason recorded',
+        payload: await snapshotFromDb(c.env.DB, [
+          { table: 'cgm_class_members', where: 'id = ?', params: [memberId] },
+        ]),
+        actorLabel: member.name, actorProfileId: member.profileId,
+      });
       await c.env.DB.prepare(
         `UPDATE cgm_class_members SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = ? WHERE id = ?`
       ).bind(reason, memberId).run();

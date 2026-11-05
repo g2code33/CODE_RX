@@ -206,7 +206,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 50);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 51);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -5461,6 +5461,127 @@ check('46.11 — opening one tab never clears another',
       && Number(navSection(board, 'audit').lastSeenId) === 0;
   })(),
   JSON.stringify((recycleSeen.json?.data?.board?.sections || []).map((entry) => [entry.key, entry.lastSeenId])));
+
+
+
+// ---------------------------------------------------------------------------
+// 47. Elections use every member, and every delete is reversible
+// ---------------------------------------------------------------------------
+section('47. ALL puts every member on the ballot; deletes land in the Recycle Bin');
+
+// A fresh activity with a known group of members.
+const recycleLab = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Recycle Lab', type: 'practical',
+  config: { method: 'automatic', groupCount: 3, capacity: 100, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const recycleActivityId = Number(recycleLab.json?.data?.activityId || recycleLab.json?.data?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${recycleActivityId}/lifecycle`, { action: 'publish' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${recycleActivityId}/generate`, {}, amaToken);
+const recycleDetail0 = await memberCall('GET', `/api/cgm/activities/${recycleActivityId}`, undefined, amaToken);
+const recycleGroupId = Number((recycleDetail0.json?.data?.groups || [])[0]?.id || 0);
+const seatsFilled = Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'", recycleGroupId)?.c || 0);
+
+const allElection = await memberCall('POST', `/api/cgm/groups/${recycleGroupId}/elections`, {
+  title: 'All-members ballot', role: 'leader', anonymity: 'anonymous', visibility: 'group',
+  allowVoteChange: false, tieBreak: 'random', eligibleMode: 'all',
+}, amaToken);
+const allElectionId = Number(allElection.json?.data?.electionId || 0);
+check('47.1 — ALL records the election as open to every member', allElection.status === 200
+  && allElection.json?.data?.eligibleMode === 'all'
+  && q1('SELECT eligible_mode FROM cgm_elections WHERE id = ?', allElectionId)?.eligible_mode === 'all',
+  `${allElection.status} ${allElection.text?.slice(0, 160)}`);
+check('47.2 — ALL puts every group member on the ballot at creation, without waiting for volunteers',
+  seatsFilled >= 2
+  && Number(allElection.json?.data?.candidatesSeeded) === seatsFilled
+  && Number(q1("SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ? AND status = 'active'", allElectionId)?.c) === seatsFilled,
+  `seats=${seatsFilled} seeded=${allElection.json?.data?.candidatesSeeded} onBallot=${q1("SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ? AND status = 'active'", allElectionId)?.c}`);
+check('47.3 — every one of those candidates is a real member of the group',
+  Number(q1(`SELECT COUNT(*) c FROM cgm_candidates c JOIN cgm_group_assignments ga
+             ON ga.student_id = c.student_id AND ga.group_id = ? AND ga.status = 'active'
+             WHERE c.election_id = ?`, recycleGroupId, allElectionId)?.c) === seatsFilled);
+const openAllVote = await memberCall('POST', `/api/cgm/elections/${allElectionId}/open-voting`, {}, amaToken);
+check('47.4 — a ballot full of members can open for voting straight away', openAllVote.status === 200, openAllVote.text?.slice(0, 160));
+
+const customElection = await memberCall('POST', `/api/cgm/groups/${recycleGroupId}/elections`, {
+  title: 'Not yet', role: 'leader', eligibleMode: 'custom', eligibleStudentIds: [],
+}, amaToken);
+check('47.5 — CUSTOMIZE still needs somebody to be picked (or refuses a second live election)',
+  [400, 409].includes(customElection.status), `${customElection.status}`);
+
+// Delete the whole election: it must land in the bin, rows and all.
+const ballotsBefore = Number(q1('SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ?', allElectionId)?.c || 0);
+const deleteElection = await memberCall('DELETE', `/api/cgm/elections/${allElectionId}`, { reason: 'Created by mistake' }, amaToken);
+const recycleId = Number(deleteElection.json?.data?.recycleId || 0);
+check('47.6 — deleting an election needs a reason and moves the whole record to the bin',
+  deleteElection.status === 200 && recycleId > 0
+  && !q1('SELECT id FROM cgm_elections WHERE id = ?', allElectionId)
+  && Number(q1('SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ?', allElectionId)?.c) === 0,
+  `${deleteElection.status} ${deleteElection.text?.slice(0, 160)}`);
+const deleteNoReason = await memberCall('DELETE', `/api/cgm/elections/${allElectionId}`, {}, amaToken);
+check('47.7 — the same delete without a reason is refused (and the row is already gone)', deleteNoReason.status === 404 || deleteNoReason.status === 400);
+
+const bin = await memberCall('GET', `/api/cgm/recycle-bin?classId=${classAId}`, undefined, amaToken);
+const binRow = (bin.json?.data || []).find((row) => Number(row.id) === recycleId);
+check('47.8 — the organizer Recycle Bin lists it with what it would restore', Boolean(binRow)
+  && binRow.entityType === 'election' && binRow.rowCount >= ballotsBefore && binRow.restored === false,
+  `status=${bin.status} text=${bin.text?.slice(0, 200)}`);
+
+const restore = await memberCall('POST', `/api/cgm/recycle-bin/${recycleId}/restore`, {}, amaToken);
+check('47.9 — restoring puts the election and its candidates back exactly as they were',
+  restore.status === 200
+  && Number(q1('SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ?', allElectionId)?.c) === ballotsBefore
+  && q1('SELECT status FROM cgm_elections WHERE id = ?', allElectionId)?.status === 'voting',
+  `${restore.status} ${restore.text?.slice(0, 160)}`);
+const restoreAgain = await memberCall('POST', `/api/cgm/recycle-bin/${recycleId}/restore`, {}, amaToken);
+check('47.10 — a change can only be reversed once', restoreAgain.status === 409, `${restoreAgain.status}`);
+check('47.11 — the bin is class-scoped and organizer-gated',
+  (await memberCall('GET', `/api/cgm/recycle-bin?classId=${classAId}`, undefined, amaToken)).status === 200
+  && (await memberCall('GET', '/api/cgm/recycle-bin?classId=999999', undefined, amaToken)).status >= 400
+  && (await memberCall('POST', `/api/cgm/recycle-bin/${recycleId}/restore`, {}, assistantToken)).status >= 400);
+
+// A roster row and an announcement are reversible too.
+const recycleRoster = await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries`, {
+  fullName: 'Recycle Roster Row', indexNumber: 'RCY-900-001',
+}, amaToken);
+const rosterEntryId = Number(recycleRoster.json?.data?.entryId || recycleRoster.json?.data?.id || 0)
+  || Number(q1("SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number = 'RCY-900-001'", classAId)?.id || 0);
+const rosterDelete = await memberCall('DELETE', `/api/cgm/classes/${classAId}/roster/entries/${rosterEntryId}`, undefined, amaToken);
+const rosterBinRow = ((await memberCall('GET', `/api/cgm/recycle-bin?classId=${classAId}`, undefined, amaToken)).json?.data || [])
+  .find((row) => row.entityType === 'roster_entry' && !row.restored);
+check('47.12 — a deleted roster row is kept in the bin', rosterDelete.status === 200 && Boolean(rosterBinRow),
+  `${rosterDelete.status} ${JSON.stringify(rosterBinRow || {}).slice(0, 140)}`);
+const rosterRestore = rosterBinRow
+  ? await memberCall('POST', `/api/cgm/recycle-bin/${rosterBinRow.id}/restore`, {}, amaToken)
+  : { status: 0 };
+check('47.13 — and restoring puts the row back in the roster',
+  rosterRestore.status === 200
+  && Boolean(q1("SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number = 'RCY-900-001'", classAId)),
+  `${rosterRestore.status}`);
+
+const recycleClass = await memberCall('POST', '/api/cgm/classes', {
+  name: 'Recycle Announcement Lab', institution: 'Recycle University',
+}, phantomToken);
+const recycleClassId = Number(recycleClass.json?.data?.classId || 0);
+await memberCall('POST', `/api/cgm/classes/${recycleClassId}/entry-password`, { entryPassword: 'recycle-101' }, phantomToken);
+await memberCall('POST', `/api/cgm/classes/${recycleClassId}/submit`, {}, phantomToken);
+await memberCall('POST', `/api/cgm/phantom/classes/${recycleClassId}/approve`, {}, phantomToken);
+const recycleAnn = await memberCall('POST', `/api/cgm/classes/${recycleClassId}/announcements`, {
+  title: 'Recycle me', body: 'This notice will be taken down and put back.',
+}, phantomToken);
+const recycleAnnId = Number(recycleAnn.json?.data?.announcementId || recycleAnn.json?.data?.id || 0);
+const annRemove = await memberCall('DELETE', `/api/cgm/announcements/${recycleAnnId}`, undefined, phantomToken);
+const annBin = ((await memberCall('GET', `/api/cgm/recycle-bin?classId=${recycleClassId}`, undefined, phantomToken)).json?.data || [])
+  .find((row) => row.entityType === 'announcement' && !row.restored);
+check('47.14 — a taken-down announcement is restorable, not gone',
+  annRemove.status === 200 && Boolean(annBin)
+  && q1('SELECT status FROM cgm_announcements WHERE id = ?', recycleAnnId)?.status === 'removed',
+  `${annRemove.status} ${JSON.stringify(annBin || {}).slice(0, 140)}`);
+const annRestore = annBin ? await memberCall('POST', `/api/cgm/recycle-bin/${annBin.id}/restore`, {}, phantomToken) : { status: 0 };
+check('47.15 — restoring publishes it again with its original text',
+  annRestore.status === 200
+  && q1('SELECT status FROM cgm_announcements WHERE id = ?', recycleAnnId)?.status === 'published'
+  && q1('SELECT title FROM cgm_announcements WHERE id = ?', recycleAnnId)?.title === 'Recycle me',
+  `${annRestore.status}`);
 
 
 // ---------------------------------------------------------------------------
