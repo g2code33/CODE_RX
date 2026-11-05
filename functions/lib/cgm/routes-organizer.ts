@@ -58,6 +58,7 @@ import {
 } from './parse';
 import { hashPassword } from '../auth';
 import { allocateStudentPasskey, sanitizePasskeyPrefix } from './core';
+import { convertReservationsForEntry, releaseReservationsForEntries } from './forceGet';
 import {
   asRows,
   auditCgm,
@@ -1417,6 +1418,9 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       'SELECT student_id FROM cgm_roster_entries WHERE id = ? AND class_id = ?'
     ).bind(entryId, classId));
     if (entry[0]?.student_id) return bad(c, 'This student has already registered; remove the class membership instead.', 409);
+    // A seat held by a Force Get approval belongs to this roster row: releasing
+    // it first keeps the delete legal and tells PHANTOM the seat is gone.
+    await releaseReservationsForEntries(c.env.DB, [entryId], { label: member.name, profileId: member.profileId });
     await c.env.DB.prepare('DELETE FROM cgm_roster_entries WHERE id = ? AND class_id = ?').bind(entryId, classId).run();
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
@@ -1447,6 +1451,7 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const skippedRegistered = targets.length - deletable.length;
     let deleted = 0;
     if (deletable.length) {
+      await releaseReservationsForEntries(c.env.DB, deletable, { label: member.name, profileId: member.profileId });
       const deletePlaceholders = deletable.map(() => '?').join(', ');
       const result = await c.env.DB.prepare(
         `DELETE FROM cgm_roster_entries WHERE class_id = ? AND id IN (${deletePlaceholders})`
@@ -1682,6 +1687,17 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       `UPDATE cgm_registration_requests SET status = 'approved', student_id = ?, reviewed_by_profile_id = ?,
        reviewer_label = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
     ).bind(studentId, member.profileId, member.name, requestId).run();
+
+    // A Force Get seat approved for this roster row becomes the student's own
+    // designation the moment they register — no second approval, nothing moved.
+    const convertedSeats = await convertReservationsForEntry(c.env.DB, {
+      rosterEntryId: Number(request.roster_entry_id), studentId, classId, label: member.name,
+    });
+    for (const placed of convertedSeats) {
+      await notifyStudent(c.env.DB, studentId, 'groups', 'Your group is already decided',
+        `Your organizer had an approved group for you in ${placed.activityName}: ${placed.groupName}. `
+        + `Keep using your normal group selection — you will be placed there when you do.`);
+    }
 
     if (issuedPasskey) {
       // One-time disclosure rule: the passkey itself is shown once in this

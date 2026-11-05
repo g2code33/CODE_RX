@@ -206,7 +206,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 46);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 48);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -3801,7 +3801,7 @@ check('a non-numeric group id answers 404 instead of a D1 500',
 const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
 check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
   /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
-  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx27-passkey-reset'/.test(schemaSrc));
+  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx28-force-get-roster'/.test(schemaSrc));
 
 // ---------------------------------------------------------------------------
 // 39. Re-choose: organizer asks, PHANTOM approves, the member starts fresh
@@ -4736,6 +4736,252 @@ check('42.13 — a telephone number finds the same student (one open request, no
   prPhone.status === 200 && Number(prPhone.json?.data?.requestId) === Number(q1(
     "SELECT id FROM cgm_passkey_requests WHERE student_id = ? AND status = 'pending'", prStudent2.studentId)?.id),
   `status ${prPhone.status} ${prPhone.text?.slice(0, 120)}`);
+
+// ===========================================================================
+section('43. Force Get covers the WHOLE roster — including students who have not registered');
+
+const fgRlConfig = { ...fgConfig, groupCount: 2, capacity: 2, genderRule: 'none' };
+const fgRlLab = await fgNewActivity('Force Get Roster Lab', fgRlConfig);
+await memberCall('POST', `/api/cgm/activities/${fgRlLab}/groups`, { count: 2, capacity: 2 }, amaToken);
+const fgRlGroups = (await fgGroupsOf(fgRlLab)).map((g) => Number(g.id));
+const fgRlGroupName = (groupId) => ((fgGroupsOfNameCache[groupId]) || null);
+const fgGroupsOfNameCache = {};
+for (const g of await fgGroupsOf(fgRlLab)) fgGroupsOfNameCache[Number(g.id)] = g.name;
+
+// Two people who are on the class roster but have never registered.
+const fgRlEntry = async (fullName, indexNumber, gender) => {
+  const created = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`,
+    { fullName, indexNumber, gender }, amaToken);
+  return Number(created.json?.data?.id || 0);
+};
+const fgRlUche = await fgRlEntry('Roster Uche Mensah', 'PH/PHA/26/0901', 'female');
+const fgRlVera = await fgRlEntry('Roster Vera Owusu', 'PH/PHA/26/0902', 'male');
+check('43.0 — a roster row that has not registered has no student identity at all',
+  fgRlUche > 0 && q1('SELECT student_id FROM cgm_roster_entries WHERE id = ?', fgRlUche)?.student_id === null);
+
+const fgRlRoster = await memberCall('GET', `/api/cgm/activities/${fgRlLab}/force-get`, undefined, amaToken);
+const fgRlRows = fgRlRoster.json?.data?.unregistered || [];
+check('43.1 — the Force Get roster lists the unregistered rows next to the members, with name, index and gender',
+  fgRlRoster.status === 200 && fgRlRows.some((row) => Number(row.id) === fgRlUche
+    && row.fullName === 'Roster Uche Mensah' && row.indexNumber === 'PH/PHA/26/0901' && row.gender === 'female'
+    && row.eligible === true && row.reservation === null),
+  `rows=${fgRlRows.length} ${JSON.stringify(fgRlRows.map((row) => row.fullName)).slice(0, 120)}`);
+check('43.2 — they are kept in their own list (no fake student ids, no pollution of the member rows)',
+  (fgRlRoster.json?.data?.students || []).every((row) => Number(row.id) !== fgRlUche && Number(row.id) !== fgRlVera)
+  && Number(fgRlRoster.json?.data?.unregisteredCount) >= 2
+  && fgRlRoster.json?.data?.canForceUnregistered === true);
+
+// -- Proposing a destination for somebody who has not registered ------------
+const fgRlBadEntry = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: 987654, groupId: fgRlGroups[0] }],
+}, amaToken);
+check('43.3 — a roster row that is not in this class is refused', fgRlBadEntry.status === 400
+  && /not an unregistered row/.test(String(fgRlBadEntry.json?.error || '')), `status ${fgRlBadEntry.status}`);
+const fgRlRegisteredEntry = Number(q1(
+  'SELECT id FROM cgm_roster_entries WHERE class_id = ? AND student_id = ?', fmtClassId, fgE.studentId)?.id || 0);
+const fgRlAlreadyRegistered = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlRegisteredEntry, groupId: fgRlGroups[0] }],
+}, amaToken);
+check('43.4 — somebody who HAS registered cannot be forced by roster row (they are a member already)',
+  fgRlAlreadyRegistered.status === 400 && /Members instead/.test(String(fgRlAlreadyRegistered.json?.error || '')),
+  `status ${fgRlAlreadyRegistered.status} ${fgRlAlreadyRegistered.text?.slice(0, 120)}`);
+const fgRlDuplicateEntry = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlUche, groupId: fgRlGroups[0] }, { rosterEntryId: fgRlUche, groupId: fgRlGroups[1] }],
+}, amaToken);
+check('43.5 — the same unregistered row twice in one request is refused', fgRlDuplicateEntry.status === 400);
+check('43.6 — none of the refused requests created anything',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_requests WHERE activity_id = ?', fgRlLab).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_request_entries').c === 0);
+
+const fgRlSubmit = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlUche, groupId: fgRlGroups[0] }],
+  explanation: 'She is on the list but has not collected her passkey yet.',
+}, amaToken);
+const fgRlRequestId = Number(fgRlSubmit.json?.data?.requestId || 0);
+check('43.7 — the organizer sends a destination for a student who has not registered',
+  fgRlSubmit.status === 200 && fgRlRequestId > 0, `status ${fgRlSubmit.status} ${fgRlSubmit.text?.slice(0, 160)}`);
+check('43.8 — the request carries the roster row (no student id), and PHANTOM sees the count',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_request_entries WHERE request_id = ? AND version = 1 AND roster_entry_id = ? AND destination_group_id = ?',
+    fgRlRequestId, fgRlUche, fgRlGroups[0]).c === 1
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_request_items WHERE request_id = ?', fgRlRequestId).c === 0
+  && Number(q1('SELECT student_count FROM cgm_force_get_requests WHERE id = ?', fgRlRequestId).student_count) === 1);
+check('43.9 — submitting still moves nobody and designates nobody',
+  q1('SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ?', fgRlLab).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ?', fgRlLab).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_reservations WHERE activity_id = ?', fgRlLab).c === 0);
+
+const fgRlDetail = await memberCall('GET', `/api/cgm/phantom/force-get/requests/${fgRlRequestId}`, undefined, phantomToken);
+const fgRlBucket = (fgRlDetail.json?.data?.groups || []).find((row) => Number(row.groupId) === fgRlGroups[0]) || {};
+check('43.10 — PHANTOM sees the unregistered row in the destination group, flagged as unregistered',
+  fgRlDetail.status === 200 && (fgRlBucket.students || []).some((row) => Number(row.rosterEntryId) === fgRlUche
+    && row.unregistered === true && row.fullName === 'Roster Uche Mensah'),
+  JSON.stringify(fgRlBucket).slice(0, 220));
+check('43.11 — the request is approvable (nothing invalid, no conflict)',
+  fgRlDetail.json?.data?.invalidItems === 0 && fgRlDetail.json?.data?.canApprove === true);
+
+const fgRlApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRlRequestId}/approve`,
+  { version: 1, reason: 'Approved — hold her seat.' }, phantomToken);
+const fgRlReservation = q1('SELECT * FROM cgm_force_get_reservations WHERE activity_id = ? AND roster_entry_id = ?',
+  fgRlLab, fgRlUche);
+check('43.12 — approval HOLDS the seat for the roster row instead of inventing an assignment',
+  fgRlApprove.status === 200 && fgRlReservation?.status === 'active'
+  && Number(fgRlReservation?.designated_group_id) === fgRlGroups[0]
+  && fgRlReservation?.student_id === null
+  && q1('SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ?', fgRlLab).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ?', fgRlLab).c === 0,
+  `status ${fgRlApprove.status} ${JSON.stringify(fgRlReservation || {}).slice(0, 160)}`);
+check('43.13 — the held seat is audited as a reservation, not a designation',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.reserved_roster_row' AND entity_type = 'force_get_reservation' AND entity_id = ?",
+    String(fgRlReservation?.id)).c === 1);
+check('43.14 — the board reports the held seat as a reservation and NOT as a member',
+  Number(((await fgGroupsOf(fgRlLab)).find((g) => Number(g.id) === fgRlGroups[0]) || {}).reserved) === 1
+  && Number(((await fgGroupsOf(fgRlLab)).find((g) => Number(g.id) === fgRlGroups[0]) || {}).size) === 0);
+
+// -- The held seat is real capacity -----------------------------------------
+const fgRlOverfill = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  items: [{ studentId: fgA.studentId, groupId: fgRlGroups[0] }, { studentId: fgB.studentId, groupId: fgRlGroups[0] }],
+}, amaToken);
+check('43.15 — a seat held for an unregistered row blocks students from filling it (capacity 2, 1 held)',
+  fgRlOverfill.status === 400 && /capacity/.test(String(fgRlOverfill.json?.error || '')),
+  `status ${fgRlOverfill.status} ${fgRlOverfill.text?.slice(0, 160)}`);
+// One seat per group: the only seat in the destination group is the held one.
+const fgRlTightLab = await fgNewActivity('Force Get Roster Tight Lab', { ...fgConfig, groupCount: 2, capacity: 1 });
+await memberCall('POST', `/api/cgm/activities/${fgRlTightLab}/groups`, { count: 2, capacity: 1 }, amaToken);
+const fgRlTightGroups = (await fgGroupsOf(fgRlTightLab)).map((g) => Number(g.id));
+const fgRlTessa = await fgRlEntry('Roster Tight Tessa', 'PH/PHA/26/0904', 'female');
+const fgRlTightSubmit = await memberCall('POST', `/api/cgm/activities/${fgRlTightLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlTessa, groupId: fgRlTightGroups[0] }],
+}, amaToken);
+await memberCall('POST', `/api/cgm/phantom/force-get/requests/${Number(fgRlTightSubmit.json?.data?.requestId)}/approve`,
+  { version: Number(fgRlTightSubmit.json?.data?.version) }, phantomToken);
+const fgRlOrdinary = await studentCall('POST', `/api/cgm/student/activities/${fgRlTightLab}/random-draw`, {}, fgE.session);
+check('43.16 — an ordinary draw can never take the seat held for an unregistered row',
+  fgRlOrdinary.status === 200
+  && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'", fgRlTightGroups[0]).c) === 0,
+  `status ${fgRlOrdinary.status} ${fgRlOrdinary.text?.slice(0, 120)}`);
+
+// -- Gender pools include the held seat --------------------------------------
+const fgRlGenderConfig = { ...fgConfig, groupCount: 2, capacity: 4, genderRule: 'separate' };
+const fgRlGenderLab = await fgNewActivity('Force Get Roster Gender Lab', fgRlGenderConfig);
+await memberCall('POST', `/api/cgm/activities/${fgRlGenderLab}/groups`, { count: 2, capacity: 4 }, amaToken);
+const fgRlGenderGroups = (await fgGroupsOf(fgRlGenderLab)).map((g) => Number(g.id));
+const fgRlMixed = await memberCall('POST', `/api/cgm/activities/${fgRlGenderLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlUche, groupId: fgRlGenderGroups[0] }, { rosterEntryId: fgRlVera, groupId: fgRlGenderGroups[0] }],
+}, amaToken);
+check('43.17 — two unregistered rows of different genders cannot share a separated group',
+  fgRlMixed.status === 400 && /separates gender pools/.test(String(fgRlMixed.json?.error || '')),
+  `status ${fgRlMixed.status} ${fgRlMixed.text?.slice(0, 160)}`);
+const fgRlGenderFirst = await memberCall('POST', `/api/cgm/activities/${fgRlGenderLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlVera, groupId: fgRlGenderGroups[0] }],
+}, amaToken);
+check('43.18 — one pool at a time is accepted (the male roster row alone)',
+  fgRlGenderFirst.status === 200, `status ${fgRlGenderFirst.status}`);
+const fgRlGenderApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${Number(fgRlGenderFirst.json?.data?.requestId)}/approve`,
+  { version: Number(fgRlGenderFirst.json?.data?.version) }, phantomToken);
+check('43.19 — PHANTOM approves the single-pool seat', fgRlGenderApprove.status === 200, `status ${fgRlGenderApprove.status}`);
+const fgRlGenderSecond = await memberCall('POST', `/api/cgm/activities/${fgRlGenderLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlUche, groupId: fgRlGenderGroups[0] }],
+}, amaToken);
+check('43.20 — a seat already held for a male row refuses a female row into the same group',
+  fgRlGenderSecond.status === 400 && /separates gender pools/.test(String(fgRlGenderSecond.json?.error || '')),
+  `status ${fgRlGenderSecond.status} ${fgRlGenderSecond.text?.slice(0, 160)}`);
+
+// -- Revising a request keeps the roster rows --------------------------------
+const fgRlKofi = await fgRlEntry('Roster Kofi Boateng', 'PH/PHA/26/0903', 'male');
+const fgRlDraft = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlVera, groupId: fgRlGroups[1] }],
+  explanation: 'First draft.',
+}, amaToken);
+const fgRlDraftId = Number(fgRlDraft.json?.data?.requestId || 0);
+const fgRlRevise = await memberCall('POST', `/api/cgm/force-get/requests/${fgRlDraftId}/revise`, {
+  entries: [{ rosterEntryId: fgRlVera, groupId: fgRlGroups[1] }, { rosterEntryId: fgRlKofi, groupId: fgRlGroups[0] }],
+  explanation: 'Both roster rows, two groups.',
+}, amaToken);
+// A revision is its own version (and its own request row) — the superseded
+// version can never be approved afterwards.
+const fgRlRevVersion = Number(fgRlDraft.json?.data?.version || 0) + 1;
+const fgRlRevId = Number(fgRlRevise.json?.data?.requestId || 0);
+check('43.21 — a revision carries the unregistered rows too, as a brand-new version',
+  fgRlDraft.status === 200 && fgRlRevise.status === 200 && Number(fgRlRevise.json?.data?.version) === fgRlRevVersion
+  && fgRlRevId !== fgRlDraftId
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_request_entries WHERE request_id = ? AND version = ?', fgRlRevId, fgRlRevVersion).c === 2
+  && q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgRlDraftId)?.status === 'superseded'
+  && q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgRlRevId)?.status === 'pending',
+  `status ${fgRlRevise.status} draft=${fgRlDraft.status}/v${fgRlDraft.json?.data?.version} new=${fgRlRevId} ${fgRlRevise.text?.slice(0, 140)}`);
+
+// -- The row registers: the held seat becomes their own designation ----------
+const fgRlRegister = await call('POST', '/api/cgm/student/register',
+  { classCode: fmtCode, indexNumber: 'PH/PHA/26/0901', entryPassword: 'fmt-101-entry' });
+const fgRlStudentId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', 'ph/pha/26/0901')?.id || 0);
+check('43.22 — the previously unregistered student can now register normally',
+  fgRlRegister.status === 200 && fgRlStudentId > 0 && Boolean(fgRlRegister.json?.data?.passkey),
+  `status ${fgRlRegister.status} ${fgRlRegister.text?.slice(0, 160)}`);
+const fgRlReservationAfter = q1('SELECT * FROM cgm_force_get_reservations WHERE id = ?', fgRlReservation?.id);
+const fgRlDesignation = q1('SELECT * FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?',
+  fgRlLab, fgRlStudentId);
+check('43.23 — the seat held for her becomes her own designation the moment she registers',
+  fgRlReservationAfter?.status === 'converted' && Number(fgRlReservationAfter?.student_id) === fgRlStudentId
+  && fgRlDesignation?.status === 'active' && Number(fgRlDesignation?.designated_group_id) === fgRlGroups[0]
+  && Number(fgRlReservationAfter?.converted_designation_id) === Number(fgRlDesignation?.id),
+  JSON.stringify({ res: fgRlReservationAfter?.status, des: fgRlDesignation?.status }).slice(0, 200));
+check('43.24 — the conversion is audited and the student is told without being moved',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.reservation_converted' AND entity_id = ?",
+    String(fgRlDesignation?.id)).c === 1
+  && q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND title = 'Your group is already decided'",
+    fgRlStudentId).c === 1
+  && q1('SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ?', fgRlLab, fgRlStudentId).c === 0);
+const fgRlNewSession = (await studentCall('POST', '/api/cgm/student/login', {
+  identifierType: 'index_number', identifier: 'PH/PHA/26/0901', passkey: String(fgRlRegister.json?.data?.passkey || ''),
+})).json?.data?.session?.token;
+const fgRlDraw = await studentCall('POST', `/api/cgm/student/activities/${fgRlLab}/random-draw`, {}, fgRlNewSession);
+check('43.25 — she still samples herself and lands in the seat that was held for her',
+  fgRlDraw.status === 200 && Number(fgRlDraw.json?.data?.groupId) === fgRlGroups[0]
+  && fgRlDraw.json?.data?.designated === true,
+  `status ${fgRlDraw.status} ${fgRlDraw.text?.slice(0, 160)}`);
+check('43.26 — the reservation is spent: it never converts twice',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_reservations WHERE roster_entry_id = ?', fgRlUche).c === 1
+  && q1("SELECT status FROM cgm_force_get_reservations WHERE id = ?", fgRlReservation?.id)?.status === 'converted'
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?', fgRlLab, fgRlStudentId).c === 1);
+
+// -- A selected-only activity never forces an unregistered row ---------------
+const fgRlSelLab = await fgNewActivity('Force Get Roster Selected Lab', { ...fgConfig, groupCount: 2, capacity: 4, eligibility: 'selected' });
+await memberCall('PATCH', `/api/cgm/activities/${fgRlSelLab}`, {
+  config: { ...fgConfig, groupCount: 2, capacity: 4, eligibility: 'selected' },
+  eligibleStudentIds: [fgE.studentId],
+}, amaToken);
+await memberCall('POST', `/api/cgm/activities/${fgRlSelLab}/groups`, { count: 2, capacity: 4 }, amaToken);
+const fgRlSelGroups = (await fgGroupsOf(fgRlSelLab)).map((g) => Number(g.id));
+const fgRlSelRoster = await memberCall('GET', `/api/cgm/activities/${fgRlSelLab}/force-get`, undefined, amaToken);
+const fgRlSelRow = (fgRlSelRoster.json?.data?.unregistered || []).find((row) => Number(row.id) === fgRlVera) || {};
+check('43.27 — in a selected-only activity the unregistered rows are shown but marked ineligible with the reason',
+  fgRlSelRow.eligible === false && /selected/.test(String(fgRlSelRow.reason || ''))
+  && fgRlSelRoster.json?.data?.canForceUnregistered === false,
+  JSON.stringify(fgRlSelRow).slice(0, 200));
+const fgRlSelSubmit = await memberCall('POST', `/api/cgm/activities/${fgRlSelLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlVera, groupId: fgRlSelGroups[0] }],
+}, amaToken);
+check('43.28 — and the server refuses to force them anyway',
+  fgRlSelSubmit.status === 400 && /selected/.test(String(fgRlSelSubmit.json?.error || '')),
+  `status ${fgRlSelSubmit.status} ${fgRlSelSubmit.text?.slice(0, 160)}`);
+
+// -- Deleting a roster row releases the seat it was holding ------------------
+const fgRlGone = await fgRlEntry('Roster Gone Guy', 'PH/PHA/26/0905', 'male');
+const fgRlGoneSubmit = await memberCall('POST', `/api/cgm/activities/${fgRlLab}/force-get/requests`, {
+  entries: [{ rosterEntryId: fgRlGone, groupId: fgRlGroups[1] }], explanation: 'Seat for a late addition.',
+}, amaToken);
+await memberCall('POST', `/api/cgm/phantom/force-get/requests/${Number(fgRlGoneSubmit.json?.data?.requestId)}/approve`,
+  { version: Number(fgRlGoneSubmit.json?.data?.version) }, phantomToken);
+const fgRlGoneReservation = q1('SELECT * FROM cgm_force_get_reservations WHERE activity_id = ? AND roster_entry_id = ?',
+  fgRlLab, fgRlGone);
+check('43.29 — the seat is held for the row', fgRlGoneReservation?.status === 'active');
+const fgRlGoneDelete = await memberCall('DELETE', `/api/cgm/classes/${fmtClassId}/roster/entries/${fgRlGone}`, undefined, amaToken);
+check('43.30 — deleting that roster row releases the seat instead of failing on it',
+  fgRlGoneDelete.status === 200
+  && q1('SELECT status FROM cgm_force_get_reservations WHERE id = ?', fgRlGoneReservation?.id)?.status === 'cleared'
+  && q1('SELECT COUNT(*) c FROM cgm_roster_entries WHERE id = ?', fgRlGone).c === 0
+  && q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.reservation_cleared' AND entity_id = ?",
+    String(fgRlGoneReservation?.id)).c === 1,
+  `status ${fgRlGoneDelete.status} ${fgRlGoneDelete.text?.slice(0, 140)}`);
 
 
 // ---------------------------------------------------------------------------

@@ -901,6 +901,127 @@ let wsClass = null;
 }
 
 // ---------------------------------------------------------------------------
+// Force Get covers the WHOLE roster: a person who is on the class roster but has
+// never registered can be given a destination. The seat is held (capacity and
+// gender included), and becomes their own designation when they register.
+// ---------------------------------------------------------------------------
+{
+  const organizer = { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } };
+  const rosterActivity = await api('POST', `/api/cgm/classes/${wsClass.classId}/activities`, {
+    name: `Browser Check Roster Force ${stamp}`, type: 'tutorial',
+    config: { method: 'random', groupCount: 2, capacity: 2, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, phantomToken);
+  const rosterActivityId = rosterActivity.json?.data?.activityId ?? rosterActivity.json?.data?.id;
+  await api('POST', `/api/cgm/activities/${rosterActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+  const rosterIndex = `BRW-${stamp}-UR`;
+  const unregisteredEntry = await api('POST', `/api/cgm/classes/${wsClass.classId}/roster/entries`,
+    { fullName: 'Unregistered Uma', indexNumber: rosterIndex, gender: 'female' }, phantomToken);
+  const unregisteredEntryId = Number(unregisteredEntry.json?.data?.id || 0);
+  const rosterApi = (await api('GET', `/api/cgm/activities/${rosterActivityId}`, undefined, phantomToken)).json?.data || {};
+  const rosterGroupIds = (rosterApi.groups || []).map((group) => Number(group.id));
+
+  const page = await boot('#class-groups', organizer);
+  const groupsNav = page.buttonByText('Groups');
+  groupsNav && groupsNav.click();
+  await page.waitForFor('Choose an activity', 20_000);
+  const chooser = page.window.document.querySelector('select[aria-label="Choose activity"]');
+  const selectSetter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+  if (chooser) {
+    selectSetter.call(chooser, String(rosterActivityId));
+    chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  const openForceGet = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-force-get-open"]'), 20_000);
+  openForceGet && openForceGet.click();
+  await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-force-get"]'), 20_000);
+
+  const rowOf = (entryId) => [...page.window.document.querySelectorAll('[data-testid="cgm-force-get-unregistered-row"]')]
+    .find((row) => Number(row.getAttribute('data-roster-entry-id')) === Number(entryId));
+  const unregisteredRow = await page.waitForElement(() => rowOf(unregisteredEntryId), 20_000);
+  check('the workspace lists a class-roster row that has not registered, marked NOT REGISTERED',
+    Boolean(unregisteredRow) && /Unregistered Uma/.test(unregisteredRow.textContent || '')
+    && /NOT REGISTERED/.test(unregisteredRow.textContent || '')
+    && Boolean(unregisteredRow.querySelector('[data-testid="cgm-force-get-unregistered-group"]')),
+    page.body().slice(0, 220));
+  check('the page explains that the seat is held and becomes theirs when they register',
+    /becomes their own designation/.test(page.body())
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-force-get-unregistered-note"]')));
+
+  const entrySelect = rowOf(unregisteredEntryId)?.querySelector('[data-testid="cgm-force-get-unregistered-group"]');
+  if (entrySelect) {
+    selectSetter.call(entrySelect, String(rosterGroupIds[0]));
+    entrySelect.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  await page.wait(150);
+  const entryCheckbox = rowOf(unregisteredEntryId)?.querySelector('[data-testid="cgm-force-get-select"]');
+  entryCheckbox && entryCheckbox.click();
+  await page.wait(200);
+  check('an unregistered row can be selected and given a destination like any member',
+    Boolean(entryCheckbox?.checked) && Boolean(rowOf(unregisteredEntryId)?.querySelector('select')?.value),
+    page.body().slice(0, 200));
+  check('the live preview counts the unregistered student in the destination group',
+    Boolean(page.window.document.querySelector('[data-testid="cgm-force-get-preview-toggle"]'))
+    && /1 student\(s\) ready/.test(page.body().replace(/\s+/g, ' ')));
+
+  const submitRoster = page.window.document.querySelector('[data-testid="cgm-force-get-submit"]');
+  check('submitting is enabled for a request that only names an unregistered student',
+    Boolean(submitRoster) && submitRoster.disabled === false);
+  submitRoster && submitRoster.click();
+  check('the request is sent to PHANTOM like any other version',
+    await page.waitForFor('sent to PHANTOM. Nothing moves until PHANTOM approves.', 20_000), page.body().slice(0, 240));
+
+  const rosterQueue = (await api('GET', '/api/cgm/phantom/force-get/requests?status=pending', undefined, phantomToken)).json?.data || [];
+  const rosterRequest = rosterQueue.find((row) => Number(row.activityId) === Number(rosterActivityId));
+  check('the PHANTOM queue counts the unregistered student in the request',
+    Boolean(rosterRequest) && Number(rosterRequest.studentCount) === 1,
+    JSON.stringify(rosterRequest || {}).slice(0, 160));
+  const rosterDetail = (await api('GET', `/api/cgm/phantom/force-get/requests/${Number(rosterRequest?.id)}`, undefined, phantomToken)).json?.data || {};
+  const rosterBucket = (rosterDetail.groups || []).find((bucket) => Number(bucket.groupId) === Number(rosterGroupIds[0])) || {};
+  check('PHANTOM sees the unregistered row in the destination group, flagged as such',
+    (rosterBucket.students || []).some((student) => Number(student.rosterEntryId) === unregisteredEntryId && student.unregistered === true),
+    JSON.stringify(rosterBucket).slice(0, 200));
+
+  const rosterApprove = await api('POST', `/api/cgm/phantom/force-get/requests/${Number(rosterRequest?.id)}/approve`,
+    { version: Number(rosterRequest?.version) }, phantomToken);
+  check('PHANTOM approval holds the seat instead of inventing an assignment', rosterApprove.status === 200,
+    `status ${rosterApprove.status}`);
+  const heldBoard = (await api('GET', `/api/cgm/activities/${rosterActivityId}`, undefined, phantomToken)).json?.data || {};
+  const heldGroup = (heldBoard.groups || []).find((group) => Number(group.id) === Number(rosterGroupIds[0])) || {};
+  check('the held seat shows as reserved with nobody added to the group',
+    Number(heldGroup.reserved) === 1 && Number(heldGroup.size) === 0,
+    JSON.stringify(heldGroup).slice(0, 160));
+
+  // She registers: the held seat becomes her own designation, and she samples into it.
+  const joinRegistration = await fetch(`${BASE}/api/cgm/student/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.246' },
+    body: JSON.stringify({ classCode: wsClass.code, indexNumber: rosterIndex, entryPassword: 'rechoose-entry' }),
+  }).then((response) => response.json());
+  const joinQueue = (await api('GET', `/api/cgm/classes/${wsClass.classId}/registrations`, undefined, phantomToken)).json?.data || [];
+  const joinPending = joinQueue.find((row) => row.indexNumber === rosterIndex);
+  // The class may approve registrations automatically or through the organizer.
+  const joinApproved = joinPending
+    ? await api('POST', `/api/cgm/classes/${wsClass.classId}/registrations/${joinPending.id}/approve`, {}, phantomToken)
+    : await Promise.resolve(null);
+  const joinPasskey = String(joinApproved?.json?.data?.passkey || joinRegistration?.data?.passkey || '');
+  const joinLogin = await api('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: rosterIndex, passkey: joinPasskey });
+  const joinStudentId = Number(joinLogin.json?.data?.student?.id || 0);
+  const joinRosterAfter = (await api('GET', `/api/cgm/activities/${rosterActivityId}/force-get`, undefined, phantomToken)).json?.data || {};
+  check('registering converts the held seat into her own designation',
+    joinStudentId > 0
+    && Number(joinRosterAfter.unregisteredCount) === 0
+    && (joinRosterAfter.students || []).some((student) => Number(student.id) === joinStudentId
+      && student.designation && Number(student.designation.groupId) === Number(rosterGroupIds[0])),
+    `pending=${Boolean(joinPending)} student=${joinStudentId} unregistered=${joinRosterAfter.unregisteredCount}`);
+  const joinToken = joinLogin.json?.data?.session?.token;
+  const joinDraw = await fetch(`${BASE}/api/cgm/student/activities/${rosterActivityId}/random-draw`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Code-Rx-Student-Session': String(joinToken) },
+    body: JSON.stringify({}),
+  }).then((response) => response.json());
+  check('she still samples herself and lands in the seat that was held for her',
+    joinDraw?.success === true && Number(joinDraw?.data?.groupId) === Number(rosterGroupIds[0]) && joinDraw?.data?.designated === true,
+    JSON.stringify(joinDraw?.data || {}).slice(0, 160));
+}
+
+// ---------------------------------------------------------------------------
 // Forgot passkey, driven through the DOM from the SIGN-IN PAGE: request →
 // organizer approval → the same page generates the new passkey → sign in works.
 // ---------------------------------------------------------------------------

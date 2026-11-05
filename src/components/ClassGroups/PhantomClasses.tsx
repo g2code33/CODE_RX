@@ -492,11 +492,19 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                         </div>
                         <ul className="mt-1 space-y-0.5">
                           {(bucket.students || []).map((student: any) => (
-                            <li key={student.studentId} className="text-[11px] font-semibold text-slate-600">
+                            <li key={`${student.studentId || `row-${student.rosterEntryId}`}`} className="text-[11px] font-semibold text-slate-600">
                               {student.fullName}
-                              <span className="text-slate-400"> · now {student.currentGroupName || 'unplaced'}</span>
-                              <span className="text-slate-400"> · {student.sampled ? 'sampled' : 'not sampled yet'}</span>
-                              {student.rechooseState ? <span className="text-amber-600"> · re-choose {student.rechooseState}</span> : null}
+                              {student.unregistered ? (
+                                <span className="text-sky-700" data-testid="cgm-phantom-force-get-unregistered">
+                                  {' '}· on the class roster, not registered yet — the seat is held and becomes theirs when they register
+                                </span>
+                              ) : (
+                                <>
+                                  <span className="text-slate-400"> · now {student.currentGroupName || 'unplaced'}</span>
+                                  <span className="text-slate-400"> · {student.sampled ? 'sampled' : 'not sampled yet'}</span>
+                                  {student.rechooseState ? <span className="text-amber-600"> · re-choose {student.rechooseState}</span> : null}
+                                </>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -514,6 +522,8 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   <p className="mt-2 text-[10px] font-semibold text-slate-400">
                     Approving creates designations only — nobody is moved. Each student is placed in the approved group when they sample,
                     and students who already have a group keep it until their own approved Re-choose releases it.
+                    A row marked "not registered yet" gets a held seat instead: it counts for capacity and gender, and becomes that
+                    student's own designation the moment they register.
                   </p>
                 </div>
               )}

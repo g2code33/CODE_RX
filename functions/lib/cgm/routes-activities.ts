@@ -43,6 +43,8 @@ import {
   insertAssignmentRespectingDesignations,
   markDesignationApplied,
   reservedSeatsFor,
+  reserveRosterEntry,
+  rosterReservationsFor,
 } from './forceGet';
 import {
   ensureRechooseSchema,
@@ -1921,6 +1923,38 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        WHERE cm.class_id = ? AND cm.status = 'active' ORDER BY s.full_name`
     ).bind(activityId, activityId, activityId, activityId, activityId, activityId, activityId, Number(activity.class_id)));
     const groupNames = new Map(groups.map((row) => [Number(row.id), row.name || `Group ${row.position}`]));
+    // EVERYBODY ON THE CLASS ROSTER — including the people who have not
+    // registered yet. They have no student identity, so the organizer forces
+    // them by roster row; the seat is reserved and becomes their own the moment
+    // they register.
+    const reservations = await rosterReservationsFor(c.env.DB, activityId);
+    const unregisteredRows = await asRows<any>(c.env.DB.prepare(
+      `SELECT re.id, re.full_name, re.index_number,
+              COALESCE(NULLIF(LOWER(TRIM(re.gender)), ''), 'unknown') AS gender
+       FROM cgm_roster_entries re
+       WHERE re.class_id = ? AND re.status = 'unregistered' AND re.student_id IS NULL
+       ORDER BY re.full_name`
+    ).bind(Number(activity.class_id)));
+    const unregistered = unregisteredRows.map((row) => {
+      const reservation = reservations.get(Number(row.id));
+      return {
+        id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
+        gender: row.gender || 'unknown',
+        // A selected-only activity lists named students; somebody who has not
+        // even registered was never selected, so forcing them would invent an
+        // eligibility they do not have.
+        eligible: config.eligibility !== 'selected',
+        reason: config.eligibility === 'selected'
+          ? 'This activity only includes selected students — an unregistered roster row was never selected.'
+          : null,
+        registered: false,
+        reservation: reservation ? {
+          id: reservation.id, groupId: reservation.groupId,
+          groupName: reservation.groupName || groupNames.get(reservation.groupId) || null,
+          approvedBy: reservation.approvedBy, approvedAt: reservation.approvedAt,
+        } : null,
+      };
+    });
     const pending = await asRows<any>(c.env.DB.prepare(
       `SELECT * FROM cgm_force_get_requests WHERE activity_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`
     ).bind(activityId));
@@ -1933,6 +1967,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         genderCounts: compositionByGroup.get(Number(row.id))?.genderCounts || { male: 0, female: 0, unknown: 0 },
         genderPools: compositionByGroup.get(Number(row.id))?.pools || [],
       })),
+      unregistered,
+      unregisteredCount: unregistered.length,
+      canForceUnregistered: config.eligibility !== 'selected',
       students: students.map((row) => ({
         id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
         gender: row.gender || 'unknown',
@@ -1967,20 +2004,26 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
    */
   const validateForceGetBatch = async (
     c: any, activityId: number, activity: any, config: any,
-    rawItems: any[],
+    rawItems: any[], rawEntries: any[] = [],
   ) => {
     const errors: string[] = [];
     const warnings: string[] = [];
-    if (!Array.isArray(rawItems) || !rawItems.length) {
-      return { errors: ['Choose at least one student and a destination group.'], warnings, items: [] as any[] };
+    const entriesInput = Array.isArray(rawEntries) ? rawEntries : [];
+    if ((!Array.isArray(rawItems) || !rawItems.length) && !entriesInput.length) {
+      return { errors: ['Choose at least one student and a destination group.'], warnings, items: [] as any[], entries: [] as any[] };
     }
-    if (rawItems.length > 400) return { errors: ['A Force Get request can name at most 400 students.'], warnings, items: [] };
+    if (rawItems.length + entriesInput.length > 400) {
+      return { errors: ['A Force Get request can name at most 400 students.'], warnings, items: [] as any[], entries: [] as any[] };
+    }
     const roster = await forceGetRoster(c, activityId, activity, config);
     const byStudent = new Map(roster.students.map((row) => [Number(row.id), row]));
+    const byEntry = new Map<number, any>((roster as any).unregistered.map((row: any) => [Number(row.id), row]));
     const groupById = new Map(roster.groups.map((row) => [Number(row.id), row]));
     const items: Array<{ studentId: number; groupId: number; previousGroupId: number | null; sampled: boolean; rechoose: string | null }> = [];
+    const entries: Array<{ rosterEntryId: number; groupId: number; fullName: string; indexNumber: string; gender: string }> = [];
     const seen = new Set<number>();
-    for (const raw of rawItems) {
+    const seenEntries = new Set<number>();
+    for (const raw of rawItems || []) {
       const studentId = Number((raw as any)?.studentId);
       const groupId = Number((raw as any)?.groupId ?? (raw as any)?.destinationGroupId);
       if (!Number.isInteger(studentId) || studentId <= 0) { errors.push('Every row needs a student.'); continue; }
@@ -1997,6 +2040,25 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         sampled: student.everAssigned, rechoose: student.rechooseStatus,
       });
     }
+    // Roster rows that have not registered yet: forced by roster entry id, with
+    // the same destination/capacity/gender rules. Their seat is reserved and
+    // becomes a designation the moment they register.
+    for (const raw of entriesInput) {
+      const rosterEntryId = Number((raw as any)?.rosterEntryId ?? (raw as any)?.entryId);
+      const groupId = Number((raw as any)?.groupId ?? (raw as any)?.destinationGroupId);
+      if (!Number.isInteger(rosterEntryId) || rosterEntryId <= 0) { errors.push('Every unregistered row needs a roster entry.'); continue; }
+      if (seenEntries.has(rosterEntryId)) { errors.push(`Roster row #${rosterEntryId} appears twice in the same request.`); continue; }
+      seenEntries.add(rosterEntryId);
+      const entry = byEntry.get(rosterEntryId);
+      if (!entry) {
+        errors.push(`Roster row #${rosterEntryId} is not an unregistered row of this class — it may already be registered; choose that student from Members instead.`);
+        continue;
+      }
+      if (!entry.eligible) { errors.push(`${entry.fullName}: ${entry.reason || 'this student is not eligible for this activity.'}`); continue; }
+      if (!Number.isInteger(groupId) || groupId <= 0) { errors.push(`Choose a destination group for ${entry.fullName}.`); continue; }
+      if (!groupById.has(groupId)) { errors.push(`The destination group for ${entry.fullName} is not part of this activity.`); continue; }
+      entries.push({ rosterEntryId, groupId, fullName: entry.fullName, indexNumber: entry.indexNumber, gender: entry.gender });
+    }
     // Capacity: projected occupancy = live members staying + incoming.
     const leaving = new Map<number, number>();
     for (const item of items) {
@@ -2008,6 +2070,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     for (const item of items) {
       if (item.previousGroupId !== item.groupId) incoming.set(item.groupId, (incoming.get(item.groupId) || 0) + 1);
     }
+    // An unregistered row has no seat to give up: every one it names is a new
+    // arrival that must fit inside the group's capacity.
+    for (const entry of entries) incoming.set(entry.groupId, (incoming.get(entry.groupId) || 0) + 1);
     const committed = new Map<number, number>();
     for (const [groupId, count] of incoming) {
       const group = groupById.get(groupId)!;
@@ -2039,12 +2104,19 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       activityId,
       genderRule: config.genderRule,
       proposal: items.map((item) => ({ studentId: item.studentId, groupId: item.groupId })),
+      proposalEntries: entries.map((entry) => ({
+        rosterEntryId: entry.rosterEntryId, groupId: entry.groupId,
+        fullName: entry.fullName, gender: entry.gender,
+      })),
       groups: roster.groups.map((group) => ({ id: group.id, name: group.name, capacity: group.capacity })),
     });
     // Only the groups this proposal actually sends students to can block it: a
     // legacy mixed group somewhere else in the activity is reported, but it is
     // not this organizer's proposal that would create it.
-    const targetedGroups = new Set(items.map((item) => item.groupId));
+    const targetedGroups = new Set([
+      ...items.map((item) => item.groupId),
+      ...entries.map((entry) => entry.groupId),
+    ]);
     for (const conflict of composition.conflicts) {
       if (!targetedGroups.has(conflict.groupId)) continue;
       if (conflict.kind === 'gender') errors.push(conflict.message);
@@ -2062,7 +2134,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       if (!warnings.includes(warning)) warnings.push(warning);
     }
 
-    return { errors, warnings, items };
+    return { errors, warnings, items, entries };
   };
 
   app.get('/api/cgm/activities/:id/force-get', async (c: any) => {
@@ -2111,9 +2183,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (!guard.ok) return guard.response;
     await ensureForceGetSchema(c.env.DB);
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
-    const body = await readBody<{ items?: unknown[]; explanation?: string }>(c);
+    const body = await readBody<{ items?: unknown[]; entries?: unknown[]; explanation?: string }>(c);
     const rawItems: any[] = Array.isArray(body.items) ? body.items : [];
-    const validation = await validateForceGetBatch(c, activityId, activity, config, rawItems);
+    // Unregistered roster rows travel separately: they have no student id.
+    const rawEntries: any[] = Array.isArray(body.entries) ? body.entries : [];
+    const validation = await validateForceGetBatch(c, activityId, activity, config, rawItems, rawEntries);
     if (validation.errors.length) {
       return c.json({ success: false, error: validation.errors[0], data: { errors: validation.errors, warnings: validation.warnings } }, 400);
     }
@@ -2136,7 +2210,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `INSERT INTO cgm_force_get_requests
          (activity_id, class_id, version, status, explanation, student_count, requested_by_profile_id, requester_label)
        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`
-    ).bind(activityId, Number(activity.class_id), version, explanation, validation.items.length,
+    ).bind(activityId, Number(activity.class_id), version, explanation,
+      validation.items.length + validation.entries.length,
       member.profileId, member.name).run();
     const requestId = Number(inserted.meta.last_row_id);
     for (const item of validation.items) {
@@ -2146,6 +2221,15 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       ).bind(requestId, version, item.studentId, item.groupId, item.previousGroupId,
         item.sampled ? 1 : 0, item.rechoose).run();
+    }
+    for (const entry of validation.entries) {
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_force_get_request_entries
+           (request_id, version, roster_entry_id, destination_group_id, previous_group_id,
+            full_name, index_number, gender_at_submission)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`
+      ).bind(requestId, version, entry.rosterEntryId, entry.groupId,
+        entry.fullName, entry.indexNumber || '', entry.gender).run();
     }
     for (const stale of pendings) {
       await c.env.DB.prepare(
@@ -2161,7 +2245,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     await recordPhantomInboxItem(c.env.DB, {
       channel: 'class_groups',
       title: 'Force Get request awaiting approval',
-      summary: `${member.name} proposed destinations for ${validation.items.length} student(s) in ${activity.name} (${activity.class_name}).`,
+      summary: `${member.name} proposed destinations for ${validation.items.length + validation.entries.length} student(s) in ${activity.name} (${activity.class_name}).`,
       source: 'cgm_force_get', sourceId: String(requestId), actorProfileId: member.profileId,
       actorLabel: member.name, link: '#class-groups/phantom',
       body: explanation || '',
@@ -2170,7 +2254,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.force_get.requested', entityType: 'force_get_request', entityId: requestId,
       classId: Number(activity.class_id), activityId,
-      context: { version, students: validation.items.length, items: validation.items.map((i) => ({ studentId: i.studentId, groupId: i.groupId })) },
+      context: {
+        version, students: validation.items.length + validation.entries.length,
+        items: validation.items.map((i) => ({ studentId: i.studentId, groupId: i.groupId })),
+        unregisteredEntries: validation.entries.map((e) => ({ rosterEntryId: e.rosterEntryId, groupId: e.groupId })),
+      },
     });
     if (reviseId) {
       // A revision is its own audited event: the old version, the new version
@@ -2179,7 +2267,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
         action: 'cgm.force_get.updated', entityType: 'force_get_request', entityId: requestId,
         classId: Number(activity.class_id), activityId,
-        context: { revisedRequestId: reviseId, version, students: validation.items.length, explanation },
+        context: { revisedRequestId: reviseId, version, students: validation.items.length + validation.entries.length, explanation },
       });
     }
     return c.json({
@@ -2260,6 +2348,20 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        WHERE i.request_id = ? AND i.version = ?
        ORDER BY dg.position, s.full_name`
     ).bind(Number(request.activity_id), Number(request.activity_id), requestId, Number(request.version)));
+    // Roster rows that have not registered yet are part of the same review: they
+    // hold a seat but no student identity.
+    const entries = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.*, COALESCE(NULLIF(re.full_name, ''), e.full_name) AS full_name,
+              COALESCE(NULLIF(re.index_number, ''), e.index_number) AS index_number,
+              COALESCE(NULLIF(LOWER(TRIM(re.gender)), ''), e.gender_at_submission, 'unknown') AS gender,
+              dg.name AS destination_name, dg.position AS destination_position,
+              re.student_id AS registered_student_id
+       FROM cgm_force_get_request_entries e
+       LEFT JOIN cgm_roster_entries re ON re.id = e.roster_entry_id
+       JOIN cgm_groups dg ON dg.id = e.destination_group_id
+       WHERE e.request_id = ? AND e.version = ?
+       ORDER BY dg.position, full_name`
+    ).bind(requestId, Number(request.version)));
     const groups = await asRows<any>(c.env.DB.prepare(
       `SELECT g.id, g.name, g.position, g.capacity,
               (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
@@ -2280,6 +2382,12 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const destination = groupById.get(Number(item.destination_group_id));
       if (!destination) invalid += 1;
       if (!eligibleSet || eligibleSet.has(Number(item.student_id))) { /* eligible */ } else invalid += 1;
+    }
+    for (const entry of entries) {
+      if (!groupById.has(Number(entry.destination_group_id))) invalid += 1;
+      // A row that registered since submission must be reviewed as a student,
+      // and a selected-only activity never covers an unregistered row.
+      else if (entry.registered_student_id || eligibleSet) invalid += 1;
     }
     for (const item of items) {
       const destination = groupById.get(Number(item.destination_group_id));
@@ -2304,6 +2412,28 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         gender: String(item.gender || 'unknown').toLowerCase(),
       });
     }
+    for (const entry of entries) {
+      const destination = groupById.get(Number(entry.destination_group_id));
+      if (!destination) continue;
+      const key = Number(destination.id);
+      if (!distribution.has(key)) {
+        distribution.set(key, {
+          groupId: key, groupName: destination.name || `Group ${destination.position}`,
+          capacity: destination.capacity === null ? null : Number(destination.capacity),
+          size: Number(destination.size), reserved: reserved.get(key) || 0, projected: 0, students: [],
+        });
+      }
+      const bucket = distribution.get(key)!;
+      bucket.projected += 1;
+      bucket.students.push({
+        studentId: 0, rosterEntryId: Number(entry.roster_entry_id),
+        fullName: entry.full_name, indexNumber: entry.index_number,
+        currentGroupId: null, currentGroupName: null, sampled: false, rechooseState: null,
+        destinationGroupId: key, gender: String(entry.gender || 'unknown').toLowerCase(),
+        unregistered: true,
+        registeredSinceSubmission: Boolean(entry.registered_student_id),
+      });
+    }
     // The same evaluator the approval uses, so PHANTOM sees exactly what the
     // approval will refuse: capacity AND the gender-separated composition,
     // naming the group, the students and where the clash comes from.
@@ -2311,6 +2441,12 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       activityId: Number(request.activity_id),
       genderRule: config.genderRule,
       proposal: items.map((item) => ({ studentId: Number(item.student_id), groupId: Number(item.destination_group_id) })),
+      proposalEntries: entries
+        .filter((entry) => !entry.registered_student_id)
+        .map((entry) => ({
+          rosterEntryId: Number(entry.roster_entry_id), groupId: Number(entry.destination_group_id),
+          fullName: entry.full_name, gender: entry.gender,
+        })),
       groups: groups.map((group) => ({
         id: Number(group.id), name: group.name || `Group ${group.position}`,
         capacity: group.capacity === null || group.capacity === undefined ? null : Number(group.capacity),
@@ -2334,6 +2470,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         activityId: Number(request.activity_id), activityName: request.activity_name,
         classId: Number(request.class_id), className: request.class_name, classCode: request.class_code,
         explanation: request.explanation, studentCount: Number(request.student_count || 0),
+        unregisteredCount: entries.length,
         requesterLabel: request.requester_label, requestedByProfileId: request.requested_by_profile_id,
         submittedAt: request.submitted_at, reviewerLabel: request.reviewer_label,
         reviewedAt: request.reviewed_at, reviewReason: request.review_reason,
@@ -2462,8 +2599,21 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT i.*, s.full_name FROM cgm_force_get_request_items i JOIN cgm_students s ON s.id = i.student_id
        WHERE i.request_id = ? AND i.version = ?`
     ).bind(requestId, Number(request.version)));
-    if (!items.length) return bad(c, 'This request has no students to approve.', 409);
+    // Roster rows that had not registered when the request was filed.
+    const entries = await asRows<any>(c.env.DB.prepare(
+      `SELECT e.*, COALESCE(NULLIF(re.full_name, ''), e.full_name) AS full_name,
+              COALESCE(NULLIF(re.index_number, ''), e.index_number) AS index_number,
+              re.student_id AS registered_student_id,
+              COALESCE(NULLIF(LOWER(TRIM(re.gender)), ''), e.gender_at_submission, 'unknown') AS gender
+       FROM cgm_force_get_request_entries e
+       LEFT JOIN cgm_roster_entries re ON re.id = e.roster_entry_id
+       WHERE e.request_id = ? AND e.version = ?`
+    ).bind(requestId, Number(request.version)));
+    if (!items.length && !entries.length) return bad(c, 'This request has no students to approve.', 409);
     const config = sanitizeActivityConfig(JSON.parse(request.config_json || '{}'));
+    if (config.eligibility === 'selected' && entries.length) {
+      return bad(c, 'This request names unregistered roster rows, and this activity only includes selected students. Reject it and ask the organizer to revise.', 409);
+    }
     const activity = await activityCore(c.env.DB, Number(request.activity_id));
     if (!activity) return bad(c, 'The activity no longer exists.', 409);
     if (config.eligibility === 'selected') {
@@ -2482,11 +2632,15 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'`
     ).bind(Number(request.activity_id)));
     const groupById = new Map(groups.map((row) => [Number(row.id), row]));
-    for (const item of items) {
+    for (const item of [...items, ...entries]) {
       if (!groupById.has(Number(item.destination_group_id))) {
         return bad(c, `${item.full_name}'s destination group no longer exists in this activity. Reject and ask the organizer to revise.`, 409);
       }
     }
+    // Somebody who registered after the request was filed now has their own
+    // identity: they are designated as a student, not held as a roster row.
+    const stillUnregistered = entries.filter((entry) => !entry.registered_student_id);
+    const graduated = entries.filter((entry) => Boolean(entry.registered_student_id));
     // APPROVAL-TIME REVALIDATION — the proposal is judged again against LIVE
     // data (members, reservations, other approved designations, current
     // genders), because any of them may have changed since submission. One
@@ -2498,13 +2652,20 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const composition = await forceGetComposition(c.env.DB, {
       activityId: Number(request.activity_id),
       genderRule: config.genderRule,
-      proposal: items.map((item) => ({ studentId: Number(item.student_id), groupId: Number(item.destination_group_id) })),
+      proposal: [
+        ...items.map((item) => ({ studentId: Number(item.student_id), groupId: Number(item.destination_group_id) })),
+        ...graduated.map((entry) => ({ studentId: Number(entry.registered_student_id), groupId: Number(entry.destination_group_id) })),
+      ],
+      proposalEntries: stillUnregistered.map((entry) => ({
+        rosterEntryId: Number(entry.roster_entry_id), groupId: Number(entry.destination_group_id),
+        fullName: entry.full_name, gender: entry.gender,
+      })),
       groups: groups.map((group) => ({
         id: Number(group.id), name: group.name || `Group ${group.position}`,
         capacity: group.capacity === null || group.capacity === undefined ? null : Number(group.capacity),
       })),
     });
-    const approvalGroups = new Set(items.map((item) => Number(item.destination_group_id)));
+    const approvalGroups = new Set([...items, ...entries].map((item) => Number(item.destination_group_id)));
     const blockingConflicts = composition.conflicts.filter((conflict) => conflict.blocking && approvalGroups.has(conflict.groupId));
     if (blockingConflicts.length) {
       // PHANTOM sees exactly what is wrong: the group, who clashes, which pool
@@ -2551,7 +2712,17 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
 
     let designated = 0;
     let appliedNow = 0;
-    for (const item of items) {
+    // Designations are created for students who already have an identity — the
+    // request's own items plus any roster row that registered since submission.
+    const designationTargets = [
+      ...items,
+      ...graduated.map((entry) => ({
+        ...entry,
+        student_id: Number(entry.registered_student_id),
+        previous_group_id: null,
+      })),
+    ];
+    for (const item of designationTargets) {
       const studentId = Number(item.student_id);
       const groupId = Number(item.destination_group_id);
       const student = await asRows<{ full_name: string }>(c.env.DB.prepare(
@@ -2609,11 +2780,42 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           ? `Your organizer's placement for you in ${request.activity_name} was approved. You are already in that group.`
           : `PHANTOM approved a destination group for you in ${request.activity_name}. Keep using your normal group selection — you will be placed in the approved group when you do. If you have already been placed, your organizer will ask you to re-choose.`);
     }
+    // Seats approved for people who are still only roster rows. Nothing is
+    // assigned: the seat is held, and it becomes a designation for them the
+    // moment they register.
+    let reservedRows = 0;
+    for (const entry of stillUnregistered) {
+      const groupId = Number(entry.destination_group_id);
+      const group = groupById.get(groupId);
+      const reservationId = await reserveRosterEntry(c.env.DB, {
+        activityId: Number(request.activity_id), classId: Number(request.class_id),
+        rosterEntryId: Number(entry.roster_entry_id), fullName: entry.full_name,
+        indexNumber: entry.index_number, gender: entry.gender, groupId,
+        requestId, version: Number(request.version),
+        designatedByProfileId: request.requested_by_profile_id, designatedByLabel: request.requester_label,
+        approvedByProfileId: member.profileId, approvedByLabel: `PHANTOM · ${member.name}`,
+      });
+      reservedRows += 1;
+      await auditCgm(c.env.DB, {
+        actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.force_get.reserved_roster_row', entityType: 'force_get_reservation',
+        entityId: reservationId || Number(entry.roster_entry_id),
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: {
+          rosterEntryId: Number(entry.roster_entry_id), indexNumber: entry.index_number,
+          groupId, groupName: group ? (group.name || `Group ${group.position}`) : null,
+          requestId, version: Number(request.version),
+        },
+      });
+    }
     await auditCgm(c.env.DB, {
       actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.force_get.approved', entityType: 'force_get_request', entityId: requestId,
       classId: Number(request.class_id), activityId: Number(request.activity_id),
-      context: { version: Number(request.version), students: designated, appliedImmediately: appliedNow, reason },
+      context: {
+        version: Number(request.version), students: designated, appliedImmediately: appliedNow,
+        reservedRosterRows: reservedRows, reason,
+      },
     });
     if (request.requested_by_profile_id) {
       await createNotification(c.env.DB, {

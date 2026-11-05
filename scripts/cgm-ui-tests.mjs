@@ -829,7 +829,7 @@ check('bulk destination assignment exists for the selected rows',
 check('a live preview shows current vs projected capacity and blocks over-capacity proposals',
   /data-testid="cgm-force-get-preview"/.test(forceGetWs) && /projected/.test(forceGetWs)
   && /over capacity/.test(forceGetWs)
-  && /const canSubmit = readyItems\.length > 0 && !missingDestination && !blockedIneligible[\s\S]{0,120}?!overfilled\.length[\s\S]{0,120}?!genderConflicts\.length/.test(forceGetWs));
+  && /const canSubmit = \(readyItems\.length > 0 \|\| readyEntries\.length > 0\) && !missingDestination && !blockedIneligible[\s\S]{0,140}?!overfilled\.length[\s\S]{0,140}?!genderConflicts\.length/.test(forceGetWs));
 check('the workspace states that nothing moves until PHANTOM approves',
   /Nothing moves until PHANTOM approves/.test(forceGetWs));
 check('a pending version can be revised or cancelled from the workspace',
@@ -880,8 +880,8 @@ check('the organizer preview names the destination group, its current compositio
   && /Gender pools held now:/.test(forceGetWs)
   && /unknown is never assumed to be male or female/.test(forceGetWs));
 check('the preview judges the COMPLETE composition (members + reservations + every student added at once)',
-  /counts\.male|counts\.female/.test(forceGetWs) && /for \(const student of proposed\) pools\.add\(student\.gender\)/.test(forceGetWs)
-  && /student\.groupId\) !== Number\(bucket\.groupId\)/.test(forceGetWs));
+  /counts\.male|counts\.female/.test(forceGetWs) && /for \(const \w+ of proposed\) pools\.add\(\w+\.gender\)/.test(forceGetWs)
+  && /\.groupId\) !== Number\(bucket\.groupId\)/.test(forceGetWs));
 check('an unknown gender is surfaced separately and never silently treated as male/female',
   /data-testid="cgm-force-get-gender-unknown"/.test(forceGetWs) && /const asGender =/.test(forceGetWs));
 check('PHANTOM sees which group, which students, which pools and where the clash comes from BEFORE approving',
@@ -956,6 +956,73 @@ check('the organizer queue marks sign-in requests as unproven and shows what the
 check('the organizer notification warns that the request carries no passkey proof',
   /could not prove their current passkey/.test(routesStudent)
   && /verify this student before approving/.test(routesStudent));
+
+section('25. Force Get works on the WHOLE roster, including students who have not registered');
+
+const forceGet = src('src/components/ClassGroups/ForceGetWorkspace.tsx');
+check('the workspace lists the unregistered roster rows in the same table as the members',
+  /data-testid="cgm-force-get-unregistered-row"/.test(forceGet)
+  && /roster\.unregistered|unregistered\b/.test(forceGet)
+  && /data-testid="cgm-force-get-unregistered-chip"/.test(forceGet)
+  && /NOT REGISTERED/.test(forceGet));
+check('an unregistered row still gets a destination picker and a checkbox',
+  /data-testid="cgm-force-get-unregistered-group"/.test(forceGet)
+  && /data-testid="cgm-force-get-select"/.test(forceGet)
+  && /toggleEntry\(/.test(forceGet));
+check('the page explains that the seat is held and becomes theirs when they register',
+  /becomes their own designation/.test(forceGet)
+  && /Placed automatically when they register/.test(forceGet)
+  && /data-testid="cgm-force-get-unregistered-note"/.test(forceGet));
+check('the held seat is visible per row, and the summary counts unregistered students and held seats',
+  /data-testid="cgm-force-get-reservation"/.test(forceGet)
+  && /'Not registered'/.test(forceGet) && /'Seats held'/.test(forceGet)
+  && /SEAT HELD/.test(forceGet));
+check('the roster filter can isolate the rows that have not registered',
+  /\['unregistered', 'Not registered yet'\]/.test(forceGet)
+  && /case 'unregistered': return false;/.test(forceGet));
+check('the preview, the gender check and the submit all include the unregistered rows',
+  /selectedEntries/.test(forceGet)
+  && /readyEntries/.test(forceGet)
+  && /not registered yet\)/.test(forceGet)
+  && /readyItems\.length \+ readyEntries\.length/.test(forceGet));
+check('submitting sends them as their own list, separate from the student items',
+  /submitForceGet\(activityId, items, explanation\.trim\(\) \|\| undefined, entries\)/.test(forceGet)
+  && /reviseForceGet\(Number\(pending\.id\), items, explanation\.trim\(\) \|\| undefined, entries\)/.test(forceGet));
+const fgClientLib = src('src/lib/cgm.ts');
+check('the client types the unregistered rows and the entry input',
+  /export interface ForceGetUnregisteredRow/.test(fgClientLib)
+  && /export interface ForceGetEntryInput \{ rosterEntryId: number; groupId: number \}/.test(fgClientLib)
+  && /unregistered\?: ForceGetUnregisteredRow\[\]/.test(fgClientLib));
+const activitiesRoute = src('functions/lib/cgm/routes-activities.ts');
+check('the backend roster returns every unregistered roster row of the class',
+  /re\.status = 'unregistered' AND re\.student_id IS NULL/.test(activitiesRoute)
+  && /unregisteredCount: unregistered\.length/.test(activitiesRoute)
+  && /reservation: reservation \?/.test(activitiesRoute));
+check('a roster row cannot be forced twice, or forced after it registered',
+  /appears twice in the same request/.test(activitiesRoute)
+  && /already be registered; choose that student from Members instead/.test(activitiesRoute)
+  && /Every unregistered row needs a roster entry/.test(activitiesRoute));
+check('a selected-only activity shows the rows but refuses to force them',
+  /eligible: config\.eligibility !== 'selected'/.test(activitiesRoute)
+  && /was never selected/.test(activitiesRoute)
+  && /this activity only includes selected students/.test(activitiesRoute));
+check('approval holds a seat instead of inventing a student identity',
+  /reserveRosterEntry\(c\.env\.DB/.test(activitiesRoute)
+  && /cgm\.force_get\.reserved_roster_row/.test(activitiesRoute));
+const fgLib = src('functions/lib/cgm/forceGet.ts');
+check('the held seat competes for capacity and gender exactly like a designation',
+  /cgm_force_get_reservations/.test(fgLib)
+  && /seats held for students who are on the roster/.test(fgLib)
+  && /export const reserveRosterEntry/.test(fgLib)
+  && /export const convertReservationsForEntry/.test(fgLib));
+check('registering converts the held seat into that student\'s own designation',
+  /convertReservationsForEntry\(c\.env\.DB/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /convertReservationsForEntry\(c\.env\.DB/.test(src('functions/lib/cgm/routes-organizer.ts'))
+  && /cgm\.force_get\.reservation_converted/.test(fgLib));
+check('PHANTOM sees the unregistered row in the destination group it was proposed for',
+  /unregistered: true/.test(activitiesRoute)
+  && /cgm-phantom-force-get-unregistered/.test(phantom)
+  && /the seat is held and becomes theirs when they register/.test(phantom));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

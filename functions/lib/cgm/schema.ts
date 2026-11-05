@@ -415,6 +415,51 @@ CREATE TABLE IF NOT EXISTS cgm_force_get_request_items (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+CREATE TABLE IF NOT EXISTS cgm_force_get_request_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  roster_entry_id INTEGER NOT NULL,
+  destination_group_id INTEGER NOT NULL,
+  previous_group_id INTEGER,
+  full_name TEXT NOT NULL DEFAULT '',
+  index_number TEXT NOT NULL DEFAULT '',
+  gender_at_submission TEXT NOT NULL DEFAULT 'unknown' CHECK (gender_at_submission IN ('male','female','unknown')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  -- The name/index are SNAPSHOT here (not only looked up from the roster): the
+  -- organizer may later delete the roster row, and PHANTOM must still be able to
+  -- read exactly what was requested of whom.
+  FOREIGN KEY(request_id) REFERENCES cgm_force_get_requests(id)
+);
+
+-- A seat held for a student who is ON THE CLASS ROSTER but has not registered
+-- yet. It behaves exactly like an approved designation (it reserves capacity and
+-- a gender pool) and is converted into a real designation the moment that roster
+-- row registers, so the student still samples with their activity's own method.
+CREATE TABLE IF NOT EXISTS cgm_force_get_reservations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  activity_id INTEGER NOT NULL,
+  class_id INTEGER NOT NULL,
+  roster_entry_id INTEGER NOT NULL,
+  student_id INTEGER,
+  full_name TEXT NOT NULL,
+  index_number TEXT NOT NULL,
+  gender TEXT NOT NULL DEFAULT 'unknown' CHECK (gender IN ('male','female','unknown')),
+  designated_group_id INTEGER NOT NULL,
+  approved_request_id INTEGER,
+  request_version INTEGER,
+  designated_by_profile_id INTEGER,
+  designated_by_label TEXT,
+  approved_by_profile_id INTEGER,
+  approved_by_label TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','converted','superseded','cleared')),
+  converted_designation_id INTEGER,
+  designated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  converted_at DATETIME,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_force_get_designations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   activity_id INTEGER NOT NULL,
@@ -804,6 +849,11 @@ CREATE INDEX IF NOT EXISTS idx_cgm_force_get_requests_activity ON cgm_force_get_
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_requests_status ON cgm_force_get_requests(status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_items_request ON cgm_force_get_request_items(request_id, version);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_force_get_items_unique ON cgm_force_get_request_items(request_id, version, student_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_force_get_entries_unique ON cgm_force_get_request_entries(request_id, version, roster_entry_id);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_entries_request ON cgm_force_get_request_entries(request_id, version);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_reservations_activity ON cgm_force_get_reservations(activity_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_reservations_entry ON cgm_force_get_reservations(roster_entry_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_force_get_reservations_live ON cgm_force_get_reservations(activity_id, roster_entry_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_designations_student ON cgm_force_get_designations(activity_id, student_id, status);
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_designations_group ON cgm_force_get_designations(designated_group_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_force_get_designations_live ON cgm_force_get_designations(activity_id, student_id) WHERE status = 'active';

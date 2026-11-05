@@ -291,6 +291,15 @@ export interface ForceGetStudent {
   everAssigned: boolean; rechooseStatus: string | null;
   designation: ForceGetDesignation | null;
 }
+/** A person on the class roster who has not registered yet — no student identity. */
+export interface ForceGetUnregisteredRow {
+  id: number; fullName: string; indexNumber: string; gender?: string;
+  /** False when the activity only includes selected students (they were never selected). */
+  eligible: boolean;
+  /** Why they cannot be forced, when `eligible` is false. */
+  reason: string | null;
+  reservation: { id: number; groupId: number; groupName: string | null; approvedBy: string | null; approvedAt: string | null } | null;
+}
 export interface ForceGetPendingRequest {
   id: number; version: number; status: string; requesterLabel: string | null;
   submittedAt: string | null; explanation: string | null; studentCount: number;
@@ -303,6 +312,10 @@ export interface ForceGetRoster {
   canSubmit: boolean;
   groups: ForceGetGroup[];
   students: ForceGetStudent[];
+  /** Roster rows that have not registered yet (forced by roster entry id). */
+  unregistered?: ForceGetUnregisteredRow[];
+  unregisteredCount?: number;
+  canForceUnregistered?: boolean;
   pendingRequest: ForceGetPendingRequest | null;
   history: Array<{
     id: number; version: number; status: string; explanation: string | null;
@@ -311,6 +324,8 @@ export interface ForceGetRoster {
   }>;
 }
 export interface ForceGetItemInput { studentId: number; groupId: number }
+/** Destination for a roster row that has no student identity yet. */
+export interface ForceGetEntryInput { rosterEntryId: number; groupId: number }
 export interface ForceGetSubmitResult {
   requestId: number; version: number; status: string; warnings: string[]; message: string;
 }
@@ -490,13 +505,13 @@ export const cgm = {
   // when PHANTOM approves that exact version.
   forceGetRoster: (activityId: number) =>
     memberCall<ForceGetRoster>(`/api/cgm/activities/${activityId}/force-get`),
-  submitForceGet: (activityId: number, items: ForceGetItemInput[], explanation?: string) =>
+  submitForceGet: (activityId: number, items: ForceGetItemInput[], explanation?: string, entries: ForceGetEntryInput[] = []) =>
     memberCall<ForceGetSubmitResult>(`/api/cgm/activities/${activityId}/force-get/requests`, {
-      method: 'POST', body: { items, explanation },
+      method: 'POST', body: { items, entries, explanation },
     }),
-  reviseForceGet: (requestId: number, items: ForceGetItemInput[], explanation?: string) =>
+  reviseForceGet: (requestId: number, items: ForceGetItemInput[], explanation?: string, entries: ForceGetEntryInput[] = []) =>
     memberCall<ForceGetSubmitResult>(`/api/cgm/force-get/requests/${requestId}/revise`, {
-      method: 'POST', body: { items, explanation },
+      method: 'POST', body: { items, entries, explanation },
     }),
   cancelForceGet: (requestId: number) =>
     memberCall<{ status: string }>(`/api/cgm/force-get/requests/${requestId}/cancel`, { method: 'POST', body: {} }),

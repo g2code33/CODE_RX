@@ -24,7 +24,13 @@ export type Gender = 'male' | 'female' | 'unknown';
 export type CompositionSource = 'active' | 'reserved' | 'proposed';
 
 export interface CompositionMember {
+  /**
+   * The permanent student identity. 0 for a student who is on the class roster
+   * but has not registered yet — those are keyed by `rosterEntryId` instead, so
+   * the same person is still only ever counted once.
+   */
   studentId: number;
+  rosterEntryId?: number;
   fullName?: string;
   gender: Gender;
   source: CompositionSource;
@@ -87,7 +93,14 @@ export const asGender = (value: unknown): Gender => {
 };
 
 const labelOf = (member: CompositionMember) =>
-  member.fullName || `student #${member.studentId}`;
+  member.fullName
+  || (member.studentId > 0 ? `student #${member.studentId}` : `roster row #${member.rosterEntryId ?? '?'}`);
+
+/** One key per PERSON: a registered student by id, an unregistered row by entry. */
+const memberKey = (member: CompositionMember) =>
+  member.studentId > 0
+    ? `s:${member.studentId}`
+    : (Number.isInteger(member.rosterEntryId) && Number(member.rosterEntryId) > 0 ? `r:${member.rosterEntryId}` : null);
 
 const sourceWords = (source: CompositionSource) =>
   source === 'active' ? 'an existing member'
@@ -98,13 +111,14 @@ const dedupe = (members: CompositionMember[]) => {
   // Later sources win for display purposes but the student is counted once:
   // proposed > reserved > active for the *entry*, while "active" is what keeps
   // them from being an addition at all.
-  const byId = new Map<number, CompositionMember>();
+  const byId = new Map<string, CompositionMember>();
   for (const member of members) {
-    if (!Number.isInteger(member.studentId) || member.studentId <= 0) continue;
-    const current = byId.get(member.studentId);
-    if (!current) { byId.set(member.studentId, { ...member }); continue; }
+    const key = memberKey(member);
+    if (!key) continue;
+    const current = byId.get(key);
+    if (!current) { byId.set(key, { ...member }); continue; }
     const rank = (source: CompositionSource) => (source === 'proposed' ? 3 : source === 'reserved' ? 2 : 1);
-    if (rank(member.source) > rank(current.source)) byId.set(member.studentId, { ...member, source: member.source });
+    if (rank(member.source) > rank(current.source)) byId.set(key, { ...member, source: member.source });
   }
   return [...byId.values()];
 };

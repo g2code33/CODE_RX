@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle, ArrowLeft, CheckCircle2, Clock3, Layers, Loader2, RefreshCw, Search, Send, ShieldCheck, Target, Users, X,
+  AlertTriangle, ArrowLeft, CheckCircle2, Clock3, Layers, Loader2, Lock, RefreshCw, Search, Send, ShieldCheck, Target,
+  UserPlus, Users, UserX, X,
 } from 'lucide-react';
-import { cgm, CgmError, type ForceGetItemInput, type ForceGetRoster, type ForceGetStudent } from '../../lib/cgm';
+import {
+  cgm, CgmError,
+  type ForceGetEntryInput, type ForceGetItemInput, type ForceGetRoster, type ForceGetStudent,
+  type ForceGetUnregisteredRow,
+} from '../../lib/cgm';
 
 /**
  * FORCE GET — the organizer's dedicated workspace.
@@ -28,16 +33,23 @@ const card = 'rounded-2xl border border-emerald-100 bg-white p-4 shadow-sm shado
 const label = 'text-[10px] font-black uppercase tracking-[0.16em] text-slate-400';
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 focus:border-emerald-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-100';
 
-type FilterKey = 'all' | 'unsampled' | 'sampled' | 'designated' | 'rechoose' | 'ineligible';
+type FilterKey = 'all' | 'unsampled' | 'sampled' | 'designated' | 'rechoose' | 'ineligible' | 'unregistered';
 
 const FILTERS: Array<[FilterKey, string]> = [
-  ['all', 'Everyone'],
+  ['all', 'Everyone on the roster'],
   ['unsampled', 'Not sampled yet'],
   ['sampled', 'Already sampled'],
   ['designated', 'Has an approved designation'],
   ['rechoose', 'Re-choose in progress'],
   ['ineligible', 'Ineligible'],
+  ['unregistered', 'Not registered yet'],
 ];
+
+/** One row in a preview bucket: a member OR a roster row with no identity yet. */
+type BucketMember = {
+  key: string; fullName: string; groupId: number | null; groupName: string | null;
+  gender: Gender; unregistered: boolean;
+};
 
 type Gender = 'male' | 'female' | 'unknown';
 const asGender = (value: unknown): Gender => {
@@ -73,6 +85,10 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [destinations, setDestinations] = useState<Record<number, number>>({});
+  // Roster rows that have not registered yet are keyed by their roster entry id —
+  // a different id space from student ids, so they get their own selection map.
+  const [entrySelected, setEntrySelected] = useState<Set<number>>(new Set());
+  const [entryDestinations, setEntryDestinations] = useState<Record<number, number>>({});
   const [bulkGroupId, setBulkGroupId] = useState<number | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [explanation, setExplanation] = useState('');
@@ -97,6 +113,18 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
         }
         return next;
       });
+      // An unregistered row starts from the seat already approved for it.
+      const seededEntries: Record<number, number> = {};
+      for (const row of data.unregistered || []) {
+        if (row.reservation?.groupId) seededEntries[row.id] = Number(row.reservation.groupId);
+      }
+      setEntryDestinations((current) => {
+        const next: Record<number, number> = { ...seededEntries };
+        for (const [key, value] of Object.entries(current)) {
+          if (data.unregistered?.some((row) => row.id === Number(key))) next[Number(key)] = Number(value);
+        }
+        return next;
+      });
     } catch (failure: any) {
       setRoster(null);
       setError(failure?.message || 'The Force Get workspace could not be loaded.');
@@ -107,6 +135,7 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
 
   const groups = roster?.groups || [];
   const students = roster?.students || [];
+  const unregistered = useMemo<ForceGetUnregisteredRow[]>(() => roster?.unregistered || [], [roster]);
   const groupName = useCallback((groupId: number | null | undefined) => {
     if (!groupId) return null;
     return groups.find((group) => Number(group.id) === Number(groupId))?.name || null;
@@ -122,28 +151,58 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
         case 'designated': return Boolean(student.designation);
         case 'rechoose': return Boolean(student.rechooseStatus);
         case 'ineligible': return !student.eligible;
+        // These rows live in their own list below the table.
+        case 'unregistered': return false;
         default: return true;
       }
     });
   }, [students, search, filter]);
 
+  /**
+   * Roster rows with no student identity yet. They are shown in the same roster
+   * on purpose: an organizer must be able to place somebody who has not
+   * registered, without waiting for them to sign up first.
+   */
+  const visibleEntries = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (filter !== 'all' && filter !== 'ineligible' && filter !== 'unregistered') return [] as ForceGetUnregisteredRow[];
+    return unregistered.filter((row) => {
+      if (needle && !`${row.fullName} ${row.indexNumber}`.toLowerCase().includes(needle)) return false;
+      if (filter === 'ineligible') return !row.eligible;
+      return true;
+    });
+  }, [unregistered, search, filter]);
+
   const selectedStudents = useMemo(() => students.filter((student) => selected.has(student.id)), [students, selected]);
+  const selectedEntries = useMemo(
+    () => unregistered.filter((row) => entrySelected.has(row.id)),
+    [unregistered, entrySelected],
+  );
 
   /** Preview buckets: what each destination group would hold if approved. */
   const buckets = useMemo(() => {
-    const rows = new Map<number, { groupId: number; name: string; size: number; capacity: number | null; incoming: ForceGetStudent[]; leaving: number }>();
-    for (const student of selectedStudents) {
-      const target = destinations[student.id];
-      if (!target) continue;
+    const rows = new Map<number, { groupId: number; name: string; size: number; capacity: number | null; incoming: BucketMember[]; leaving: number }>();
+    const push = (target: number, key: string, fullName: string, groupId: number | null, groupName: string | null, gender: Gender, unregisteredRow: boolean) => {
       const group = groups.find((entry) => Number(entry.id) === Number(target));
-      if (!group) continue;
+      if (!group) return;
       if (!rows.has(Number(group.id))) {
         rows.set(Number(group.id), {
           groupId: Number(group.id), name: group.name, size: Number(group.size),
           capacity: group.capacity === null ? null : Number(group.capacity), incoming: [], leaving: 0,
         });
       }
-      rows.get(Number(group.id))!.incoming.push(student);
+      rows.get(Number(group.id))!.incoming.push({ key, fullName, groupId, groupName, gender, unregistered: unregisteredRow });
+    };
+    for (const student of selectedStudents) {
+      const target = destinations[student.id];
+      if (!target) continue;
+      push(target, `s${student.id}`, student.fullName, student.groupId ?? null,
+        student.groupName || null, asGender(student.gender), false);
+    }
+    for (const row of selectedEntries) {
+      const target = entryDestinations[row.id];
+      if (!target) continue;
+      push(target, `r${row.id}`, row.fullName, null, null, asGender(row.gender), true);
     }
     // Members leaving a group into another group free their seat there.
     for (const student of selectedStudents) {
@@ -153,18 +212,24 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
       if (row) row.leaving += 1;
     }
     return [...rows.values()].map((row) => {
-      const net = row.incoming.filter((student) => Number(student.groupId) !== row.groupId).length - row.leaving;
+      const net = row.incoming.filter((member) => Number(member.groupId) !== row.groupId).length - row.leaving;
       const projected = row.size + net;
       return { ...row, projected, over: row.capacity !== null && projected > row.capacity };
     }).sort((a, b) => a.name.localeCompare(b.name));
-  }, [selectedStudents, destinations, groups]);
+  }, [selectedStudents, selectedEntries, destinations, entryDestinations, groups]);
 
   const readyItems: ForceGetItemInput[] = useMemo(() => selectedStudents
     .filter((student) => destinations[student.id] && student.eligible)
     .map((student) => ({ studentId: student.id, groupId: Number(destinations[student.id]) })), [selectedStudents, destinations]);
 
-  const blockedIneligible = selectedStudents.filter((student) => !student.eligible).length;
-  const missingDestination = selectedStudents.filter((student) => !destinations[student.id]).length;
+  const readyEntries: ForceGetEntryInput[] = useMemo(() => selectedEntries
+    .filter((row) => entryDestinations[row.id] && row.eligible)
+    .map((row) => ({ rosterEntryId: row.id, groupId: Number(entryDestinations[row.id]) })), [selectedEntries, entryDestinations]);
+
+  const blockedIneligible = selectedStudents.filter((student) => !student.eligible).length
+    + selectedEntries.filter((row) => !row.eligible).length;
+  const missingDestination = selectedStudents.filter((student) => !destinations[student.id]).length
+    + selectedEntries.filter((row) => !entryDestinations[row.id]).length;
   const overfilled = buckets.filter((bucket) => bucket.over);
 
   /**
@@ -197,8 +262,8 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
       if (counts.female) existing.push({ name: `${counts.female} female member(s)`, gender: 'female' });
       if (counts.unknown) existing.push({ name: `${counts.unknown} member(s) with no gender recorded`, gender: 'unknown' });
       const proposed = bucket.incoming
-        .filter((student) => Number(student.groupId) !== Number(bucket.groupId))
-        .map((student) => ({ name: student.fullName, gender: asGender(student.gender) }));
+        .filter((member) => Number(member.groupId) !== Number(bucket.groupId))
+        .map((member) => ({ name: member.fullName, gender: asGender(member.gender) }));
       for (const student of proposed) pools.add(student.gender);
       if (pools.size > 1) {
         rows.push({ groupId: bucket.groupId, groupName: bucket.name, existing, proposed, pools: [...pools] });
@@ -207,8 +272,11 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
     return rows;
   }, [buckets, groups, genderRule]);
 
-  const unknownGenderSelected = selectedStudents.filter((student) => asGender(student.gender) === 'unknown');
-  const canSubmit = readyItems.length > 0 && !missingDestination && !blockedIneligible
+  const unknownGenderSelected = [
+    ...selectedStudents.map((student) => ({ name: student.fullName, gender: student.gender })),
+    ...selectedEntries.map((row) => ({ name: row.fullName, gender: row.gender })),
+  ].filter((row) => asGender(row.gender) === 'unknown');
+  const canSubmit = (readyItems.length > 0 || readyEntries.length > 0) && !missingDestination && !blockedIneligible
     && !overfilled.length && !genderConflicts.length && !busy;
 
   const toggle = (studentId: number, on: boolean) => {
@@ -219,8 +287,19 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
     });
   };
 
-  const selectAllFiltered = () => setSelected(new Set(visible.map((student) => student.id)));
-  const clearSelection = () => { setSelected(new Set()); setPreview(false); };
+  const toggleEntry = (rosterEntryId: number, on: boolean) => {
+    setEntrySelected((current) => {
+      const next = new Set(current);
+      if (on) next.add(rosterEntryId); else next.delete(rosterEntryId);
+      return next;
+    });
+  };
+
+  const selectAllFiltered = () => {
+    setSelected(new Set(visible.map((student) => student.id)));
+    setEntrySelected(new Set(visibleEntries.filter((row) => row.eligible).map((row) => row.id)));
+  };
+  const clearSelection = () => { setSelected(new Set()); setEntrySelected(new Set()); setPreview(false); };
 
   const applyBulk = () => {
     if (!bulkGroupId) return;
@@ -228,6 +307,11 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
     setDestinations((current) => {
       const next = { ...current };
       for (const student of selectedStudents) next[student.id] = Number(bulkGroupId);
+      return next;
+    });
+    setEntryDestinations((current) => {
+      const next = { ...current };
+      for (const row of selectedEntries) next[row.id] = Number(bulkGroupId);
       return next;
     });
     setBulkBusy(false);
@@ -238,13 +322,15 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
     setBusy(true); setError(null); setMessage(null); setWarnings([]);
     try {
       const items = readyItems;
+      const entries = readyEntries;
       const pending = roster?.pendingRequest;
       const result = pending
-        ? await cgm.reviseForceGet(Number(pending.id), items, explanation.trim() || undefined)
-        : await cgm.submitForceGet(activityId, items, explanation.trim() || undefined);
+        ? await cgm.reviseForceGet(Number(pending.id), items, explanation.trim() || undefined, entries)
+        : await cgm.submitForceGet(activityId, items, explanation.trim() || undefined, entries);
       setWarnings(Array.isArray(result?.warnings) ? result.warnings : []);
       setMessage(`Version ${result?.version} sent to PHANTOM. Nothing moves until PHANTOM approves.`);
       setSelected(new Set());
+      setEntrySelected(new Set());
       setPreview(false);
       setExplanation('');
       await load();
@@ -348,6 +434,8 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
           ['Sampled', students.filter((student) => student.everAssigned && student.groupId).length, CheckCircle2],
           ['Not sampled', students.filter((student) => !student.everAssigned).length, Target],
           ['Designated', students.filter((student) => Boolean(student.designation)).length, ShieldCheck],
+          ['Not registered', unregistered.length, UserX],
+          ['Seats held', unregistered.filter((row) => Boolean(row.reservation)).length, Lock],
         ].map(([title, value, Icon]: any) => (
           <div key={String(title)} className="rounded-xl border border-slate-100 bg-white px-3 py-2.5">
             <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
@@ -385,7 +473,7 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black text-slate-600" data-testid="cgm-force-get-counts">
-            {visible.length} shown · {selected.size} selected
+            {visible.length + visibleEntries.length} shown · {selected.size + selectedEntries.length} selected
           </span>
           <button type="button" className="mini-button" onClick={selectAllFiltered} data-testid="cgm-force-get-select-all">Select all shown</button>
           <button type="button" className="mini-button" onClick={clearSelection} data-testid="cgm-force-get-clear">Clear</button>
@@ -405,7 +493,7 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
           <button
             type="button"
             className="mini-button disabled:opacity-40"
-            disabled={!bulkGroupId || !selected.size || bulkBusy}
+            disabled={!bulkGroupId || (!selected.size && !selectedEntries.length) || bulkBusy}
             onClick={applyBulk}
             data-testid="cgm-force-get-bulk-apply"
           >
@@ -417,10 +505,10 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
       {/* Roster */}
       <div className={card}>
         <div className="flex items-center justify-between">
-          <p className={label}>Roster · destination per student</p>
+          <p className={label}>Roster · destination per student (registered and not registered)</p>
           {loading && <Loader2 className="h-4 w-4 animate-spin text-slate-300" />}
         </div>
-        {!loading && !visible.length && (
+        {!loading && !visible.length && !visibleEntries.length && (
           <p className="mt-3 rounded-xl bg-slate-50 px-3 py-4 text-center text-xs font-bold text-slate-400">Nobody matches this search or filter.</p>
         )}
         <div className="-mx-1 mt-3 overflow-x-auto">
@@ -501,9 +589,95 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
                   </tr>
                 );
               })}
+              {visibleEntries.map((row) => {
+                const destination = entryDestinations[row.id];
+                const isSelected = entrySelected.has(row.id);
+                return (
+                  <tr
+                    key={`entry-${row.id}`}
+                    className={`align-top ${isSelected ? 'bg-sky-50/70' : 'bg-sky-50/30'} ${row.eligible ? '' : 'opacity-70'}`}
+                    data-testid="cgm-force-get-unregistered-row"
+                    data-roster-entry-id={row.id}
+                  >
+                    <td className="rounded-l-xl px-2 py-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-slate-300 text-sky-600"
+                        checked={isSelected}
+                        disabled={!row.eligible}
+                        onChange={(event) => toggleEntry(row.id, event.target.checked)}
+                        aria-label={`Select ${row.fullName}`}
+                        data-testid="cgm-force-get-select"
+                      />
+                    </td>
+                    <td className="px-2 py-2">
+                      <p className="text-xs font-black text-slate-900">{row.fullName}</p>
+                      <p className="text-[10px] font-semibold text-slate-400">{row.indexNumber}</p>
+                    </td>
+                    <td className="px-2 py-2">
+                      <span className="flex flex-wrap gap-1">
+                        <span className="rounded-full bg-sky-100 px-1.5 py-0.5 text-[9px] font-black text-sky-700" data-testid="cgm-force-get-unregistered-chip">
+                          NOT REGISTERED
+                        </span>
+                        {row.reservation && (
+                          <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-black text-amber-800">
+                            SEAT HELD
+                          </span>
+                        )}
+                        {!row.eligible && (
+                          <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[9px] font-black text-red-600">INELIGIBLE</span>
+                        )}
+                      </span>
+                      {row.reservation && (
+                        <p className="mt-1 text-[10px] font-bold text-amber-800" data-testid="cgm-force-get-reservation">
+                          Approved → {row.reservation.groupName || groupName(row.reservation.groupId) || 'a group'}
+                          {row.reservation.approvedBy ? ` · ${row.reservation.approvedBy}` : ''}
+                        </p>
+                      )}
+                      <p className="mt-1 text-[10px] font-semibold text-slate-400">
+                        Placed automatically when they register.
+                      </p>
+                    </td>
+                    <td className="px-2 py-2 text-[11px] font-bold text-slate-600">
+                      {row.reservation ? 'seat held' : 'on the roster'}
+                    </td>
+                    <td className="rounded-r-xl px-2 py-2">
+                      <select
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[11px] font-black text-slate-800 disabled:bg-slate-100"
+                        value={destination ?? ''}
+                        disabled={!row.eligible}
+                        onChange={(event) => setEntryDestinations((current) => ({ ...current, [row.id]: Number(event.target.value) }))}
+                        aria-label={`Destination for ${row.fullName}`}
+                        data-testid="cgm-force-get-unregistered-group"
+                      >
+                        <option value="">Choose a group…</option>
+                        {groups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {`${group.name} — ${Number(group.size)}/${group.capacity ?? '∞'}`}
+                            {group.reserved ? ` · ${group.reserved} seat(s) reserved` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {!row.eligible && (
+                        <p className="mt-1 text-[10px] font-black text-red-500">
+                          {row.reason || 'Not eligible for this activity — cannot be forced.'}
+                        </p>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+        {visibleEntries.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 rounded-xl bg-sky-50 px-3 py-2 text-[10px] font-bold text-sky-800" data-testid="cgm-force-get-unregistered-note">
+            <UserPlus className="mt-0.5 h-3 w-3 shrink-0" />
+            Rows marked NOT REGISTERED are on the class roster but have no student identity yet. A destination you send for
+            them is still approved by PHANTOM and holds the seat, capacity and gender pool — it becomes their own designation
+            automatically the moment they register.
+          </p>
+        )}
       </div>
 
       {/* Preview + submit */}
@@ -514,7 +688,7 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
             type="button"
             className="mini-button inline-flex items-center gap-1.5"
             onClick={() => setPreview((value) => !value)}
-            disabled={!selectedStudents.length}
+            disabled={!selectedStudents.length && !selectedEntries.length}
             data-testid="cgm-force-get-preview-toggle"
           >
             <Layers className="h-3.5 w-3.5" /> {preview ? 'Hide preview' : 'Preview'}
@@ -539,7 +713,9 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
                   </p>
                 </div>
                 <p className="mt-1 text-[11px] font-semibold text-slate-600">
-                  {bucket.incoming.map((student) => `${student.fullName}${student.groupName ? ` (from ${student.groupName})` : ' (not sampled yet)'}`).join(' · ')}
+                  {bucket.incoming.map((member) => `${member.fullName}${
+                    member.unregistered ? ' (not registered yet)'
+                      : member.groupName ? ` (from ${member.groupName})` : ' (not sampled yet)'}`).join(' · ')}
                 </p>
                 {bucket.over && <p className="mt-1 text-[10px] font-black text-red-600">Reduce this group's incoming students before submitting.</p>}
                 {genderRule === 'separate' && (
@@ -619,12 +795,15 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
             {pending ? 'Replace pending version' : 'Send to PHANTOM for approval'}
           </button>
           <span className="text-[11px] font-bold text-slate-400">
-            {readyItems.length} student(s) ready{pending ? ` · replaces version ${pending.version}` : ''}
+            {readyItems.length + readyEntries.length} student(s) ready
+            {readyEntries.length ? ` · ${readyEntries.length} not registered yet` : ''}
+            {pending ? ` · replaces version ${pending.version}` : ''}
           </span>
         </div>
         <p className="mt-2 text-[10px] font-semibold text-slate-400">
           Approved designations reserve their seats but never fill them: each student is placed when they sample
-          (or when their own approved re-choose lets them sample again). Organizers cannot approve their own request.
+          (or when their own approved re-choose lets them sample again). A seat approved for somebody who has not
+          registered yet becomes their own designation the moment they do. Organizers cannot approve their own request.
         </p>
       </div>
 

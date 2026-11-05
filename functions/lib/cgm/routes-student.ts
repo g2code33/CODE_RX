@@ -70,8 +70,8 @@ import {
   type CgmStudentRow,
 } from './service';
 import {
-  claimDesignatedSeat, groupGenderPools, groupHoldsOtherPool, insertAssignmentRespectingDesignations,
-  reservedSeatsFor, studentGenders,
+  claimDesignatedSeat, convertReservationsForEntry, groupGenderPools, groupHoldsOtherPool,
+  insertAssignmentRespectingDesignations, reservedSeatsFor, studentGenders,
 } from './forceGet';
 import { sha256Hex } from '../vault';
 import { createNotification } from '../notifications';
@@ -230,6 +230,17 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         `UPDATE cgm_registration_requests SET status = 'approved', student_id = ?,
          reviewer_label = 'Policy (automatic)', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
       ).bind(studentId, requestId).run();
+      // An approved Force Get seat may already be held for this roster row. Now
+      // that the row has an identity it becomes that student's own designation —
+      // they still sample with the activity's own method.
+      const converted = await convertReservationsForEntry(c.env.DB, {
+        rosterEntryId: Number(entry.id), studentId, classId: Number(klass.id), label: 'Policy (automatic)',
+      });
+      for (const placed of converted) {
+        await notifyStudent(c.env.DB, studentId, 'groups', 'Your group is already decided',
+          `Your organizer had an approved group for you in ${placed.activityName}: ${placed.groupName}. `
+          + `Keep using your normal group selection — you will be placed there when you do.`);
+      }
       if (issuedPasskey) {
         // One-time disclosure rule: the passkey itself lives only in the
         // registration response, never in persistent notification history.
