@@ -1769,7 +1769,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const reserved = await reservedSeatsFor(c.env.DB, activityId);
     const forced = await forcedMemberCounts(c.env.DB, activityId);
     const students = await asRows<any>(c.env.DB.prepare(
-      `SELECT s.id, s.full_name, s.index_number,
+      `SELECT s.id, s.full_name, s.index_number, s.gender,
               ga.id AS assignment_id, ga.group_id, ga.assigned_via, ga.assigned_at,
               EXISTS(SELECT 1 FROM cgm_group_assignments x WHERE x.activity_id = ? AND x.student_id = s.id) AS ever_assigned,
               (SELECT rc.status FROM cgm_rechoose_requests rc WHERE rc.activity_id = ? AND rc.student_id = s.id
@@ -1799,6 +1799,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       })),
       students: students.map((row) => ({
         id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
+        gender: row.gender || 'unknown',
         eligible: eligibleSet ? eligibleSet.has(Number(row.id)) : true,
         groupId: row.group_id === null || row.group_id === undefined ? null : Number(row.group_id),
         groupName: row.group_id ? (groupNames.get(Number(row.group_id)) || null) : null,
@@ -1891,6 +1892,32 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       if (item.rechoose) {
         warnings.push(`A Re-choose request already exists for one student — the designation waits for their own resampling.`);
         break;
+      }
+    }
+    // Gender rules are preserved, not silently broken: with 'separate' the
+    // destination group can only hold one gender pool, so a cross-pool
+    // designation is reported to the organizer and to PHANTOM.
+    if (config.genderRule === 'separate') {
+      const pools = await asRows<any>(c.env.DB.prepare(
+        `SELECT ga.group_id, s.gender, COUNT(*) AS c
+         FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id
+         WHERE ga.activity_id = ? AND ga.status = 'active' GROUP BY ga.group_id, s.gender`
+      ).bind(activityId));
+      const poolsByGroup = new Map<number, Set<string>>();
+      for (const row of pools) {
+        if (!poolsByGroup.has(Number(row.group_id))) poolsByGroup.set(Number(row.group_id), new Set());
+        poolsByGroup.get(Number(row.group_id))!.add(String(row.gender || 'unknown'));
+      }
+      for (const item of items) {
+        const student = byStudent.get(item.studentId);
+        const existing = poolsByGroup.get(item.groupId);
+        if (!student || !existing || !existing.size) continue;
+        const gender = String((student as any).gender || 'unknown');
+        if (gender === 'unknown') continue;
+        const clash = [...existing].filter((value) => value !== 'unknown' && value !== gender);
+        if (clash.length) {
+          warnings.push(`${byStudent.get(item.studentId)?.fullName} would join a group whose members are ${clash[0]} — this activity separates gender pools.`);
+        }
       }
     }
     return { errors, warnings, items };
@@ -2359,7 +2386,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         action: alreadyThere ? 'cgm.force_get.applied' : 'cgm.force_get.approved',
         entityType: 'force_get_designation', entityId: Number(result.meta.last_row_id),
         classId: Number(request.class_id), activityId: Number(request.activity_id),
-        context: { studentId, studentName, groupId, requestId, version: Number(request.version), alreadyThere },
+        context: {
+          studentId, studentName, groupId, requestId, version: Number(request.version), alreadyThere,
+          fromGroupId: item.previous_group_id === null || item.previous_group_id === undefined ? null : Number(item.previous_group_id),
+          toGroupId: groupId,
+        },
       });
       await notifyStudent(c.env.DB, studentId, 'groups', 'Your organizer designated your group',
         alreadyThere

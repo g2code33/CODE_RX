@@ -4245,6 +4245,26 @@ check('a newer approval supersedes the older live designation for the same stude
   && q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'superseded'", fgDrawLab, fgE.studentId).c === 1
   && q1("SELECT designated_group_id FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgE.studentId).designated_group_id === fgG2);
 
+// -- Gender rules are reported, never silently broken ----------------------
+const fgGenderLab = await fgNewActivity('Force Get Gender Lab', { ...fgConfig, groupCount: 2, capacity: 4, genderRule: 'separate' });
+await memberCall('POST', `/api/cgm/activities/${fgGenderLab}/groups`, { count: 2, capacity: 4 }, amaToken);
+const fgGenderGroups = (await fgGroupsOf(fgGenderLab)).map((g) => Number(g.id));
+const fgGenderStudents = [];
+for (const n of [70, 71]) fgGenderStudents.push(await freshFmtRosterStudent(n, `Gender Split ${n}`));
+sqlite.prepare("UPDATE cgm_students SET gender = 'male' WHERE id = ?").run(fgGenderStudents[0].studentId);
+sqlite.prepare("UPDATE cgm_students SET gender = 'female' WHERE id = ?").run(fgGenderStudents[1].studentId);
+await memberCall('POST', `/api/cgm/activities/${fgGenderLab}/assign-student`, { studentId: fgGenderStudents[0].studentId, groupId: fgGenderGroups[0] }, amaToken);
+const fgGenderCross = await memberCall('POST', `/api/cgm/activities/${fgGenderLab}/force-get/requests`, {
+  items: [{ studentId: fgGenderStudents[1].studentId, groupId: fgGenderGroups[0] }], explanation: 'Sibling pair.',
+}, amaToken);
+check('a cross-pool designation under genderRule=separate is reported, not silently applied',
+  fgGenderCross.status === 200
+  && (fgGenderCross.json?.data?.warnings || []).some((warning) => /separates gender pools/.test(String(warning))),
+  JSON.stringify(fgGenderCross.json?.data?.warnings || fgGenderCross.text?.slice(0, 120)));
+await memberCall('POST', `/api/cgm/force-get/requests/${fgGenderCross.json?.data?.requestId}/cancel`, {}, amaToken);
+check('the approval audit records the old and new destination for every student',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.approved' AND entity_type = 'force_get_designation' AND context_json LIKE '%toGroupId%' AND context_json LIKE '%fromGroupId%'").c >= 1);
+
 // -- Two PHANTOM operators racing the same approval ------------------------
 const fgRaceRequest = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
   items: [{ studentId: fgB.studentId, groupId: fgG1 }], explanation: 'Race fixture.',
