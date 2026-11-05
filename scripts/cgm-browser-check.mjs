@@ -331,26 +331,6 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
     && await page.waitForFor('Wait for PHANTOM approval', 5_000),
     page.body().slice(0, 200));
 
-  // A decision that has been granted must still be readable afterwards.
-  const fgQueue = (await api('GET', '/api/cgm/phantom/force-get/requests', undefined, phantomToken)).json?.data || [];
-  const approvedRequest = fgQueue.find((row) => row.status === 'approved');
-  check('an approved Force Get request is still returned by its queue', Boolean(approvedRequest),
-    JSON.stringify(fgQueue.map((row) => row.status)).slice(0, 160));
-  if (approvedRequest) {
-    const second = await boot('#class-groups/phantom', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
-    await second.waitForFor('PHANTOM');
-    const tab = await second.waitForElement(() => second.buttonByText('Class Groups'));
-    tab && tab.click();
-    await second.waitForFor('Module settings', 20_000);
-    const fgTab = await second.waitForElement(() => second.buttonByText('Force Get Requests'));
-    fgTab && fgTab.click();
-    check('the approved request is still on the Force Get tab, marked APPROVED',
-      await second.waitForFor(`Request #${approvedRequest.id}`, 20_000)
-      && await second.waitForFor('APPROVED', 5_000),
-      second.body().slice(0, 240));
-    check('the decided row names who approved it', await second.waitForFor(/APPROVED by PHANTOM/, 5_000),
-      second.body().slice(0, 240));
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1105,32 @@ let wsClass = null;
   check('she still samples herself and lands in the seat that was held for her',
     joinDraw?.success === true && Number(joinDraw?.data?.groupId) === Number(rosterGroupIds[0]) && joinDraw?.data?.designated === true,
     JSON.stringify(joinDraw?.data || {}).slice(0, 160));
+}
+
+// ---------------------------------------------------------------------------
+// A granted approval must stay on the record — same queue, marked APPROVED.
+// ---------------------------------------------------------------------------
+{
+  // A decision that has been granted must still be readable afterwards.
+  const fgQueue = (await api('GET', '/api/cgm/phantom/force-get/requests', undefined, phantomToken)).json?.data || [];
+  const approvedRequest = fgQueue.find((row) => row.status === 'approved');
+  check('an approved Force Get request is still returned by its queue', Boolean(approvedRequest),
+    JSON.stringify(fgQueue.map((row) => row.status)).slice(0, 160));
+  if (approvedRequest) {
+    const second = await boot('#class-groups/phantom', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+    await second.waitForFor('PHANTOM');
+    const tab = await second.waitForElement(() => second.buttonByText('Class Groups'));
+    tab && tab.click();
+    await second.waitForFor('Module settings', 20_000);
+    const fgTab = await second.waitForElement(() => second.buttonByText('Force Get Requests'));
+    fgTab && fgTab.click();
+    check('the approved request is still on the Force Get tab, marked APPROVED',
+      await second.waitForFor(`Request #${approvedRequest.id}`, 20_000)
+      && await second.waitForFor('APPROVED', 5_000),
+      second.body().slice(0, 240));
+    check('the decided row names who approved it', await second.waitForFor(/APPROVED by PHANTOM/, 5_000),
+      second.body().slice(0, 240));
+  }
 }
 
 // ---------------------------------------------------------------------------
