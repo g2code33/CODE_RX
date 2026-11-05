@@ -35,7 +35,11 @@ import {
   activeAssignmentId,
   activeDesignationsFor,
   ensureForceGetSchema,
+  forceGetComposition,
   forcedMemberCounts,
+  groupGenderPools,
+  groupHoldsOtherPool,
+  studentGenders,
   insertAssignmentRespectingDesignations,
   markDesignationApplied,
   reservedSeatsFor,
@@ -604,8 +608,16 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     await ensureForceGetSchema(db);
     const designations = await activeDesignationsFor(db, activityId);
     const pending: number[] = [];
+    const blocked: number[] = [];
     let placed = 0;
-    if (!designations.size) return { placed, pending };
+    if (!designations.size) return { placed, pending, blocked };
+    // genderRule = 'separate' also governs the automatic application of an
+    // approved designation: the rule is never broken to honour one.
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    const enforcePools = config.genderRule === 'separate';
+    const genders = enforcePools
+      ? await studentGenders(db, activityId, [...designations.values()].map((d) => d.studentId))
+      : new Map<number, string>();
     const assignedRows = await asRows<{ student_id: number }>(db.prepare(
       `SELECT student_id FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'`
     ).bind(activityId));
@@ -615,8 +627,29 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const ok = await insertAssignmentRespectingDesignations(db, {
         activityId, groupId: designation.groupId, studentId: designation.studentId,
         via: 'automatic', label,
+        enforceGenderPools: enforcePools, studentGender: genders.get(designation.studentId),
       });
-      if (!ok) { pending.push(designation.studentId); continue; }
+      if (!ok) {
+        // Distinguish "seat taken" from "gender-separated policy": the latter is
+        // reported to the organizer, and the designation stays active (unapplied)
+        // so nothing is silently lost or silently violated.
+        if (enforcePools && await groupHoldsOtherPool(db, activityId, designation.groupId, genders.get(designation.studentId))) {
+          blocked.push(designation.studentId);
+          await auditCgm(db, {
+            actorType: 'system', actorLabel: 'gender policy',
+            action: 'cgm.force_get.apply_blocked', entityType: 'force_get_designation', entityId: designation.id,
+            activityId, classId: Number(activity.class_id),
+            context: {
+              studentId: designation.studentId, groupId: designation.groupId,
+              reason: 'gender_rule_separate', studentGender: genders.get(designation.studentId) || 'unknown',
+              requestId: designation.requestId, version: designation.version,
+            },
+          });
+          continue;
+        }
+        pending.push(designation.studentId);
+        continue;
+      }
       const assignmentId = await activeAssignmentId(db, activityId, designation.studentId);
       const applied = await markDesignationApplied(db, designation.id, assignmentId);
       await db.prepare(
@@ -633,7 +666,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       });
       placed += 1;
     }
-    return { placed, pending };
+    return { placed, pending, blocked };
   };
 
   app.post('/api/cgm/activities/:id/generate', async (c: any) => {
@@ -658,13 +691,19 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     // planner sees their seats as taken and never reshuffles them.
     const designated = await placeDesignatedStudents(c.env.DB, activityId, activity, member.name);
     const awaitingDesignationSeat = new Set(designated.pending);
+    // genderRule = 'separate': the planner can only use groups that are empty
+    // or already hold the student's own pool (a 'mixed' group accepts nobody).
+    const pools = config.genderRule === 'separate' ? await groupGenderPools(c.env.DB, activityId) : new Map<number, string>();
 
     const existingGroups = await asRows<any>(c.env.DB.prepare(
       `SELECT g.id, g.capacity,
               (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
        FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active' ORDER BY g.position`
     ).bind(activityId));
-    let groups = existingGroups.map((row) => ({ groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity), currentSize: Number(row.size) }));
+    let groups = existingGroups.map((row) => ({
+      groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity),
+      currentSize: Number(row.size), pool: pools.get(Number(row.id)),
+    }));
 
     // Create the groups the organizer asked for (idempotent: only the missing
     // number is added).
@@ -692,7 +731,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         `SELECT g.id, g.capacity,
                 (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
          FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active' ORDER BY g.position`
-      ).bind(activityId)).then((rows) => rows.map((row) => ({ groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity), currentSize: Number(row.size) })));
+      ).bind(activityId)).then((rows) => rows.map((row) => ({
+        groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity),
+        currentSize: Number(row.size), pool: pools.get(Number(row.id)),
+      })));
     }
     if (!groups.length) return bad(c, 'Create groups first or specify how many groups you need.');
 
@@ -719,7 +761,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       plan = rebalanceGenders(plan, studentMap, groups, secureRng());
     }
 
-    const applied = await applyPlan(c.env.DB, activityId, plan, 'automatic', member.name);
+    const applied = await applyPlan(c.env.DB, activityId, plan, 'automatic', member.name, {
+      genderRule: config.genderRule,
+      genders: new Map(students.map((student) => [student.studentId, student.gender])),
+    });
     const unplaced = students.length - applied;
     const warnings: string[] = [];
     if (awaitingDesignationSeat.size) {
@@ -779,14 +824,20 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     return map;
   };
 
-  const applyPlan = async (db: D1Database, activityId: number, plan: { studentId: number; groupId: number }[], via: string, label: string) => {
+  const applyPlan = async (
+    db: D1Database, activityId: number, plan: { studentId: number; groupId: number }[], via: string, label: string,
+    gate?: { genderRule: string; genders: Map<number, string> },
+  ) => {
     let applied = 0;
+    const enforcePools = gate?.genderRule === 'separate';
     for (const placement of plan) {
       try {
         // Designation-aware guard: seats reserved for approved Force Get
-        // designations are never stolen by ordinary placement.
+        // designations are never stolen by ordinary placement, and under
+        // `separate` a group only accepts one gender pool.
         const wrote = await insertAssignmentRespectingDesignations(db, {
           activityId, groupId: placement.groupId, studentId: placement.studentId, via, label,
+          enforceGenderPools: enforcePools, studentGender: gate?.genders.get(placement.studentId),
         });
         if (!wrote) {
           console.warn('[code-rx] assignment skipped (already active or capacity):', placement);
@@ -821,6 +872,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     // then counted as taken, never handed to somebody else).
     const designated = await placeDesignatedStudents(c.env.DB, activityId, activity, member.name);
     const awaitingDesignationSeat = new Set(designated.pending);
+    const pools = config.genderRule === 'separate' ? await groupGenderPools(c.env.DB, activityId) : new Map<number, string>();
     const groups = await asRows<any>(c.env.DB.prepare(
       `SELECT g.id, g.capacity,
               (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
@@ -834,38 +886,61 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const students: AssignableStudent[] = roster.filter((row: any) => !assignedIds.has(Number(row.id)) && !awaitingDesignationSeat.has(Number(row.id)))
       .map((row: any) => ({ studentId: Number(row.id), gender: row.gender }));
     const plan = planAssignments({
-      groups: groups.map((row) => ({ groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity), currentSize: Number(row.size) })),
+      groups: groups.map((row) => ({
+        groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity),
+        currentSize: Number(row.size), pool: pools.get(Number(row.id)),
+      })),
       students,
       genderRule: config.genderRule,
       repeatRule: config.repeatRule,
       previousClassmates: await repeatClassmateMap(c.env.DB, Number(activity.class_id), students.map((s) => s.studentId)),
       rng: secureRng(),
     });
-    const applied = await applyPlan(c.env.DB, activityId, plan, 'automatic', member.name);
+    const applied = await applyPlan(c.env.DB, activityId, plan, 'automatic', member.name, {
+      genderRule: config.genderRule,
+      genders: new Map(students.map((student) => [student.studentId, student.gender])),
+    });
     // Promote from the waitlist while seats remain.
     const waiting = await asRows<any>(c.env.DB.prepare(
       `SELECT w.id, w.student_id FROM cgm_activity_waitlist w WHERE w.activity_id = ? AND w.status = 'waiting' ORDER BY w.id`
     ).bind(activityId));
     let promoted = 0;
     for (const row of waiting) {
-      const freeGroup = await asRows<any>(c.env.DB.prepare(
-        `SELECT g.id FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
-         AND (g.capacity IS NULL OR (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') < g.capacity)
+      const waiterId = Number(row.student_id);
+      // Candidates are re-read for every waiter: earlier promotions changed
+      // sizes, pools and reservations.
+      const candidateRows = await asRows<any>(c.env.DB.prepare(
+        `SELECT g.id, g.capacity,
+                (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+         FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
          AND NOT EXISTS (SELECT 1 FROM cgm_group_assignments ga WHERE ga.activity_id = ? AND ga.student_id = ? AND ga.status = 'active')
-         ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') LIMIT 1`
-      ).bind(activityId, activityId, Number(row.student_id)));
-      if (!freeGroup[0]) break;
+         ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active'), g.position`
+      ).bind(activityId, activityId, waiterId));
+      const liveReserved = await reservedSeatsFor(c.env.DB, activityId);
+      const livePools = config.genderRule === 'separate' ? await groupGenderPools(c.env.DB, activityId) : null;
+      const waiterGender = livePools ? (await studentGenders(c.env.DB, activityId, [waiterId])).get(waiterId) : undefined;
+      const freeGroup = candidateRows.filter((group) => {
+        if (group.capacity !== null
+          && Number(group.size) + (liveReserved.get(Number(group.id)) || 0) >= Number(group.capacity)) return false;
+        if (!livePools) return true;
+        const pool = livePools.get(Number(group.id));
+        // A group already holding another pool (or more than one) cannot take
+        // this waiter — the seat stays free rather than mixing genders.
+        return !pool || (pool !== 'mixed' && pool === String(waiterGender || 'unknown'));
+      }).slice(0, 1);
+      if (!freeGroup[0]) continue;
       // Same atomic guard as self-assignment: if a concurrent request took
       // the seat, skip this waiter instead of overfilling the group.
       const promotedSeat = await insertAssignmentRespectingDesignations(c.env.DB, {
-        activityId, groupId: Number(freeGroup[0].id), studentId: Number(row.student_id),
+        activityId, groupId: Number(freeGroup[0].id), studentId: waiterId,
         via: 'waitlist', label: member.name,
+        enforceGenderPools: config.genderRule === 'separate', studentGender: waiterGender,
       });
       if (!promotedSeat) continue;
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
          VALUES (?, ?, ?, 'assigned', ?, 'promoted from waiting list')`
-      ).bind(activityId, Number(row.student_id), Number(freeGroup[0].id), member.name).run();
+      ).bind(activityId, waiterId, Number(freeGroup[0].id), member.name).run();
       await c.env.DB.prepare(
         `UPDATE cgm_activity_waitlist SET status = 'promoted', promoted_at = CURRENT_TIMESTAMP WHERE id = ?`
       ).bind(Number(row.id)).run();
@@ -901,6 +976,47 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        WHERE ga.activity_id = ? AND ga.student_id = ? AND ga.status = 'active'`
     ).bind(activityId, studentId));
     if (current[0] && Number(current[0].group_id) === groupId) return bad(c, 'The student is already in that group.', 409);
+    // genderRule = 'separate': a manual move may not mix pools either — judged
+    // on the group's COMPLETE composition (members + seats reserved by approved
+    // designations + this student), exactly like a Force Get request. The
+    // organizer gets the reason instead of a misleading "group is full".
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    let genderGate = false;
+    let genderOfStudent = 'unknown';
+    if (config.genderRule === 'separate') {
+      const genderMap = await studentGenders(c.env.DB, activityId, [studentId]);
+      genderOfStudent = genderMap.get(studentId) || 'unknown';
+      const activityGroups = await asRows<any>(c.env.DB.prepare(
+        `SELECT id, name, position, capacity FROM cgm_groups WHERE activity_id = ? AND status = 'active'`
+      ).bind(activityId));
+      const composition = await forceGetComposition(c.env.DB, {
+        activityId,
+        genderRule: 'separate',
+        proposal: [{ studentId, groupId }],
+        groups: activityGroups.map((row: any) => ({
+          id: Number(row.id), name: row.name || `Group ${row.position}`, capacity: row.capacity,
+        })),
+      });
+      const clash = composition.conflicts.find((conflict) => conflict.kind === 'gender' && conflict.groupId === groupId);
+      if (clash) {
+        return c.json({
+          success: false,
+          error: `This activity separates gender pools, so ${group.name || 'that group'} cannot take this student. ${clash.message}`,
+          data: {
+            code: 'force_get_composition_conflict',
+            conflicts: [{
+              kind: clash.kind, groupId: clash.groupId, groupName: clash.groupName, message: clash.message,
+              pools: clash.detail.pools,
+              students: [
+                ...clash.detail.proposed.map((member) => ({ ...member, role: 'proposed' })),
+                ...clash.detail.existing.map((member) => ({ ...member, role: member.source })),
+              ],
+            }],
+          },
+        }, 409);
+      }
+      genderGate = true;
+    }
     if (group.capacity !== null) {
       const sizeRows = await asRows<{ c: number }>(c.env.DB.prepare(
         `SELECT COUNT(*) AS c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
@@ -932,12 +1048,16 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       ).bind(Number(current[0].id)).run();
       const wrote = await insertAssignmentRespectingDesignations(c.env.DB, {
         activityId, groupId, studentId, via: 'organizer', label: member.name,
+        enforceGenderPools: genderGate, studentGender: genderOfStudent,
       });
       if (!wrote) {
-        // The destination filled up between the check and the write; put the
-        // student back exactly where they were instead of leaving them seatless.
+        // The destination filled up (or changed pool) between the check and the
+        // write; put the student back exactly where they were instead of
+        // leaving them seatless.
         await restoreAssignment(c.env.DB, Number(current[0].id));
-        return bad(c, 'That group just filled up — the student keeps their current group.', 409);
+        return bad(c, genderGate
+          ? 'That group just changed — the student keeps their current group.'
+          : 'That group just filled up — the student keeps their current group.', 409);
       }
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, from_group_id, to_group_id, action, actor_label, reason)
@@ -946,8 +1066,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     } else {
       const wrote = await insertAssignmentRespectingDesignations(c.env.DB, {
         activityId, groupId, studentId, via: 'organizer', label: member.name,
+        enforceGenderPools: genderGate, studentGender: genderOfStudent,
       });
-      if (!wrote) return bad(c, 'That group just filled up.', 409);
+      if (!wrote) return bad(c, genderGate ? 'That group just changed pool or filled up.' : 'That group just filled up.', 409);
       if (liveDesignation && liveDesignation.groupId === groupId) {
         await markDesignationApplied(c.env.DB, liveDesignation.id, await activeAssignmentId(c.env.DB, activityId, studentId));
       }
@@ -1768,6 +1889,19 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(activityId));
     const reserved = await reservedSeatsFor(c.env.DB, activityId);
     const forced = await forcedMemberCounts(c.env.DB, activityId);
+    // Live gender composition of each group (members + the seats already
+    // promised to approved designations), read from the SAME evaluator that
+    // blocks a submission and an approval — so the organizer's preview can never
+    // disagree with what the server will refuse.
+    const liveComposition = await forceGetComposition(c.env.DB, {
+      activityId,
+      genderRule: config.genderRule,
+      proposal: [],
+      groups: groups.map((row) => ({
+        id: Number(row.id), name: row.name || `Group ${row.position}`, capacity: row.capacity,
+      })),
+    });
+    const compositionByGroup = new Map(liveComposition.groups.map((entry) => [entry.groupId, entry]));
     const students = await asRows<any>(c.env.DB.prepare(
       `SELECT s.id, s.full_name, s.index_number, s.gender,
               ga.id AS assignment_id, ga.group_id, ga.assigned_via, ga.assigned_at,
@@ -1796,6 +1930,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         capacity: row.capacity === null ? null : Number(row.capacity), size: Number(row.size),
         reserved: reserved.get(Number(row.id)) || 0,
         forced: forced.get(Number(row.id)) || 0,
+        genderCounts: compositionByGroup.get(Number(row.id))?.genderCounts || { male: 0, female: 0, unknown: 0 },
+        genderPools: compositionByGroup.get(Number(row.id))?.pools || [],
       })),
       students: students.map((row) => ({
         id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
@@ -1894,32 +2030,38 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         break;
       }
     }
-    // Gender rules are preserved, not silently broken: with 'separate' the
-    // destination group can only hold one gender pool, so a cross-pool
-    // designation is reported to the organizer and to PHANTOM.
-    if (config.genderRule === 'separate') {
-      const pools = await asRows<any>(c.env.DB.prepare(
-        `SELECT ga.group_id, s.gender, COUNT(*) AS c
-         FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id
-         WHERE ga.activity_id = ? AND ga.status = 'active' GROUP BY ga.group_id, s.gender`
-      ).bind(activityId));
-      const poolsByGroup = new Map<number, Set<string>>();
-      for (const row of pools) {
-        if (!poolsByGroup.has(Number(row.group_id))) poolsByGroup.set(Number(row.group_id), new Set());
-        poolsByGroup.get(Number(row.group_id))!.add(String(row.gender || 'unknown'));
-      }
-      for (const item of items) {
-        const student = byStudent.get(item.studentId);
-        const existing = poolsByGroup.get(item.groupId);
-        if (!student || !existing || !existing.size) continue;
-        const gender = String((student as any).gender || 'unknown');
-        if (gender === 'unknown') continue;
-        const clash = [...existing].filter((value) => value !== 'unknown' && value !== gender);
-        if (clash.length) {
-          warnings.push(`${byStudent.get(item.studentId)?.fullName} would join a group whose members are ${clash[0]} — this activity separates gender pools.`);
-        }
+    // GENDER — judged on the COMPLETE proposed composition of every destination
+    // group (existing members + reserved seats + every student named in this
+    // proposal at once), never one student at a time. Under `separate` a clash
+    // is a hard error: the request cannot even be filed while it would mix
+    // gender pools. 'unknown' is its own pool and is never guessed at.
+    const composition = await forceGetComposition(c.env.DB, {
+      activityId,
+      genderRule: config.genderRule,
+      proposal: items.map((item) => ({ studentId: item.studentId, groupId: item.groupId })),
+      groups: roster.groups.map((group) => ({ id: group.id, name: group.name, capacity: group.capacity })),
+    });
+    // Only the groups this proposal actually sends students to can block it: a
+    // legacy mixed group somewhere else in the activity is reported, but it is
+    // not this organizer's proposal that would create it.
+    const targetedGroups = new Set(items.map((item) => item.groupId));
+    for (const conflict of composition.conflicts) {
+      if (!targetedGroups.has(conflict.groupId)) continue;
+      if (conflict.kind === 'gender') errors.push(conflict.message);
+      else if (conflict.kind === 'capacity' && conflict.blocking && !committed.has(conflict.groupId)) {
+        errors.push(conflict.detail.reserved.length
+          ? `${conflict.groupName} would hold ${conflict.detail.projected} students including ${conflict.detail.reserved.length} seat(s) already reserved for other approved designations, but its capacity is ${conflict.detail.capacity}.`
+          : conflict.message);
       }
     }
+    for (const conflict of composition.conflicts) {
+      if (targetedGroups.has(conflict.groupId)) continue;
+      warnings.push(`${conflict.groupName} already mixes gender pools outside this proposal — fix it before those students are re-placed.`);
+    }
+    for (const warning of composition.warnings) {
+      if (!warnings.includes(warning)) warnings.push(warning);
+    }
+
     return { errors, warnings, items };
   };
 
@@ -2101,6 +2243,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (!request) return null;
     const items = await asRows<any>(c.env.DB.prepare(
       `SELECT i.*, s.full_name, s.index_number,
+              COALESCE(NULLIF(LOWER(TRIM(s.gender)), ''), 'unknown') AS gender,
               dg.name AS destination_name, dg.position AS destination_position,
               pg.name AS previous_name, pg.position AS previous_position,
               ga.group_id AS current_group_id, cg.name AS current_group_name,
@@ -2157,13 +2300,33 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         sampled: Number(item.sampled_at_submission || 0) === 1,
         rechooseState: item.rechoose_now || item.rechoose_state || null,
         destinationGroupId: key,
+        gender: String(item.gender || 'unknown').toLowerCase(),
       });
     }
-    const buckets = [...distribution.values()].map((bucket) => ({
-      ...bucket,
-      projectedTotal: bucket.size + bucket.projected,
-      conflict: bucket.capacity !== null ? bucket.size + bucket.projected > bucket.capacity : false,
-    }));
+    // The same evaluator the approval uses, so PHANTOM sees exactly what the
+    // approval will refuse: capacity AND the gender-separated composition,
+    // naming the group, the students and where the clash comes from.
+    const composition = await forceGetComposition(c.env.DB, {
+      activityId: Number(request.activity_id),
+      genderRule: config.genderRule,
+      proposal: items.map((item) => ({ studentId: Number(item.student_id), groupId: Number(item.destination_group_id) })),
+      groups: groups.map((group) => ({
+        id: Number(group.id), name: group.name || `Group ${group.position}`,
+        capacity: group.capacity === null || group.capacity === undefined ? null : Number(group.capacity),
+      })),
+    });
+    const compositionByGroup = new Map(composition.groups.map((entry) => [entry.groupId, entry]));
+    const buckets = [...distribution.values()].map((bucket) => {
+      const evaluated = compositionByGroup.get(bucket.groupId);
+      return {
+        ...bucket,
+        projectedTotal: evaluated ? evaluated.projected : bucket.size + bucket.projected,
+        genderPools: evaluated ? evaluated.pools : [],
+        genderCounts: evaluated ? evaluated.genderCounts : { male: 0, female: 0, unknown: 0 },
+        conflict: bucket.capacity !== null ? bucket.size + bucket.projected > bucket.capacity : false,
+        genderConflict: Boolean(evaluated?.mixed),
+      };
+    });
     return {
       request: {
         id: Number(request.id), version: Number(request.version), status: request.status,
@@ -2175,10 +2338,28 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         reviewedAt: request.reviewed_at, reviewReason: request.review_reason,
       },
       groups: buckets,
-      conflicts: buckets.filter((bucket) => bucket.conflict).map((bucket) => ({
+      // Every blocking conflict the approval would raise, with its detail.
+      conflicts: composition.conflicts
+        .filter((conflict) => conflict.kind === 'gender' || distribution.has(conflict.groupId))
+        .map((conflict) => ({
+          kind: conflict.kind,
+          groupId: conflict.groupId,
+          groupName: conflict.groupName,
+          message: conflict.message,
+          blocking: conflict.blocking,
+          pools: conflict.detail.pools,
+          students: conflict.detail.proposed.map((member) => ({ ...member, role: 'proposed' as const }))
+            .concat(conflict.detail.existing.map((member) => ({ ...member, role: member.source }))),
+          capacity: conflict.detail.capacity,
+          projected: conflict.detail.projected,
+          overflow: conflict.detail.overflow,
+        })),
+      capacityConflicts: buckets.filter((bucket) => bucket.conflict).map((bucket) => ({
         groupId: bucket.groupId, groupName: bucket.groupName,
         message: `${bucket.groupName}: ${bucket.size} member(s) now + ${bucket.projected} proposed = ${bucket.projectedTotal}, capacity ${bucket.capacity}.`,
       })),
+      genderRule: config.genderRule,
+      canApprove: composition.errors.length === 0 && invalid === 0,
       invalidItems: invalid,
     };
   };
@@ -2303,28 +2484,56 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         return bad(c, `${item.full_name}'s destination group no longer exists in this activity. Reject and ask the organizer to revise.`, 409);
       }
     }
-    // Capacity with reservations already granted to other students.
-    const reserved = await reservedSeatsFor(c.env.DB, Number(request.activity_id));
-    const incoming = new Map<number, number>();
-    const leaving = new Map<number, number>();
-    for (const item of items) {
-      const target = Number(item.destination_group_id);
-      incoming.set(target, (incoming.get(target) || 0) + 1);
-      if (item.previous_group_id && Number(item.previous_group_id) !== target) {
-        leaving.set(Number(item.previous_group_id), (leaving.get(Number(item.previous_group_id)) || 0) + 1);
-      }
-    }
-    for (const [groupId, count] of incoming) {
-      const group = groupById.get(groupId)!;
-      if (group.capacity === null) continue;
-      const projected = Number(group.size) - (leaving.get(groupId) || 0) + count;
-      if (projected > Number(group.capacity)) {
-        const name = group.name || `Group ${group.position}`;
-        return bad(c,
-          `${name} cannot hold this batch: ${Number(group.size)} member(s) now, ${count} proposed, capacity ${Number(group.capacity)}` +
-          `${reserved.get(groupId) ? `, ${reserved.get(groupId)} seat(s) reserved for other approved designations` : ''}. ` +
-          `Reject and ask the organizer to revise the destinations or raise the capacity.`, 409);
-      }
+    // APPROVAL-TIME REVALIDATION — the proposal is judged again against LIVE
+    // data (members, reservations, other approved designations, current
+    // genders), because any of them may have changed since submission. One
+    // evaluator covers BOTH capacity and the gender-separated policy:
+    //   final group = active members that stay
+    //               + reservations still waiting to be applied
+    //               + this proposal's students
+    // with every student counted once.
+    const composition = await forceGetComposition(c.env.DB, {
+      activityId: Number(request.activity_id),
+      genderRule: config.genderRule,
+      proposal: items.map((item) => ({ studentId: Number(item.student_id), groupId: Number(item.destination_group_id) })),
+      groups: groups.map((group) => ({
+        id: Number(group.id), name: group.name || `Group ${group.position}`,
+        capacity: group.capacity === null || group.capacity === undefined ? null : Number(group.capacity),
+      })),
+    });
+    const approvalGroups = new Set(items.map((item) => Number(item.destination_group_id)));
+    const blockingConflicts = composition.conflicts.filter((conflict) => conflict.blocking && approvalGroups.has(conflict.groupId));
+    if (blockingConflicts.length) {
+      // PHANTOM sees exactly what is wrong: the group, who clashes, which pool
+      // each of them belongs to and whether they are an existing member, a
+      // reserved approved seat or part of this proposal.
+      return c.json({
+        success: false,
+        error: `Cannot approve — the proposed composition breaks this activity's rules. ${blockingConflicts.map((conflict) => conflict.message).join(' ')} `
+          + `Reject the request and ask the organizer to revise it (or change the activity's gender rule first).`,
+        data: {
+          code: 'force_get_composition_conflict',
+          genderRule: config.genderRule,
+          errors: blockingConflicts.map((conflict) => conflict.message),
+          warnings: composition.warnings,
+          canApprove: false,
+          conflicts: blockingConflicts.map((conflict) => ({
+            kind: conflict.kind,
+            groupId: conflict.groupId,
+            groupName: conflict.groupName,
+            message: conflict.message,
+            blocking: conflict.blocking,
+            pools: conflict.detail.pools,
+            students: [
+              ...conflict.detail.proposed.map((member) => ({ ...member, role: 'proposed' })),
+              ...conflict.detail.existing.map((member) => ({ ...member, role: member.source })),
+            ],
+            capacity: conflict.detail.capacity,
+            projected: conflict.detail.projected,
+            overflow: conflict.detail.overflow,
+          })),
+        },
+      }, 409);
     }
 
     const claimed = await c.env.DB.prepare(

@@ -1433,6 +1433,13 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
                 <option value="balanced">Balanced distribution</option>
                 <option value="separate">Separate male/female groups</option>
               </select>
+              {form.genderRule === 'separate' && (
+                <p className="mt-1 rounded-lg bg-amber-50 px-2 py-1 text-[10px] font-bold leading-relaxed text-amber-800" data-testid="cgm-act-gender-note">
+                  One gender pool per group, everywhere: random draws, self-assignment, organizer moves and Force Get
+                  proposals/revisions/approvals. “Unknown” is its own pool — it is never assumed male or female, and a
+                  Force Get that would mix pools is refused, not approved with a warning.
+                </p>
+              )}
             </div>
             <div><label className={label} htmlFor="cgm-act-repeat">Repeat classmates</label>
               <select id="cgm-act-repeat" className={`${inputClass} mt-1`} value={form.repeatRule} onChange={(event) => setForm({ ...form, repeatRule: event.target.value })}>

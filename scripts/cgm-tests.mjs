@@ -4257,11 +4257,12 @@ await memberCall('POST', `/api/cgm/activities/${fgGenderLab}/assign-student`, { 
 const fgGenderCross = await memberCall('POST', `/api/cgm/activities/${fgGenderLab}/force-get/requests`, {
   items: [{ studentId: fgGenderStudents[1].studentId, groupId: fgGenderGroups[0] }], explanation: 'Sibling pair.',
 }, amaToken);
-check('a cross-pool designation under genderRule=separate is reported, not silently applied',
-  fgGenderCross.status === 200
-  && (fgGenderCross.json?.data?.warnings || []).some((warning) => /separates gender pools/.test(String(warning))),
-  JSON.stringify(fgGenderCross.json?.data?.warnings || fgGenderCross.text?.slice(0, 120)));
-await memberCall('POST', `/api/cgm/force-get/requests/${fgGenderCross.json?.data?.requestId}/cancel`, {}, amaToken);
+check('a cross-pool designation under genderRule=separate is REFUSED, never silently applied',
+  fgGenderCross.status === 400
+  && (fgGenderCross.json?.data?.errors || []).some((error) => /separates gender pools/.test(String(error))),
+  JSON.stringify(fgGenderCross.json?.data?.errors || fgGenderCross.text?.slice(0, 160)));
+check('the refused cross-pool request never created a pending row',
+  q1("SELECT COUNT(*) c FROM cgm_force_get_requests WHERE activity_id = ? AND status = 'pending'", fgGenderLab).c === 0);
 check('the approval audit records the old and new destination for every student',
   q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.approved' AND entity_type = 'force_get_designation' AND context_json LIKE '%toGroupId%' AND context_json LIKE '%fromGroupId%'").c >= 1);
 
@@ -4332,6 +4333,262 @@ check('the Force Get workspace submits through the approval gate, never a direct
 check('PHANTOM has a Force Get Requests tab with approve and reject',
   /'force-get', 'Force Get Requests'/.test(fgPhantomSrc) && /cgm-phantom-approve-force-get/.test(fgPhantomSrc)
   && /phantomDecideForceGet/.test(fgPhantomSrc));
+
+
+// ---------------------------------------------------------------------------
+section('41. Force Get gender balancing: the COMPLETE proposed composition, at every step');
+
+// A dedicated family of activities so the final scan can never be polluted by
+// fixtures from earlier sections.
+const fgpConfig = { ...fgConfig, method: 'hybrid', genderRule: 'separate', capacity: 4, groupCount: 3 };
+const fgpNew = async (name, overrides = {}, groupCount = null) => {
+  const count = groupCount ?? overrides.groupCount ?? 3;
+  const id = await fgNewActivity(name, { ...fgpConfig, ...overrides, groupCount: count });
+  const capacity = overrides.capacity === undefined ? 4 : overrides.capacity;
+  const created = await memberCall('POST', `/api/cgm/activities/${id}/groups`, { count: groupCount, capacity }, amaToken);
+  if (created.status !== 200) throw new Error(`group creation failed for ${name}: ${created.status} ${created.text?.slice(0, 120)}`);
+  const groups = (await fgGroupsOf(id)).map((g) => Number(g.id));
+  return { id, groups };
+};
+const fgpStudent = async (n, gender) => {
+  const s = await freshFmtRosterStudent(n, `Pool ${n}`);
+  if (gender) sqlite.prepare('UPDATE cgm_students SET gender = ? WHERE id = ?').run(gender, s.studentId);
+  return s;
+};
+const fgpItems = (pairs) => pairs.map(([student, groupId]) => ({ studentId: student.studentId, groupId: Number(groupId) }));
+const fgpSubmit = (activityId, pairs, explanation = 'Pool composition probe.') =>
+  memberCall('POST', `/api/cgm/activities/${activityId}/force-get/requests`, { items: fgpItems(pairs), explanation }, amaToken);
+const fgpApprove = (requestId, version) =>
+  memberCall('POST', `/api/cgm/phantom/force-get/requests/${requestId}/approve`, { version }, phantomToken);
+const fgpDesignations = (activityId, studentId) => q1(
+  'SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?', activityId, Number(studentId),
+).c;
+
+// Sixteen fresh students with a known gender (two deliberately left unknown).
+const pMale1 = await fgpStudent(80, 'male');
+const pMale2 = await fgpStudent(81, 'male');
+const pMale3 = await fgpStudent(82, 'male');
+const pFemale1 = await fgpStudent(83, 'female');
+const pFemale2 = await fgpStudent(84, 'female');
+const pFemale3 = await fgpStudent(85, 'female');
+const pUnknown1 = await fgpStudent(86, null);
+const pUnknown2 = await fgpStudent(87, null);
+check('the pool fixtures carry their genders (unknown stays unknown, never guessed)',
+  q1('SELECT gender FROM cgm_students WHERE id = ?', pFemale1.studentId)?.gender === 'female'
+  && q1('SELECT gender FROM cgm_students WHERE id = ?', pUnknown1.studentId)?.gender === 'unknown',
+  String(q1('SELECT gender FROM cgm_students WHERE id = ?', pUnknown1.studentId)?.gender));
+
+// ---- A. two different genders into ONE EMPTY group, in the same request ----
+const labA = await fgpNew('Force Get Pool A');
+const [gA1, gA2, gA3] = labA.groups;
+const mixedPair = await fgpSubmit(labA.id, [[pMale1, gA1], [pFemale1, gA1]]);
+check('A — two different-gender students into the SAME empty group is refused at submission',
+  mixedPair.status === 400
+  && (mixedPair.json?.data?.errors || []).some((error) => /separates gender pools/.test(String(error))
+    && /male/.test(String(error)) && /female/.test(String(error))),
+  `status ${mixedPair.status} ${JSON.stringify(mixedPair.json?.data?.errors || mixedPair.text?.slice(0, 160))}`);
+check('A — the refused proposal created no request and no reservation',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_requests WHERE activity_id = ?', labA.id).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ?', labA.id).c === 0);
+
+// ---- B. the same gender into one empty group is allowed -------------------
+const sameGender = await fgpSubmit(labA.id, [[pMale1, gA1], [pMale2, gA1]]);
+const sameGenderId = Number(sameGender.json?.data?.requestId || 0);
+check('B — two students of the SAME gender into one empty group is accepted',
+  sameGender.status === 200 && sameGenderId > 0,
+  `status ${sameGender.status} ${JSON.stringify(sameGender.json?.data?.errors || sameGender.text?.slice(0, 160))}`);
+const sameGenderApprove = await fgpApprove(sameGenderId, Number(sameGender.json?.data?.version || 0));
+check('B — PHANTOM approves it and both students hold a live reservation in that group',
+  sameGenderApprove.status === 200
+  && fgpDesignations(labA.id, pMale1.studentId) === 1 && fgpDesignations(labA.id, pMale2.studentId) === 1
+  && q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND designated_group_id = ? AND status = 'active'", labA.id, gA1).c === 2,
+  `status ${sameGenderApprove.status}`);
+
+// ---- C. a clash with an EXISTING member -----------------------------------
+const memberPlaced = await memberCall('POST', `/api/cgm/activities/${labA.id}/assign-student`, {
+  studentId: pMale3.studentId, groupId: gA2,
+}, amaToken);
+check('C — the organizer can place a student in an EMPTY group of a separated activity',
+  memberPlaced.status === 200, `status ${memberPlaced.status} ${memberPlaced.text?.slice(0, 120)}`);
+const existingClash = await fgpSubmit(labA.id, [[pFemale2, gA2]]);
+check('C — proposing a different gender into a group that already holds one is refused, naming the group and the existing member',
+  existingClash.status === 400
+  && (existingClash.json?.data?.errors || []).some((error) => /separates gender pools/.test(String(error))
+    && /existing member/.test(String(error)) && new RegExp(`Pool ${Math.floor(0)}|Group|${'Pool'}`).test(String(error))),
+  JSON.stringify(existingClash.json?.data?.errors || existingClash.text?.slice(0, 160)));
+
+// ---- D. a clash with an APPROVED, NOT-YET-APPLIED reservation --------------
+const reservedClash = await fgpSubmit(labA.id, [[pFemale2, gA1]]);
+check('D — a proposal that clashes with an approved-but-unapplied RESERVED seat is refused',
+  reservedClash.status === 400
+  && (reservedClash.json?.data?.errors || []).some((error) => /separates gender pools/.test(String(error))
+    && /reserved APPROVED designation/.test(String(error))),
+  JSON.stringify(reservedClash.json?.data?.errors || reservedClash.text?.slice(0, 200)));
+const reservedMove = await memberCall('POST', `/api/cgm/activities/${labA.id}/assign-student`, {
+  studentId: pFemale2.studentId, groupId: gA1,
+}, amaToken);
+check('D — an organizer manual move hits the same rule: it is refused with a structured conflict, not a wrong "group is full"',
+  reservedMove.status === 409 && reservedMove.json?.data?.code === 'force_get_composition_conflict'
+  && Array.isArray(reservedMove.json?.data?.conflicts) && reservedMove.json.data.conflicts[0].kind === 'gender',
+  `status ${reservedMove.status} ${reservedMove.text?.slice(0, 200)}`);
+check('D — the refused move changed nothing (student still unassigned, reservation intact)',
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", labA.id, pFemale2.studentId).c === 0
+  && q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND designated_group_id = ? AND status = 'active'", labA.id, gA1).c === 2);
+
+// ---- E. revisions are validated independently ------------------------------
+const labE = await fgpNew('Force Get Pool E');
+const [gE1] = labE.groups;
+const validReq = await fgpSubmit(labE.id, [[pMale1, gE1]]);
+const validId = Number(validReq.json?.data?.requestId || 0);
+const validVersion = Number(validReq.json?.data?.version || 0);
+check('E — a single-pool proposal is accepted', validReq.status === 200 && validId > 0, `status ${validReq.status}`);
+const badRevision = await memberCall('POST', `/api/cgm/force-get/requests/${validId}/revise`, {
+  items: fgpItems([[pMale1, gE1], [pFemale1, gE1]]), explanation: 'Now a mixed pair.',
+}, amaToken);
+check('E — a revision is validated on its OWN content: a mixed revision is refused',
+  badRevision.status === 400
+  && (badRevision.json?.data?.errors || []).some((error) => /separates gender pools/.test(String(error))),
+  `status ${badRevision.status} ${badRevision.text?.slice(0, 160)}`);
+check('E — the refused revision left the pending version untouched (same id, same version, still pending)',
+  q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', validId).status === 'pending'
+  && Number(q1('SELECT MAX(version) v FROM cgm_force_get_requests WHERE activity_id = ?', labE.id).v) === validVersion,
+  `version=${q1('SELECT MAX(version) v FROM cgm_force_get_requests WHERE activity_id = ?', labE.id).v}`);
+const validApprove = await fgpApprove(validId, validVersion);
+check('E — the untouched pending version still approves cleanly', validApprove.status === 200, `status ${validApprove.status}`);
+
+// ---- F. approval-time revalidation (live data changed after submission) ----
+const labF = await fgpNew('Force Get Pool F', { genderRule: 'none', method: 'random' }, 2);
+const [gF1] = labF.groups;
+const fMixedUnderNone = await fgpSubmit(labF.id, [[pMale3, gF1], [pFemale3, gF1]]);
+const fMixedId = Number(fMixedUnderNone.json?.data?.requestId || 0);
+check('F — under a non-separated rule the same mixed proposal is allowed (no invented gender rule)',
+  fMixedUnderNone.status === 200, `status ${fMixedUnderNone.status} ${fMixedUnderNone.text?.slice(0, 120)}`);
+const fRuleFlip = await memberCall('PATCH', `/api/cgm/activities/${labF.id}`, { config: { genderRule: 'separate' } }, amaToken);
+check('F — the activity is switched to gender-separated AFTER the request was filed', fRuleFlip.status === 200,
+  `status ${fRuleFlip.status} ${fRuleFlip.text?.slice(0, 120)}`);
+const fApprove = await fgpApprove(fMixedId, 1);
+const fConflict = (fApprove.json?.data?.conflicts || [])[0];
+check('F — approval is blocked at approval time, with the group, the students, their genders and where each comes from',
+  fApprove.status === 409 && fConflict?.kind === 'gender'
+  && Array.isArray(fConflict.students) && fConflict.students.length >= 2
+  && fConflict.students.every((row) => row.role === 'proposed')
+  && fConflict.pools.includes('male') && fConflict.pools.includes('female')
+  && fApprove.json?.data?.canApprove === false,
+  `status ${fApprove.status} ${JSON.stringify(fApprove.json?.data?.conflicts || fApprove.text?.slice(0, 200))}`);
+check('F — the blocked approval approved nothing: request still pending, no designation created',
+  q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fMixedId).status === 'pending'
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE approved_request_id = ?', fMixedId).c === 0);
+const fRevision = await memberCall('POST', `/api/cgm/force-get/requests/${fMixedId}/revise`, {
+  items: fgpItems([[pMale3, gF1]]), explanation: 'Same pool only.',
+}, amaToken);
+check('F — the organizer fixes it with a same-pool revision', fRevision.status === 200, `status ${fRevision.status} ${fRevision.text?.slice(0, 140)}`);
+const fOldVersion = await fgpApprove(fMixedId, 1);
+check('F — the OLD version can never be approved after the revision', fOldVersion.status === 409, `status ${fOldVersion.status}`);
+const fNewApprove = await fgpApprove(Number(fRevision.json?.data?.requestId), Number(fRevision.json?.data?.version));
+check('F — the revised, same-pool version approves', fNewApprove.status === 200, `status ${fNewApprove.status}`);
+
+// ---- G. designation honouring at sampling + Re-choose, never breaking the rule
+const labG = await fgpNew('Force Get Pool R');
+const [gG1, gG2] = labG.groups;
+const selfPlace = await studentCall('POST', `/api/cgm/student/activities/${labG.id}/assign`, { groupId: gG1 }, pMale1.session);
+check('G — a student samples into an empty group', selfPlace.status === 200 && Number(selfPlace.json?.data?.groupId) === gG1,
+  `status ${selfPlace.status} ${selfPlace.text?.slice(0, 120)}`);
+const gReq = await fgpSubmit(labG.id, [[pMale1, gG2]]);
+const gApprove = await fgpApprove(Number(gReq.json?.data?.requestId), Number(gReq.json?.data?.version));
+const gAssignmentId = Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", labG.id, pMale1.studentId)?.id || 0);
+check('G — the approval does NOT move an already-sampled student, it saves a designation',
+  gApprove.status === 200 && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE id = ?", gAssignmentId)?.group_id) === gG1
+  && q1("SELECT status FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", labG.id, pMale1.studentId)?.status === 'active',
+  `status ${gApprove.status}`);
+const gRechoose = await memberCall('POST', `/api/cgm/assignments/${gAssignmentId}/rechoose`, { reason: 'Lab reshuffle' }, amaToken);
+const gRechooseApprove = await memberCall('POST', `/api/cgm/phantom/rechoose-requests/${gRechoose.json?.data?.id}/approve`, {}, phantomToken);
+check('G — the Re-choose request needs PHANTOM (organizer cannot self-approve)', gRechoose.status === 200 && gRechooseApprove.status === 200,
+  `${gRechoose.status}/${gRechooseApprove.status}`);
+const gResample = await studentCall('POST', `/api/cgm/student/activities/${labG.id}/random-draw`, {}, pMale1.session);
+check('G — on Re-choose completion the designation lands exactly once, in the approved group',
+  gResample.status === 200 && Number(gResample.json?.data?.groupId) === gG2
+  && q1("SELECT status FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", labG.id, pMale1.studentId)?.status === 'applied'
+  && q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'applied'", labG.id, pMale1.studentId).c === 1,
+  `status ${gResample.status} ${gResample.text?.slice(0, 160)}`);
+
+// ---- H. unknown gender is its own pool, never guessed ---------------------
+const labH = await fgpNew('Force Get Pool H');
+const [gH1] = labH.groups;
+const unknownWithKnown = await fgpSubmit(labH.id, [[pUnknown1, gH1], [pMale1, gH1]]);
+check('H — a known gender plus an unknown one in the same group is refused (unknown is never assumed male/female)',
+  unknownWithKnown.status === 400
+  && (unknownWithKnown.json?.data?.errors || []).some((error) => /not recorded/.test(String(error))),
+  JSON.stringify(unknownWithKnown.json?.data?.errors || unknownWithKnown.text?.slice(0, 160)));
+const unknownOnly = await fgpSubmit(labH.id, [[pUnknown1, gH1], [pUnknown2, gH1]]);
+check('H — unknown-only groups are allowed but the organizer is warned that the rule cannot be verified',
+  unknownOnly.status === 200
+  && (unknownOnly.json?.data?.warnings || []).some((warning) => /no gender recorded/.test(String(warning))),
+  JSON.stringify(unknownOnly.json?.data?.warnings || unknownOnly.text?.slice(0, 160)));
+const unknownApprove = await fgpApprove(Number(unknownOnly.json?.data?.requestId), Number(unknownOnly.json?.data?.version));
+check('H — such a request can still be approved (it never mixes pools)', unknownApprove.status === 200, `status ${unknownApprove.status}`);
+
+// ---- I. non-separated activities are untouched ----------------------------
+const labI = await fgpNew('Force Get Pool I', { genderRule: 'none', method: 'random' }, 2);
+const [gI1] = labI.groups;
+const noneMixed = await fgpSubmit(labI.id, [[pMale2, gI1], [pFemale1, gI1]]);
+const noneApprove = await fgpApprove(Number(noneMixed.json?.data?.requestId), Number(noneMixed.json?.data?.version));
+check('I — a non-separated activity accepts and approves a mixed proposal unchanged',
+  noneMixed.status === 200 && noneApprove.status === 200, `${noneMixed.status}/${noneApprove.status}`);
+
+// ---- J. capacity and gender together; a reservation is consumed once ------
+const labJ = await fgpNew('Force Get Pool J', { capacity: 1, groupCount: 1 }, 1);
+const [gJ1] = labJ.groups;
+const jFirst = await fgpSubmit(labJ.id, [[pMale1, gJ1]]);
+const jFirstApprove = await fgpApprove(Number(jFirst.json?.data?.requestId), Number(jFirst.json?.data?.version));
+check('J — the first reservation is approved into a capacity-1 group', jFirst.status === 200 && jFirstApprove.status === 200,
+  `${jFirst.status}/${jFirstApprove.status}`);
+const jSecond = await fgpSubmit(labJ.id, [[pMale2, gJ1]]);
+check('J — the reserved seat is counted as taken: a second proposal for that group is refused for CAPACITY, naming the reservation',
+  jSecond.status === 400
+  && (jSecond.json?.data?.errors || []).some((error) => /capacity|reserved/.test(String(error))),
+  JSON.stringify(jSecond.json?.data?.errors || jSecond.text?.slice(0, 200)));
+check('J — the reservation is consumed exactly once (one designation, one approved request)',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ?', labJ.id).c === 1
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND status = \'active\'', labJ.id).c === 1);
+
+// ---- J2. concurrent seat claims cannot overfill a group -------------------
+const labK = await fgpNew('Force Get Pool K', { genderRule: 'none', method: 'random', capacity: 1, groupCount: 1 }, 1);
+const [gK1] = labK.groups;
+const race = await Promise.all([
+  studentCall('POST', `/api/cgm/student/activities/${labK.id}/random-draw`, {}, pMale3.session),
+  studentCall('POST', `/api/cgm/student/activities/${labK.id}/random-draw`, {}, pFemale3.session),
+]);
+check('J — two simultaneous draws for the last seat: exactly one lands, the group never overfills',
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", labK.id).c === 1
+  && q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'", gK1).c === 1,
+  `statuses ${race.map((row) => row.status).join(',')} assignments ${q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", labK.id).c}`);
+
+// ---- Final acceptance: no separated activity produced a mixed group -------
+const mixedGroups = q(
+  `SELECT ga.group_id AS group_id, COUNT(DISTINCT COALESCE(NULLIF(LOWER(TRIM(s.gender)), ''), 'unknown')) AS pools
+   FROM cgm_group_assignments ga
+   JOIN cgm_students s ON s.id = ga.student_id
+   JOIN cgm_groups g ON g.id = ga.group_id
+   JOIN cgm_activities a ON a.id = g.activity_id
+   WHERE ga.status = 'active' AND a.name LIKE 'Force Get Pool %'
+     AND a.config_json LIKE '%"genderRule":"separate"%'
+   GROUP BY ga.group_id HAVING pools > 1`,
+);
+check('ACCEPTANCE — after every path above, no group in a separated activity holds more than one gender pool',
+  mixedGroups.length === 0, JSON.stringify(mixedGroups));
+const mixedReservations = q(
+  `SELECT d.designated_group_id AS group_id,
+          COUNT(DISTINCT COALESCE(NULLIF(LOWER(TRIM(s.gender)), ''), 'unknown')) AS pools
+   FROM cgm_force_get_designations d
+   JOIN cgm_students s ON s.id = d.student_id
+   JOIN cgm_groups g ON g.id = d.designated_group_id
+   JOIN cgm_activities a ON a.id = g.activity_id
+   WHERE d.status = 'active' AND a.name LIKE 'Force Get Pool %'
+     AND a.config_json LIKE '%"genderRule":"separate"%'
+   GROUP BY d.designated_group_id HAVING pools > 1`,
+);
+check('ACCEPTANCE — no group holds live reservations of more than one gender pool either',
+  mixedReservations.length === 0, JSON.stringify(mixedReservations));
 
 
 // ---------------------------------------------------------------------------

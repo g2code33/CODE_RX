@@ -39,6 +39,12 @@ const FILTERS: Array<[FilterKey, string]> = [
   ['ineligible', 'Ineligible'],
 ];
 
+type Gender = 'male' | 'female' | 'unknown';
+const asGender = (value: unknown): Gender => {
+  const text = String(value || '').trim().toLowerCase();
+  return text === 'male' || text === 'female' ? text : 'unknown';
+};
+
 const statusChips = (student: ForceGetStudent) => {
   const chips: Array<{ text: string; tone: string }> = [];
   if (student.everAssigned && student.groupId) chips.push({ text: 'SAMPLED', tone: 'bg-sky-50 text-sky-700' });
@@ -160,7 +166,50 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
   const blockedIneligible = selectedStudents.filter((student) => !student.eligible).length;
   const missingDestination = selectedStudents.filter((student) => !destinations[student.id]).length;
   const overfilled = buckets.filter((bucket) => bucket.over);
-  const canSubmit = readyItems.length > 0 && !missingDestination && !blockedIneligible && !overfilled.length && !busy;
+
+  /**
+   * GENDER PREVIEW — the same rule the server enforces, computed before the
+   * request is sent: the COMPLETE composition of every destination group
+   * (members + seats already reserved by approved designations + EVERY student
+   * in this proposal going there at once). One student at a time is never
+   * enough: two different-pool students into one empty group clash with each
+   * other, and 'unknown' is a pool of its own, never a wildcard.
+   */
+  const genderRule = roster?.activity?.genderRule || 'none';
+  const genderConflicts = useMemo(() => {
+    if (genderRule !== 'separate') return [] as Array<{
+      groupId: number; groupName: string; existing: Array<{ name: string; gender: Gender }>;
+      proposed: Array<{ name: string; gender: Gender }>; pools: Gender[];
+    }>;
+    const rows: Array<{
+      groupId: number; groupName: string; existing: Array<{ name: string; gender: Gender }>;
+      proposed: Array<{ name: string; gender: Gender }>; pools: Gender[];
+    }> = [];
+    for (const bucket of buckets) {
+      const group = groups.find((entry) => Number(entry.id) === Number(bucket.groupId));
+      const counts = group?.genderCounts || { male: 0, female: 0, unknown: 0 };
+      const pools = new Set<Gender>();
+      if (counts.male) pools.add('male');
+      if (counts.female) pools.add('female');
+      if (counts.unknown) pools.add('unknown');
+      const existing: Array<{ name: string; gender: Gender }> = [];
+      if (counts.male) existing.push({ name: `${counts.male} male member(s)`, gender: 'male' });
+      if (counts.female) existing.push({ name: `${counts.female} female member(s)`, gender: 'female' });
+      if (counts.unknown) existing.push({ name: `${counts.unknown} member(s) with no gender recorded`, gender: 'unknown' });
+      const proposed = bucket.incoming
+        .filter((student) => Number(student.groupId) !== Number(bucket.groupId))
+        .map((student) => ({ name: student.fullName, gender: asGender(student.gender) }));
+      for (const student of proposed) pools.add(student.gender);
+      if (pools.size > 1) {
+        rows.push({ groupId: bucket.groupId, groupName: bucket.name, existing, proposed, pools: [...pools] });
+      }
+    }
+    return rows;
+  }, [buckets, groups, genderRule]);
+
+  const unknownGenderSelected = selectedStudents.filter((student) => asGender(student.gender) === 'unknown');
+  const canSubmit = readyItems.length > 0 && !missingDestination && !blockedIneligible
+    && !overfilled.length && !genderConflicts.length && !busy;
 
   const toggle = (studentId: number, on: boolean) => {
     setSelected((current) => {
@@ -476,7 +525,12 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
           <div className="mt-3 space-y-2" data-testid="cgm-force-get-preview">
             {!buckets.length && <p className="rounded-xl bg-slate-50 px-3 py-3 text-xs font-bold text-slate-400">Pick a destination for at least one selected student.</p>}
             {buckets.map((bucket) => (
-              <div key={bucket.groupId} className={`rounded-xl border px-3 py-2 ${bucket.over ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
+              <div
+                key={bucket.groupId}
+                className={`rounded-xl border px-3 py-2 ${
+                  bucket.over || genderConflicts.some((row) => row.groupId === bucket.groupId)
+                    ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}
+              >
                 <div className="flex flex-wrap items-center justify-between gap-1">
                   <p className="text-xs font-black text-slate-900">{bucket.name}</p>
                   <p className={`text-[11px] font-black ${bucket.over ? 'text-red-600' : 'text-slate-500'}`}>
@@ -488,11 +542,57 @@ export const ForceGetWorkspace = ({ activityId, onBack, onChanged }: {
                   {bucket.incoming.map((student) => `${student.fullName}${student.groupName ? ` (from ${student.groupName})` : ' (not sampled yet)'}`).join(' · ')}
                 </p>
                 {bucket.over && <p className="mt-1 text-[10px] font-black text-red-600">Reduce this group's incoming students before submitting.</p>}
+                {genderRule === 'separate' && (
+                  <p className={`mt-1 text-[10px] font-black ${
+                    genderConflicts.some((row) => row.groupId === bucket.groupId) ? 'text-red-600' : 'text-slate-500'}`}>
+                    Gender pools held now: {(() => {
+                      const group = groups.find((entry) => Number(entry.id) === Number(bucket.groupId));
+                      const pools = group?.genderPools || [];
+                      const counts = group?.genderCounts || { male: 0, female: 0, unknown: 0 };
+                      return pools.length
+                        ? pools.map((pool) => `${pool} (${counts[pool as 'male' | 'female' | 'unknown'] || 0})`).join(', ')
+                        : 'empty — this group is not gender-separated yet';
+                    })()}
+                  </p>
+                )}
               </div>
             ))}
             {missingDestination > 0 && <p className="text-[11px] font-black text-red-600">{missingDestination} selected student(s) have no destination yet.</p>}
             {blockedIneligible > 0 && <p className="text-[11px] font-black text-red-600">{blockedIneligible} selected student(s) are not eligible and will never be forced.</p>}
           </div>
+        )}
+
+        {genderConflicts.length > 0 && (
+          <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5" data-testid="cgm-force-get-gender-conflict">
+            <p className="text-[11px] font-black uppercase tracking-[0.14em] text-red-700">
+              <AlertTriangle className="mr-1 inline h-3.5 w-3.5" /> Gender separation — cannot be sent as it stands
+            </p>
+            <ul className="mt-1.5 space-y-1.5 text-[11px] font-semibold text-red-800">
+              {genderConflicts.map((conflict) => (
+                <li key={conflict.groupId}>
+                  <span className="font-black">{conflict.groupName}</span> would hold {conflict.pools.join(' and ')} together.
+                  {' '}Already there: {conflict.existing.length ? conflict.existing.map((row) => row.name).join(', ') : 'nobody'}.
+                  {' '}This proposal adds: {conflict.proposed.length
+                    ? conflict.proposed.map((row) => `${row.name} (${row.gender})`).join(', ')
+                    : 'nobody'}.
+                  {' '}{conflict.pools.includes('unknown')
+                    ? 'A gender is not recorded — the separated rule cannot be verified until it is set; unknown is never assumed to be male or female.'
+                    : `This activity separates gender pools, so ${conflict.groupName} can only take one of them.`}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1.5 text-[10px] font-bold text-red-700">
+              Move the clashing student to another group, or ask PHANTOM to change the activity's gender rule first.
+            </p>
+          </div>
+        )}
+
+        {genderRule === 'separate' && unknownGenderSelected.length > 0 && (
+          <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-[11px] font-bold text-amber-800" data-testid="cgm-force-get-gender-unknown">
+            <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+            {unknownGenderSelected.length} selected student(s) have no gender recorded. A separated activity treats
+            “unknown” as its own pool — set their gender in the class roster instead of guessing.
+          </p>
         )}
 
         <label className="mt-3 block">

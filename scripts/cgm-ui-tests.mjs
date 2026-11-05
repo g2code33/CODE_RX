@@ -828,7 +828,8 @@ check('bulk destination assignment exists for the selected rows',
   && /applyBulk/.test(forceGetWs));
 check('a live preview shows current vs projected capacity and blocks over-capacity proposals',
   /data-testid="cgm-force-get-preview"/.test(forceGetWs) && /projected/.test(forceGetWs)
-  && /over capacity/.test(forceGetWs) && /const canSubmit = readyItems\.length > 0 && !missingDestination && !blockedIneligible && !overfilled\.length/.test(forceGetWs));
+  && /over capacity/.test(forceGetWs)
+  && /const canSubmit = readyItems\.length > 0 && !missingDestination && !blockedIneligible[\s\S]{0,120}?!overfilled\.length[\s\S]{0,120}?!genderConflicts\.length/.test(forceGetWs));
 check('the workspace states that nothing moves until PHANTOM approves',
   /Nothing moves until PHANTOM approves/.test(forceGetWs));
 check('a pending version can be revised or cancelled from the workspace',
@@ -866,12 +867,43 @@ check('the backend keeps designation separate from assignment and applies it exa
 check('sampling honours the designation on both the draw and the self-assignment path',
   /claimDesignatedSeat/.test(src('functions/lib/cgm/routes-student.ts'))
   && /placeByDesignation/.test(src('functions/lib/cgm/routes-student.ts'))
-  && (src('functions/lib/cgm/routes-student.ts').match(/placeByDesignation\(c, activity, student\)/g) || []).length === 2);
+  && (src('functions/lib/cgm/routes-student.ts').match(/placeByDesignation\(c, activity, student, config\)/g) || []).length === 2);
 check('organizer planners place approved designations first, before any planning',
   /placeDesignatedStudents/.test(routesActivities)
   && (routesActivities.match(/placeDesignatedStudents\(c\.env\.DB/g) || []).length >= 2);
 check('the rejection reason is stored and surfaced back to the organizer',
   /review_reason = \?/.test(routesActivities) && /reviewReason/.test(forceGetWs));
+
+check('the organizer preview names the destination group, its current composition and the proposed additions when genders clash',
+  /data-testid="cgm-force-get-gender-conflict"/.test(forceGetWs)
+  && /Already there:/.test(forceGetWs) && /This proposal adds:/.test(forceGetWs)
+  && /Gender pools held now:/.test(forceGetWs)
+  && /unknown is never assumed to be male or female/.test(forceGetWs));
+check('the preview judges the COMPLETE composition (members + reservations + every student added at once)',
+  /counts\.male|counts\.female/.test(forceGetWs) && /for \(const student of proposed\) pools\.add\(student\.gender\)/.test(forceGetWs)
+  && /student\.groupId\) !== Number\(bucket\.groupId\)/.test(forceGetWs));
+check('an unknown gender is surfaced separately and never silently treated as male/female',
+  /data-testid="cgm-force-get-gender-unknown"/.test(forceGetWs) && /const asGender =/.test(forceGetWs));
+check('PHANTOM sees which group, which students, which pools and where the clash comes from BEFORE approving',
+  /data-testid="cgm-phantom-force-get-conflict"/.test(phantom)
+  && /in this proposal/.test(phantom) && /holds a reserved approved seat here/.test(phantom)
+  && /already a member of this group/.test(phantom)
+  && /Approving is refused until the conflict is gone/.test(phantom));
+check('the shared evaluator is the single source of truth for both preview and enforcement',
+  /export const evaluateComposition/.test(src('functions/lib/cgm/groupComposition.ts'))
+  && /forceGetComposition/.test(routesActivities)
+  && /forceGetComposition/.test(forceGetLib)
+  && /evaluateComposition/.test(forceGetLib));
+check('the atomic seat claim re-checks the gender pool inside the INSERT (members AND reservations)',
+  /enforceGenderPools/.test(forceGetLib)
+  && (forceGetLib.match(/FROM cgm_force_get_designations dm/g) || []).length >= 1
+  && /groupHoldsOtherPool/.test(forceGetLib));
+check('the activity settings document that the separated rule has no Force Get exception',
+  /data-testid="cgm-act-gender-note"/.test(workspace) && /Force Get\s+proposals\/revisions\/approvals/.test(workspace));
+check('revisions, sampling and Re-choose all route through the same pool guard',
+  /enforceGenderPools: separated/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /enforceGenderPools: enforcePools/.test(routesActivities)
+  && /placeByDesignation/.test(src('functions/lib/cgm/routes-student.ts')));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

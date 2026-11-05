@@ -273,6 +273,9 @@ export async function importRosterFile(
 export interface ForceGetGroup {
   id: number; name: string; position: number; capacity: number | null;
   size: number; reserved: number; forced: number;
+  /** Live gender composition (members + seats already reserved by approvals). */
+  genderCounts?: { male: number; female: number; unknown: number };
+  genderPools?: string[];
 }
 export interface ForceGetDesignation {
   id: number; groupId: number | null; groupName: string | null;
@@ -280,6 +283,8 @@ export interface ForceGetDesignation {
 }
 export interface ForceGetStudent {
   id: number; fullName: string; indexNumber: string;
+  /** 'male' | 'female' | 'unknown' — the separated rule treats unknown as its own pool. */
+  gender?: string;
   eligible: boolean;
   groupId: number | null; groupName: string | null;
   assignmentId: number | null; assignedVia: string | null;
@@ -312,11 +317,34 @@ export interface ForceGetSubmitResult {
 export interface ForceGetBucket {
   groupId: number; groupName: string; capacity: number | null; size: number;
   reserved: number; projected: number; projectedTotal: number; conflict: boolean;
+  /** Set when the projected composition would mix gender pools. */
+  genderConflict?: boolean;
+  genderCounts?: { male: number; female: number; unknown: number };
+  genderPools?: string[];
   students: Array<{
     studentId: number; fullName: string; indexNumber: string;
     currentGroupId: number | null; currentGroupName: string | null;
     sampled: boolean; rechooseState: string | null; destinationGroupId: number;
+    gender?: string;
   }>;
+}
+/**
+ * One blocking conflict on a Force Get request. `kind` says whether it is the
+ * gender-separated policy or a capacity overflow; the detail names the group,
+ * the students involved and where each of them comes from (existing member,
+ * reserved approved seat, or this proposal) so PHANTOM can explain it.
+ */
+export interface ForceGetConflict {
+  kind: 'gender' | 'capacity';
+  groupId: number;
+  groupName: string;
+  message: string;
+  blocking: boolean;
+  pools: string[];
+  students: Array<{ studentId: number; fullName?: string; gender: string; role: string }>;
+  capacity: number | null;
+  projected: number;
+  overflow: number;
 }
 export interface ForceGetRequestDetail {
   request: {
@@ -327,7 +355,11 @@ export interface ForceGetRequestDetail {
     reviewerLabel: string | null; reviewedAt: string | null; reviewReason: string | null;
   };
   groups: ForceGetBucket[];
-  conflicts: Array<{ groupId: number; groupName: string; message: string }>;
+  conflicts: ForceGetConflict[];
+  capacityConflicts: Array<{ groupId: number; groupName: string; message: string }>;
+  genderRule: string;
+  /** False when ANY conflict (gender, capacity, invalid row) blocks approval. */
+  canApprove: boolean;
   invalidItems: number;
 }
 export interface ForceGetQueueRow {

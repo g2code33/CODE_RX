@@ -68,7 +68,10 @@ import {
   hashPassword,
   type CgmStudentRow,
 } from './service';
-import { claimDesignatedSeat, insertAssignmentRespectingDesignations, reservedSeatsFor } from './forceGet';
+import {
+  claimDesignatedSeat, groupGenderPools, groupHoldsOtherPool, insertAssignmentRespectingDesignations,
+  reservedSeatsFor, studentGenders,
+} from './forceGet';
 import { sha256Hex } from '../vault';
 import { createNotification } from '../notifications';
 
@@ -770,15 +773,36 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
    * designation can never break capacity. Returns null when the student has no
    * live designation (callers then run the ordinary path untouched).
    */
-  const placeByDesignation = async (c: any, activity: any, student: any) => {
+  const placeByDesignation = async (c: any, activity: any, student: any, config: any) => {
+    const separated = config?.genderRule === 'separate';
     const seat = await claimDesignatedSeat(c.env.DB, {
       activityId: Number(activity.id), studentId: Number(student.id),
       via: 'self', label: student.full_name,
+      enforceGenderPools: separated, studentGender: student.gender,
     });
     if (!seat) return null;
     if (!seat.claimed) {
+      // The seat could not be taken. If the reason is the gender-separated
+      // policy (a member or reservation of another pool arrived in the
+      // meantime), the designation is NOT applied: it stays active, the
+      // student samples normally and the organizer is told. The gender rule is
+      // never violated to honour a designation.
+      if (separated && await groupHoldsOtherPool(c.env.DB, Number(activity.id), seat.designation.groupId, student.gender)) {
+        await auditCgm(c.env.DB, {
+          actorType: 'system', actorLabel: 'gender policy',
+          action: 'cgm.force_get.apply_blocked', entityType: 'force_get_designation', entityId: seat.designation.id,
+          activityId: Number(activity.id), classId: Number(activity.class_id),
+          context: {
+            studentId: Number(student.id), groupId: seat.designation.groupId,
+            reason: 'gender_rule_separate', studentGender: String(student.gender || 'unknown'),
+            requestId: seat.designation.requestId, version: seat.designation.version,
+          },
+        });
+        return { ok: false as const, kind: 'gender' as const, error: '' };
+      }
       return {
         ok: false as const,
+        kind: 'capacity' as const,
         error: 'Your organizer-approved group has no free seat right now. Your approved placement is saved — try again in a moment or contact your organizer.',
       };
     }
@@ -852,8 +876,8 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
 
     // FORCE GET — an approved designation decides the group, whatever the
     // client asked for. The student still goes through the normal method.
-    const designated = await placeByDesignation(c, activity, student);
-    if (designated && !designated.ok) return bad(c, designated.error, 409);
+    const designated = await placeByDesignation(c, activity, student, config);
+    if (designated && !designated.ok && designated.kind === 'capacity') return bad(c, designated.error, 409);
     if (designated?.ok) {
       await consumeRechooseGrant(c.env.DB, rechooseGrantId);
       return c.json({
@@ -879,14 +903,36 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // anybody else — they are subtracted here and again inside the INSERT.
     const reservedSeats = await reservedSeatsFor(c.env.DB, Number(activity.id));
 
+    // genderRule = 'separate': a student may only join an EMPTY group or one
+    // that already holds their own pool. This is the same rule the guarded
+    // INSERT enforces, surfaced here so the student gets a clear answer.
+    const separated = config.genderRule === 'separate';
+    const pools = separated ? await groupGenderPools(c.env.DB, Number(activity.id)) : new Map<number, string>();
+    const myGender = separated
+      ? (await studentGenders(c.env.DB, Number(activity.id), [Number(student.id)])).get(Number(student.id)) || 'unknown'
+      : undefined;
+    const poolBlocks = (groupId: number) => {
+      if (!separated) return false;
+      const pool = pools.get(groupId);
+      return Boolean(pool) && (pool === 'mixed' || pool !== myGender);
+    };
+
     // Load-balance: the server chooses the emptiest eligible group unless the
     // student explicitly asked for one that still has room.
     const open = candidateGroups
       .filter((group) => group.capacity === null
         || Number(group.size) + (reservedSeats.get(Number(group.id)) || 0) < Number(group.capacity))
+      .filter((group) => !poolBlocks(Number(group.id)))
       .sort((a, b) => Number(a.size) - Number(b.size));
     let target = requestedGroupId ? open[0] : open[0] || null;
     if (!target) {
+      if (separated) {
+        const anySeat = candidateGroups.some((group) => group.capacity === null
+          || Number(group.size) + (reservedSeats.get(Number(group.id)) || 0) < Number(group.capacity));
+        if (anySeat) {
+          return bad(c, 'This activity keeps gender pools separate: the groups with free seats already hold a different one. Ask your organizer to add a group or reshuffle.', 409);
+        }
+      }
       if (config.overflow === 'waitlist') {
         await c.env.DB.prepare(
           `INSERT OR IGNORE INTO cgm_activity_waitlist (activity_id, student_id) VALUES (?, ?)`
@@ -904,6 +950,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     let placed = await insertAssignmentRespectingDesignations(c.env.DB, {
       activityId: Number(activity.id), groupId: Number(target.id), studentId: student.id,
       via: 'self', label: student.full_name,
+      enforceGenderPools: separated, studentGender: myGender,
     });
     if (!placed) {
       // Lost the race for that seat. If the student slipped in through another
@@ -919,12 +966,16 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
          ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active'), g.position`
       ).bind(activity.id));
       const retryReserved = await reservedSeatsFor(c.env.DB, Number(activity.id));
-      const retryTarget = retryGroups.find((group) => group.capacity === null
-        || Number(group.size) + (retryReserved.get(Number(group.id)) || 0) < Number(group.capacity));
+      const retryPools = separated ? await groupGenderPools(c.env.DB, Number(activity.id)) : pools;
+      const retryTarget = retryGroups.find((group) => (group.capacity === null
+        || Number(group.size) + (retryReserved.get(Number(group.id)) || 0) < Number(group.capacity))
+        && (!separated || !retryPools.get(Number(group.id))
+          || (retryPools.get(Number(group.id)) !== 'mixed' && retryPools.get(Number(group.id)) === myGender)));
       if (retryTarget && !requestedGroupId) {
         placed = await insertAssignmentRespectingDesignations(c.env.DB, {
           activityId: Number(activity.id), groupId: Number(retryTarget.id), studentId: student.id,
           via: 'self', label: student.full_name,
+          enforceGenderPools: separated, studentGender: myGender,
         });
         target = retryTarget;
       }
@@ -1008,8 +1059,8 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (existing[0]) return bad(c, 'You are already in a group for this activity.', 409);
 
     // FORCE GET — the draw happens, but a live designation wins the outcome.
-    const designated = await placeByDesignation(c, activity, student);
-    if (designated && !designated.ok) return bad(c, designated.error, 409);
+    const designated = await placeByDesignation(c, activity, student, config);
+    if (designated && !designated.ok && designated.kind === 'capacity') return bad(c, designated.error, 409);
     if (designated?.ok) {
       await consumeRechooseGrant(c.env.DB, rechooseGrantId);
       return c.json({
@@ -1022,6 +1073,11 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       });
     }
 
+    const separated = config.genderRule === 'separate';
+    const myGender = separated
+      ? (await studentGenders(c.env.DB, Number(activity.id), [Number(student.id)])).get(Number(student.id)) || 'unknown'
+      : undefined;
+
     const openGroups = async () => {
       const rows = await asRows<any>(c.env.DB.prepare(
         `SELECT g.id, g.name, g.position, g.capacity,
@@ -1032,8 +1088,13 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       // Approved designations reserve their seats: a group is only a candidate
       // for somebody else while free capacity remains beyond those reservations.
       const reservedSeats = await reservedSeatsFor(c.env.DB, Number(activity.id));
-      return rows.filter((group) => group.capacity === null
-        || Number(group.size) + (reservedSeats.get(Number(group.id)) || 0) < Number(group.capacity));
+      // genderRule = 'separate': the draw only ever picks a group the student's
+      // own pool may join (empty, or already that pool).
+      const drawPools = separated ? await groupGenderPools(c.env.DB, Number(activity.id)) : new Map<number, string>();
+      return rows.filter((group) => (group.capacity === null
+        || Number(group.size) + (reservedSeats.get(Number(group.id)) || 0) < Number(group.capacity))
+        && (!separated || !drawPools.get(Number(group.id))
+          || (drawPools.get(Number(group.id)) !== 'mixed' && drawPools.get(Number(group.id)) === myGender)));
     };
 
     // Exactly-equal chance for every eligible group, then the guarded atomic
@@ -1057,6 +1118,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     let placed = await insertAssignmentRespectingDesignations(c.env.DB, {
       activityId: Number(activity.id), groupId: Number(winner.id), studentId: student.id,
       via: 'self', label: student.full_name,
+      enforceGenderPools: separated, studentGender: myGender,
     });
     if (!placed) {
       const nowAssigned = await asRows<{ id: number }>(c.env.DB.prepare(
@@ -1069,6 +1131,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
         placed = await insertAssignmentRespectingDesignations(c.env.DB, {
           activityId: Number(activity.id), groupId: Number(winner.id), studentId: student.id,
           via: 'self', label: student.full_name,
+          enforceGenderPools: separated, studentGender: myGender,
         });
       }
       if (!placed) {

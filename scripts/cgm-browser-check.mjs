@@ -808,6 +808,98 @@ let wsClass = null;
     !JSON.stringify((await api('GET', `/api/cgm/student/activities/${fgActivityId}`, undefined, fgSession)).json || {}).includes('lab partner'));
 }
 
+// ---------------------------------------------------------------------------
+// Force Get gender separation, driven through the DOM: the organizer's preview
+// refuses a proposal that would mix pools BEFORE it is sent, names the group and
+// the students, and clears the moment the destination changes.
+// ---------------------------------------------------------------------------
+{
+  const organizer = { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } };
+  const poolConfig = {
+    method: 'hybrid', groupCount: 2, capacity: 4, genderRule: 'separate', repeatRule: 'random',
+    leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true,
+    attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
+  };
+  const poolActivity = await api('POST', `/api/cgm/classes/${wsClass.classId}/activities`, {
+    name: `Browser Check Gender Pool ${stamp}`, type: 'tutorial', config: poolConfig,
+  }, phantomToken);
+  const poolActivityId = poolActivity.json?.data?.activityId ?? poolActivity.json?.data?.id;
+  await api('POST', `/api/cgm/activities/${poolActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+
+  // The gender is captured on the roster row and carried onto the student by
+  // registration, so the organizer never needs a second edit.
+  const addMember = async (fullName, indexNumber, gender) => {
+    const entry = await api('POST', `/api/cgm/classes/${wsClass.classId}/roster/entries`,
+      { fullName, indexNumber, gender }, phantomToken);
+    const registered = await fetch(`${BASE}/api/cgm/student/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.240' },
+      body: JSON.stringify({ classCode: wsClass.code, indexNumber, entryPassword: 'rechoose-entry' }),
+    }).then((response) => response.json());
+    const studentId = Number(registered?.data?.student?.id || 0);
+    return { entryId: Number(entry.json?.data?.id || 0), studentId, gender };
+  };
+  const poolMia = await addMember('Pool Mia', `BRW-${stamp}-PM`, 'male');
+  const poolFred = await addMember('Pool Fred', `BRW-${stamp}-PF`, 'female');
+  const poolApi = (await api('GET', `/api/cgm/activities/${poolActivityId}`, undefined, phantomToken)).json?.data || {};
+  const poolGroups = (poolApi.groups || []).map((group) => Number(group.id));
+  check('the separated activity fixture has two members of different genders and real groups',
+    Boolean(poolMia?.entryId) && Boolean(poolFred?.entryId) && poolGroups.length >= 2,
+    `entries=${poolMia?.entryId}/${poolFred?.entryId} groups=${poolGroups.length} students=${poolMia?.studentId}/${poolFred?.studentId}`);
+
+  const page = await boot('#class-groups', organizer);
+  const nav = page.buttonByText('Groups');
+  nav && nav.click();
+  await page.waitForFor('Choose an activity', 20_000);
+  const chooser = page.window.document.querySelector('select[aria-label="Choose activity"]');
+  const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+  if (chooser) { setter.call(chooser, String(poolActivityId)); chooser.dispatchEvent(new page.window.Event('change', { bubbles: true })); }
+  await page.waitForFor('Browser Check Gender Pool', 20_000);
+  const openButton = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-force-get-open"]'), 20_000);
+  openButton && openButton.click();
+  await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-force-get"]'), 20_000);
+  await page.waitForFor('Pool Mia', 15_000);
+
+  const poolRows = () => [...page.window.document.querySelectorAll('[data-testid="cgm-force-get-row"]')];
+  const rowFor = (name) => poolRows().find((row) => row.textContent.includes(name));
+  const pick = (row, groupId) => {
+    const select = row?.querySelector('[data-testid="cgm-force-get-group"]');
+    if (!select) return;
+    setter.call(select, String(groupId));
+    select.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  };
+  rowFor('Pool Mia')?.querySelector('[data-testid="cgm-force-get-select"]')?.click();
+  rowFor('Pool Fred')?.querySelector('[data-testid="cgm-force-get-select"]')?.click();
+  await page.wait(200);
+  pick(rowFor('Pool Mia'), poolGroups[0]);
+  pick(rowFor('Pool Fred'), poolGroups[0]);
+  await page.wait(300);
+  const conflictBlock = await page.waitForElement(
+    () => page.window.document.querySelector('[data-testid="cgm-force-get-gender-conflict"]'), 10_000);
+  check('the preview refuses a mixed-gender destination and names the group, the pools and both students',
+    Boolean(conflictBlock)
+    && /Pool Mia|Pool Fred/.test(conflictBlock.textContent)
+    && /male/.test(conflictBlock.textContent) && /female/.test(conflictBlock.textContent),
+    conflictBlock?.textContent?.slice(0, 200) || page.body().slice(0, 200));
+  const submitNow = page.window.document.querySelector('[data-testid="cgm-force-get-submit"]');
+  check('submitting is blocked while the composition would mix pools', Boolean(submitNow) && submitNow.disabled,
+    `disabled=${submitNow?.disabled}`);
+
+  const previewToggle = page.window.document.querySelector('[data-testid="cgm-force-get-preview-toggle"]');
+  previewToggle && previewToggle.click();
+  await page.wait(200);
+  check('the preview shows the live gender pools of each group before anything is sent',
+    /Gender pools held now:/.test(page.body()), page.body().slice(0, 200));
+
+  // Move one student to the other group: the conflict disappears and submit works.
+  pick(rowFor('Pool Fred'), poolGroups[1]);
+  await page.wait(300);
+  const stillBlocked = page.window.document.querySelector('[data-testid="cgm-force-get-gender-conflict"]');
+  const submitAfter = page.window.document.querySelector('[data-testid="cgm-force-get-submit"]');
+  check('separating the destinations clears the conflict and re-enables submitting',
+    !stillBlocked && Boolean(submitAfter) && !submitAfter.disabled,
+    `blocked=${Boolean(stillBlocked)} disabled=${submitAfter?.disabled}`);
+}
+
 // Restore the spec-default policies so the local database stays clean.
 await api('PUT', '/api/cgm/phantom/policies', { policies: [
   { key: 'student_registration_mode', value: 'approval' },

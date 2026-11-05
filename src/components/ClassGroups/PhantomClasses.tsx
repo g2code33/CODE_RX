@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ClipboardList, FileText, RefreshCw, ShieldCheck, Target, Users } from 'lucide-react';
-import { cgm } from '../../lib/cgm';
+import { cgm, type ForceGetConflict } from '../../lib/cgm';
 import { ConnectionBanner } from './ConnectionBanner';
 import { appDialog } from '../AppDialog';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
@@ -439,9 +439,41 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                     <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs italic text-slate-600">“{forceGetDetail.request.explanation}”</p>
                   )}
                   {(forceGetDetail.conflicts || []).length > 0 && (
-                    <div className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-[11px] font-bold text-red-700">
-                      {(forceGetDetail.conflicts || []).map((conflict: any) => <p key={conflict.groupId}>{conflict.message}</p>)}
+                    <div className="mt-2 space-y-1.5 rounded-xl bg-red-50 px-3 py-2" data-testid="cgm-phantom-force-get-conflict">
+                      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-red-700">
+                        Approval is blocked — the proposed composition breaks this activity's rules
+                      </p>
+                      {(forceGetDetail.conflicts || []).map((conflict: ForceGetConflict) => (
+                        <div key={`${conflict.kind}-${conflict.groupId}`} className="text-[11px] font-bold text-red-700">
+                          <p>
+                            <span className="font-black">{conflict.kind === 'gender' ? 'Gender separation' : 'Capacity'} · {conflict.groupName}</span>
+                            {' — '}{conflict.message}
+                          </p>
+                          {conflict.pools?.length > 0 && (
+                            <p className="font-semibold text-red-600">Pools involved: {conflict.pools.join(' + ')}</p>
+                          )}
+                          <ul className="mt-0.5 space-y-0.5">
+                            {(conflict.students || []).map((student: ForceGetConflict['students'][number], index: number) => (
+                              <li key={`${student.studentId}-${student.role}-${index}`} className="font-semibold text-red-600">
+                                {student.fullName || `student #${student.studentId}`} · {student.gender} ·{' '}
+                                {student.role === 'proposed' ? 'in this proposal'
+                                  : student.role === 'reserved' ? 'holds a reserved approved seat here'
+                                    : 'already a member of this group'}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                      <p className="text-[10px] font-bold text-red-600">
+                        Reject the request and ask the organizer for a same-pool revision, or change the activity's gender rule first.
+                        Approving is refused until the conflict is gone.
+                      </p>
                     </div>
+                  )}
+                  {forceGetDetail.genderRule === 'separate' && forceGetDetail.canApprove === false && (forceGetDetail.conflicts || []).length === 0 && (
+                    <p className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-[11px] font-bold text-red-700">
+                      Approval is blocked by an invalid row — reject and ask the organizer to revise.
+                    </p>
                   )}
                   {Number(forceGetDetail.invalidItems || 0) > 0 && (
                     <p className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-[11px] font-bold text-red-700">
@@ -450,7 +482,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   )}
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">
                     {(forceGetDetail.groups || []).map((bucket: any) => (
-                      <div key={bucket.groupId} className={`rounded-xl border px-3 py-2 ${bucket.conflict ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
+                      <div key={bucket.groupId} className={`rounded-xl border px-3 py-2 ${bucket.conflict || bucket.genderConflict ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-black text-slate-900">{bucket.groupName}</p>
                           <p className={`text-[11px] font-black ${bucket.conflict ? 'text-red-600' : 'text-slate-500'}`}>
@@ -468,6 +500,14 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                             </li>
                           ))}
                         </ul>
+                        {forceGetDetail.genderRule === 'separate' && (
+                          <p className="mt-1 text-[10px] font-black text-slate-500">
+                            Gender pools: {(bucket.genderPools || []).length
+                              ? (bucket.genderPools || []).join(' + ')
+                              : 'none yet (empty group)'}
+                            {bucket.genderConflict ? ' — this would MIX pools' : ''}
+                          </p>
+                        )}
                       </div>
                     ))}
                   </div>

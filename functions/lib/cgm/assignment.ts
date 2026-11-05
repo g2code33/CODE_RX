@@ -30,6 +30,14 @@ export interface AssignableGroup {
   groupId: number;
   capacity: number | null;
   currentSize: number;
+  /**
+   * The gender pool the group already holds, when the caller knows it:
+   * 'male' | 'female' | 'unknown' for a clean pool, 'mixed' for a group that
+   * already contains more than one. Under `genderRule = 'separate'` a student
+   * may only join an EMPTY group or a group of their own pool; an omitted pool
+   * means "unknown state" and stays unconstrained (the SQL guard still applies).
+   */
+  pool?: string;
 }
 
 export interface PlacementPlan {
@@ -81,13 +89,19 @@ const groupSizes = (plan: PlacementPlan[], groups: AssignableGroup[]) => {
  * Even-fill ordering: repeatedly take the group with the most free capacity
  * (fewest members on ties), so round-robin filling keeps sizes balanced.
  */
-const balancedTargetOrder = (plan: PlacementPlan[], groups: AssignableGroup[], rng: Rng) => {
+const balancedTargetOrder = (
+  plan: PlacementPlan[], groups: AssignableGroup[], rng: Rng,
+  pool?: string,
+) => {
   const sizes = groupSizes(plan, groups);
   return shuffled(groups, rng)
     // LIVE seat check: the plan grows as students are placed, so a group is a
     // candidate only while its RUNNING size (initial + placed so far) is below
     // its hard capacity — never the stale pre-plan count.
     .filter((group) => group.capacity === null || (sizes.get(group.groupId) || group.currentSize) < group.capacity)
+    // GENDER POOL (only passed for `separate`): a group is a candidate only
+    // while it is empty or already holds exactly this student's pool.
+    .filter((group) => !pool || poolFits(group, pool))
     .sort((a, b) => {
       const sizeDelta = (sizes.get(a.groupId) || 0) - (sizes.get(b.groupId) || 0);
       if (sizeDelta !== 0) return sizeDelta - 0; // smaller first
@@ -95,8 +109,8 @@ const balancedTargetOrder = (plan: PlacementPlan[], groups: AssignableGroup[], r
     });
 };
 
-const firstFreeGroup = (plan: PlacementPlan[], groups: AssignableGroup[], rng: Rng) =>
-  balancedTargetOrder(plan, groups, rng)[0] || null;
+const firstFreeGroup = (plan: PlacementPlan[], groups: AssignableGroup[], rng: Rng, pool?: string) =>
+  balancedTargetOrder(plan, groups, rng, pool)[0] || null;
 
 /**
  * Picks the group for one student under the repeat-avoidance rule: the group
@@ -110,8 +124,9 @@ const avoidRepeatTarget = (
   studentId: number,
   historyClassmates: Set<number>,
   rng: Rng,
+  pool?: string,
 ) => {
-  const candidates = balancedTargetOrder(plan, groups, rng);
+  const candidates = balancedTargetOrder(plan, groups, rng, pool);
   if (!candidates.length) return null;
   const sizes = groupSizes(plan, groups);
   let best = candidates[0];
@@ -141,6 +156,24 @@ export interface PlanOptions {
 const genderPoolOf = (student: AssignableStudent, genderRule: GenderRule): string =>
   genderRule === 'separate' ? student.gender : 'all';
 
+/** 'Male'/' male '/'unknown'/'mixed' all normalise to a comparable pool key. */
+const normalisePool = (value: unknown): string => {
+  const text = String(value ?? '').trim().toLowerCase();
+  return text === 'male' || text === 'female' ? text : text === 'mixed' ? 'mixed' : 'unknown';
+};
+
+/**
+ * May this student join this group under `genderRule = 'separate'`?
+ * An unspecified pool ("caller did not tell me", e.g. a group created seconds
+ * ago) stays permissive — the SQL guard is the authority. A group that already
+ * holds more than one pool ('mixed') accepts nobody new.
+ */
+const poolFits = (group: AssignableGroup, studentPool: string): boolean => {
+  if (group.pool === undefined || group.pool === null || group.pool === '') return true;
+  if (normalisePool(group.pool) === 'mixed') return false;
+  return normalisePool(group.pool) === normalisePool(studentPool);
+};
+
 /**
  * Builds a placement plan for unassigned students. Never mutates inputs and
  * never exceeds capacity: if everyone cannot fit, the leftover students are
@@ -148,7 +181,12 @@ const genderPoolOf = (student: AssignableStudent, genderRule: GenderRule): strin
  */
 export const planAssignments = (options: PlanOptions): PlacementPlan[] => {
   const rng = options.rng || secureRng();
-  const groups = options.groups.filter((group) => group.capacity === null || group.capacity > 0);
+  // Working copies: the pool each group ends up holding is tracked here, so
+  // 'separate' never mixes pools mid-plan without touching caller objects.
+  const groups: AssignableGroup[] = options.groups
+    .filter((group) => group.capacity === null || group.capacity > 0)
+    .map((group) => ({ ...group }));
+  const separated = options.genderRule === 'separate';
   const plan: PlacementPlan[] = [];
   const totalFree = groups.reduce((sum, group) => sum + Math.min(freeSeats(group), Number.MAX_SAFE_INTEGER), 0);
   if (!groups.length || totalFree === 0 || !options.students.length) return [];
@@ -165,11 +203,14 @@ export const planAssignments = (options: PlanOptions): PlacementPlan[] => {
   const poolOrder = [...pools.entries()].sort((a, b) => b[1].length - a[1].length);
   for (const [, pool] of poolOrder) {
     for (const student of shuffled(pool, rng)) {
+      const poolKey = separated ? student.gender : undefined;
       const target = options.repeatRule === 'avoid' && previous.size
-        ? avoidRepeatTarget(plan, groups, student.studentId, previous.get(student.studentId) || new Set<number>(), rng)
-        : firstFreeGroup(plan, groups, rng);
-      if (!target) continue; // every group full for this pool
+        ? avoidRepeatTarget(plan, groups, student.studentId, previous.get(student.studentId) || new Set<number>(), rng, poolKey)
+        : firstFreeGroup(plan, groups, rng, poolKey);
+      if (!target) continue; // every group full (or pool-blocked) for this student
       plan.push({ studentId: student.studentId, groupId: target.groupId });
+      // An empty group adopts the pool of the first student placed in it.
+      if (separated) target.pool = normalisePool(student.gender);
     }
   }
   return plan;
