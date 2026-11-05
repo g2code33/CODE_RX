@@ -361,6 +361,24 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
 }
 
 // ---------------------------------------------------------------------------
+// 2b2b. The bundle the browser actually receives carries the election fixes,
+//       and the service worker can no longer pin an old build in the cache
+// ---------------------------------------------------------------------------
+{
+  const shell = await (await fetch(`${BASE}/`)).text();
+  check('the served bundle carries the ALL/CUSTOMIZE fixes, not an older build',
+    shell.includes('goes on the ballot') && shell.includes('hand-picked member')
+    && shell.includes('Recycle Bin'));
+  const worker = await (await fetch(`${BASE}/sw.js`)).text();
+  check('the served service worker takes the app shell from the network first',
+    worker.includes('const isShell = request.mode === \'navigate\'')
+    && /if \(isShell\) \{\s*event\.respondWith\(\s*fetch\(request\)/.test(worker));
+  check('and its cache name is versioned past the stale one',
+    /const CACHE = 'code-rx-v(\d+)'/.exec(worker) !== null
+    && Number(/const CACHE = 'code-rx-v(\d+)'/.exec(worker)[1]) >= 8);
+}
+
+// ---------------------------------------------------------------------------
 // 2b3. The organizer workspace carries a Recycle Bin, and an election record
 //      can be deleted from the page into it
 // ---------------------------------------------------------------------------

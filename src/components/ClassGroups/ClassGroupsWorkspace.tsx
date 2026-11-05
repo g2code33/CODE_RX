@@ -2671,7 +2671,10 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
 
   // When group picker changes, fetch its members for CUSTOMIZE
   useEffect(() => {
-    if (!selectedGroupId) { setGroupMembers([]); setChosenIds(new Set()); return; }
+    // Members picked for the PREVIOUS group are meaningless here: keeping them
+    // is what made CUSTOMIZE send ids that are not in the chosen group.
+    setChosenIds(new Set());
+    if (!selectedGroupId) { setGroupMembers([]); return; }
     void (async () => {
       try {
         const res: any = await (cgm as any).groupDetail(Number(selectedGroupId));
@@ -2704,7 +2707,7 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
             <p className={label}>Open voting — {pendingOpen.election.title}</p>
             <button type="button" className="mini-button" onClick={() => setPendingOpen(null)}>Cancel</button>
           </div>
-          <p className="mt-1 text-[11px] font-medium text-slate-500">Prefilled from creation — edit what remains and confirm to open the ballot. Nominators: <span className="font-bold">{pendingOpen.election.eligibleMode === 'custom' ? `${(pendingOpen.election.eligibleStudentIds || []).length} customized` : 'ALL (everyone in the group)'}</span> · Group: <span className="font-bold">{pendingOpen.election.groupName}</span> · Role: <span className="font-bold">{pendingOpen.election.role}</span></p>
+          <p className="mt-1 text-[11px] font-medium text-slate-500">Prefilled from creation — edit what remains and confirm to open the ballot. Who may stand: <span className="font-bold">{pendingOpen.election.eligibleMode === 'custom' ? `${(pendingOpen.election.eligibleStudentIds || []).length} hand-picked member(s)` : 'ALL — every member of the group'}</span> · Group: <span className="font-bold">{pendingOpen.election.groupName}</span> · Role: <span className="font-bold">{pendingOpen.election.role}</span></p>
           <form className="mt-3 grid gap-2 sm:grid-cols-2" onSubmit={async (event) => {
             event.preventDefault();
             const form = event.target as HTMLFormElement;
@@ -2796,8 +2799,12 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
                 <button type="button" aria-pressed={nominatorMode === 'custom'} onClick={() => setNominatorMode('custom')} className={`flex-1 rounded-lg border px-3 py-2 text-xs font-black ${nominatorMode === 'custom' ? 'border-sky-400 bg-sky-50 text-sky-800' : 'border-slate-200 bg-white text-slate-600'}`}>CUSTOMIZE — choose who may stand</button>
               </div>
               <p className="mt-2 text-[11px] font-medium text-slate-400" data-testid="cgm-nominator-hint">{nominatorMode === 'all'
-                  ? 'ALL puts every current member of the chosen group on the ballot the moment you create the election — nobody has to volunteer first. They can still withdraw, and members who join later can add themselves.'
-                  : 'Pick exactly who may be nominated — only checked members can stand as candidates.'}</p>
+                  ? (selectedGroupId && groupMembers.length > 0
+                    ? `ALL — ${groupMembers.length} active member(s) of this group will be placed on the ballot the moment you create the election. Nobody has to volunteer first; they can still withdraw, and members who join later can add themselves.`
+                    : 'ALL puts every current member of the chosen group on the ballot the moment you create the election — nobody has to volunteer first. They can still withdraw, and members who join later can add themselves.')
+                  : (chosenIds.size > 0
+                    ? `CUSTOMIZE — only the ${chosenIds.size} member(s) you ticked may stand. The ballot stays empty until they nominate themselves.`
+                    : 'CUSTOMIZE — tick exactly who may stand as a candidate. Nothing is placed on the ballot for you.')}</p>
               {nominatorMode === 'custom' && (
                 <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2" data-testid="cgm-custom-nominators">
                   {!selectedGroupId && <p className="text-xs font-medium text-slate-400">Choose a group above to see its members.</p>}

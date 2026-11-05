@@ -3047,6 +3047,27 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
   // -------------------------------------------------------------------------
   // Elections (organizer side)
   // -------------------------------------------------------------------------
+  /**
+   * "Open to ALL" means every active member of the group is ON the ballot. Used
+   * when the election is created and again when an empty ALL election is opened
+   * for voting, so an old or half-built record never dead-ends.
+   */
+  const seedAllCandidates = async (db: D1Database, electionId: number, groupId: number) => {
+    const members = await asRows<{ student_id: number }>(db.prepare(
+      `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active' ORDER BY id`
+    ).bind(groupId));
+    let seeded = 0;
+    for (const row of members) {
+      try {
+        await db.prepare(
+          `INSERT INTO cgm_candidates (election_id, student_id, statement) VALUES (?, ?, NULL)`
+        ).bind(electionId, Number(row.student_id)).run();
+        seeded += 1;
+      } catch { /* already on the ballot */ }
+    }
+    return seeded;
+  };
+
   app.post('/api/cgm/groups/:id/elections', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
@@ -3122,17 +3143,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     // "ALL" means every member of this group is IN the election — they go on the
     // ballot at creation instead of waiting for each one to volunteer. They can
     // still withdraw, and CUSTOMIZE leaves the ballot to whoever stands.
-    let seeded = 0;
-    if (eligibleMode === 'all') {
-      for (const row of members) {
-        try {
-          await c.env.DB.prepare(
-            `INSERT INTO cgm_candidates (election_id, student_id, statement) VALUES (?, ?, NULL)`
-          ).bind(newElectionId, Number(row.student_id)).run();
-          seeded += 1;
-        } catch { /* already on the ballot */ }
-      }
-    }
+    const seeded = eligibleMode === 'all' ? await seedAllCandidates(c.env.DB, newElectionId, groupId) : 0;
     for (const row of members) {
       await notifyStudent(c.env.DB, Number(row.student_id), 'election', 'Group election created',
         `An election (${role === 'leader' ? 'leader' : 'assistant'}) was created for your group in ${group.activity_name}.`);
@@ -3387,7 +3398,30 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const candidates = await asRows<{ c: number }>(c.env.DB.prepare(
         `SELECT COUNT(*) AS c FROM cgm_candidates WHERE election_id = ? AND status = 'active'`
       ).bind(electionId));
-      if (Number(candidates[0]?.c || 0) === 0) return bad(c, 'No active candidates. Use organizer appointment instead.', 409);
+      // An election open to ALL should never be empty: if it was created before
+      // the ballot was filled (or every candidate withdrew), put the group's
+      // members on it now rather than telling the organizer to give up.
+      if (Number(candidates[0]?.c || 0) === 0 && String(election.eligible_mode || 'all') === 'all') {
+        await seedAllCandidates(c.env.DB, electionId, Number(election.group_id));
+        const afterSeed = await asRows<{ c: number }>(c.env.DB.prepare(
+          `SELECT COUNT(*) AS c FROM cgm_candidates WHERE election_id = ? AND status = 'active'`
+        ).bind(electionId));
+        if (Number(afterSeed[0]?.c || 0) > 0) {
+          await auditCgm(c.env.DB, {
+            actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+            action: 'cgm.election.ballot_filled', entityType: 'election', entityId: electionId,
+            classId: Number(election.class_id), context: { candidates: Number(afterSeed[0]?.c || 0) },
+          });
+        }
+      }
+      const live = await asRows<{ c: number }>(c.env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM cgm_candidates WHERE election_id = ? AND status = 'active'`
+      ).bind(electionId));
+      if (Number(live[0]?.c || 0) === 0) {
+        return bad(c, String(election.eligible_mode) === 'custom'
+          ? 'Nobody has stood in this election yet — the members you picked can still be nominated. You can also use organizer appointment.'
+          : 'Nobody is on this ballot yet. Create it with ALL to put every group member on it, or use organizer appointment.', 409);
+      }
       const votingOpenAt = cleanOrNull(body.votingOpenAt, 30);
       const votingCloseAt = cleanOrNull(body.votingCloseAt, 30);
       if (votingOpenAt || votingCloseAt) {

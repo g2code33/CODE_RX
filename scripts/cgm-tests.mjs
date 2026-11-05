@@ -5584,6 +5584,100 @@ check('47.15 — restoring publishes it again with its original text',
   `${annRestore.status}`);
 
 
+
+// ---------------------------------------------------------------------------
+// 48. ALL and CUSTOMIZE both behave exactly as the form promises
+// ---------------------------------------------------------------------------
+section('48. ALL fills the ballot; CUSTOMIZE limits who may stand');
+
+const modeLab = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Ballot Mode Lab', type: 'practical',
+  config: { method: 'automatic', groupCount: 3, capacity: 100, genderRule: 'none', overflow: 'block', leaderMethod: 'appointment', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+}, amaToken);
+const modeActivityId = Number(modeLab.json?.data?.activityId || modeLab.json?.data?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${modeActivityId}/lifecycle`, { action: 'publish' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${modeActivityId}/generate`, {}, amaToken);
+const modeDetail = await memberCall('GET', `/api/cgm/activities/${modeActivityId}`, undefined, amaToken);
+const modeGroups = modeDetail.json?.data?.groups || [];
+const groupA1 = Number(modeGroups[0]?.id || 0);
+const groupA2 = Number(modeGroups[1]?.id || 0);
+const seatsOf = (groupId) => Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'", groupId)?.c || 0);
+const studentIdsOf = (groupId) => q("SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active' ORDER BY id", groupId).map((row) => Number(row.student_id));
+
+// ALL, with no hand-picked list at all — the exact request the form sends.
+const allMode = await memberCall('POST', `/api/cgm/groups/${groupA1}/elections`, {
+  title: 'ALL ballot', role: 'leader', anonymity: 'anonymous', visibility: 'group',
+  allowVoteChange: false, tieBreak: 'random', eligibleMode: 'all', eligibleStudentIds: undefined,
+}, amaToken);
+const allModeId = Number(allMode.json?.data?.electionId || 0);
+check('48.1 — ALL seeds every seat in the group from the form alone',
+  allMode.status === 200 && seatsOf(groupA1) >= 2
+  && Number(allMode.json?.data?.candidatesSeeded) === seatsOf(groupA1)
+  && allMode.json?.data?.eligibleMode === 'all',
+  `${allMode.status} ${allMode.text?.slice(0, 200)}`);
+check('48.2 — the seeded ballot is exactly the group roster, nobody else',
+  JSON.stringify(q('SELECT student_id FROM cgm_candidates WHERE election_id = ? ORDER BY student_id', allModeId).map((row) => Number(row.student_id)))
+  === JSON.stringify(studentIdsOf(groupA1).sort((a, b) => a - b)),
+  `seeded=${JSON.stringify(q('SELECT student_id FROM cgm_candidates WHERE election_id = ?', allModeId))} seats=${JSON.stringify(studentIdsOf(groupA1))}`);
+const openAll = await memberCall('POST', `/api/cgm/elections/${allModeId}/open-voting`, {}, amaToken);
+check('48.3 — and it opens for voting without an organizer appointment', openAll.status === 200, openAll.text?.slice(0, 160));
+
+// CUSTOMIZE with two hand-picked members.
+const picked = studentIdsOf(groupA2).slice(0, 2);
+const customMode = await memberCall('POST', `/api/cgm/groups/${groupA2}/elections`, {
+  title: 'CUSTOMIZE ballot', role: 'leader', anonymity: 'anonymous', visibility: 'group',
+  allowVoteChange: false, tieBreak: 'random', eligibleMode: 'custom', eligibleStudentIds: picked,
+}, amaToken);
+const customModeId = Number(customMode.json?.data?.electionId || 0);
+check('48.4 — CUSTOMIZE places nobody on the ballot by itself',
+  customMode.status === 200 && Number(customMode.json?.data?.candidatesSeeded) === 0
+  && Number(q1('SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ?', customModeId)?.c) === 0,
+  `${customMode.status} ${customMode.text?.slice(0, 200)}`);
+check('48.5 — CUSTOMIZE remembers exactly who may stand',
+  JSON.parse(String(q1('SELECT eligible_student_ids FROM cgm_elections WHERE id = ?', customModeId)?.eligible_student_ids || '[]')).sort().join(',')
+  === picked.slice().sort().join(','),
+  String(q1('SELECT eligible_student_ids FROM cgm_elections WHERE id = ?', customModeId)?.eligible_student_ids));
+const pickedStudent = picked[0];
+const pickedSession = await loginForStudent(pickedStudent);
+const pickedToken = pickedSession.json?.data?.session?.token;
+const pickedContest = pickedToken
+  ? await studentCall('POST', `/api/cgm/student/activities/${modeActivityId}/contest`, { statement: 'I will stand.' }, pickedToken)
+  : { status: 0 };
+check('48.6 — a hand-picked member can stand', pickedContest.status === 200, `${pickedContest.status} ${pickedContest.text?.slice(0, 140)}`);
+const outside = studentIdsOf(groupA2).filter((id) => !picked.includes(id))[0];
+const outsideSession = outside ? await loginForStudent(outside) : { json: null };
+const outsideToken = outsideSession.json?.data?.session?.token;
+const outsideContest = outsideToken
+  ? await studentCall('POST', `/api/cgm/student/activities/${modeActivityId}/contest`, {}, outsideToken)
+  : { status: 0 };
+check('48.7 — a member who was NOT picked cannot stand',
+  outsideContest.status >= 400 && String(outsideContest.text || '').includes('not eligible'),
+  `${outsideContest.status} ${outsideContest.text?.slice(0, 140)}`);
+const customOpen = await memberCall('POST', `/api/cgm/elections/${customModeId}/open-voting`, {}, amaToken);
+check('48.8 — once a picked member stands, CUSTOMIZE opens normally', customOpen.status === 200, customOpen.text?.slice(0, 160));
+
+// An ALL election that somehow has an empty ballot heals when opened.
+const healGroup = Number(modeGroups[2]?.id || 0);
+const healElection = await memberCall('POST', `/api/cgm/groups/${healGroup}/elections`, {
+  title: 'Half-built ballot', role: 'leader', eligibility: 'all',
+}, amaToken);
+const healId = Number(healElection.json?.data?.electionId || 0);
+if (healId) {
+  sqlite.prepare('DELETE FROM cgm_candidates WHERE election_id = ?').run(healId);
+}
+const healOpen = await memberCall('POST', `/api/cgm/elections/${healId}/open-voting`, {}, amaToken);
+check('48.9 — an ALL election with an empty ballot fills itself when opened, instead of dead-ending',
+  healId > 0 && healOpen.status === 200
+  && Number(q1("SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ? AND status = 'active'", healId)?.c) === seatsOf(healGroup)
+  && Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.election.ballot_filled' AND entity_id = ?", String(healId))),
+  `${healOpen.status} ${healOpen.text?.slice(0, 200)}`);
+const customEmpty = await memberCall('POST', `/api/cgm/groups/${groupA1}/elections`, {
+  title: 'Empty custom', role: 'assistant', eligibleMode: 'custom', eligibleStudentIds: studentIdsOf(groupA1).slice(0, 1),
+}, amaToken);
+// groupA1 already has a live election, so this is refused before anything else.
+check('48.10 — one live election per group is still enforced', customEmpty.status === 409, `${customEmpty.status}`);
+
+
 // ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

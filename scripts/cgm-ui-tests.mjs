@@ -380,7 +380,7 @@ check('a lost move restores the student\'s original seat instead of leaving them
 check('the vote ledger commits participation and ballot together with a clean 409 on double votes',
   /cgm_election_participation[\s\S]*cgm_election_ballots/.test(studentRoutes.match(/DB\.batch\(\[[\s\S]*?\]\);/)?.[0] || '')
   && /You have already voted in this election\.', 409/.test(studentRoutes));
-check('the service worker keeps caching the shell only', /CACHE = 'code-rx-v7'/.test(src('public/sw.js')));
+check('the service worker keeps caching the shell only', /CACHE = 'code-rx-v\d+'/.test(src('public/sw.js')));
 
 // ===========================================================================
 section('15. Step-9 security sweep: verifiable credential rotation, lockout model');
@@ -1294,9 +1294,17 @@ const recycleLib = src('functions/lib/cgm/recycle.ts');
 const organizerRoutes = src('functions/lib/cgm/routes-organizer.ts');
 
 check('ALL puts the whole group on the ballot instead of waiting for volunteers',
-  /if \(eligibleMode === 'all'\) \{/.test(activitiesRoute)
+  /const seeded = eligibleMode === 'all' \? await seedAllCandidates\(c\.env\.DB, newElectionId, groupId\) : 0;/.test(activitiesRoute)
+  && /if \(Number\(candidates\[0\]\?\.c \|\| 0\) === 0 && String\(election\.eligible_mode \|\| 'all'\) === 'all'\)/.test(activitiesRoute)
   && /INSERT INTO cgm_candidates \(election_id, student_id, statement\) VALUES \(\?, \?, NULL\)/.test(activitiesRoute)
+  && /const seedAllCandidates = async/.test(activitiesRoute)
   && /candidatesSeeded: seeded/.test(activitiesRoute));
+check('the form states what will actually happen, with real counts',
+  /ALL — \$\{groupMembers\.length\} active member\(s\) of this group will be placed on the ballot/.test(workspace)
+  && /CUSTOMIZE — only the \$\{chosenIds\.size\} member\(s\) you ticked may stand/.test(workspace)
+  && /CUSTOMIZE — tick exactly who may stand as a candidate\. Nothing is placed on the ballot for you\./.test(workspace));
+check('hand-picked members are cleared when the group changes',
+  /setChosenIds\(new Set\(\)\);\n    if \(!selectedGroupId\)/.test(workspace));
 check('the ALL choice says what it does, in the form itself',
   /ALL puts every current member of the chosen group on the ballot the moment you create the election/.test(workspace)
   && /every group member goes on the ballot/.test(workspace)

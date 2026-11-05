@@ -455,3 +455,22 @@ only be reversed once, and every reversal is audited as `cgm.recycle.restored`.
 `GET /api/cgm/recycle-bin?classId=` and `POST /api/cgm/recycle-bin/:id/restore`
 are open to the primary organizer and to anyone trusted to remove students or
 edit the roster — whoever may delete may undo.
+
+### ALL, CUSTOMIZE and stale deploys (2026-11-05, later)
+
+- **ALL** enters every active member of the chosen group as a candidate at
+  creation (`seedAllCandidates`). If an ALL election somehow reaches *open
+  voting* with an empty ballot — created before this change, or every candidate
+  withdrew — the ballot is filled from the group roster at that moment and the
+  event is audited (`cgm.election.ballot_filled`) instead of dead-ending with
+  "No active candidates".
+- **CUSTOMIZE** places nobody on the ballot; only the hand-picked members may
+  stand, and the form says so with the real count. Switching group clears the
+  hand-picked list, which used to send student ids belonging to the previous
+  group and fail server validation.
+- **Stale builds are no longer possible.** `public/sw.js` served the app shell
+  *cache-first* under a hand-bumped cache name, so a returning visitor kept the
+  previous build and never saw a shipped fix. The shell is now **network-first**
+  (cache only as the offline fallback), the cache name moved to `code-rx-v8`
+  (purging the old shell on activate), and `main.tsx` registers the worker with
+  `updateViaCache: 'none'` and reloads once when a new worker takes control.
