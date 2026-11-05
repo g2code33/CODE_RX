@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, Compass, GraduationCap,
-  LayoutDashboard, Lightbulb, LogOut, User as UserIcon, Users, Vote,
+  KeyRound, LayoutDashboard, Lightbulb, LogOut, ShieldCheck, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
 import { RandomGroupReveal } from './RandomGroupReveal';
@@ -206,6 +206,222 @@ const GroupMembersFullPage = ({ groupName, className, activityName, members, cur
 // Registration & sign-in
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// FORGOT PASSKEY — the sign-in page path.
+//
+// The student cannot sign in (that is the problem), so this requests a reset
+// from the LOGIN page: the class organizer approves it, and only then can the
+// passkey be generated. The new passkey is still system-generated and shown
+// once, exactly like every other passkey in the system.
+//
+// The browser that filed the request keeps a one-time claim code (also shown on
+// screen). That code — not the index number — is what collects the new passkey,
+// so somebody who only knows an index number cannot take it after approval.
+// ---------------------------------------------------------------------------
+const PASSKEY_RESET_KEY = 'codeRx_passkeyReset';
+
+interface SavedReset { identifier: string; identifierType: string; claimCode: string; status: string }
+
+const readSavedReset = (): SavedReset | null => {
+  try {
+    const raw = localStorage.getItem(PASSKEY_RESET_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.claimCode) return null;
+    return {
+      identifier: String(parsed.identifier || ''),
+      identifierType: String(parsed.identifierType || 'index_number'),
+      claimCode: String(parsed.claimCode),
+      status: String(parsed.status || 'pending'),
+    };
+  } catch { return null; }
+};
+
+const PasskeyResetPanel = ({ onBack, onDone }: { onBack: () => void; onDone: (identifier: string) => void }) => {
+  const saved = useRef<SavedReset | null>(readSavedReset()).current;
+  const [identifierType, setIdentifierType] = useState(saved?.identifierType || 'index_number');
+  const [identifier, setIdentifier] = useState(saved?.identifier || '');
+  const [classCode, setClassCode] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [claimCode, setClaimCode] = useState(saved?.claimCode || '');
+  const [status, setStatus] = useState(saved?.status || '');
+  const [issuedPasskey, setIssuedPasskey] = useState<string | null>(null);
+
+  const remember = (next: SavedReset | null) => {
+    try {
+      if (!next) localStorage.removeItem(PASSKEY_RESET_KEY);
+      else localStorage.setItem(PASSKEY_RESET_KEY, JSON.stringify(next));
+    } catch { /* private mode */ }
+  };
+
+  const sendRequest = async () => {
+    setBusy(true); setError(null); setInfo(null);
+    try {
+      const result: any = await cgmStudent.resetPasskeyRequest({
+        identifier: identifier.trim(),
+        identifierType,
+        classCode: classCode.trim() || undefined,
+        note: note.trim() || undefined,
+      });
+      const code = String(result?.claimCode || '');
+      const nextStatus = String(result?.status || 'pending');
+      setClaimCode(code); setStatus(nextStatus);
+      remember({ identifier: identifier.trim(), identifierType, claimCode: code, status: nextStatus });
+      setInfo(String(result?.message || 'Request sent to your organizer.'));
+    } catch (failure: any) {
+      setError(failure?.message || 'The reset request could not be sent.');
+    } finally { setBusy(false); }
+  };
+
+  const generate = async () => {
+    setBusy(true); setError(null); setInfo(null);
+    try {
+      const result: any = await cgmStudent.resetPasskeyGenerate(claimCode);
+      setIssuedPasskey(String(result?.passkey || ''));
+      setStatus('completed');
+      remember(null);
+      setInfo(String(result?.message || 'New passkey generated.'));
+    } catch (failure: any) {
+      const code = String(failure?.code || '');
+      if (code === 'reset_pending') setStatus('pending');
+      if (code === 'reset_declined') setStatus('declined');
+      if (code === 'reset_used' || code === 'reset_code_invalid') { setStatus(''); remember(null); }
+      setError(failure?.message || 'The reset could not be completed.');
+    } finally { setBusy(false); }
+  };
+
+  const identifierLabels: Record<string, string> = { index_number: 'Index number', phone: 'Telephone number' };
+
+  if (issuedPasskey) {
+    return (
+      <div className="mt-5" data-testid="cgm-passkey-reset-issued">
+        <div className="rounded-2xl border-2 border-amber-300 bg-amber-50/60 p-4">
+          <p className={label}>New passkey — shown only on this page</p>
+          <p className="mt-2 select-all rounded-xl border-2 border-amber-400 bg-white px-4 py-4 text-center font-mono text-2xl font-black tracking-[0.16em] text-amber-900 sm:text-3xl">{issuedPasskey}</p>
+          <p className="mt-2 text-[11px] font-semibold text-slate-600">Write it down now. Your old passkey no longer works, and every device that was signed in has been signed out.</p>
+          <button type="button" className="cgm-primary-button mt-3 w-full" onClick={() => onDone(identifier.trim())} data-testid="cgm-passkey-reset-signin">
+            I have saved it — sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-5 space-y-3" data-testid="cgm-passkey-reset">
+      <button type="button" onClick={onBack} className="inline-flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wider text-emerald-700 hover:text-emerald-800" data-testid="cgm-passkey-reset-back">
+        <ArrowLeft className="h-3.5 w-3.5" /> Back to sign in
+      </button>
+      <div>
+        <h2 className="flex items-center gap-2 text-lg font-black tracking-tight text-slate-900">
+          <KeyRound className="h-4 w-4 text-amber-500" /> Reset your permanent passkey
+        </h2>
+        <p className="mt-1 text-[11px] font-medium text-slate-500">
+          Passkeys are always generated by the system — nobody types their own. Send a request from this page and your
+          class organizer approves it. When they do, come back here and press <span className="font-bold">Generate new passkey</span>.
+        </p>
+      </div>
+
+      {!claimCode && (
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="cgm-reset-identifier-type">I sign in with</label>
+            <select
+              id="cgm-reset-identifier-type"
+              className={`${inputClass} mt-1`}
+              value={identifierType}
+              onChange={(event) => setIdentifierType(event.target.value)}
+              data-testid="cgm-passkey-reset-identifier-type"
+            >
+              {Object.entries(identifierLabels).map(([key, text]) => <option key={key} value={key}>{text}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={label} htmlFor="cgm-reset-identifier">{identifierLabels[identifierType]}</label>
+            <input
+              id="cgm-reset-identifier"
+              required
+              className={`${inputClass} mt-1`}
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
+              placeholder={identifierType === 'index_number' ? 'PH/PHA/24/0292' : '024 000 0001'}
+              autoComplete="username"
+              data-testid="cgm-passkey-reset-identifier"
+            />
+          </div>
+          <div>
+            <label className={label} htmlFor="cgm-reset-class">Class code <span className="font-semibold normal-case tracking-normal text-slate-400">(if you are in more than one class)</span></label>
+            <input id="cgm-reset-class" className={`${inputClass} mt-1 font-mono`} value={classCode} onChange={(event) => setClassCode(event.target.value)} placeholder="CRX-CLS-0001" />
+          </div>
+          <div>
+            <label className={label} htmlFor="cgm-reset-note">Why do you need a reset? <span className="font-semibold normal-case tracking-normal text-slate-400">(your organizer reads this)</span></label>
+            <input id="cgm-reset-note" className={`${inputClass} mt-1`} value={note} onChange={(event) => setNote(event.target.value)} maxLength={400} placeholder="e.g. I lost the paper with my passkey" />
+          </div>
+          <button
+            type="button"
+            disabled={busy || !identifier.trim()}
+            onClick={() => void sendRequest()}
+            className="cgm-primary-button w-full"
+            data-testid="cgm-passkey-reset-send"
+          >
+            {busy ? 'Sending…' : 'Send reset request to my organizer'}
+          </button>
+          <p className="text-[10px] font-medium text-slate-400">
+            <ShieldCheck className="mr-1 inline h-3 w-3" />
+            Nothing changes until your organizer approves. Your current passkey keeps working until then.
+          </p>
+        </div>
+      )}
+
+      {claimCode && (
+        <div className="space-y-3" data-testid="cgm-passkey-reset-progress">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <p className={label}>Your reset code</p>
+            <p className="mt-1 select-all font-mono text-lg font-black tracking-[0.14em] text-slate-900" data-testid="cgm-passkey-reset-code">{claimCode}</p>
+            <p className="mt-1 text-[10px] font-semibold text-slate-500">
+              Keep this code — you need it on this page to collect the new passkey. It is the only thing that can collect it.
+            </p>
+          </div>
+          <div className={`rounded-xl px-4 py-3 text-xs font-bold ${
+            status === 'approved' ? 'bg-emerald-50 text-emerald-800'
+              : status === 'declined' ? 'bg-red-50 text-red-700'
+                : 'bg-amber-50 text-amber-800'}`} data-testid={`cgm-passkey-reset-status-${status || 'unknown'}`}>
+            {status === 'approved'
+              ? 'Your organizer approved this reset. Press Generate new passkey now.'
+              : status === 'declined'
+                ? 'Your organizer declined this request. Your current passkey still works — send a new request if you still need one.'
+                : 'Waiting for your organizer to approve it. Press Generate again after they approve.'}
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void generate()}
+            className="cgm-primary-button w-full"
+            data-testid="cgm-passkey-reset-generate"
+          >
+            {busy ? 'Checking…' : '🔑 Generate new passkey'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => { setClaimCode(''); setStatus(''); setInfo(null); setError(null); remember(null); }}
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black uppercase tracking-wider text-slate-500 hover:bg-slate-50"
+            data-testid="cgm-passkey-reset-restart"
+          >
+            Send a new request instead
+          </button>
+        </div>
+      )}
+
+      {info && <p role="status" className="rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold text-emerald-700">{info}</p>}
+      {error && <p role="alert" className="rounded-xl bg-red-50 px-4 py-3 text-xs font-semibold text-red-600" data-testid="cgm-passkey-reset-error">{error}</p>}
+    </div>
+  );
+};
+
 const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null; onAuthenticated: (session: CgmStudentSession) => void }) => {
   const [mode, setMode] = useState<'register' | 'login' | 'join'>(inviteCode ? 'join' : 'login');
   const [busy, setBusy] = useState(false);
@@ -231,6 +447,11 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
   const [invite, setInvite] = useState<any>(null);
   const [inviteProblem, setInviteProblem] = useState<string | null>(null);
   const [pendingSession, setPendingSession] = useState<CgmStudentSession | null>(null);
+  // Forgot-passkey: the reset runs from here, BEFORE any session exists.
+  const [resetOpen, setResetOpen] = useState(false);
+  const [savedReset, setSavedReset] = useState<SavedReset | null>(null);
+
+  useEffect(() => { setSavedReset(readSavedReset()); }, [resetOpen]);
 
   useEffect(() => {
     if (!inviteCode) return;
@@ -340,6 +561,25 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
           </div>
         )}
 
+        {savedReset && !resetOpen && !issuedPasskey && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3" data-testid="cgm-passkey-reset-saved">
+            <p className="text-[11px] font-bold text-amber-800">
+              <KeyRound className="mr-1 inline h-3.5 w-3.5" />
+              {savedReset.status === 'approved'
+                ? 'Your organizer approved your passkey reset — collect your new passkey.'
+                : 'Your passkey reset is waiting for your organizer.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => setResetOpen(true)}
+              className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-black text-amber-800 hover:bg-amber-100"
+              data-testid="cgm-passkey-reset-continue"
+            >
+              Continue reset
+            </button>
+          </div>
+        )}
+
         <div className="mt-5 flex flex-wrap gap-2" role="tablist" aria-label="Choose an action">
           {([['login', 'Sign in'], ['register', 'Register'], ['join', 'Join a class']] as const).map(([key, text]) => (
             <button
@@ -347,7 +587,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               type="button"
               role="tab"
               aria-selected={mode === key}
-              onClick={() => { setMode(key); setError(null); setMessage(null); }}
+              onClick={() => { setMode(key); setResetOpen(false); setError(null); setMessage(null); }}
               className={`rounded-full px-4 py-2 text-xs font-black uppercase tracking-wider transition ${mode === key ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}
             >
               {text}
@@ -358,7 +598,24 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
         {error && <p role="alert" className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-600">{error}</p>}
         {message && <p role="status" className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">{message}</p>}
 
-        {mode === 'login' && (
+        {resetOpen && (
+          <PasskeyResetPanel
+            onBack={() => { setResetOpen(false); setError(null); }}
+            onDone={(newIdentifier) => {
+              // The reset is done: go straight back to a sign-in form with the
+              // identifier filled in and the (now dead) passkey field empty.
+              setIdentifier(newIdentifier || identifier);
+              setIdentifierType(/^[+0-9][0-9\s-]{5,}$/.test(newIdentifier) ? 'phone' : 'index_number');
+              setPasskey('');
+              setResetOpen(false);
+              setMode('login');
+              setError(null);
+              setMessage('Your passkey was reset. Sign in with the new passkey — it was shown once.');
+            }}
+          />
+        )}
+
+        {!resetOpen && mode === 'login' && (
           <form
             className="mt-5 space-y-3"
             onSubmit={(event) => {
@@ -394,13 +651,29 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               <label className={label} htmlFor="cgm-passkey">Permanent passkey</label>
               <input id="cgm-passkey" required className={`${inputClass} mt-1 font-mono`} value={passkey} onChange={(event) => setPasskey(event.target.value)} placeholder="rx30a" autoComplete="current-password" />
             </div>
-            <button type="submit" disabled={busy} className="cgm-primary-button w-full">
-              {busy ? 'Signing in…' : 'Sign in'}
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+              <button type="submit" disabled={busy} className="cgm-primary-button flex-1">
+                {busy ? 'Signing in…' : 'Sign in'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setResetOpen(true); setError(null); setMessage(null); }}
+                disabled={busy}
+                className="rounded-xl border border-emerald-200 bg-white px-4 py-2.5 text-xs font-black uppercase tracking-wider text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:opacity-50"
+                data-testid="cgm-student-passkey-reset-open"
+                title="Lost or forgot your passkey? Ask your organizer for a reset."
+              >
+                <KeyRound className="mr-1 inline h-3.5 w-3.5" /> Reset passkey
+              </button>
+            </div>
+            <p className="text-[11px] font-medium text-slate-400">
+              Forgot your passkey? Press <span className="font-bold text-slate-500">Reset passkey</span> — your organizer
+              approves it, then you generate the new one here.
+            </p>
           </form>
         )}
 
-        {mode === 'register' && (
+        {!resetOpen && mode === 'register' && (
           <form
             className="mt-5 space-y-3"
             onSubmit={(event) => {
@@ -446,7 +719,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
           </form>
         )}
 
-        {mode === 'join' && (
+        {!resetOpen && mode === 'join' && (
           <form
             className="mt-5 space-y-3"
             onSubmit={(event) => {
@@ -1974,6 +2247,7 @@ const ProfileView = ({ me, onChanged }: { me: any; onChanged: () => void }) => {
           You never type your own new passkey: the system generates it so it can never clash with another student&rsquo;s key.
           Prove who you are with your <span className="font-bold">current passkey</span> to ask your organizer; when they approve
           (or send you the link), a <span className="font-bold">Generate new passkey</span> button appears here.
+          If you cannot sign in at all, send the request from the sign-in page instead — your organizer approves it there too.
         </p>
         {issuedPasskey && (
           <div className="mt-3 rounded-xl bg-emerald-50 px-4 py-3" role="alert">

@@ -56,6 +56,7 @@ import {
   notifyStudent,
   readBody,
   requireModuleEnabled,
+  ensurePasskeyResetSchema,
   requireStudent,
   revokeStudentSessions,
   STUDENT_LOCK_MINUTES,
@@ -1882,6 +1883,220 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     await notifyStudent(c.env.DB, student.id, 'security', 'Your passkey was changed',
       'A new system-generated passkey was issued and shown once on your screen. If this was not you, contact your organizer immediately.');
     return c.json({ success: true, data: { passkey: issuedPasskey, session, message: 'New passkey generated. It is shown only now — save it.' } });
+  });
+
+  // -------------------------------------------------------------------------
+  // FORGOT-PASSKEY RESETS FROM THE SIGN-IN PAGE
+  //
+  // A student who cannot sign in has no session and no working passkey, so this
+  // path proves nothing but the identifier. Two things make that safe:
+  //
+  //   1. nothing happens on the request itself — the class organizer must
+  //      approve it, and the queue marks it as "no passkey proof" so they can
+  //      verify the student out of band first;
+  //   2. the request mints a one-time CLAIM CODE (stored only as a SHA-256
+  //      hash). Collecting the new passkey needs that code, so somebody who
+  //      merely knows an index number cannot take the reset after approval.
+  //
+  // The response is deliberately identical whether or not the identifier
+  // exists, so the endpoint cannot be used to enumerate the roster.
+  // -------------------------------------------------------------------------
+  const CLAIM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no O/0/I/1
+  const newClaimCode = () => {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    let out = '';
+    for (let index = 0; index < 16; index += 1) {
+      // 32 divides 256 exactly, so the modulo introduces no bias.
+      out += CLAIM_ALPHABET[bytes[index] % CLAIM_ALPHABET.length];
+      if (index % 4 === 3 && index < 15) out += '-';
+    }
+    return out; // K7QM-3XTD-9B2F-H8YR
+  };
+  const normaliseClaim = (raw: unknown) => String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const claimHash = (raw: unknown) => sha256Hex(`cgm-passkey-reset:${normaliseClaim(raw)}`);
+
+  /** The student behind an identifier, using the same matching as sign-in. */
+  const studentByIdentifier = async (
+    db: D1Database, identifier: string, identifierType: LoginIdentifierKey,
+  ) => {
+    if (identifierType === 'phone') {
+      const key = phoneKey(identifier);
+      if (!key) return null;
+      return (await asRows<any>(db.prepare(
+        `SELECT * FROM cgm_students WHERE phone_key = ? AND status IN ('active','pending') ORDER BY id LIMIT 5`
+      ).bind(key)))[0] || null;
+    }
+    const variants = indexKeyVariants(String(identifier || '').trim().replace(/\s+/g, ' ').toLowerCase());
+    if (!variants.length) return null;
+    return (await asRows<any>(db.prepare(
+      `SELECT * FROM cgm_students WHERE index_number_key IN (${variants.map(() => '?').join(', ')})
+         AND status IN ('active','pending') ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id LIMIT 1`
+    ).bind(...variants)))[0] || null;
+  };
+
+  /** The class whose organizer should decide: an explicit code, else the first live membership. */
+  const classForPasskeyReset = async (db: D1Database, studentId: number, classCode: string | null) => {
+    const code = String(classCode || '').trim().toLowerCase();
+    const rows = await asRows<any>(db.prepare(
+      `SELECT cl.id AS class_id, cl.name, cl.code
+       FROM cgm_class_members m JOIN cgm_classes cl ON cl.id = m.class_id
+       WHERE m.student_id = ? AND m.status = 'active' AND cl.status = 'active'
+         ${code ? 'AND LOWER(cl.code) = ?' : ''}
+       ORDER BY cl.id LIMIT 1`
+    ).bind(...(code ? [studentId, code] : [studentId])));
+    return rows[0] || null;
+  };
+
+  app.post('/api/cgm/student/passkey/reset/request', async (c: any) => {
+    const dark = await requireModuleEnabled(c);
+    if (dark) return dark;
+    if (!throttle(c, 5, 3600)) return bad(c, 'Too many reset requests from this connection. Try again later.', 429);
+    await ensurePasskeyResetSchema(c.env.DB);
+    const body = await readBody(c);
+    const identifierType = String(body.identifierType || 'index_number') as LoginIdentifierKey;
+    if (!(LOGIN_IDENTIFIER_KEYS as readonly string[]).includes(identifierType)) {
+      return bad(c, 'Choose how you sign in.', 400);
+    }
+    const identifier = clean(body.identifier, 120);
+    if (!identifier) return bad(c, 'Enter your index number or telephone number.', 400);
+    const note = cleanOrNull(body.note, 400);
+
+    // Every response below is the same shape and wording, so an unknown
+    // identifier cannot be told apart from a real one.
+    const genericMessage = 'If that identifier belongs to a registered student, your request is now with your class organizer. '
+      + 'Keep the reset code below — when they approve it, come back here and press “Generate new passkey”.';
+    const claimCode = newClaimCode();
+
+    const student = await studentByIdentifier(c.env.DB, identifier, identifierType);
+    if (!student) return c.json({ success: true, data: { accepted: true, status: 'pending', claimCode, message: genericMessage } });
+
+    const membership = await classForPasskeyReset(c.env.DB, Number(student.id), cleanOrNull(body.classCode, 40));
+    if (!membership) return c.json({ success: true, data: { accepted: true, status: 'pending', claimCode, message: genericMessage } });
+
+    const classId = Number(membership.class_id);
+    const open = await asRows<any>(c.env.DB.prepare(
+      `SELECT id, status, claim_token_hash FROM cgm_passkey_requests
+       WHERE student_id = ? AND status IN ('pending','approved') ORDER BY id DESC LIMIT 1`
+    ).bind(Number(student.id)));
+    const claimDigest = await claimHash(claimCode);
+
+    if (open[0]) {
+      // Never stack a second request. A new claim code is issued so a student
+      // who lost the first one (closed tab, different device) can still collect
+      // — the organizer's approval is unchanged, and the old code stops working.
+      await c.env.DB.prepare(
+        `UPDATE cgm_passkey_requests SET claim_token_hash = ?, claim_issued_at = CURRENT_TIMESTAMP,
+           requested_identifier = COALESCE(requested_identifier, ?), note = COALESCE(?, note) WHERE id = ?`
+      ).bind(claimDigest, identifier, note, Number(open[0].id)).run();
+      return c.json({ success: true, data: {
+        accepted: true, status: String(open[0].status), claimCode, requestId: Number(open[0].id),
+        message: String(open[0].status) === 'approved'
+          ? 'Your organizer already approved this reset — press “Generate new passkey” now and the system will show your new passkey once.'
+          : genericMessage,
+      } });
+    }
+
+    const inserted = await c.env.DB.prepare(
+      `INSERT INTO cgm_passkey_requests
+         (class_id, student_id, status, source, requested_identifier, note, claim_token_hash, claim_issued_at)
+       VALUES (?, ?, 'pending', 'login', ?, ?, ?, CURRENT_TIMESTAMP)`
+    ).bind(classId, Number(student.id), identifier, note, claimDigest).run();
+    const requestId = Number(inserted.meta.last_row_id);
+
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: String(student.full_name || 'Student'), actorStudentId: Number(student.id),
+      action: 'cgm.passkey.reset_requested', entityType: 'student', entityId: Number(student.id), classId,
+      context: { requestId, source: 'login', identifierType },
+    });
+    await notifyStudent(c.env.DB, Number(student.id), 'security', 'Passkey reset sent to your organizer',
+      'You asked for a new passkey from the sign-in page. When your organizer approves it, return to the sign-in page and press “Generate new passkey”.');
+    // The organizer has to know a reset is waiting — and that this one carries
+    // no passkey proof, so they should verify the student before approving.
+    const organizers = await asRows<{ member_profile_id: number }>(c.env.DB.prepare(
+      `SELECT member_profile_id FROM cgm_class_organizers WHERE class_id = ? AND status = 'active'`
+    ).bind(classId));
+    if (organizers.length) {
+      await createNotification(c.env.DB, {
+        title: 'Passkey reset waiting for approval',
+        message: `${student.full_name} (${student.index_number}) asked to reset their passkey from the sign-in page. `
+          + `They could not prove their current passkey — verify this student before approving. `
+          + `Approve it under Class & Groups → ${membership.name || 'your class'} → Passkey requests.`,
+        audience: 'system', audienceLabel: 'Class & Groups',
+        recipientProfileIds: organizers.map((row) => Number(row.member_profile_id)),
+      });
+    }
+    return c.json({ success: true, data: { accepted: true, status: 'pending', claimCode, requestId, message: genericMessage } });
+  });
+
+  app.post('/api/cgm/student/passkey/reset/generate', async (c: any) => {
+    const dark = await requireModuleEnabled(c);
+    if (dark) return dark;
+    if (!throttle(c, 10, 3600)) return bad(c, 'Too many attempts. Try again later.', 429);
+    await ensurePasskeyResetSchema(c.env.DB);
+    const body = await readBody(c);
+    const claimCode = normaliseClaim(body.claimCode);
+    if (claimCode.length < 12) return bad(c, 'Enter the reset code you were given when you sent the request.', 400);
+    const digest = await claimHash(claimCode);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.id, r.status, r.class_id, r.student_id, r.handled_label, r.handled_at,
+              s.full_name, s.index_number, cl.name AS class_name
+       FROM cgm_passkey_requests r
+       JOIN cgm_students s ON s.id = r.student_id
+       LEFT JOIN cgm_classes cl ON cl.id = r.class_id
+       WHERE r.claim_token_hash = ? ORDER BY r.id DESC LIMIT 1`
+    ).bind(digest));
+    const request = rows[0];
+    if (!request) {
+      return c.json({ success: false, code: 'reset_code_invalid', error: 'That reset code is not valid. Send a new reset request from the sign-in page.' }, 403);
+    }
+    if (request.status === 'pending') {
+      return c.json({ success: false, code: 'reset_pending', error: 'Your organizer has not approved this reset yet. Press “Generate new passkey” again once they do.' }, 409);
+    }
+    if (request.status === 'declined') {
+      return c.json({ success: false, code: 'reset_declined', error: `${request.handled_label || 'Your organizer'} declined this reset${request.handled_label ? '' : ''}. Your current passkey still works — send a new request if you still need one.` }, 403);
+    }
+    if (request.status !== 'approved') {
+      return c.json({ success: false, code: 'reset_used', error: 'This reset code was already used. If your new passkey is lost, send a new reset request.' }, 409);
+    }
+
+    // Consume the approval FIRST: only the request that wins this CAS may issue
+    // a passkey, so a double-tap (or two tabs) can never mint two passkeys.
+    const consumed = await c.env.DB.prepare(
+      `UPDATE cgm_passkey_requests SET status = 'completed', handled_at = COALESCE(handled_at, CURRENT_TIMESTAMP),
+         claim_token_hash = NULL WHERE id = ? AND status = 'approved'`
+    ).bind(Number(request.id)).run();
+    if (!(Number((consumed as any)?.meta?.changes || 0) > 0)) {
+      return c.json({ success: false, code: 'reset_used', error: 'This reset was already completed. Send a new request if you need another passkey.' }, 409);
+    }
+
+    const prefixRows = await asRows<{ passkey_prefix: string | null }>(c.env.DB.prepare(
+      'SELECT passkey_prefix FROM cgm_classes WHERE id = ?'
+    ).bind(Number(request.class_id)));
+    const classPrefix = String(prefixRows[0]?.passkey_prefix || 'rx30');
+    const allocation = await allocateStudentPasskey(c.env.DB);
+    const issuedPasskey = `${classPrefix}${allocation.suffix}`;
+    await c.env.DB.prepare(
+      `UPDATE cgm_students SET passkey_verifier = ?, passkey_sequence = ?, passkey_suffix = ?,
+         passkey_prefix = ?, passkey_reset_at = CURRENT_TIMESTAMP, failed_attempts = 0, locked_until = NULL,
+         updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(await hashPassword(issuedPasskey), allocation.sequence, allocation.suffix, classPrefix, Number(request.student_id)).run();
+    // The old passkey is dead from this moment: every device signed in with it
+    // is signed out, exactly like a profile-side reset.
+    await revokeStudentSessions(c.env.DB, Number(request.student_id));
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: String(request.full_name || 'Student'), actorStudentId: Number(request.student_id),
+      action: 'cgm.passkey.generated', entityType: 'student', entityId: Number(request.student_id),
+      classId: Number(request.class_id), context: { requestId: Number(request.id), source: 'login' },
+    });
+    await notifyStudent(c.env.DB, Number(request.student_id), 'security', 'Your passkey was reset',
+      'A new system-generated passkey was issued from the sign-in page and shown once. If this was not you, contact your organizer immediately.');
+    return c.json({ success: true, data: {
+      passkey: issuedPasskey,
+      fullName: request.full_name,
+      classLabel: request.class_name || null,
+      message: 'New passkey generated — it is shown only now. Sign in with it immediately.',
+    } });
   });
 
   // -------------------------------------------------------------------------

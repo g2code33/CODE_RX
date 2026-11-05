@@ -900,6 +900,107 @@ let wsClass = null;
     `blocked=${Boolean(stillBlocked)} disabled=${submitAfter?.disabled}`);
 }
 
+// ---------------------------------------------------------------------------
+// Forgot passkey, driven through the DOM from the SIGN-IN PAGE: request →
+// organizer approval → the same page generates the new passkey → sign in works.
+// ---------------------------------------------------------------------------
+{
+  const resetIndex = `BRW-${stamp}-RS`;
+  await api('POST', `/api/cgm/classes/${wsClass.classId}/roster/entries`,
+    { fullName: 'Reset Rana', indexNumber: resetIndex }, phantomToken);
+  const resetRegistered = await fetch(`${BASE}/api/cgm/student/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.245' },
+    body: JSON.stringify({ classCode: wsClass.code, indexNumber: resetIndex, entryPassword: 'rechoose-entry' }),
+  }).then((response) => response.json());
+  const resetOriginalPasskey = String(resetRegistered?.data?.passkey || '');
+
+  const page = await boot('#class-groups/student');
+  const resetOpen = await page.waitForElement(
+    () => page.window.document.querySelector('[data-testid="cgm-student-passkey-reset-open"]'), 20_000);
+  check('the sign-in page offers a Reset passkey control beside Sign in',
+    Boolean(resetOpen) && /reset passkey/i.test(resetOpen.textContent || '')
+    && Boolean(page.window.document.querySelector('form button[type="submit"]')),
+    page.body().slice(0, 200));
+  resetOpen && resetOpen.click();
+  const panel = await page.waitForElement(
+    () => page.window.document.querySelector('[data-testid="cgm-passkey-reset"]'), 15_000);
+  check('it opens a reset panel that explains the organizer approves it first',
+    Boolean(panel) && /organizer/i.test(page.body()) && /Generate new passkey/i.test(page.body()),
+    page.body().slice(0, 240));
+
+  const setValue = (selector, value) => {
+    const field = page.window.document.querySelector(selector);
+    if (!field) return false;
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLInputElement.prototype, 'value').set;
+    setter.call(field, value);
+    field.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+    return true;
+  };
+  const identifierField = await page.waitForElement(
+    () => page.window.document.querySelector('[data-testid="cgm-passkey-reset-identifier"]'), 10_000);
+  check('the reset form asks for the identifier, not the forgotten passkey',
+    Boolean(identifierField) && !/passkey"/i.test(String(identifierField?.getAttribute('id'))));
+  setValue('[data-testid="cgm-passkey-reset-identifier"]', resetIndex);
+  await page.wait(150);
+  const sendButton = page.window.document.querySelector('[data-testid="cgm-passkey-reset-send"]');
+  sendButton && sendButton.click();
+  const progress = await page.waitForElement(
+    () => page.window.document.querySelector('[data-testid="cgm-passkey-reset-progress"]'), 20_000);
+  const shownCode = page.window.document.querySelector('[data-testid="cgm-passkey-reset-code"]')?.textContent?.trim() || '';
+  check('sending the request shows a one-time reset code and a waiting state',
+    Boolean(progress) && /^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$/.test(shownCode)
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-passkey-reset-status-pending"]')),
+    `code=${shownCode || 'none'} ${page.body().slice(0, 160)}`);
+
+  const pendingQueue = (await api('GET', `/api/cgm/classes/${wsClass.classId}/passkey-requests`, undefined, phantomToken)).json?.data || [];
+  const resetRow = pendingQueue.find((row) => row.status === 'pending'
+    && (row.requestedIdentifier === resetIndex || row.indexNumber === resetIndex));
+  check('the request reached the organizer marked as coming from the sign-in page',
+    Boolean(resetRow) && resetRow.source === 'login' && resetRow.requestedIdentifier === resetIndex,
+    JSON.stringify(resetRow || {}).slice(0, 160));
+
+  // Pressing Generate before approval must not hand out anything.
+  const earlyGenerate = page.window.document.querySelector('[data-testid="cgm-passkey-reset-generate"]');
+  earlyGenerate && earlyGenerate.click();
+  await page.wait(600);
+  check('pressing Generate before approval hands out no passkey',
+    !page.window.document.querySelector('[data-testid="cgm-passkey-reset-issued"]')
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-passkey-reset-error"]')),
+    page.body().slice(0, 200));
+
+  const approved = await api('POST', `/api/cgm/classes/${wsClass.classId}/passkey-requests/${Number(resetRow?.id)}/approve`, {}, phantomToken);
+  check('the organizer approves the reset', approved.status === 200, `status ${approved.status}`);
+  await page.wait(300);
+  const generateAgain = page.window.document.querySelector('[data-testid="cgm-passkey-reset-generate"]');
+  generateAgain && generateAgain.click();
+  const issued = await page.waitForElement(
+    () => page.window.document.querySelector('[data-testid="cgm-passkey-reset-issued"]'), 20_000);
+  const newPasskey = issued
+    ? String(page.window.document.querySelector('[data-testid="cgm-passkey-reset-issued"] p.select-all')?.textContent || '').trim()
+    : '';
+  check('after approval the SAME sign-in page generates and shows the new passkey once',
+    Boolean(issued) && Boolean(newPasskey) && newPasskey !== resetOriginalPasskey,
+    `passkey=${newPasskey ? 'shown' : 'missing'} ${page.body().slice(0, 160)}`);
+
+  const signInAgain = page.window.document.querySelector('[data-testid="cgm-passkey-reset-signin"]');
+  signInAgain && signInAgain.click();
+  await page.wait(300);
+  const passkeyField = page.window.document.querySelector('#cgm-passkey');
+  check('it returns to the sign-in form so the student can use the new passkey',
+    Boolean(passkeyField) && String(page.window.document.querySelector('#cgm-identifier')?.value || '') === resetIndex,
+    page.body().slice(0, 160));
+
+  const newLogin = await api('POST', '/api/cgm/student/login', {
+    identifierType: 'index_number', identifier: resetIndex, passkey: newPasskey,
+  });
+  const oldLogin = await api('POST', '/api/cgm/student/login', {
+    identifierType: 'index_number', identifier: resetIndex, passkey: resetOriginalPasskey,
+  });
+  check('the new passkey signs in and the old one does not',
+    newLogin.status === 200 && Boolean(newLogin.json?.data?.session?.token) && oldLogin.status === 400,
+    `new=${newLogin.status} old=${oldLogin.status}`);
+}
+
 // Restore the spec-default policies so the local database stays clean.
 await api('PUT', '/api/cgm/phantom/policies', { policies: [
   { key: 'student_registration_mode', value: 'approval' },

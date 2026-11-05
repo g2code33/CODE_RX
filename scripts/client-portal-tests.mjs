@@ -763,7 +763,7 @@ const main = async () => {
   // The marker moves whenever a new additive migration lands. 2026-11-05
   // (rx26) adds the FORCE GET request / item / designation tables.
   check('schema version marker was advanced',
-    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-11-05-code-rx26-force-get'));
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-11-05-code-rx27-passkey-reset'));
   // Phase 20 adds the review section's own table: one row per answer, so a
   // client who changes their mind leaves a trail instead of overwriting.
   // Phase 20 adds the review table, the signature table and the message table:

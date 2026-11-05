@@ -905,6 +905,58 @@ check('revisions, sampling and Re-choose all route through the same pool guard',
   && /enforceGenderPools: enforcePools/.test(routesActivities)
   && /placeByDesignation/.test(src('functions/lib/cgm/routes-student.ts')));
 
+section('24. Forgot passkey from the sign-in page');
+
+const routesStudent = src('functions/lib/cgm/routes-student.ts');
+const routesOrganizer = src('functions/lib/cgm/routes-organizer.ts');
+check('the reset control sits beside the Sign in button on the login form',
+  /data-testid="cgm-student-passkey-reset-open"/.test(studentPortal)
+  && studentPortal.indexOf('type="submit" disabled={busy} className="cgm-primary-button flex-1"')
+     < studentPortal.indexOf('cgm-student-passkey-reset-open')
+  && /Reset passkey/.test(studentPortal));
+check('the reset panel asks for the identifier only (never the forgotten passkey) and names the organizer step',
+  /data-testid="cgm-passkey-reset-identifier"/.test(studentPortal)
+  && /data-testid="cgm-passkey-reset-send"/.test(studentPortal)
+  && /organizer approves it/i.test(studentPortal)
+  && /data-testid="cgm-passkey-reset\/identifier-type|data-testid="cgm-passkey-reset-identifier-type"/.test(studentPortal));
+check('after approval the SAME page generates the passkey and shows it once',
+  /data-testid="cgm-passkey-reset-generate"/.test(studentPortal)
+  && /data-testid="cgm-passkey-reset-issued"/.test(studentPortal)
+  && /shown only on this page/.test(studentPortal)
+  && /data-testid="cgm-passkey-reset-signin"/.test(studentPortal));
+check('the reset code is kept in this browser so a returning student can collect the passkey',
+  /codeRx_passkeyReset/.test(studentPortal) && /localStorage/.test(studentPortal)
+  && /data-testid="cgm-passkey-reset-continue"/.test(studentPortal));
+check('the client exposes session-less reset methods on the student auth helper',
+  /resetPasskeyRequest: \(body: \{ identifier: string/.test(client)
+  && /resetPasskeyGenerate: \(claimCode: string\)/.test(client)
+  && /\/api\/cgm\/student\/passkey\/reset\/request/.test(client)
+  && /\/api\/cgm\/student\/passkey\/reset\/generate/.test(client));
+check('the backend route needs NO session and answers identically for unknown identifiers',
+  /app\.post\('\/api\/cgm\/student\/passkey\/reset\/request'/.test(routesStudent)
+  && !/app\.post\('\/api\/cgm\/student\/passkey\/reset\/request',[\s\S]{0,200}?requireStudent/.test(routesStudent)
+  && /your request is now with your class organizer/.test(routesStudent)
+  && /studentByIdentifier/.test(routesStudent));
+check('the claim code is one-time, hashed at rest, and burned when the passkey is issued',
+  /claim_token_hash/.test(routesStudent) && /claimHash/.test(routesStudent)
+  && /cgm-passkey-reset:\$\{normaliseClaim\(raw\)\}/.test(routesStudent)
+  && /claim_token_hash = NULL WHERE id = \? AND status = 'approved'/.test(routesStudent));
+check('generation is refused before approval and after a decline, with distinct reasons',
+  /reset_pending/.test(routesStudent) && /reset_declined/.test(routesStudent)
+  && /reset_code_invalid/.test(routesStudent) && /reset_used/.test(routesStudent));
+check('issuing the new passkey revokes the old sessions and audits the login-page source',
+  /revokeStudentSessions\(c\.env\.DB, Number\(request\.student_id\)\)/.test(routesStudent)
+  && /source: 'login'/.test(routesStudent)
+  && /cgm\.passkey\.reset_requested/.test(routesStudent));
+check('the organizer queue marks sign-in requests as unproven and shows what the student typed',
+  /data-testid="cgm-passkey-request-login-source"/.test(workspace)
+  && /from sign-in/.test(workspace)
+  && /could not prove their current passkey/.test(workspace)
+  && /requestedIdentifier/.test(routesOrganizer));
+check('the organizer notification warns that the request carries no passkey proof',
+  /could not prove their current passkey/.test(routesStudent)
+  && /verify this student before approving/.test(routesStudent));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

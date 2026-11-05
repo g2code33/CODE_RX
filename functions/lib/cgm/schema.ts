@@ -659,7 +659,19 @@ CREATE TABLE IF NOT EXISTS cgm_passkey_requests (
   handled_member_id INTEGER,
   handled_label TEXT,
   requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  handled_at DATETIME
+  handled_at DATETIME,
+  -- Where the request came from: 'profile' proves the CURRENT passkey,
+  -- 'login' is the forgot-my-passkey path and carries no proof, only the
+  -- identifier — so the organizer is warned to verify the student first.
+  source TEXT NOT NULL DEFAULT 'profile' CHECK (source IN ('profile','login')),
+  -- The identifier the student typed on the sign-in page (shown to the
+  -- organizer so they can match it against the roster).
+  requested_identifier TEXT,
+  -- The one-time collection code, stored only as a SHA-256 hash: the browser
+  -- that filed the request must present it to collect the new passkey, so a
+  -- third party who merely knows the index number cannot take it.
+  claim_token_hash TEXT,
+  claim_issued_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS cgm_student_notifications (
@@ -737,6 +749,7 @@ CREATE TABLE IF NOT EXISTS cgm_audit (
  */
 export const CGM_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_student ON cgm_passkey_requests(student_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_claim ON cgm_passkey_requests(claim_token_hash);
 CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_class ON cgm_passkey_requests(class_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_students_identity ON cgm_students(institution_key, index_number_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_students_sequence ON cgm_students(passkey_sequence);

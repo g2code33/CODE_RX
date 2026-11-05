@@ -694,6 +694,14 @@ export const cgmStudent = {
     studentCall('/api/cgm/student/passkey/request', { method: 'POST', body: { classId: classId ?? undefined, currentPasskey } }),
   generatePasskey: () =>
     studentCall('/api/cgm/student/passkey/generate', { method: 'POST', body: {} }),
+  // FORGOT-PASSKEY (sign-in page, no session): ask from the login page, the
+  // organizer approves, then the same browser collects the new passkey with the
+  // one-time claim code it was given. Responses are deliberately identical for
+  // unknown identifiers, so this cannot be used to enumerate the roster.
+  resetPasskeyRequest: (body: { identifier: string; identifierType?: string; classCode?: string; note?: string }) =>
+    studentCall('/api/cgm/student/passkey/reset/request', { method: 'POST', body }),
+  resetPasskeyGenerate: (claimCode: string) =>
+    studentCall('/api/cgm/student/passkey/reset/generate', { method: 'POST', body: { claimCode } }),
   invitationInfo: (code: string) => studentCall(`/api/cgm/invitations/${encodeURIComponent(code)}`),
   joinClass: (code: string) => studentCall('/api/cgm/student/join', { method: 'POST', body: { code } }),
   claimInvitation: (code: string) => studentCall(`/api/cgm/student/invitations/${encodeURIComponent(code)}/claim`, { method: 'POST', body: {} }),

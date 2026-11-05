@@ -3801,7 +3801,7 @@ check('a non-numeric group id answers 404 instead of a D1 500',
 const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
 check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
   /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
-  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx26-/.test(schemaSrc));
+  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx27-passkey-reset'/.test(schemaSrc));
 
 // ---------------------------------------------------------------------------
 // 39. Re-choose: organizer asks, PHANTOM approves, the member starts fresh
@@ -4589,6 +4589,153 @@ const mixedReservations = q(
 );
 check('ACCEPTANCE — no group holds live reservations of more than one gender pool either',
   mixedReservations.length === 0, JSON.stringify(mixedReservations));
+
+
+// ---------------------------------------------------------------------------
+section('42. Forgot passkey on the sign-in page: request → organizer approval → generate');
+
+// A student who cannot sign in has no session and no working passkey, so this
+// path proves nothing but the identifier. It must therefore be organizer-gated,
+// and the new passkey must only be collectable by the browser that asked.
+const prStudent = await freshFmtRosterStudent(90, 'Reset Rana');
+const prOriginalPasskey = String(prStudent.register?.json?.data?.passkey || '');
+check('42.0 — the reset fixture registered with a real permanent passkey',
+  Boolean(prOriginalPasskey) && /^[a-z0-9]+$/i.test(prOriginalPasskey), prOriginalPasskey ? 'passkey issued' : 'missing');
+
+const prRequestCount = () => Number(q1('SELECT COUNT(*) c FROM cgm_passkey_requests WHERE student_id = ?', prStudent.studentId).c || 0);
+const prAsk = await studentCall('POST', '/api/cgm/student/passkey/reset/request', {
+  identifier: prStudent.indexNumber, note: 'Lost the slip with my passkey',
+});
+const prClaim = String(prAsk.json?.data?.claimCode || '');
+check('42.1 — a student with no session can ask for a reset straight from the sign-in page',
+  prAsk.status === 200 && /^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$/.test(prClaim) && prAsk.json?.data?.status === 'pending',
+  `status ${prAsk.status} ${prAsk.text?.slice(0, 160)}`);
+const prRow = q1('SELECT * FROM cgm_passkey_requests WHERE student_id = ? ORDER BY id DESC LIMIT 1', prStudent.studentId);
+check('42.2 — the request is recorded as coming from sign-in, with the typed identifier and only a HASH of the claim code',
+  prRow?.source === 'login' && prRow?.requested_identifier === prStudent.indexNumber
+  && prRow?.status === 'pending' && Boolean(prRow?.claim_token_hash)
+  && !String(prRow.claim_token_hash).includes(prClaim.replace(/-/g, '')),
+  JSON.stringify({ source: prRow?.source, status: prRow?.status, hash: String(prRow?.claim_token_hash || '').slice(0, 12) }));
+const prOrganizerNotice = q1(
+  `SELECT n.id FROM notifications n WHERE n.title = 'Passkey reset waiting for approval'
+     AND EXISTS (SELECT 1 FROM notification_recipients r WHERE r.notification_id = n.id) ORDER BY n.id DESC LIMIT 1`);
+check('42.3 — the class organizer is told a reset is waiting (and that it carries no passkey proof)',
+  Boolean(prOrganizerNotice?.id));
+check('42.3b — that notice warns the organizer to verify the student first',
+  /could not prove their current passkey/i.test(String(q1('SELECT message FROM notifications WHERE id = ?', prOrganizerNotice?.id)?.message || '')));
+
+// Enumeration: an identifier nobody owns answers exactly like a real one.
+const prUnknown = await studentCall('POST', '/api/cgm/student/passkey/reset/request', {
+  identifier: 'NOBODY-000-000', note: 'probe',
+});
+check('42.4 — an unknown identifier answers with the SAME shape (no roster enumeration)',
+  prUnknown.status === 200 && prUnknown.json?.data?.accepted === true
+  && Boolean(prUnknown.json?.data?.claimCode)
+  && prUnknown.json?.data?.message === prAsk.json?.data?.message,
+  `status ${prUnknown.status} ${prUnknown.text?.slice(0, 140)}`);
+check('42.4b — the unknown identifier created no request row',
+  q1("SELECT COUNT(*) c FROM cgm_passkey_requests WHERE requested_identifier = 'NOBODY-000-000'").c === 0);
+
+// Asking twice must not stack requests; the newest code wins.
+const prAskAgain = await studentCall('POST', '/api/cgm/student/passkey/reset/request', {
+  identifier: prStudent.indexNumber, classCode: fmtCode,
+});
+const prClaim2 = String(prAskAgain.json?.data?.claimCode || '');
+check('42.5 — asking again reuses the open request and re-issues the claim code',
+  prAskAgain.status === 200 && prRequestCount() === 1 && prClaim2 && prClaim2 !== prClaim
+  && Number(prAskAgain.json?.data?.requestId) === Number(prRow?.id),
+  `rows=${prRequestCount()} same=${prClaim2 === prClaim}`);
+const prStaleClaim = await studentCall('POST', '/api/cgm/student/passkey/reset/generate', { claimCode: prClaim });
+check('42.5b — the superseded claim code stops working', prStaleClaim.status === 403
+  && prStaleClaim.json?.code === 'reset_code_invalid', `status ${prStaleClaim.status} ${prStaleClaim.text?.slice(0, 120)}`);
+
+const prEarly = await studentCall('POST', '/api/cgm/student/passkey/reset/generate', { claimCode: prClaim2 });
+check('42.6 — generating before the organizer approves is refused, and says why',
+  prEarly.status === 409 && prEarly.json?.code === 'reset_pending', `status ${prEarly.status} ${prEarly.text?.slice(0, 140)}`);
+const prWrongCode = await studentCall('POST', '/api/cgm/student/passkey/reset/generate', { claimCode: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ' });
+check('42.6b — a made-up code is refused', prWrongCode.status === 403 && prWrongCode.json?.code === 'reset_code_invalid');
+
+const prList = await memberCall('GET', `/api/cgm/classes/${fmtClassId}/passkey-requests`, undefined, amaToken);
+const prListRow = (prList.json?.data || []).find((row) => Number(row.id) === Number(prRow?.id));
+check('42.7 — the organizer queue marks it as coming from the sign-in page, with the typed identifier and the note',
+  prList.status === 200 && prListRow?.source === 'login'
+  && prListRow?.requestedIdentifier === prStudent.indexNumber
+  && /Lost the slip/.test(String(prListRow?.note || '')),
+  JSON.stringify({ source: prListRow?.source, identifier: prListRow?.requestedIdentifier }));
+const prApprove = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/passkey-requests/${Number(prRow?.id)}/approve`, {}, amaToken);
+check('42.8 — the organizer approves it', prApprove.status === 200, `status ${prApprove.status} ${prApprove.text?.slice(0, 120)}`);
+const prApprovedNotice = q1(
+  "SELECT body FROM cgm_student_notifications WHERE student_id = ? AND title = 'Passkey reset approved' ORDER BY id DESC LIMIT 1",
+  prStudent.studentId);
+check('42.8b — the student is told to finish it on the sign-in page',
+  /sign-in page/i.test(String(prApprovedNotice?.body || '')), String(prApprovedNotice?.body || '').slice(0, 120));
+
+const prGenerate = await studentCall('POST', '/api/cgm/student/passkey/reset/generate', { claimCode: prClaim2 });
+const prNewPasskey = String(prGenerate.json?.data?.passkey || '');
+check('42.9 — after approval the SAME page generates the new passkey, shown once',
+  prGenerate.status === 200 && Boolean(prNewPasskey) && prNewPasskey !== prOriginalPasskey
+  && /^[a-z0-9]+$/i.test(prNewPasskey),
+  `status ${prGenerate.status} ${prGenerate.text?.slice(0, 140)}`);
+const prCompleted = q1('SELECT status, claim_token_hash FROM cgm_passkey_requests WHERE id = ?', Number(prRow?.id));
+check('42.9b — the request is completed and its claim code is burned (nothing left to replay)',
+  prCompleted?.status === 'completed' && prCompleted?.claim_token_hash === null,
+  JSON.stringify(prCompleted));
+const prSequenceBeforeReplay = q1('SELECT passkey_sequence FROM cgm_students WHERE id = ?', prStudent.studentId)?.passkey_sequence;
+const prReplay = await studentCall('POST', '/api/cgm/student/passkey/reset/generate', { claimCode: prClaim2 });
+check('42.9c — the used code cannot mint a second passkey (it is refused, and the passkey is unchanged)',
+  prReplay.status >= 400
+  && q1('SELECT passkey_sequence FROM cgm_students WHERE id = ?', prStudent.studentId)?.passkey_sequence === prSequenceBeforeReplay
+  && (await studentCall('POST', '/api/cgm/student/login', {
+    identifierType: 'index_number', identifier: prStudent.indexNumber, passkey: prNewPasskey,
+  })).status === 200,
+  `status ${prReplay.status} ${prReplay.text?.slice(0, 120)}`);
+
+const prOldLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: prStudent.indexNumber, passkey: prOriginalPasskey });
+check('42.10 — the old passkey no longer signs in', prOldLogin.status === 400, `status ${prOldLogin.status}`);
+const prNewLogin = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: prStudent.indexNumber, passkey: prNewPasskey });
+check('42.10b — the new passkey signs in normally', prNewLogin.status === 200 && Boolean(prNewLogin.json?.data?.session?.token),
+  `status ${prNewLogin.status}`);
+const prOldSession = await studentCall('GET', '/api/cgm/student/me', undefined, prStudent.session);
+check('42.10c — any session that existed before the reset is revoked', prOldSession.status === 401, `status ${prOldSession.status}`);
+const prAuditRequested = q1(
+  "SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.passkey.reset_requested' AND entity_id = ?", String(prStudent.studentId));
+const prAuditGenerated = q1(
+  "SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.passkey.generated' AND entity_id = ? AND context_json LIKE '%\"source\":\"login\"%'",
+  String(prStudent.studentId));
+check('42.11 — both the request and the login-page generation are audited',
+  prAuditRequested.c >= 1 && prAuditGenerated.c >= 1,
+  `requested=${prAuditRequested.c} generated=${prAuditGenerated.c}`);
+
+// Decline path
+const prStudent2 = await freshFmtRosterStudent(91, 'Reset Kojo');
+const prAsk2 = await studentCall('POST', '/api/cgm/student/passkey/reset/request', { identifier: prStudent2.indexNumber });
+const prClaim3 = String(prAsk2.json?.data?.claimCode || '');
+const prRow2 = q1('SELECT * FROM cgm_passkey_requests WHERE student_id = ? ORDER BY id DESC LIMIT 1', prStudent2.studentId);
+const prDecline = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/passkey-requests/${Number(prRow2?.id)}/decline`, {}, amaToken);
+const prDeclinedGenerate = await studentCall('POST', '/api/cgm/student/passkey/reset/generate', { claimCode: prClaim3 });
+check('42.12 — a declined reset can never generate a passkey, and says so',
+  prDecline.status === 200 && prDeclinedGenerate.status === 403
+  && prDeclinedGenerate.json?.code === 'reset_declined',
+  `decline ${prDecline.status} generate ${prDeclinedGenerate.status}`);
+check('42.12b — the declined student keeps their original passkey',
+  (await studentCall('POST', '/api/cgm/student/login', {
+    identifierType: 'index_number', identifier: prStudent2.indexNumber,
+    passkey: String(prStudent2.register?.json?.data?.passkey || ''),
+  })).status === 200);
+const prAsk3 = await studentCall('POST', '/api/cgm/student/passkey/reset/request', { identifier: prStudent2.indexNumber });
+check('42.12c — after a decline the student can ask again (a fresh pending request)',
+  prAsk3.status === 200 && prAsk3.json?.data?.status === 'pending'
+  && q1("SELECT COUNT(*) c FROM cgm_passkey_requests WHERE student_id = ? AND status = 'pending'", prStudent2.studentId).c === 1,
+  `status ${prAsk3.status} ${prAsk3.json?.data?.status}`);
+
+// Phone identifiers resolve too (the login page offers both).
+const prPhone = await studentCall('POST', '/api/cgm/student/passkey/reset/request', {
+  identifierType: 'phone', identifier: `024511${String(91).padStart(4, '0')}`,
+});
+check('42.13 — a telephone number finds the same student (one open request, no duplicate)',
+  prPhone.status === 200 && Number(prPhone.json?.data?.requestId) === Number(q1(
+    "SELECT id FROM cgm_passkey_requests WHERE student_id = ? AND status = 'pending'", prStudent2.studentId)?.id),
+  `status ${prPhone.status} ${prPhone.text?.slice(0, 120)}`);
 
 
 // ---------------------------------------------------------------------------

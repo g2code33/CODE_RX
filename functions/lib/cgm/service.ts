@@ -138,6 +138,37 @@ export const ensureRechooseSchema = async (db: D1Database) => {
   } catch { /* already there, or the batch will retry next request */ }
 };
 
+/**
+ * Passkey resets started from the SIGN-IN PAGE need four additive columns on
+ * `cgm_passkey_requests` (source, requested_identifier, claim_token_hash,
+ * claim_issued_at). The schema bootstrap adds them on the next cold start, but
+ * a warm isolate booted before that deploy would otherwise answer 500 — so the
+ * new routes ensure them once per isolate, exactly like the Re-choose table.
+ */
+let passkeyResetSchemaChecked = false;
+export const ensurePasskeyResetSchema = async (db: D1Database) => {
+  if (passkeyResetSchemaChecked) return;
+  const statements = [
+    "ALTER TABLE cgm_passkey_requests ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'",
+    'ALTER TABLE cgm_passkey_requests ADD COLUMN requested_identifier TEXT',
+    'ALTER TABLE cgm_passkey_requests ADD COLUMN claim_token_hash TEXT',
+    'ALTER TABLE cgm_passkey_requests ADD COLUMN claim_issued_at DATETIME',
+  ];
+  let complete = true;
+  for (const sql of statements) {
+    try { await db.prepare(sql).run(); }
+    catch (error: any) {
+      // "duplicate column name" means it is already there; anything else is
+      // retried on the next request.
+      if (!/duplicate column/i.test(String(error?.message || error))) complete = false;
+    }
+  }
+  try {
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_claim ON cgm_passkey_requests(claim_token_hash)').run();
+  } catch { complete = false; }
+  if (complete) passkeyResetSchemaChecked = true;
+};
+
 export const restoreAssignment = async (
   db: D1Database,
   assignmentId: number,

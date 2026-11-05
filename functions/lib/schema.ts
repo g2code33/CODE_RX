@@ -1189,6 +1189,15 @@ const SAFE_MIGRATIONS = [
   // Class & Group Management: per-class passkey marks. The default keeps
   // every existing passkey exactly as it is (rx30…).
   { table: 'cgm_students', column: 'passkey_prefix', sql: "ALTER TABLE cgm_students ADD COLUMN passkey_prefix TEXT NOT NULL DEFAULT 'rx30'" },
+  // Passkey resets can now be started from the STUDENT SIGN-IN PAGE (before any
+  // session exists) — the student has forgotten the passkey, so the request
+  // proves nothing but the identifier and therefore needs organizer approval
+  // plus a one-time claim code that only the requesting browser holds. All four
+  // columns are additive; existing rows keep 'profile' and no claim.
+  { table: 'cgm_passkey_requests', column: 'source', sql: "ALTER TABLE cgm_passkey_requests ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'" },
+  { table: 'cgm_passkey_requests', column: 'requested_identifier', sql: 'ALTER TABLE cgm_passkey_requests ADD COLUMN requested_identifier TEXT' },
+  { table: 'cgm_passkey_requests', column: 'claim_token_hash', sql: 'ALTER TABLE cgm_passkey_requests ADD COLUMN claim_token_hash TEXT' },
+  { table: 'cgm_passkey_requests', column: 'claim_issued_at', sql: 'ALTER TABLE cgm_passkey_requests ADD COLUMN claim_issued_at DATETIME' },
   { table: 'cgm_classes', column: 'passkey_prefix', sql: "ALTER TABLE cgm_classes ADD COLUMN passkey_prefix TEXT NOT NULL DEFAULT 'rx30'" },
   // Invitations keep their token so organizers can copy, share and
   // re-download the QR any time (replaces the show-once flow).
@@ -1270,7 +1279,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-11-05-code-rx26-force-get';
+const VAULT_SCHEMA_VERSION = '2026-11-05-code-rx27-passkey-reset';
 
 
 // Role codes stay stable for member history and permissions. Their visible

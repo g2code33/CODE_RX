@@ -551,10 +551,22 @@ const StudentsArea = ({ classId, canEdit, canImport, sensitive, onChanged }: { c
           {passkeyRequests.some((row) => row.status === 'pending') && <span className="rounded-full bg-amber-200 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-amber-800">{passkeyRequests.filter((row) => row.status === 'pending').length} waiting</span>}
         </div>
         <p className="mt-1 text-[11px] font-medium text-slate-400">Passkeys are system-generated, so a student cannot invent a new one. They prove their current passkey and ask; approving opens a Generate button for exactly that student (they are notified directly). Declining tells them too.</p>
+        <p className="mt-1 text-[11px] font-bold text-amber-700">A request marked <span className="rounded bg-amber-100 px-1 font-black uppercase tracking-wider">from sign-in</span> came from the login page, where the student could not prove their current passkey — check that it is really them before approving. The new passkey can only be collected by the browser that sent the request, using the reset code it was given.</p>
         <ul className="mt-3 space-y-1.5">
           {passkeyRequests.map((row) => (
             <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs" data-testid={`cgm-passkey-request-${row.status}`}>
-              <span className="font-black text-slate-700">{row.fullName} <span className="ml-1 font-semibold text-slate-400">{row.indexNumber}</span></span>
+              <span className="font-black text-slate-700">
+                {row.fullName} <span className="ml-1 font-semibold text-slate-400">{row.indexNumber}</span>
+                {row.source === 'login' && (
+                  <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-amber-800" data-testid="cgm-passkey-request-login-source">
+                    from sign-in
+                  </span>
+                )}
+                {row.source === 'login' && row.requestedIdentifier && row.requestedIdentifier !== row.indexNumber && (
+                  <span className="ml-1 text-[10px] font-semibold text-slate-400">typed “{row.requestedIdentifier}”</span>
+                )}
+                {row.note && <span className="ml-2 text-[10px] font-semibold italic text-slate-500">“{row.note}”</span>}
+              </span>
               <span className="flex items-center gap-2">
                 <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${row.status === 'pending' ? 'bg-amber-200 text-amber-800' : row.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : row.status === 'completed' ? 'bg-slate-200 text-slate-600' : 'bg-red-100 text-red-600'}`}>{row.status}</span>
                 {row.status === 'pending' && canEdit && (

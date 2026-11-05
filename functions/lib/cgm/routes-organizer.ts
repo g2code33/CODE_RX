@@ -1199,7 +1199,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     const guard = await requireClassPermission(c, member, classId, 'edit_roster');
     if (!guard.ok) return guard.response;
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT r.id, r.status, r.requested_at, r.handled_at, r.handled_label,
+      `SELECT r.id, r.status, r.requested_at, r.handled_at, r.handled_label, r.note,
+              r.source, r.requested_identifier,
               s.id AS student_id, s.full_name, s.index_number
        FROM cgm_passkey_requests r JOIN cgm_students s ON s.id = r.student_id
        WHERE r.class_id = ?
@@ -1210,6 +1211,11 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
       id: Number(row.id), status: String(row.status), requestedAt: row.requested_at, handledAt: row.handled_at,
       handledLabel: row.handled_label || null, studentId: Number(row.student_id),
       fullName: row.full_name, indexNumber: row.index_number,
+      // 'login' = the student could NOT prove their current passkey; the
+      // organizer should verify them before approving.
+      source: String(row.source || 'profile'),
+      requestedIdentifier: row.requested_identifier || null,
+      note: row.note || null,
     })) });
   });
 
@@ -1221,8 +1227,8 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     if (!guard.ok) return guard.response;
     const requestId = Number(c.req.param('requestId'));
     if (!Number.isInteger(requestId) || requestId <= 0) return bad(c, 'Request not found.', 404);
-    const rows = await asRows<{ id: number; status: string; student_id: number; full_name: string }>(c.env.DB.prepare(
-      `SELECT r.id, r.status, r.student_id, s.full_name FROM cgm_passkey_requests r
+    const rows = await asRows<{ id: number; status: string; student_id: number; full_name: string; source: string }>(c.env.DB.prepare(
+      `SELECT r.id, r.status, r.student_id, r.source, s.full_name FROM cgm_passkey_requests r
        JOIN cgm_students s ON s.id = r.student_id WHERE r.id = ? AND r.class_id = ?`
     ).bind(requestId, classId));
     const request = rows[0];
@@ -1233,7 +1239,9 @@ export const registerCgmOrganizerRoutes = (app: CgmApp) => {
     ).bind(decision, member.profileId ?? null, member.name, requestId).run();
     if (decision === 'approved') {
       await notifyStudent(c.env.DB, Number(request.student_id), 'security', 'Passkey reset approved',
-        `${member.name} approved your passkey change request. Open your profile and tap "Generate new passkey" — the system creates your new unique passkey and shows it once.`);
+        String(request.source || 'profile') === 'login'
+          ? `${member.name} approved your passkey reset. Go back to the sign-in page and press "Generate new passkey" — the system creates your new unique passkey and shows it once.`
+          : `${member.name} approved your passkey change request. Open your profile and tap "Generate new passkey" — the system creates your new unique passkey and shows it once.`);
     } else {
       await notifyStudent(c.env.DB, Number(request.student_id), 'security', 'Passkey change request declined',
         `${member.name} declined your passkey change request. Your current passkey still works — contact your organizer if you need help.`);
