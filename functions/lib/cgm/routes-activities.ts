@@ -2111,8 +2111,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (!guard.ok) return guard.response;
     await ensureForceGetSchema(c.env.DB);
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
-    const body = await readBody<{ items?: any[]; explanation?: string }>(c);
-    const validation = await validateForceGetBatch(c, activityId, activity, config, Array.isArray(body.items) ? body.items : []);
+    const body = await readBody<{ items?: unknown[]; explanation?: string }>(c);
+    const rawItems: any[] = Array.isArray(body.items) ? body.items : [];
+    const validation = await validateForceGetBatch(c, activityId, activity, config, rawItems);
     if (validation.errors.length) {
       return c.json({ success: false, error: validation.errors[0], data: { errors: validation.errors, warnings: validation.warnings } }, 400);
     }
@@ -2348,8 +2349,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           message: conflict.message,
           blocking: conflict.blocking,
           pools: conflict.detail.pools,
-          students: conflict.detail.proposed.map((member) => ({ ...member, role: 'proposed' as const }))
-            .concat(conflict.detail.existing.map((member) => ({ ...member, role: member.source }))),
+          students: [
+            ...conflict.detail.proposed.map((member) => ({ ...member, role: 'proposed' as string })),
+            ...conflict.detail.existing.map((member) => ({ ...member, role: member.source as string })),
+          ],
           capacity: conflict.detail.capacity,
           projected: conflict.detail.projected,
           overflow: conflict.detail.overflow,
