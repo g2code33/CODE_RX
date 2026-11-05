@@ -763,7 +763,7 @@ const main = async () => {
   // The marker moves whenever a new additive migration lands. 2026-11-05
   // (rx26) adds the FORCE GET request / item / designation tables.
   check('schema version marker was advanced',
-    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-11-05-code-rx28-force-get-roster'));
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-11-05-code-rx29-phantom-attention'));
   // Phase 20 adds the review section's own table: one row per answer, so a
   // client who changes their mind leaves a trail instead of overwriting.
   // Phase 20 adds the review table, the signature table and the message table:
@@ -780,7 +780,7 @@ const main = async () => {
   // adds the three FORCE GET tables (44-46): an organizer's proposed
   // destinations only ever take effect after PHANTOM approves them.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 48, `${allTables.length} user tables`);
+    allTables.length === 63 + 11 + 3 + 49, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',
@@ -5290,7 +5290,7 @@ const main = async () => {
   check('PHANTOM can open the unified inbox', phantomFeed.status === 200, JSON.stringify(phantomFeed.json).slice(0, 120));
   const feedData = phantomFeed.json?.data || {};
   check('every channel appears in the feed, grouped and labelled', Array.isArray(feedData.channels)
-    && ['website', 'applications', 'client_messages', 'forum_threads', 'public_chat', 'public_reports', 'private_messages', 'telegram']
+    && ['website', 'applications', 'client_messages', 'forum_threads', 'public_chat', 'public_reports', 'private_messages', 'telegram', 'class_groups']
       .every((key) => (feedData.channels || []).some((channel) => channel.key === key && typeof channel.label === 'string'))
     && typeof feedData.groups === 'object', JSON.stringify((feedData.channels || []).map((channel) => channel.key)));
   check('a seeded contact message lives in the Website → PHANTOM group of the feed',
@@ -5389,7 +5389,7 @@ const main = async () => {
   check('the channel permission matrix lists the founding members and all channels',
     permRead.status === 200
     && Array.isArray(permRead.json?.data?.members) && permRead.json.data.members.length > 0
-    && Array.isArray(permRead.json?.data?.channels) && permRead.json.data.channels.length === 8,
+    && Array.isArray(permRead.json?.data?.channels) && permRead.json.data.channels.length === 9,
     JSON.stringify(permRead.json).slice(0, 160));
   check('every receive permission starts OFF by default',
     (permRead.json?.data?.members || []).every((member) => member.canReceive === false),

@@ -606,6 +606,9 @@ export const cgm = {
 
   // PHANTOM
   phantomOverview: () => memberCall('/api/cgm/phantom/overview'),
+  phantomAttention: () => memberCall('/api/cgm/phantom/attention'),
+  phantomAttentionSeen: (tab: string) =>
+    memberCall(`/api/cgm/phantom/attention/${encodeURIComponent(tab)}/seen`, { method: 'POST' }),
   phantomOrganizerApplications: (status = '') =>
     memberCall(`/api/cgm/phantom/organizer-applications${status ? `?status=${status}` : ''}`),
   phantomOrganizerAction: (id: number, action: 'approve' | 'reject' | 'correction' | 'suspend' | 'reinstate' | 'revoke', reason?: string) =>

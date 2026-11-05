@@ -248,6 +248,65 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
 }
 
 // ---------------------------------------------------------------------------
+// 2b. PHANTOM attention: a number on every section, cleared the moment it is
+//     opened — and the same event already sitting in the notice feed
+// ---------------------------------------------------------------------------
+{
+  // A submission is a decision waiting on PHANTOM, so it must arrive as news.
+  const badgeClassName = `Browser Check Badge ${stamp}`;
+  const badgeCreated = await api('POST', '/api/cgm/classes', { name: badgeClassName, institution: 'Browser Check University' }, phantomToken);
+  const badgeClassId = Number(badgeCreated.json?.data?.classId || 0);
+  await api('POST', `/api/cgm/classes/${badgeClassId}/entry-password`, { entryPassword: 'badge-entry' }, phantomToken);
+  await api('POST', `/api/cgm/classes/${badgeClassId}/submit`, {}, phantomToken);
+
+  const feed = (await api('GET', '/api/phantom/inbox', undefined, phantomToken)).json?.data || {};
+  const cgChannel = (feed.channels || []).find((channel) => channel.key === 'class_groups');
+  check('a class submission lands in the Class & Groups notice channel',
+    Boolean(cgChannel) && Number(cgChannel.unread) >= 1 && (feed.groups?.class_groups || []).some((item) => String(item.title).includes('Class awaiting approval')),
+    JSON.stringify(cgChannel || {}));
+
+  const boardBefore = (await api('GET', '/api/cgm/phantom/attention', undefined, phantomToken)).json?.data || {};
+  const classesTabBefore = (boardBefore.tabs || []).find((tab) => tab.key === 'classes') || {};
+  check('the attention board lists every section with a number',
+    (boardBefore.tabs || []).length === 11 && (boardBefore.tabs || []).every((tab) => Number.isInteger(tab.unseen)),
+    JSON.stringify((boardBefore.tabs || []).map((tab) => tab.key)));
+  check('the new submission is counted as unseen work on the Class approvals tab',
+    Number(classesTabBefore.unseen) >= 1 && Number(classesTabBefore.pending) >= 1, JSON.stringify(classesTabBefore));
+
+  const page = await boot('#class-groups/phantom', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('PHANTOM');
+  const cgTab = await page.waitForElement(() => page.buttonByText('Class Groups'));
+  cgTab && cgTab.click();
+  await page.waitForFor('Module settings', 20_000);
+
+  const badgeOf = () => page.window.document.querySelector('[data-testid="phantom-tab-badge-classes"]');
+  const badgeEl = await page.waitForElement(badgeOf, 20_000);
+  check('the Class approvals tab itself carries that number',
+    Boolean(badgeEl) && Number(String(badgeEl.textContent).trim()) === Number(classesTabBefore.unseen),
+    `badge=${badgeEl ? badgeEl.textContent : 'missing'} api=${classesTabBefore.unseen}`);
+
+  const approvalsTab = await page.waitForElement(() => page.buttonByText('Class approvals'));
+  approvalsTab && approvalsTab.click();
+  check('opening the section shows the work it was counting', await page.waitForFor(badgeClassName, 20_000));
+  const clearedInUi = await page.waitForElement(() => !badgeOf(), 20_000);
+  check('the number disappears once PHANTOM has viewed the section', Boolean(clearedInUi));
+
+  const boardAfter = (await api('GET', '/api/cgm/phantom/attention', undefined, phantomToken)).json?.data || {};
+  const classesTabAfter = (boardAfter.tabs || []).find((tab) => tab.key === 'classes') || {};
+  check('the server agrees: nothing new on that tab, the decisions are still waiting',
+    Number(classesTabAfter.unseen) === 0 && Number(classesTabAfter.pending) >= 1,
+    JSON.stringify(classesTabAfter));
+  check('a viewed section keeps a marker for the work it still owes PHANTOM',
+    Boolean(page.window.document.querySelector('[data-testid="phantom-tab-waiting-classes"]')));
+
+  // Clearing one section must never clear another.
+  const otherTabs = (boardAfter.tabs || []).filter((tab) => tab.key !== 'classes' && Number(tab.unseen) > 0);
+  check('clearing Class approvals left the other tabs\' numbers alone',
+    otherTabs.every((tab) => Number(tab.unseen) > 0),
+    JSON.stringify(otherTabs.map((tab) => [tab.key, tab.unseen])));
+}
+
+// ---------------------------------------------------------------------------
 // 3. Student: invitation landing → registration → one-time passkey → dashboard
 // ---------------------------------------------------------------------------
 let savedPasskey = '';

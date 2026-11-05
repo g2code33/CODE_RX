@@ -47,6 +47,28 @@ const TABS: Array<[Tab, string]> = [
 
 type PhantomRows = Record<Tab, any[] | undefined>;
 
+/**
+ * The number on a tab is what ARRIVED since PHANTOM last opened that section, so
+ * it disappears the moment the section is viewed. Undecided work is never hidden
+ * by that: a section that still has decisions waiting keeps a small amber dot
+ * (no number), and the Overview carries the live totals.
+ */
+const tabBadge = (attention: any, key: Tab): { unseen: number; pending: number } | null => {
+  const tab = (attention?.tabs || []).find((entry: any) => entry?.key === key);
+  if (!tab) return null;
+  const unseen = Number(tab.unseen || 0);
+  const pending = Number(tab.pending || 0);
+  if (!unseen && !pending) return null;
+  return { unseen, pending };
+};
+
+const tabBadgeTitle = (badge: { unseen: number; pending: number }) =>
+  badge.unseen
+    ? (badge.pending
+      ? `${badge.unseen} new since you last opened this — ${badge.pending} decision(s) still waiting`
+      : `${badge.unseen} new since you last opened this`)
+    : `${badge.pending} decision(s) still waiting (nothing new)`;
+
 const POLICY_META: Array<{ key: string; title: string; description: string; valueLabels: Record<string, string> }> = [
   {
     key: 'organizer_application_mode', title: 'Organizer applications',
@@ -152,7 +174,26 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
   const [navOpen, setNavOpen] = useState(false);
   useOutsideDismiss(navOpen, () => setNavOpen(false), '.cgm-sidenav, [data-testid="phantom-nav-toggle"]');
 
+  // PHANTOM's attention board: per-section backlog plus "new since you last
+  // looked". `null` means "not loaded yet" — tab badges stay hidden rather than
+  // flashing a false 0.
+  const [attention, setAttention] = useState<any>(null);
   const loadOverview = useCallback(async () => { setOverview(await cgm.phantomOverview().catch(() => null)); }, []);
+  const loadAttention = useCallback(async () => {
+    setAttention(await cgm.phantomAttention().catch(() => null));
+  }, []);
+
+  /**
+   * "I have looked at this section." Called when a tab is opened, so that tab's
+   * badge clears for this PHANTOM account. The queue itself is untouched — a
+   * request that arrives afterwards brings the number straight back.
+   */
+  const markSeen = useCallback(async (which: Tab) => {
+    const data: any = await cgm.phantomAttentionSeen(which).catch(() => null);
+    const board = data?.board || data?.data?.board;
+    if (board) setAttention(board);
+    else await loadAttention();
+  }, [loadAttention]);
   const loadTab = useCallback(async (which: Tab) => {
     const loaders: Partial<Record<Tab, () => Promise<unknown>>> = {
       policies: () => cgm.phantomPolicies(),
@@ -172,12 +213,17 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
     setRows((current) => ({ ...current, [which]: (Array.isArray(data) ? data : data?.data || []) as any[] }));
   }, []);
 
-  useEffect(() => { void loadOverview(); }, [loadOverview]);
-  useEffect(() => { void loadTab(tab); }, [tab, loadTab]);
+  useEffect(() => { void loadOverview(); void loadAttention(); }, [loadOverview, loadAttention]);
+  useEffect(() => {
+    void loadTab(tab);
+    // Opening a section is what clears its badge — but only once the section is
+    // actually on screen, so a failed load does not silently eat the count.
+    void markSeen(tab);
+  }, [tab, loadTab, markSeen]);
 
   const act = async (work: () => Promise<unknown>, note: string) => {
     setBusy(true); setMessage(null);
-    try { await work(); setMessage(note); await Promise.all([loadOverview(), loadTab(tab)]); }
+    try { await work(); setMessage(note); await Promise.all([loadOverview(), loadTab(tab), loadAttention()]); }
     catch (failure: any) { setMessage(failure?.message || 'That did not work.'); }
     finally { setBusy(false); }
   };
@@ -240,7 +286,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   ['Live activities', overview.counters?.activities_live],
                   ['Applications', overview.counters?.organizer_apps],
                   ['Audit (7d)', overview.counters?.audit_week],
-                  ['Open queues', Number(overview.queues?.applications || 0) + Number(overview.queues?.classes || 0) + Number(overview.queues?.sensitiveChanges || 0) + Number(overview.queues?.rechoose || 0) + Number(overview.queues?.disputes || 0)],
+                  ['Open queues', Number(attention?.totalPending ?? 0)],
                 ].map(([text, value]) => (
                   <div key={String(text)} className="rounded-xl bg-slate-50 p-4">
                     <p className={label}>{text as string}</p>
@@ -248,6 +294,35 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   </div>
                 ))}
               </div>
+              {/* The tab numbers clear when PHANTOM looks, so the Overview is
+                  where the live backlog lives: nothing waiting can go unseen. */}
+              {attention && (
+                <div className={card}>
+                  <p className={label}>Waiting on you</p>
+                  {(attention.tabs || []).filter((entry: any) => entry.queue && Number(entry.pending) > 0).length === 0
+                    ? <p className="mt-2 text-xs font-medium text-slate-400">Nothing is waiting on PHANTOM right now.</p>
+                    : (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {(attention.tabs || []).filter((entry: any) => entry.queue && Number(entry.pending) > 0).map((entry: any) => (
+                          <button
+                            key={entry.key}
+                            type="button"
+                            data-testid={`phantom-overview-queue-${entry.key}`}
+                            className="mini-button"
+                            onClick={() => setTab(entry.key as Tab)}
+                          >
+                            {entry.label}
+                            <span className="ml-1.5 rounded-full bg-slate-900 px-1.5 py-0.5 text-[10px] font-black text-white">{entry.pending}</span>
+                            {Number(entry.unseen) > 0 && (
+                              <span data-testid={`phantom-overview-new-${entry.key}`} className="ml-1 rounded-full bg-rose-600 px-1.5 py-0.5 text-[10px] font-black text-white">{entry.unseen} new</span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  <p className="mt-3 text-[11px] font-semibold text-slate-400">Tab numbers count what arrived since you last opened that section; this list counts every decision that is still open.</p>
+                </div>
+              )}
             </>
           )}
 
@@ -609,9 +684,37 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm font-black text-slate-900">Class &amp; Group Management oversight</p>
           <div className="flex flex-wrap gap-1.5">
-            {TABS.map(([key, text]) => (
-              <button key={key} type="button" onClick={() => setTab(key)} className={`rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${tab === key ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}>{text}</button>
-            ))}
+            {TABS.map(([key, text]) => {
+              const badge = tabBadge(attention, key);
+              const active = tab === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  data-testid={`phantom-tab-${key}`}
+                  onClick={() => setTab(key)}
+                  title={badge ? tabBadgeTitle(badge) : text}
+                  className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${active ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}
+                >
+                  <span>{text}</span>
+                  {badge && Boolean(badge.unseen) && (
+                    <span
+                      data-testid={`phantom-tab-badge-${key}`}
+                      className={`min-w-[1.1rem] rounded-full px-1.5 py-0.5 text-center text-[10px] font-black ${active ? 'bg-white text-emerald-700' : 'bg-rose-600 text-white'}`}
+                    >
+                      {badge.unseen}
+                    </span>
+                  )}
+                  {badge && !badge.unseen && Boolean(badge.pending) && (
+                    <span
+                      aria-hidden="true"
+                      data-testid={`phantom-tab-waiting-${key}`}
+                      className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-white/80' : 'bg-amber-500'}`}
+                    />
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
         {body}
@@ -641,7 +744,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" className="mini-button" onClick={() => { void loadOverview(); void loadTab(tab); }} aria-label="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
+          <button type="button" className="mini-button" onClick={() => { void loadOverview(); void loadTab(tab); void loadAttention(); }} aria-label="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
           <button type="button" className="mini-button" onClick={onExit}>Exit</button>
         </div>
       </header>
@@ -658,11 +761,22 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
             >
               {key === 'overview' ? <ShieldCheck className="h-4 w-4" /> : key === 'audit' ? <FileText className="h-4 w-4" /> : key === 'organizers' ? <Users className="h-4 w-4" /> : <ClipboardList className="h-4 w-4" />}
               <span className="flex-1 text-left">{text}</span>
-              {key === 'applications' && Number(overview?.queues?.applications || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.applications}</span>}
-              {key === 'classes' && Number(overview?.queues?.classes || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.classes}</span>}
-              {key === 'sensitive' && Number(overview?.queues?.sensitiveChanges || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.sensitiveChanges}</span>}
-              {key === 'rechoose' && Number(overview?.queues?.rechoose || 0) > 0 && <span className="rounded-full bg-sky-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.rechoose}</span>}
-              {key === 'disputes' && Number(overview?.queues?.disputes || 0) > 0 && <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-black text-white">{overview.queues.disputes}</span>}
+              {(() => {
+                const badge = tabBadge(attention, key);
+                if (!badge) return null;
+                if (!badge.unseen) {
+                  return <span aria-hidden="true" data-testid={`phantom-nav-waiting-${key}`} title={tabBadgeTitle(badge)} className="h-1.5 w-1.5 rounded-full bg-amber-500" />;
+                }
+                return (
+                  <span
+                    data-testid={`phantom-nav-badge-${key}`}
+                    title={tabBadgeTitle(badge)}
+                    className="rounded-full bg-rose-600 px-2 py-0.5 text-[10px] font-black text-white"
+                  >
+                    {badge.unseen}
+                  </span>
+                );
+              })()}
             </button>
           ))}
         </nav>

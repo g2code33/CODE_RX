@@ -34,6 +34,11 @@ export const PHANTOM_CHANNELS = [
   { key: 'public_reports', label: 'Public reports', blurb: 'Content reports from the public community.' },
   { key: 'private_messages', label: 'Community messages', blurb: 'DMs, mentions, and group announcements from members.' },
   { key: 'telegram', label: 'Telegram', blurb: 'Messages synced in from linked Telegram chats.' },
+  // Class & Group Management writes every decision that waits on PHANTOM here:
+  // organizer applications, class submissions and changes, re-choose and Force
+  // Get requests, sensitive profile changes and disputes. Without this channel
+  // those rows were stored but never surfaced in any feed.
+  { key: 'class_groups', label: 'Class & Groups', blurb: 'Classes awaiting approval, organizer requests, re-choose and Force Get decisions, profile changes and disputes.' },
 ] as const satisfies readonly PhantomChannel[];
 
 export const PHANTOM_INBOX_CHANNEL_KEYS = PHANTOM_CHANNELS.map((channel) => channel.key);
@@ -228,7 +233,7 @@ export const phantomInboxMembers = async (db: D1Database, channel?: string): Pro
 };
 
 export interface PhantomInboxFeed {
-  channels: Array<{ key: string; label: string; blurb: string; count: number }>;
+  channels: Array<{ key: string; label: string; blurb: string; count: number; unread: number }>;
   groups: Record<string, any[]>;
 }
 

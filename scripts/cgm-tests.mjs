@@ -206,7 +206,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 48);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 49);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -3801,7 +3801,7 @@ check('a non-numeric group id answers 404 instead of a D1 500',
 const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
 check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
   /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
-  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx28-force-get-roster'/.test(schemaSrc));
+  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx29-phantom-attention'/.test(schemaSrc));
 
 // ---------------------------------------------------------------------------
 // 39. Re-choose: organizer asks, PHANTOM approves, the member starts fresh
@@ -4982,6 +4982,187 @@ check('43.30 — deleting that roster row releases the seat instead of failing o
   && q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.reservation_cleared' AND entity_id = ?",
     String(fgRlGoneReservation?.id)).c === 1,
   `status ${fgRlGoneDelete.status} ${fgRlGoneDelete.text?.slice(0, 140)}`);
+
+
+// ---------------------------------------------------------------------------
+// 44. PHANTOM's attention board — tab badges that clear when PHANTOM looks
+// ---------------------------------------------------------------------------
+section('44. PHANTOM attention: per-tab counts, seen when opened, back when new');
+
+const phantomProfileRow = q1("SELECT mp.id AS id FROM member_profiles mp JOIN users u ON u.id = mp.user_id WHERE u.email = ?", PHANTOM_EMAIL);
+const phantomProfileId = Number(phantomProfileRow?.id || 0);
+const attentionOf = async (token = phantomToken) => {
+  const response = await memberCall('GET', '/api/cgm/phantom/attention', undefined, token);
+  return { status: response.status, board: response.json?.data || {}, text: response.text };
+};
+const attentionTab = (board, key) => (board.tabs || []).find((tab) => tab.key === key) || {};
+const seenTab = (tab) => memberCall('POST', `/api/cgm/phantom/attention/${tab}/seen`, undefined, phantomToken);
+
+check('44.1 — PHANTOM can read its own attention board', Boolean(phantomToken) && (await attentionOf()).status === 200);
+const freshBoard = (await attentionOf()).board;
+check('44.2 — the board lists every oversight section, in panel order, labelled',
+  JSON.stringify((freshBoard.tabs || []).map((tab) => tab.key))
+  === JSON.stringify(['overview', 'policies', 'applications', 'classes', 'sensitive', 'rechoose', 'force-get', 'delegation', 'disputes', 'organizers', 'audit'])
+  && (freshBoard.tabs || []).every((tab) => typeof tab.label === 'string' && tab.label.length > 0),
+  JSON.stringify((freshBoard.tabs || []).map((tab) => tab.key)));
+check('44.3 — every queue tab carries a numeric pending and unseen count',
+  ['applications', 'classes', 'sensitive', 'rechoose', 'force-get', 'disputes'].every((key) => {
+    const tab = attentionTab(freshBoard, key);
+    return tab.queue === true && Number.isInteger(tab.pending) && Number.isInteger(tab.unseen);
+  }) && ['overview', 'policies', 'organizers', 'audit', 'delegation'].every((key) => attentionTab(freshBoard, key).queue === false),
+  JSON.stringify(freshBoard.tabs || []));
+check('44.4 — the counts are read from the queue tables, not invented',
+  (freshBoard.tabs || []).filter((tab) => tab.queue).every((tab) => {
+    const tables = { applications: "cgm_organizer_applications WHERE status IN ('pending','email_verified')", classes: "cgm_classes WHERE status = 'pending'", rechoose: "cgm_rechoose_requests WHERE status = 'pending'", 'force-get': "cgm_force_get_requests WHERE status = 'pending'", disputes: "cgm_announcement_reports WHERE status = 'open'" };
+    const from = tables[tab.key];
+    if (!from) return true;
+    return tab.pending === Number(q1(`SELECT COUNT(*) c FROM ${from}`)?.c || 0);
+  }),
+  JSON.stringify((freshBoard.tabs || []).filter((tab) => tab.queue)));
+check('44.5 — the totals add every tab up', Number(freshBoard.totalPending) === (freshBoard.tabs || []).filter((tab) => tab.queue).reduce((sum, tab) => sum + Number(tab.pending || 0), 0)
+  && Number(freshBoard.totalUnseen) === (freshBoard.tabs || []).reduce((sum, tab) => sum + Number(tab.unseen || 0), 0)
+  && JSON.stringify(freshBoard.unseenTabs) === JSON.stringify((freshBoard.tabs || []).filter((tab) => Number(tab.unseen) > 0).map((tab) => tab.key)));
+
+// A new class submission is PHANTOM's decision — the classes badge must light.
+const attnInboxBefore = Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE channel_key = 'class_groups'").c);
+await setPolicy('class_creation_mode', 'approval');
+const attnClass = await memberCall('POST', '/api/cgm/classes', {
+  name: 'Attention Badge Lab', institution: 'Attention University', level: '200',
+  academicYear: '2026/2027', department: 'Computer Science',
+}, amaToken);
+const attnClassId = Number(attnClass.json?.data?.classId || 0);
+await memberCall('POST', `/api/cgm/classes/${attnClassId}/entry-password`, { entryPassword: 'attention-101-entry' }, amaToken);
+const attnSubmit = await memberCall('POST', `/api/cgm/classes/${attnClassId}/submit`, {}, amaToken);
+check('44.6 — the test class was created and submitted for approval', attnClass.status === 200 && attnClassId > 0 && attnSubmit.status === 200
+  && q1('SELECT status FROM cgm_classes WHERE id = ?', attnClassId)?.status === 'pending',
+  `status ${attnClass.status}/${attnSubmit.status} ${attnSubmit.text?.slice(0, 160)}`);
+const boardAfterSubmit = (await attentionOf()).board;
+check('44.7 — a newly submitted class shows up on the Class approvals tab',
+  Number(attentionTab(boardAfterSubmit, 'classes').pending) > Number(attentionTab(freshBoard, 'classes').pending)
+  && Number(attentionTab(boardAfterSubmit, 'classes').unseen) >= 1,
+  JSON.stringify(attentionTab(boardAfterSubmit, 'classes')));
+check('44.8 — it is reported as an unseen section', (boardAfterSubmit.unseenTabs || []).includes('classes'),
+  JSON.stringify(boardAfterSubmit.unseenTabs));
+
+// Opening the tab clears THAT badge — and the work stays exactly where it was.
+const pendingBeforeSeen = Number(attentionTab(boardAfterSubmit, 'classes').pending);
+const seen = await seenTab('classes');
+const boardAfterSeen = seen.json?.data?.board || {};
+check('44.9 — opening a tab marks it seen', seen.status === 200 && attentionTab(boardAfterSeen, 'classes').lastSeenAt,
+  `status ${seen.status} ${seen.text?.slice(0, 160)}`);
+check('44.10 — the badge clears once PHANTOM has looked',
+  Number(attentionTab(boardAfterSeen, 'classes').unseen) === 0
+  && !(boardAfterSeen.unseenTabs || []).includes('classes'),
+  JSON.stringify(attentionTab(boardAfterSeen, 'classes')));
+check('44.11 — but the pending work is NOT dismissed by looking at it',
+  Number(attentionTab(boardAfterSeen, 'classes').pending) === pendingBeforeSeen
+  && q1("SELECT status FROM cgm_classes WHERE id = ?", attnClassId)?.status === 'pending');
+check('44.12 — the watermark is stored per PHANTOM account and per tab',
+  Number(phantomProfileId) > 0
+  && Number(q1('SELECT COUNT(*) c FROM cgm_phantom_attention WHERE member_profile_id = ?', phantomProfileId).c) === 1
+  && Number(q1('SELECT COUNT(*) c FROM cgm_phantom_attention WHERE member_profile_id = ? AND tab_key = ?', phantomProfileId, 'classes').c) === 1
+  && Boolean(q1('SELECT last_seen_at FROM cgm_phantom_attention WHERE member_profile_id = ? AND tab_key = ?', phantomProfileId, 'classes')?.last_seen_at),
+  `phantom profile ${phantomProfileId} rows=${q1('SELECT COUNT(*) c FROM cgm_phantom_attention').c}`);
+
+// New work after the badge was cleared brings the number back.
+const attnClass2 = await memberCall('POST', '/api/cgm/classes', {
+  name: 'Attention Badge Lab Two', institution: 'Attention University', level: '200',
+  academicYear: '2026/2027', department: 'Computer Science',
+}, amaToken);
+const attnClass2Id = Number(attnClass2.json?.data?.classId || 0);
+await memberCall('POST', `/api/cgm/classes/${attnClass2Id}/entry-password`, { entryPassword: 'attention-102-entry' }, amaToken);
+await memberCall('POST', `/api/cgm/classes/${attnClass2Id}/submit`, {}, amaToken);
+const boardAfterNew = (await attentionOf()).board;
+check('44.13 — a later arrival re-raises the same badge', Number(attentionTab(boardAfterNew, 'classes').unseen) === 1
+  && (boardAfterNew.unseenTabs || []).includes('classes'),
+  JSON.stringify(attentionTab(boardAfterNew, 'classes')));
+check('44.14 — opening one tab never clears another tab', Number(attentionTab(boardAfterNew, 'classes').unseen) === 1
+  && Number(q1("SELECT COUNT(*) c FROM cgm_phantom_attention WHERE member_profile_id = ? AND tab_key = 'classes'", phantomProfileId).c) === 1);
+check('44.15 — an unknown section is refused', (await memberCall('POST', '/api/cgm/phantom/attention/not-a-tab/seen', undefined, phantomToken)).status === 400);
+check('44.16 — an organizer cannot read or clear PHANTOM\'s badges',
+  (await attentionOf(amaToken)).status === 403
+  && (await memberCall('POST', '/api/cgm/phantom/attention/classes/seen', undefined, amaToken)).status === 403);
+check('44.17 — a signed-out visitor is refused too', (await memberCall('GET', '/api/cgm/phantom/attention')).status === 401);
+
+// PHANTOM is also told through the existing systems: inbox row + notification.
+const attnNoticeBefore = phantomProfileId ? Number(q1("SELECT COUNT(*) c FROM notifications n JOIN notification_recipients nr ON nr.notification_id = n.id WHERE nr.member_profile_id = ? AND n.title = 'PHANTOM · Class & Groups'", phantomProfileId).c) : 0;
+const attnFeed = await memberCall('GET', '/api/phantom/inbox', undefined, phantomToken);
+check('44.18 — Class & Groups is a real PHANTOM inbox channel, grouped and counted',
+  (attnFeed.json?.data?.channels || []).some((channel) => channel.key === 'class_groups' && typeof channel.label === 'string' && Number.isInteger(channel.count) && Number.isInteger(channel.unread)),
+  JSON.stringify((attnFeed.json?.data?.channels || []).map((channel) => channel.key)));
+check('44.19 — the new class submission landed in that channel',
+  Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE channel_key = 'class_groups'").c) === attnInboxBefore + 2
+  && Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE channel_key = 'class_groups' AND source = 'cgm_class'").c) >= 2,
+  `before=${attnInboxBefore} after=${q1("SELECT COUNT(*) c FROM phantom_inbox WHERE channel_key = 'class_groups'").c}`);
+
+// Re-choose is PHANTOM's decision only — so PHANTOM must be told when asked.
+const attnRechooseBefore = Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_rechoose'").c);
+const attnRechooser = await freshFmtRosterStudent(71, 'Attention Ana');
+const attnRechooserId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', attnRechooser.indexNumber.toLowerCase())?.id || 0);
+await memberCall('POST', `/api/cgm/activities/${rechooseLabId}/assign-student`, { studentId: attnRechooserId, groupId: rechooseGroups[0] }, amaToken);
+const attnAssignmentId = Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", rechooseLabId, attnRechooserId)?.id || 0);
+check('44.20a — the badge fixture member holds an active assignment', attnAssignmentId > 0, `assignment ${attnAssignmentId} student ${attnRechooserId}`);
+const attnRechooseResult = await memberCall('POST', `/api/cgm/assignments/${attnAssignmentId}/rechoose`, {
+  reason: 'Attendance check for the badge test.',
+}, amaToken);
+check('44.20 — an organizer can request a re-choose', attnRechooseResult.status === 200, `status ${attnRechooseResult.status} ${attnRechooseResult.text?.slice(0, 160)}`);
+check('44.21 — the re-choose request notifies PHANTOM in the inbox',
+  Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_rechoose'").c) === attnRechooseBefore + 1
+  && q1("SELECT channel_key FROM phantom_inbox WHERE source = 'cgm_rechoose' ORDER BY id DESC LIMIT 1")?.channel_key === 'class_groups',
+  JSON.stringify(q1("SELECT channel_key, title FROM phantom_inbox WHERE source = 'cgm_rechoose' ORDER BY id DESC LIMIT 1") || {}));
+check('44.22 — and raises a PHANTOM notification', phantomProfileId === 0 || Number(q1("SELECT COUNT(*) c FROM notifications n JOIN notification_recipients nr ON nr.notification_id = n.id WHERE nr.member_profile_id = ? AND n.title = 'PHANTOM · Class & Groups'", phantomProfileId).c) > attnNoticeBefore);
+const boardAfterRechoose = (await attentionOf()).board;
+check('44.23 — the Re-choose tab badge counts it', Number(attentionTab(boardAfterRechoose, 'rechoose').pending) >= 1
+  && Number(attentionTab(boardAfterRechoose, 'rechoose').unseen) >= 1,
+  JSON.stringify(attentionTab(boardAfterRechoose, 'rechoose')));
+
+// A sensitive profile change is a PHANTOM decision too.
+await setPolicy('profile_change_mode', 'approval');
+const attnSensitiveBefore = Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_profile_change'").c);
+const attnChange = await studentCall('POST', '/api/cgm/student/profile/change', {
+  field: 'phone', newValue: '0244000911', reason: 'New number for the badge test.',
+}, fgRlNewSession);
+check('44.24 — a sensitive profile change notifies PHANTOM in the inbox',
+  attnChange.status === 200
+  && Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_profile_change'").c) === attnSensitiveBefore + 1
+  && q1("SELECT channel_key FROM phantom_inbox WHERE source = 'cgm_profile_change' ORDER BY id DESC LIMIT 1")?.channel_key === 'class_groups',
+  `status ${attnChange.status} ${attnChange.text?.slice(0, 160)}`);
+check('44.25 — and it shows on the Sensitive changes tab',
+  Number(attentionTab((await attentionOf()).board, 'sensitive').pending) >= 1,
+  JSON.stringify(attentionTab((await attentionOf()).board, 'sensitive')));
+
+// Read-only sections ("any info arrives") badge the same way: the number is what
+// landed since PHANTOM last opened that log, and opening it clears the number.
+await seenTab('audit');
+const auditQuiet = attentionTab((await attentionOf()).board, 'audit');
+await setPolicy('class_creation_mode', 'approval');
+const auditAfter = attentionTab((await attentionOf()).board, 'audit');
+check('44.27 — a read-only section clears when opened and counts again on a new event',
+  Number(auditQuiet.unseen) === 0 && Number(auditAfter.unseen) >= 1,
+  `quiet=${auditQuiet.unseen} after=${auditAfter.unseen}`);
+// Module settings: "somebody changed a policy" is news until PHANTOM looks.
+await seenTab('policies');
+const policiesQuiet = attentionTab((await attentionOf()).board, 'policies');
+await setPolicy('class_creation_mode', 'approval');
+const policiesAfter = attentionTab((await attentionOf()).board, 'policies');
+check('44.27a — a policy change counts on Module settings until it is viewed',
+  Number(policiesQuiet.unseen) === 0 && Number(policiesAfter.unseen) >= 1,
+  `quiet=${policiesQuiet.unseen} after=${policiesAfter.unseen}`);
+await seenTab('policies');
+check('44.27b — and clears again once viewed', Number(attentionTab((await attentionOf()).board, 'policies').unseen) === 0);
+await seenTab('audit');
+check('44.28 — opening it again clears the number without losing the log',
+  Number(attentionTab((await attentionOf()).board, 'audit').unseen) === 0
+  && Number(q1('SELECT COUNT(*) c FROM cgm_audit').c) >= 1);
+check('44.29 — the cursor is stored once per PHANTOM account and section',
+  Number(q1("SELECT COUNT(*) c FROM cgm_phantom_attention WHERE tab_key = 'audit'").c) === 1
+  && Number(q1("SELECT last_seen_id FROM cgm_phantom_attention WHERE member_profile_id = ? AND tab_key = 'audit'", phantomProfileId)?.last_seen_id) >= 1);
+
+// The badge is per operator: clearing it for PHANTOM leaves nobody else's view
+// behind, and a second PHANTOM account starts with its own unseen counts.
+check('44.26 — seen state never deletes or resolves the queue rows',
+  q1("SELECT status FROM cgm_classes WHERE id = ?", attnClassId)?.status === 'pending'
+  && q1("SELECT COUNT(*) c FROM cgm_classes WHERE name LIKE 'Attention Badge Lab%' AND status = 'pending'").c === 2);
 
 
 // ---------------------------------------------------------------------------

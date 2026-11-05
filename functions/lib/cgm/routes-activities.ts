@@ -9,6 +9,7 @@
 
 import type { Hono } from 'hono';
 import { recordPhantomInboxItem } from '../phantom-inbox';
+import { markPhantomTabSeen, phantomAttentionBoard } from './attention';
 import { createNotification } from '../notifications';
 import { cleanEmail } from '../validate';
 import { buildReportPdf } from './pdf';
@@ -1270,6 +1271,16 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const requestId = Number(result.meta.last_row_id);
     await notifyStudent(c.env.DB, Number(assignment.student_id), 'groups', 'Your organizer asked you to re-choose',
       `Your organizer has asked that you choose your group again in ${assignment.activity_name}. PHANTOM reviews the request first — you will be told when it is approved.`);
+    // PHANTOM decides this one, so PHANTOM must be told the moment it arrives —
+    // in the Community inbox (channel: Class & Groups) and in notifications.
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'class_groups',
+      title: 'Re-choose request awaiting approval',
+      summary: `${member.name} asked a member to choose a group again in ${assignment.activity_name} (${assignment.class_name}).`,
+      source: 'cgm_rechoose', sourceId: String(requestId),
+      actorProfileId: member.profileId, actorLabel: member.name,
+      link: '#class-groups/phantom', body: reason || '',
+    });
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.rechoose.requested', entityType: 'rechoose_request', entityId: requestId,
@@ -4008,6 +4019,28 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         email: emailConfigStatus(c.env),
       },
     });
+  });
+
+  /**
+   * PHANTOM's attention board: what is waiting on a decision, per oversight
+   * section, plus how much of it arrived since this operator last opened that
+   * section (the tab badges). `pending` never clears by looking; `unseen` does.
+   */
+  app.get('/api/cgm/phantom/attention', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const board = await phantomAttentionBoard(c.env.DB, Number(check.member.profileId || 0));
+    return c.json({ success: true, data: board });
+  });
+
+  app.post('/api/cgm/phantom/attention/:tab/seen', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const tab = clean(c.req.param('tab'), 40);
+    const marked = await markPhantomTabSeen(c.env.DB, Number(check.member.profileId || 0), tab);
+    if (!marked) return bad(c, 'Unknown oversight section.', 400);
+    const board = await phantomAttentionBoard(c.env.DB, Number(check.member.profileId || 0));
+    return c.json({ success: true, data: { ...marked, board } });
   });
 
   app.get('/api/cgm/phantom/organizer-applications', async (c: any) => {

@@ -613,6 +613,20 @@ CREATE TABLE IF NOT EXISTS cgm_announcement_reads (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+-- PHANTOM's own attention watermark per oversight section (one row per PHANTOM
+-- account per tab). It only records WHEN that operator last opened the section:
+-- the badge ("new since you last looked") clears, the queue itself never does.
+CREATE TABLE IF NOT EXISTS cgm_phantom_attention (
+  member_profile_id INTEGER NOT NULL,
+  tab_key TEXT NOT NULL,
+  last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_id INTEGER NOT NULL DEFAULT 0,
+  seen_total INTEGER NOT NULL DEFAULT 0,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(member_profile_id, tab_key),
+  FOREIGN KEY(member_profile_id) REFERENCES member_profiles(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_announcement_reports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   announcement_id INTEGER NOT NULL,

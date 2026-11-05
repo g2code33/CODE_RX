@@ -75,6 +75,7 @@ import {
 } from './forceGet';
 import { sha256Hex } from '../vault';
 import { createNotification } from '../notifications';
+import { recordPhantomInboxItem } from '../phantom-inbox';
 
 // §31 — categories a student may mute. Security- and registration-relevant
 // notices are always delivered regardless of preferences.
@@ -1781,7 +1782,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     ).bind(student.id, field));
     if (pending[0]) return bad(c, 'You already have a pending change request for this field.', 409);
 
-    await c.env.DB.prepare(
+    const insertedChange = await c.env.DB.prepare(
       `INSERT INTO cgm_profile_change_requests (student_id, field, old_value, new_value, reason)
        VALUES (?, ?, ?, ?, ?)`
     ).bind(student.id, field, current === null || current === undefined ? null : String(current), newValue, reason).run();
@@ -1790,6 +1791,19 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       action: 'cgm.profile_change.requested', entityType: 'student', entityId: student.id,
       context: { field },
     });
+    // Gender, index number and phone are PHANTOM decisions, so PHANTOM is told
+    // the moment the request arrives instead of only finding it by opening the
+    // Sensitive changes tab.
+    if (['gender', 'index_number', 'phone'].includes(field)) {
+      await recordPhantomInboxItem(c.env.DB, {
+        channel: 'class_groups',
+        title: `Sensitive change awaiting PHANTOM: ${field.replace('_', ' ')}`,
+        summary: `${student.full_name} asked to change their ${field.replace('_', ' ')}.`,
+        source: 'cgm_profile_change', sourceId: String(Number(insertedChange.meta.last_row_id)),
+        actorProfileId: null, actorLabel: student.full_name,
+        link: '#class-groups/phantom', body: reason || '',
+      });
+    }
     return c.json({ success: true, data: { message: 'Your change request was submitted for review.' } });
   });
 
@@ -2368,13 +2382,22 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       `SELECT id FROM cgm_announcement_reports WHERE announcement_id = ? AND reporter_student_id = ? AND status = 'open'`
     ).bind(announcementId, student.id));
     if (open[0]) return bad(c, 'You already reported this announcement.', 409);
-    await c.env.DB.prepare(
+    const report = await c.env.DB.prepare(
       'INSERT INTO cgm_announcement_reports (announcement_id, reporter_student_id, reason) VALUES (?, ?, ?)'
     ).bind(announcementId, student.id, reason).run();
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: student.full_name, actorStudentId: student.id,
       action: 'cgm.announcement.reported', entityType: 'announcement', entityId: announcementId,
       classId: Number(rows[0].class_id), context: { reason },
+    });
+    // A dispute lands in PHANTOM's queue, so PHANTOM is told when it opens.
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'class_groups',
+      title: 'Announcement reported (dispute)',
+      summary: `${student.full_name} reported an announcement: ${reason.slice(0, 160)}`,
+      source: 'cgm_report', sourceId: String(Number(report.meta.last_row_id)),
+      actorProfileId: null, actorLabel: student.full_name,
+      link: '#class-groups/phantom', body: reason,
     });
     return c.json({ success: true, message: 'Thank you — the organizers will review this announcement.' });
   });

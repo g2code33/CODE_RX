@@ -1024,6 +1024,70 @@ check('PHANTOM sees the unregistered row in the destination group it was propose
   && /cgm-phantom-force-get-unregistered/.test(phantom)
   && /the seat is held and becomes theirs when they register/.test(phantom));
 
+section('26. PHANTOM attention: a number on every tab, cleared when PHANTOM looks');
+
+const phantomPanel = src('src/components/ClassGroups/PhantomClasses.tsx');
+check('the panel asks the server for its attention board and reloads it on refresh',
+  /cgm\.phantomAttention\(\)/.test(phantomPanel)
+  && /const loadAttention = useCallback/.test(phantomPanel)
+  && /void loadOverview\(\); void loadAttention\(\);/.test(phantomPanel)
+  && /void loadOverview\(\); void loadTab\(tab\); void loadAttention\(\);/.test(phantomPanel));
+check('opening a section marks it seen, so its number clears',
+  /cgm\.phantomAttentionSeen\(which\)/.test(phantomPanel)
+  && /void markSeen\(tab\);/.test(phantomPanel)
+  && /I have looked at this section/.test(phantomPanel));
+check('the embedded pill row (the Classes view) shows the per-tab number',
+  /phantom-tab-badge-/.test(phantomPanel)
+  && /phantom-tab-\$\{key\}/.test(phantomPanel)
+  && /const badge = tabBadge\(attention, key\);/.test(phantomPanel)
+  && /data-testid=\{`phantom-tab-badge-/.test(phantomPanel));
+check('the sidenav shows the same number for every section, not five hard-coded ones',
+  /data-testid=\{`phantom-nav-badge-\$\{key\}`\}/.test(phantomPanel)
+  && !/overview\?\.queues\?\.rechoose/.test(phantomPanel)
+  && !/overview\?\.queues\?\.disputes/.test(phantomPanel));
+check('the number is new arrivals only, and undecided work keeps a dot instead',
+  /badge && Boolean\(badge\.unseen\)/.test(phantomPanel)
+  && /phantom-tab-waiting-/.test(phantomPanel)
+  && /phantom-nav-waiting-/.test(phantomPanel)
+  && /new since you last opened this/.test(phantomPanel)
+  && /still waiting \(nothing new\)/.test(phantomPanel));
+const attentionClient = src('src/lib/cgm.ts');
+check('the client exposes the attention board and the mark-seen call',
+  /phantomAttention: \(\) => memberCall\('\/api\/cgm\/phantom\/attention'\)/.test(attentionClient)
+  && /phantomAttentionSeen: \(tab: string\) =>/.test(attentionClient)
+  && /\/api\/cgm\/phantom\/attention\/\$\{encodeURIComponent\(tab\)\}\/seen/.test(attentionClient));
+check('the server serves the board and clears one section at a time',
+  /app\.get\('\/api\/cgm\/phantom\/attention'/.test(activitiesRoute)
+  && /app\.post\('\/api\/cgm\/phantom\/attention\/:tab\/seen'/.test(activitiesRoute)
+  && /markPhantomTabSeen\(c\.env\.DB/.test(activitiesRoute)
+  && /requireCgmPhantom\(c\)/.test(activitiesRoute.split("'/api/cgm/phantom/attention'")[1]?.slice(0, 400) || ''));
+check('the Overview keeps the live backlog, since the tab numbers clear on view',
+  /Waiting on you/.test(phantomPanel)
+  && /phantom-overview-queue-/.test(phantomPanel)
+  && /nothing waiting can go unseen/.test(phantomPanel)
+  && /attention\?\.totalPending/.test(phantomPanel));
+const attentionLib = src('functions/lib/cgm/attention.ts');
+check('every oversight section is described once, with where its number comes from',
+  /PHANTOM_ATTENTION_TABS/.test(attentionLib)
+  && ['overview', 'policies', 'applications', 'classes', 'sensitive', 'rechoose', 'force-get', 'delegation', 'disputes', 'organizers', 'audit']
+    .every((key) => new RegExp(`key: '${key}'`).test(attentionLib))
+  && /queue: true/.test(attentionLib) && /queue: false/.test(attentionLib));
+check('the seen watermark is per PHANTOM account and per tab (row ids, not timestamps)',
+  /PRIMARY KEY\(member_profile_id, tab_key\)/.test(attentionLib)
+  && /last_seen_id/.test(attentionLib)
+  && /ON CONFLICT\(member_profile_id, tab_key\) DO UPDATE SET/.test(attentionLib));
+check('Class & Groups is a real inbox channel, so PHANTOM is notified as well as badged',
+  /key: 'class_groups'/.test(src('functions/lib/phantom-inbox.ts'))
+  && /channel: 'class_groups'/.test(activitiesRoute)
+  && /recordPhantomInboxItem\(c\.env\.DB/.test(activitiesRoute));
+check('a re-choose request, a sensitive change and a dispute each raise a PHANTOM notice',
+  /source: 'cgm_rechoose'/.test(activitiesRoute)
+  && /source: 'cgm_profile_change'/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /source: 'cgm_report'/.test(src('functions/lib/cgm/routes-student.ts')));
+check('the class & group table count is pinned for the attention watermark',
+  /cgm_phantom_attention/.test(src('functions/lib/cgm/schema.ts'))
+  && /code-rx29-phantom-attention/.test(src('functions/lib/schema.ts')));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');
