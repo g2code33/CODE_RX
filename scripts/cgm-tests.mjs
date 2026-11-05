@@ -2738,6 +2738,16 @@ const linkCandidates = await studentCall('GET', `/api/cgm/student/elections/${fm
 check('the volunteer appears on the ballot for the coming vote',
   (linkCandidates.json?.data?.candidates || []).some((row) => /Philippa/i.test(String(row.fullName || row.full_name))), JSON.stringify(linkCandidates.json?.data?.candidates || []).slice(0, 140));
 
+// A blank name on a ballot is a defect, not a design choice: every candidate
+// row must carry the human's name in BOTH shapes the clients read.
+const ballotRows = linkCandidates.json?.data?.candidates || [];
+check('every ballot candidate carries a readable name in both field shapes',
+  ballotRows.length > 0 && ballotRows.every((row) => String(row.fullName || '').trim().length > 0
+    && String(row.fullName || '') === String(row.full_name || '')),
+  JSON.stringify(ballotRows.slice(0, 3)).slice(0, 200));
+check('the ballot names the group member who is on it, not a placeholder',
+  ballotRows.some((row) => /Philippa/i.test(String(row.fullName || ''))), JSON.stringify(ballotRows.slice(0, 3)).slice(0, 200));
+
 // -- Roster-bound claims backfill a phone-first student's identity --------------
 await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName: 'Efua Sutherland', indexNumber: 'PH/PHA/24/0294', phone: '0244117294' }, amaToken);
 const efuaEntry = q1("SELECT id FROM cgm_roster_entries WHERE class_id = ? AND index_number_key = 'ph/pha/24/0294'", fmtClassId);
@@ -5638,8 +5648,41 @@ check('48.2 — the seeded ballot is exactly the group roster, nobody else',
 const openAll = await memberCall('POST', `/api/cgm/elections/${allModeId}/open-voting`, {}, amaToken);
 check('48.3 — and it opens for voting without an organizer appointment', openAll.status === 200, openAll.text?.slice(0, 160));
 
-// CUSTOMIZE with two hand-picked members.
-const picked = studentIdsOf(groupA2).slice(0, 2);
+// CUSTOMIZE with two hand-picked members. The three students are created for
+// this fixture and seated in the group FIRST, so every one of them is
+// registered with a session and no check depends on a lucky draw:
+// two are ticked (they may stand), the third is the control (they may not).
+const modeSeat = (studentId, groupId) => sqlite.prepare(
+  `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, status, assigned_via, assigned_by_label)
+   VALUES (?, ?, ?, 'active', 'organizer', 'test fixture')`
+).run(modeActivityId, groupId, studentId);
+const modeFreshStudent = async (n, fullName) => {
+  const indexNumber = `MODE-${String(n).padStart(3, '0')}`;
+  await memberCall('POST', `/api/cgm/classes/${classAId}/roster/entries`, { fullName, indexNumber }, amaToken);
+  const register = await call('POST', '/api/cgm/student/register', { classCode: classACode, indexNumber, entryPassword: 'bio-201-entry' });
+  let passkey = String(register.json?.data?.passkey || '');
+  if (!passkey) {
+    const queue = await memberCall('GET', `/api/cgm/classes/${classAId}/registrations?status=pending`, undefined, amaToken);
+    const row = (queue.json?.data || []).find((entry) => entry.indexNumber === indexNumber);
+    if (row) {
+      const approval = await memberCall('POST', `/api/cgm/classes/${classAId}/registrations/${row.id}/approve`, {}, amaToken);
+      passkey = String(approval.json?.data?.passkey || '');
+    }
+  }
+  const login = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: indexNumber, passkey });
+  const studentId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', indexNumber.toLowerCase())?.id || 0);
+  return { indexNumber, studentId, session: login.json?.data?.session?.token };
+};
+const customFresh = [];
+for (const [n, fullName] of [[180, 'Custom Keen'], [181, 'Custom Second'], [182, 'Custom Outside']]) {
+  const fresh = await modeFreshStudent(n, fullName);
+  customFresh.push(fresh);
+  if (fresh.studentId) modeSeat(fresh.studentId, groupA2);
+}
+check('the CUSTOMIZE fixture registers three class-A members, seated in the group',
+  customFresh.length === 3 && customFresh.every((fresh) => fresh.studentId > 0 && Boolean(fresh.session)),
+  customFresh.map((fresh) => `${fresh.indexNumber}:${fresh.studentId}:${fresh.session ? 'session' : 'no-session'}`).join(' '));
+const picked = customFresh.slice(0, 2).map((fresh) => fresh.studentId);
 const customMode = await memberCall('POST', `/api/cgm/groups/${groupA2}/elections`, {
   title: 'CUSTOMIZE ballot', role: 'leader', anonymity: 'anonymous', visibility: 'group',
   allowVoteChange: false, tieBreak: 'random', eligibleMode: 'custom', eligibleStudentIds: picked,
@@ -5653,16 +5696,12 @@ check('48.5 — CUSTOMIZE remembers exactly who may stand',
   JSON.parse(String(q1('SELECT eligible_student_ids FROM cgm_elections WHERE id = ?', customModeId)?.eligible_student_ids || '[]')).sort().join(',')
   === picked.slice().sort().join(','),
   String(q1('SELECT eligible_student_ids FROM cgm_elections WHERE id = ?', customModeId)?.eligible_student_ids));
-const pickedStudent = picked[0];
-const pickedSession = await loginForStudent(pickedStudent);
-const pickedToken = pickedSession.json?.data?.session?.token;
+const pickedToken = customFresh[0].session;
 const pickedContest = pickedToken
   ? await studentCall('POST', `/api/cgm/student/activities/${modeActivityId}/contest`, { statement: 'I will stand.' }, pickedToken)
   : { status: 0 };
 check('48.6 — a hand-picked member can stand', pickedContest.status === 200, `${pickedContest.status} ${pickedContest.text?.slice(0, 140)}`);
-const outside = studentIdsOf(groupA2).filter((id) => !picked.includes(id))[0];
-const outsideSession = outside ? await loginForStudent(outside) : { json: null };
-const outsideToken = outsideSession.json?.data?.session?.token;
+const outsideToken = customFresh[2].session;
 const outsideContest = outsideToken
   ? await studentCall('POST', `/api/cgm/student/activities/${modeActivityId}/contest`, {}, outsideToken)
   : { status: 0 };
@@ -5673,7 +5712,15 @@ const customOpen = await memberCall('POST', `/api/cgm/elections/${customModeId}/
 check('48.8 — once a picked member stands, CUSTOMIZE opens normally', customOpen.status === 200, customOpen.text?.slice(0, 160));
 
 // An ALL election that somehow has an empty ballot heals when opened.
-const healGroup = Number(modeGroups[2]?.id || 0);
+// The heal group must exist AND have seats of its own: with a live draw a
+// third group can end up empty, which made this fixture data-dependent.
+let healGroup = Number(modeGroups[2]?.id || 0);
+if (!healGroup) {
+  await memberCall('POST', `/api/cgm/activities/${modeActivityId}/groups`, { count: (modeGroups.length || 2) + 1, capacity: 100 }, amaToken);
+  const reRead = await memberCall('GET', `/api/cgm/activities/${modeActivityId}`, undefined, amaToken);
+  healGroup = Number((reRead.json?.data?.groups || [])[2]?.id || 0);
+}
+if (healGroup && seatsOf(healGroup) < 2) fillGroup(healGroup, 2);
 const healElection = await memberCall('POST', `/api/cgm/groups/${healGroup}/elections`, {
   title: 'Half-built ballot', role: 'leader', eligibility: 'all',
 }, amaToken);

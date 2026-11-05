@@ -1837,98 +1837,258 @@ const LeaderApplyView = ({ electionId, onClear }: { electionId: number; onClear?
   );
 };
 
+const initialsOf = (value: unknown) => {
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+};
+
+/**
+ * The student ballot.
+ *
+ * Mobile first by design: every candidate is a full-width tappable card with
+ * the name set large enough to read on a 360px screen, a selection mark that
+ * shows exactly what is picked, and a sticky "Cast my vote" bar that stays
+ * under the thumb instead of a row of tiny Vote pills at the right edge.
+ * Names are read from BOTH `fullName` and `full_name` — a ballot with blank
+ * rows is a bug, never a design decision.
+ */
 const ElectionVoteCard = ({ electionId, focused }: { electionId: number; focused?: boolean }) => {
   const [detail, setDetail] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [choice, setChoice] = useState<number | null>(null);
+  const [votedName, setVotedName] = useState<string | null>(null);
   const load = useCallback(async () => {
     try { setDetail(await cgmStudent.election(electionId)); setError(null); }
     catch (failure: any) { setError(failure?.message || 'This election could not be opened.'); }
   }, [electionId]);
   useEffect(() => { void load(); }, [load]);
-  if (error) return <div className={card}><p className="text-sm font-bold text-red-600">{error}</p></div>;
-  if (!detail) return <div className={card}><p className="text-sm font-semibold text-slate-400">Opening the ballot…</p></div>;
+
+  if (error) return <div className={card} data-testid="cgm-student-ballot"><p className="text-sm font-bold text-red-600">{error}</p></div>;
+  if (!detail) return <div className={card} data-testid="cgm-student-ballot"><p className="text-sm font-semibold text-slate-400">Opening the ballot…</p></div>;
+
   const election = detail.election || {};
-  const candidates: any[] = detail.candidates || [];
+  const rawCandidates: any[] = Array.isArray(detail.candidates) ? detail.candidates : [];
+  const candidates = rawCandidates.map((row: any) => ({
+    id: Number(row.id),
+    name: String(row.fullName || row.full_name || row.name || '').trim() || `Candidate ${row.id}`,
+    indexNumber: row.indexNumber || row.index_number || null,
+    statement: row.statement || null,
+  }));
+  const chosen = candidates.find((candidate) => candidate.id === choice) || null;
+  const isOpen = election.status === 'voting';
+  const canVote = isOpen && Boolean(detail.canVote) && !detail.voted;
+  const statusWord = String(election.status || '');
+
+  // Closed elections show the tally the organizer has already published.
+  const tally = new Map<number, number>();
+  if (election.status === 'closed' && detail.results) {
+    for (const row of (detail.results.tally || []) as any[]) tally.set(Number(row.candidate_id), Number(row.votes) || 0);
+  }
+  const totalVotes = [...tally.values()].reduce((sum, value) => sum + value, 0);
+  const leader = Math.max(0, ...tally.values());
+
+  const cast = async () => {
+    if (!chosen) return;
+    setBusy(true); setMessage(null); setFailed(false);
+    try {
+      const result: any = await cgmStudent.vote(electionId, chosen.id);
+      setVotedName(chosen.name);
+      setMessage(String(result?.message || 'Your vote is recorded.'));
+      await load();
+    } catch (failure: any) {
+      setFailed(true);
+      setMessage(failure?.message || 'The vote failed. Try again.');
+    } finally { setBusy(false); }
+  };
+
   return (
-    <div className={`${card} ${focused ? 'border-emerald-300 ring-2 ring-emerald-100' : ''}`}>
-      {focused && <p className="mb-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">You opened a voting link — this is the ballot. Pick one candidate below.</p>}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-black text-slate-900">{election.title || 'Election'}</p>
-        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-slate-500">{election.status}</span>
+    <div className={`space-y-3 ${canVote ? 'pb-24' : ''}`} data-testid="cgm-student-ballot">
+      <div className="cgm-ballot-hero">
+        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-100">Your ballot</p>
+        <h2 className="mt-1 text-lg font-black leading-tight">{election.title || 'Election'}</h2>
+        <p className="mt-1 text-[11px] font-semibold text-emerald-50">
+          {[election.role, election.anonymity === 'anonymous' ? 'Anonymous ballot' : 'Public roll', `${candidates.length} candidate${candidates.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-white ring-1 ring-white/25">{statusWord || 'election'}</span>
+          {detail.voted && <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">Voted</span>}
+          {election.status === 'closed' && <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-white ring-1 ring-white/25">Results</span>}
+        </div>
       </div>
-      <p className="mt-1 text-[11px] font-semibold text-slate-400">
-        {election.role} · {election.anonymity === 'anonymous' ? 'Anonymous ballot' : 'Public roll'}{detail.voted ? ' · you have voted' : ''}
-      </p>
-      {message && <p role="status" className="mt-2 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">{message}</p>}
-      {election.status === 'closed' && detail.results && (
-        <p className="mt-2 text-xs font-semibold text-slate-500">Voting closed — results appear in your activity once announced.</p>
+
+      {focused && (
+        <p className="rounded-2xl bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-800 ring-1 ring-emerald-100">
+          You opened a voting link — this is the ballot. Pick one candidate below, then confirm.
+        </p>
       )}
-      <ul className="mt-3 space-y-2">
-        {candidates.map((candidate: any) => (
-          <li key={candidate.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-100 px-4 py-2.5">
-            <span className="text-sm font-bold text-slate-700">{candidate.fullName}{candidate.statement ? <span className="ml-2 text-[11px] font-medium text-slate-400">{candidate.statement}</span> : null}</span>
-            {election.status === 'voting' && detail.canVote && (
+
+      {(detail.voted || votedName) && (
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 px-4 py-3" data-testid="cgm-ballot-voted">
+          <p className="flex items-center gap-2 text-sm font-black text-emerald-800">
+            <CheckCircle2 className="h-4 w-4" /> {votedName ? `Vote recorded for ${votedName}` : 'Your vote is recorded'}
+          </p>
+          <p className="mt-1 text-[11px] font-semibold text-emerald-700">
+            {election.anonymity === 'anonymous'
+              ? 'Anonymous ballot — nobody, not even the organizer, can see who you chose.'
+              : 'Your choice is on the public roll for this group.'}
+            {election.allowVoteChange && isOpen ? ' You may change it until voting closes.' : ' One vote per member.'}
+          </p>
+        </div>
+      )}
+
+      {isOpen && !detail.canVote && (
+        <p className="rounded-2xl bg-slate-50 px-4 py-3 text-xs font-semibold text-slate-500">Voting is open, but this ballot is scoped to its group members.</p>
+      )}
+      {election.status === 'nominating' && (
+        <p className="rounded-2xl bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800">Nominations are open. The ballot opens for voting once your organizer closes nominations.</p>
+      )}
+
+      <ul className="cgm-ballot-list" role={canVote ? 'radiogroup' : undefined} aria-label="Candidates">
+        {candidates.map((candidate, index) => {
+          const selected = choice === candidate.id;
+          const votes = tally.get(candidate.id) ?? 0;
+          const percent = election.status === 'closed' && totalVotes > 0 ? Math.round((votes / totalVotes) * 100) : 0;
+          return (
+            <li key={candidate.id}>
               <button
                 type="button"
-                disabled={busy || detail.voted}
-                className="cgm-primary-button !px-3 !py-1.5 text-[11px]"
-                onClick={async () => {
-                  setBusy(true); setMessage(null);
-                  try { const result: any = await cgmStudent.vote(electionId, Number(candidate.id)); setMessage(String(result?.message || 'Vote recorded.')); await load(); }
-                  catch (failure: any) { setMessage(failure?.message || 'The vote failed.'); }
-                  finally { setBusy(false); }
-                }}
+                role={canVote ? 'radio' : undefined}
+                aria-checked={canVote ? selected : undefined}
+                aria-disabled={canVote ? undefined : true}
+                disabled={!canVote}
+                data-testid={`cgm-ballot-candidate-${candidate.id}`}
+                onClick={() => { if (canVote) { setChoice(candidate.id); setMessage(null); setFailed(false); } }}
+                className={`cgm-ballot-card ${selected ? 'is-selected' : ''} ${canVote ? '' : 'is-static'}`}
               >
-                {detail.voted ? 'Voted' : 'Vote'}
+                <span className="cgm-ballot-avatar">{initialsOf(candidate.name)}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[15px] font-black leading-tight text-slate-900">{candidate.name}</span>
+                  <span className="mt-0.5 block text-[11px] font-semibold text-slate-400">
+                    {candidate.indexNumber ? String(candidate.indexNumber) : `Candidate ${index + 1}`}
+                  </span>
+                  {candidate.statement && <span className="mt-1 block text-[11px] font-medium leading-snug text-slate-500">{candidate.statement}</span>}
+                  {election.status === 'closed' && (
+                    <span className="mt-2 block">
+                      <span className="flex items-center justify-between text-[11px] font-black text-slate-500">
+                        <span>{votes} vote{votes === 1 ? '' : 's'}</span>
+                        <span>{percent}%</span>
+                      </span>
+                      <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                        <span className={`block h-full rounded-full ${votes === leader && leader > 0 ? 'bg-emerald-500' : 'bg-slate-300'}`} style={{ width: `${percent}%` }} />
+                      </span>
+                    </span>
+                  )}
+                </span>
+                {canVote && (
+                  <span className="cgm-ballot-mark" aria-hidden="true">{selected ? <CheckCircle2 className="h-4 w-4" /> : null}</span>
+                )}
               </button>
-            )}
+            </li>
+          );
+        })}
+        {!candidates.length && (
+          <li className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-xs font-semibold text-slate-400">
+            No candidates on this ballot yet.
           </li>
-        ))}
-        {!candidates.length && <li className="text-xs font-medium text-slate-400">No candidates yet.</li>}
+        )}
       </ul>
-      {!detail.canVote && election.status === 'voting' && <p className="mt-2 text-[11px] font-medium text-slate-400">Voting is open, but this ballot is scoped to its group members.</p>}
+
+      {election.status === 'closed' && !detail.results && (
+        <p className="rounded-2xl bg-slate-50 px-4 py-3 text-xs font-semibold text-slate-500">Voting closed — results appear in your activity once announced.</p>
+      )}
+
+      {message && (
+        <p role="status" className={`rounded-2xl px-4 py-3 text-xs font-bold ${failed ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{message}</p>
+      )}
+
+      {canVote && (
+        <div className="cgm-ballot-bar">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-black text-slate-900">{chosen ? chosen.name : 'No candidate picked yet'}</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{chosen ? 'Tap to confirm your vote' : 'Pick one candidate above'}</p>
+          </div>
+          <button type="button" className="cgm-primary-button" disabled={!chosen || busy} onClick={() => void cast()}>
+            {busy ? 'Sending…' : 'Cast my vote'}
+          </button>
+        </div>
+      )}
     </div>
   );
 };
 
 const MyElectionsView = ({ focusElectionId, onClearFocus, leaderElectionId, onClearLeader }: { focusElectionId?: number | null; onClearFocus?: () => void; leaderElectionId?: number | null; onClearLeader?: () => void }) => {
   const [rows, setRows] = useState<any[] | null>(null);
-  const [openId, setOpenId] = useState<number | null>(focusElectionId || null);
+  const [openId, setOpenId] = useState<number | null>(focusElectionId ? Number(focusElectionId) : null);
   useEffect(() => { void cgmStudent.electionsList().then((data: any) => setRows((data.data || data) as any[])).catch(() => setRows([])); }, []);
+  const open = openId ? (rows || []).find((row) => Number(row.id) === Number(openId)) || null : null;
+  const badge = (status: string) => status === 'voting' ? 'bg-emerald-600 text-white' : status === 'nominating' ? 'bg-amber-100 text-amber-800' : status === 'closed' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500';
+
+  // A ballot opens as its own page: the list is a list of elections, never a
+  // wall of candidates.
+  if (openId) {
+    return (
+      <div className="space-y-3" data-testid="cgm-student-ballot-page">
+        <button type="button" className="mini-button" data-testid="cgm-ballot-back"
+          onClick={() => { setOpenId(null); if (onClearFocus) onClearFocus(); }}>
+          <ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> All my elections
+        </button>
+        {leaderElectionId && Number(leaderElectionId) === Number(openId) && (
+          <LeaderApplyView electionId={Number(leaderElectionId)} onClear={() => setOpenId(null)} />
+        )}
+        <ElectionVoteCard electionId={Number(openId)} focused={Boolean(focusElectionId) && Number(focusElectionId) === Number(openId)} />
+        {!open && rows && <p className="text-[11px] font-semibold text-slate-400">This ballot is not in your list — it may have been deleted by your organizer.</p>}
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-testid="cgm-student-elections">
       {leaderElectionId ? (
         <LeaderApplyView electionId={Number(leaderElectionId)} onClear={onClearLeader} />
       ) : null}
-      {focusElectionId ? (
-        <div>
-          <ElectionVoteCard electionId={Number(focusElectionId)} focused />
-          {onClearFocus && <button type="button" className="mini-button mt-2" onClick={onClearFocus}>Back to all my elections</button>}
+      {focusElectionId && (
+        <div className={card}>
+          <p className={label}>Ballot opened from a link</p>
+          <p className="mt-1 text-xs font-medium text-slate-500">Your voting link points at election #{Number(focusElectionId)}.</p>
+          <button type="button" className="cgm-primary-button mt-3" onClick={() => setOpenId(Number(focusElectionId))}>Open that ballot</button>
         </div>
-      ) : null}
+      )}
       <div className={card}>
         <p className={label}>My elections</p>
+        <p className="mt-1 text-[11px] font-medium text-slate-500">Tap an election to open its ballot full page.</p>
         {rows === null && <p className="mt-2 text-xs font-semibold text-slate-400">Loading…</p>}
         {rows?.length === 0 && <p className="mt-2 text-xs font-medium text-slate-500">No elections yet — they appear here the moment your organizer opens one.</p>}
-        <ul className="mt-3 divide-y divide-slate-100">
-          {(rows || []).filter((row) => Number(row.id) !== Number(focusElectionId)).map((row) => (
-            <li key={row.id} className="py-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-black text-slate-800">{row.title || 'Election'}</p>
-                  <p className="text-[11px] font-semibold text-slate-400">{row.className} · {row.activityName} · {row.role}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  {row.voted && <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase text-emerald-700">voted</span>}
-                  <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${row.status === 'voting' ? 'bg-emerald-600 text-white' : row.status === 'nominating' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{row.status}</span>
-                  <button type="button" className="mini-button" onClick={() => setOpenId(openId === Number(row.id) ? null : Number(row.id))}>
-                    {row.status === 'voting' && !row.voted ? 'Vote now' : openId === Number(row.id) ? 'Hide' : 'Open'}
-                  </button>
-                </div>
-              </div>
-              {openId === Number(row.id) && <div className="mt-3"><ElectionVoteCard electionId={Number(row.id)} /></div>}
+        <ul className="mt-3 space-y-2">
+          {(rows || []).map((row) => (
+            <li key={row.id}>
+              <button
+                type="button"
+                onClick={() => setOpenId(Number(row.id))}
+                data-testid={`cgm-student-election-${row.id}`}
+                className="cgm-record-row"
+              >
+                <span className="cgm-record-icon"><Vote className="h-4 w-4" /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-black text-slate-900">{row.title || 'Election'}</span>
+                  <span className="mt-0.5 block truncate text-[11px] font-semibold text-slate-400">
+                    {[row.className, row.activityName, row.role].filter(Boolean).join(' · ')}
+                  </span>
+                  <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${badge(String(row.status))}`}>{row.status}</span>
+                    {row.voted && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-emerald-700">voted</span>}
+                  </span>
+                </span>
+                <span className="flex flex-none flex-col items-end gap-1">
+                  <ChevronRight className="h-4 w-4 text-slate-300" />
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700">
+                    {row.status === 'voting' && !row.voted ? 'Vote now' : 'Open'}
+                  </span>
+                </span>
+              </button>
             </li>
           ))}
         </ul>

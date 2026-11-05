@@ -1339,6 +1339,80 @@ check('the Recycle Bin is its own page in the organizer navigation',
 check('its list obeys the one listing rule',
   /<RecentItems\s+items=\{items\}\s+label="deleted items"\s+testId="cgm-recycle-list"/.test(workspace));
 
+section('34. Election records open a full page, and the ballot names every candidate');
+
+check('the elections list is compact tappable records, not an inline wall of candidates',
+  /const ElectionRecordRow = /.test(workspace)
+  && /<ElectionRecordRow/.test(workspace)
+  && /onOpen=\{\(\) => setOpenElectionId\(Number\(entry\.election\.id\)\)\}/.test(workspace)
+  && /data-testid="cgm-election-records"/.test(workspace)
+  && !/<ElectionManager/.test(workspace));
+
+check('clicking a record opens its own full page, with a way back to the list',
+  /const ElectionDossier = /.test(workspace)
+  && /data-testid="cgm-election-page"/.test(workspace)
+  && /data-testid="cgm-election-page-back"/.test(workspace)
+  && /Back to elections/.test(workspace)
+  && /data-testid=\{`cgm-election-dossier-\$\{election\.id\}`\}/.test(workspace));
+
+check('the full page carries the ballot counts, turnout, result, links and lifecycle',
+  /data-testid=\{`cgm-dossier-candidate-\$\{candidate\.id\}`\}/.test(workspace)
+  && /Turnout/.test(workspace)
+  && /data-testid="cgm-election-result"/.test(workspace)
+  && /onAction\('close'\)/.test(workspace) && /onAction\('cancel', \{ reason \}\)/.test(workspace)
+  && /sign in, then straight to this ballot/.test(workspace));
+
+check('a record never shows its candidates until the page is opened',
+  (() => {
+    const listStart = workspace.indexOf('const ElectionRecordRow = ');
+    const listEnd = workspace.indexOf('const OpenVotingForm = ');
+    const row = workspace.slice(listStart, listEnd);
+    return listStart > 0 && listEnd > listStart && !/candidates\.map/.test(row) && !/vote\(s\)/.test(row);
+  })());
+
+const ballot = studentPortal.slice(studentPortal.indexOf('const ElectionVoteCard = '), studentPortal.indexOf('const MyElectionsView = '));
+
+check('the ballot reads the name from both shapes, so no candidate row is ever blank',
+  /row\.fullName \|\| row\.full_name \|\| row\.name/.test(ballot)
+  && /Candidate \$\{row\.id\}/.test(ballot)
+  && /fullName: String\(row\.full_name \|\| 'Candidate'\)/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /full_name: String\(row\.full_name \|\| 'Candidate'\)/.test(src('functions/lib/cgm/routes-student.ts')));
+
+check('the ballot is a real radio group with a sticky confirm bar, not tiny Vote pills',
+  /role=\{canVote \? 'radiogroup' : undefined\}/.test(ballot)
+  && /role=\{canVote \? 'radio' : undefined\}/.test(ballot)
+  && /aria-checked=\{canVote \? selected : undefined\}/.test(ballot)
+  && /cgm-ballot-bar/.test(ballot) && /Cast my vote/.test(ballot)
+  && /cgm-ballot-card/.test(ballot) && !/Vote<\/button>/.test(ballot));
+
+check('a student picks first and confirms second — the choice is named on the bar',
+  /chosen \? chosen\.name : 'No candidate picked yet'/.test(ballot)
+  && /disabled=\{!chosen \|\| busy\}/.test(ballot)
+  && /setChoice\(candidate\.id\)/.test(ballot));
+
+check('the ballot page opens on its own with a back link to all elections',
+  /data-testid="cgm-student-ballot-page"/.test(studentPortal)
+  && /data-testid="cgm-ballot-back"/.test(studentPortal)
+  && /All my elections/.test(studentPortal)
+  && /data-testid=\{`cgm-student-election-\$\{row\.id\}`\}/.test(studentPortal)
+  && /Tap an election to open its ballot full page\./.test(studentPortal));
+
+check('an already-voted ballot says so plainly and cannot be voted twice',
+  /data-testid="cgm-ballot-voted"/.test(ballot)
+  && /Anonymous ballot — nobody, not even the organizer, can see who you chose\./.test(ballot)
+  && /One vote per member\./.test(ballot));
+
+check('the ballot is mobile-first CSS: full-width cards, thumb-height targets, a sticky bar',
+  /\.cgm-ballot-card \{[\s\S]{0,400}min-height: 4\.25rem/.test(css)
+  && /\.cgm-ballot-bar \{[\s\S]{0,300}position: sticky;/.test(css)
+  && /env\(safe-area-inset-bottom\)/.test(css)
+  && /\.cgm-record-row \{[\s\S]{0,300}min-height: 3\.5rem/.test(css)
+  && /@media \(max-width: 420px\) \{[\s\S]{0,400}\.cgm-ballot-bar \{[\s\S]{0,200}position: fixed;/.test(css)
+  && /\[data-testid\^="cgm-election-dossier-"\] \.mini-button[\s\S]{0,200}min-height: 2\.75rem/.test(css));
+
+check('the record rows and the student list share the same thumb-sized hit area',
+  /className="cgm-record-row"/.test(workspace) && /className="cgm-record-row"/.test(studentPortal));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

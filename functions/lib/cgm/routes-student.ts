@@ -1335,8 +1335,9 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     if (groupScoped && !inGroup[0]) return bad(c, 'This election is visible to its group only.', 403);
 
     const candidates = await asRows<any>(c.env.DB.prepare(
-      `SELECT c.id, s.full_name, c.statement, c.status FROM cgm_candidates c JOIN cgm_students s ON s.id = c.student_id
-       WHERE c.election_id = ? AND c.status = 'active' ORDER BY c.nominated_at`
+      `SELECT c.id, s.full_name, s.index_number, c.statement, c.status, c.nominated_at
+       FROM cgm_candidates c JOIN cgm_students s ON s.id = c.student_id
+       WHERE c.election_id = ? AND c.status = 'active' ORDER BY s.full_name`
     ).bind(electionId));
     const participation = await asRows<{ id: number }>(c.env.DB.prepare(
       'SELECT id FROM cgm_election_participation WHERE election_id = ? AND student_id = ?'
@@ -1347,7 +1348,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       const tally = await asRows<any>(c.env.DB.prepare(
         `SELECT candidate_id, COUNT(*) AS votes FROM cgm_election_ballots WHERE election_id = ? GROUP BY candidate_id`
       ).bind(electionId));
-      results = { tally };
+      results = { tally, candidates: candidates.map((row) => ({ id: Number(row.id), fullName: String(row.full_name || 'Candidate') })) };
     }
 
     return c.json({
@@ -1360,7 +1361,20 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
           nominationOpenAt: election.nomination_open_at, nominationCloseAt: election.nomination_close_at,
           votingOpenAt: election.voting_open_at, votingCloseAt: election.voting_close_at,
         },
-        candidates,
+        // The ballot names every candidate with BOTH shapes: the row as stored
+        // (`full_name`) and the camelCase the client renders (`fullName`).
+        // A ballot that shows thirteen blank rows is not a ballot.
+        candidates: candidates.map((row) => ({
+          id: Number(row.id),
+          studentId: null,
+          fullName: String(row.full_name || 'Candidate'),
+          full_name: String(row.full_name || 'Candidate'),
+          indexNumber: row.index_number ? String(row.index_number) : null,
+          index_number: row.index_number ? String(row.index_number) : null,
+          statement: row.statement || null,
+          status: row.status,
+          nominatedAt: row.nominated_at || null,
+        })),
         voted: Boolean(participation[0]),
         canVote: Boolean(inGroup[0]) && election.status === 'voting',
         activityId: Number(election.activity_id),

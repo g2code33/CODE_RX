@@ -2403,3 +2403,191 @@ h3.vault-rich-text {
     padding: 1rem 0.85rem 4rem;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Class & Group Management — mobile-first ballot + record rows
+   Every student and organizer surface is designed for a phone first
+   (360–390px): full-width tap targets, a sticky confirm bar under the thumb,
+   and names that always have room to breathe.
+   --------------------------------------------------------------------------- */
+
+.cgm-ballot-hero {
+  border-radius: 1.25rem;
+  padding: 1.05rem 1.1rem 1.15rem;
+  color: #ffffff;
+  background: linear-gradient(135deg, #065f46 0%, #047857 45%, #10b981 100%);
+  box-shadow: 0 16px 34px rgb(4 120 87 / 0.24);
+  overflow: hidden;
+}
+
+.cgm-ballot-hero h2 {
+  overflow-wrap: anywhere;
+}
+
+.cgm-ballot-list {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cgm-ballot-card {
+  display: flex;
+  width: 100%;
+  min-height: 4.25rem;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 1rem;
+  background: #ffffff;
+  padding: 0.85rem 0.9rem;
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 90ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cgm-ballot-card:active:not(:disabled) {
+  transform: scale(0.994);
+}
+
+.cgm-ballot-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(16 185 129 / 0.35);
+}
+
+.cgm-ballot-card.is-selected {
+  border-color: #059669;
+  background: #ecfdf5;
+  box-shadow: 0 0 0 3px rgb(5 150 105 / 0.16);
+}
+
+.cgm-ballot-card.is-static {
+  opacity: 1;
+  cursor: default;
+}
+
+.cgm-ballot-avatar {
+  display: grid;
+  place-items: center;
+  height: 2.5rem;
+  width: 2.5rem;
+  flex: none;
+  border-radius: 9999px;
+  background: #ecfdf5;
+  color: #047857;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.cgm-ballot-card.is-selected .cgm-ballot-avatar {
+  background: #059669;
+  color: #ffffff;
+}
+
+.cgm-ballot-mark {
+  display: grid;
+  place-items: center;
+  height: 1.6rem;
+  width: 1.6rem;
+  flex: none;
+  border: 2px solid #cbd5e1;
+  border-radius: 9999px;
+  color: #ffffff;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.cgm-ballot-card.is-selected .cgm-ballot-mark {
+  border-color: #059669;
+  background: #059669;
+}
+
+.cgm-ballot-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.25rem -0.15rem 0;
+  border: 1px solid #d1fae5;
+  border-radius: 1rem 1rem 0 0;
+  background: rgb(255 255 255 / 0.97);
+  padding: 0.7rem 0.8rem calc(0.7rem + env(safe-area-inset-bottom));
+  box-shadow: 0 -10px 26px rgb(6 78 59 / 0.13);
+  backdrop-filter: blur(8px);
+}
+
+.cgm-ballot-bar .cgm-primary-button {
+  flex: none;
+  min-height: 2.75rem;
+  padding: 0.7rem 1.05rem;
+}
+
+.cgm-record-row {
+  display: flex;
+  width: 100%;
+  min-height: 3.5rem;
+  align-items: center;
+  gap: 0.7rem;
+  border: 1px solid #e6efea;
+  border-radius: 1rem;
+  background: #ffffff;
+  padding: 0.8rem 0.9rem;
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 90ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cgm-record-row:hover {
+  border-color: #86efac;
+  background: #f7fdf9;
+}
+
+.cgm-record-row:active {
+  transform: scale(0.995);
+}
+
+.cgm-record-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(16 185 129 / 0.35);
+}
+
+.cgm-record-icon {
+  display: grid;
+  place-items: center;
+  height: 2.25rem;
+  width: 2.25rem;
+  flex: none;
+  border-radius: 0.75rem;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+/* Phone-sized controls: an action inside a full-page record or the ballot's
+   back link is never smaller than a thumb target (44px). */
+@media (max-width: 420px) {
+  [data-testid^="cgm-election-dossier-"] .mini-button,
+  [data-testid^="cgm-election-dossier-"] .cgm-primary-button,
+  [data-testid="cgm-election-page-back"],
+  [data-testid="cgm-ballot-back"] {
+    min-height: 2.75rem;
+  }
+}
+
+@media (max-width: 420px) {
+  .cgm-ballot-hero {
+    border-radius: 1rem;
+    padding: 0.95rem 1rem 1.05rem;
+  }
+
+  .cgm-ballot-bar {
+    position: fixed;
+    left: 0.6rem;
+    right: 0.6rem;
+    bottom: 0.5rem;
+    border-radius: 1rem;
+    padding-bottom: calc(0.7rem + env(safe-area-inset-bottom));
+  }
+}

@@ -104,7 +104,7 @@ const inviteB = (await api('POST', `/api/cgm/classes/${classB.classId}/invitatio
 // ---------------------------------------------------------------------------
 // jsdom boot of the shipped bundle (same pattern as browser-dom-check.mjs).
 // ---------------------------------------------------------------------------
-const boot = async (address, { memberToken = null, memberUser = null } = {}) => {
+const boot = async (address, { memberToken = null, memberUser = null, studentSession = null } = {}) => {
   const pageUrl = `${BASE}/${address}`;
   const html = await (await fetch(pageUrl)).text();
   const bundle = /<script type="module"[^>]*>([\s\S]*?)<\/script>/.exec(html);
@@ -149,6 +149,7 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
   window.alert = () => {};
   if (memberToken) window.localStorage.setItem('codeRx_token', memberToken);
   if (memberUser) window.localStorage.setItem('codeRx_user', JSON.stringify(memberUser));
+  if (studentSession) window.localStorage.setItem('codeRx_cgmStudentSession', JSON.stringify(studentSession));
   globalThis.window = window;
   globalThis.document = window.document;
 
@@ -1355,6 +1356,135 @@ let wsClass = null;
   check('the new passkey signs in and the old one does not',
     newLogin.status === 200 && Boolean(newLogin.json?.data?.session?.token) && oldLogin.status === 400,
     `new=${newLogin.status} old=${oldLogin.status}`);
+}
+
+// ---------------------------------------------------------------------------
+// 8b. Election records open a full page, and the phone ballot names everybody
+// ---------------------------------------------------------------------------
+let ballotElectionId = null;
+let ballotStudent = null;
+{
+  const ballotClass = await makeClass(`Browser Check Zballot ${stamp}`);
+  await api('POST', `/api/cgm/classes/${ballotClass.classId}/entry-password`, { entryPassword: 'ballot-entry' }, phantomToken);
+  const ballotNames = ['Ama Ballot', 'Kofi Ballot', 'Yaa Ballot'];
+  const ballotIndexes = ballotNames.map((_, position) => `BRW-${stamp}-V${position + 1}`);
+  for (let i = 0; i < ballotNames.length; i += 1) {
+    await api('POST', `/api/cgm/classes/${ballotClass.classId}/roster/entries`,
+      { fullName: ballotNames[i], indexNumber: ballotIndexes[i] }, phantomToken);
+  }
+  const ballotActivity = await api('POST', `/api/cgm/classes/${ballotClass.classId}/activities`, {
+    name: `Browser Check Ballot Pods ${stamp}`, type: 'tutorial',
+    config: { method: 'random', groupCount: 1, capacity: 200, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, phantomToken);
+  const ballotActivityId = ballotActivity.json?.data?.activityId ?? ballotActivity.json?.data?.id;
+  await api('POST', `/api/cgm/activities/${ballotActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+  await api('POST', `/api/cgm/activities/${ballotActivityId}/groups`, { count: 1, capacity: 200 }, phantomToken);
+
+  // Register the three roster students, then seat them in the single group.
+  const ballotStudentTokens = [];
+  for (let i = 0; i < ballotNames.length; i += 1) {
+    const registered = await fetch(`${BASE}/api/cgm/student/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': `203.0.113.${150 + i}` },
+      body: JSON.stringify({ classCode: ballotClass.code, indexNumber: ballotIndexes[i], entryPassword: 'ballot-entry' }),
+    });
+    const payload = await registered.json().catch(() => ({}));
+    if (payload?.data?.session?.token) ballotStudentTokens.push(payload.data.session.token);
+  }
+  const ballotActivityData = (await api('GET', `/api/cgm/activities/${ballotActivityId}`, undefined, phantomToken)).json?.data || {};
+  const ballotGroupId = Number((ballotActivityData.groups || [])[0]?.id || 0);
+  for (const row of (ballotActivityData.unassigned || [])) {
+    await api('POST', `/api/cgm/activities/${ballotActivityId}/assign-student`, { studentId: Number(row.id), groupId: ballotGroupId }, phantomToken);
+  }
+  const electionCreated = await api('POST', `/api/cgm/groups/${ballotGroupId}/elections`, {
+    title: `Ballot page ${stamp}`, role: 'leader', anonymity: 'anonymous', visibility: 'group',
+    allowVoteChange: false, tieBreak: 'random', eligibleMode: 'all',
+  }, phantomToken);
+  ballotElectionId = Number(electionCreated.json?.data?.electionId || 0);
+  const opened = await api('POST', `/api/cgm/elections/${ballotElectionId}/open-voting`, {}, phantomToken);
+  const ballotDetail = (await api('GET', `/api/cgm/elections/${ballotElectionId}`, undefined, phantomToken)).json?.data || {};
+  check('the ballot fixture has a group election with every member on it',
+    Boolean(ballotElectionId) && opened.status === 200 && (ballotDetail.candidates || []).length >= 3,
+    `election=${ballotElectionId} open=${opened.status} candidates=${(ballotDetail.candidates || []).length}`);
+  ballotStudent = { indexNumber: ballotIndexes[0] };
+
+  // --- Organizer: the records list is rows, the record itself is a page ----
+  const organizer = { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } };
+  const page = await boot('#class-groups', organizer);
+  await page.waitForFor('Class & Group Management', 20_000);
+  const classSwitcher = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Switch class"]'));
+  if (classSwitcher) {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(classSwitcher, String(ballotClass.classId));
+    classSwitcher.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  await page.waitForFor('Organizer workspace', 5_000);
+  const electionsNav = await page.waitForElement(() => page.buttonByText('Elections'));
+  electionsNav && electionsNav.click();
+  const chooser = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Choose activity"]'));
+  check('the Elections page offers the activity picker', Boolean(chooser), page.body().slice(0, 160));
+  if (chooser) {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(chooser, String(ballotActivityId));
+    chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  const recordRow = await page.waitForElement(() => page.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 20_000);
+  check('an election record is one compact tappable row', Boolean(recordRow),
+    page.body().slice(page.body().indexOf('Election records'), page.body().indexOf('Election records') + 220));
+  check('the row does NOT dump the candidates inline (a name wall is not a record)',
+    Boolean(recordRow) && !/Ama Ballot/.test(recordRow.textContent) && !/Kofi Ballot/.test(recordRow.textContent),
+    String(recordRow?.textContent || '').slice(0, 160));
+  recordRow && recordRow.click();
+  const dossier = await page.waitForElement(() => page.window.document.querySelector(`[data-testid="cgm-election-dossier-${ballotElectionId}"]`), 20_000);
+  check('clicking the row opens the record as a full page', Boolean(dossier) && Boolean(page.window.document.querySelector('[data-testid="cgm-election-page-back"]')),
+    page.body().slice(0, 200));
+  check('the full page shows the ballot with real names, turnout and the lifecycle',
+    Boolean(dossier) && /Ama Ballot/.test(dossier.textContent) && /Turnout/.test(dossier.textContent)
+    && Boolean(page.window.document.querySelector(`[data-testid="cgm-election-delete-${ballotElectionId}"]`)),
+    String(dossier?.textContent || '').slice(0, 240));
+  const backToRecords = page.window.document.querySelector('[data-testid="cgm-election-page-back"]');
+  backToRecords && backToRecords.click();
+  check('the record page has a way back to the records list',
+    await page.waitForElement(() => page.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 10_000)
+    && !page.window.document.querySelector('[data-testid="cgm-election-dossier-' + ballotElectionId + '"]'));
+
+  // --- Student: the ballot names every candidate and votes in two taps -----
+  // Registration returns its own session, so the ballot opens signed in.
+  const studentToken = ballotStudentTokens[0] || null;
+  check('the ballot fixture registered a signed-in student', Boolean(studentToken), `tokens=${ballotStudentTokens.length}`);
+  const votePage = await boot(`#student-vote/${ballotElectionId}`, {
+    studentSession: studentToken ? { token: studentToken, expiresAt: new Date(Date.now() + 86_400_000).toISOString() } : null,
+  });
+  const ballotIsUp = await votePage.waitForFor('Your ballot', 30_000);
+  check('the voting link opens the ballot itself', ballotIsUp, votePage.body().slice(0, 200));
+  const cards = [...votePage.window.document.querySelectorAll('[data-testid^="cgm-ballot-candidate-"]')];
+  check('every candidate on the ballot carries a readable name (no blank rows)',
+    cards.length >= 3 && cards.every((card) => {
+      const label = String(card.textContent || '').replace(/\s+/g, ' ').trim();
+      return /(Ama|Kofi|Yaa) Ballot/.test(label) && !/^Candidate \d/i.test(label);
+    }),
+    cards.map((card) => String(card.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40)).join(' | ').slice(0, 300));
+  const confirmBar = votePage.window.document.querySelector('.cgm-ballot-bar');
+  const castButton = confirmBar ? [...confirmBar.querySelectorAll('button')].find((el) => /Cast my vote/.test(el.textContent)) : null;
+  check('the ballot confirms on a sticky bar that starts disabled until a choice is made',
+    Boolean(confirmBar) && Boolean(castButton) && castButton.disabled
+    && /No candidate picked yet/.test(confirmBar.textContent), String(confirmBar?.textContent || 'no bar').slice(0, 160));
+  const pickCard = cards.find((card) => /Kofi Ballot/.test(card.textContent));
+  pickCard && pickCard.click();
+  await votePage.wait(300);
+  const pickedBar = votePage.window.document.querySelector('.cgm-ballot-bar');
+  const pickedButton = pickedBar ? [...pickedBar.querySelectorAll('button')].find((el) => /Cast my vote/.test(el.textContent)) : null;
+  check('picking a candidate names them on the bar and arms the confirm button',
+    Boolean(pickedButton) && pickedButton.disabled === false && /Kofi Ballot/.test(pickedBar.textContent),
+    String(pickedBar?.textContent || 'no bar').slice(0, 160));
+  check('the picked card shows its own selected state',
+    Boolean(pickCard) && (pickCard.getAttribute('aria-checked') === 'true' || pickCard.className.includes('is-selected')),
+    String(pickCard?.className || 'no card'));
+  pickedButton && pickedButton.click();
+  check('casting the vote confirms the choice and locks the ballot',
+    await votePage.waitForFor(/Vote recorded for Kofi Ballot/, 30_000)
+    && Boolean(votePage.window.document.querySelector('[data-testid="cgm-ballot-voted"]')),
+    votePage.body().slice(0, 240));
 }
 
 // Restore the spec-default policies so the local database stays clean.

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Activity, Archive, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
+  Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
   Megaphone, Plus, Recycle, RefreshCw, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
@@ -2652,6 +2652,10 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
   const [groupMembers, setGroupMembers] = useState<any[]>([]);
   const [chosenIds, setChosenIds] = useState<Set<number>>(new Set());
   const [pendingOpen, setPendingOpen] = useState<any>(null);
+  // Election records are a LIST of tappable rows. The record itself — ballot,
+  // counts, turnout, links, lifecycle — lives on its own full page, never
+  // dumped inline as a wall of names.
+  const [openElectionId, setOpenElectionId] = useState<number | null>(null);
 
   useEffect(() => { void cgm.activities(classId).then((rows) => setActivities(rows as any[])).catch(() => setActivities([])); }, [classId]);
 
@@ -2690,6 +2694,63 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
     onChanged();
   }, [activityId, loadGroups, onChanged]);
 
+  // Every lifecycle action runs the same way from the record's full page:
+  // act, then re-read the record so the page shows the truth, not an assumption.
+  const runAction = async (entry: any, action: string, extra?: any) => {
+    setBusy(true);
+    try {
+      if (action === 'delete') {
+        await cgm.deleteElection(Number(entry.election.id), String(extra?.reason || 'Deleted by organizer'));
+        setElections((current) => current.filter((item) => Number(item.election.id) !== Number(entry.election.id)));
+        setOpenElectionId(null);
+        setMessage('Election deleted — it can be restored from the Recycle Bin.');
+        onChanged();
+        return;
+      }
+      if (action === 'resolve') await cgm.resolveTie(Number(entry.election.id), Number(extra?.winner), extra?.reason);
+      else if (action === 'open-voting' && (extra as any)?.votingOpenAt !== undefined) {
+        await cgm.electionAction(Number(entry.election.id), action as any, extra?.reason, extra as any);
+      } else await cgm.electionAction(Number(entry.election.id), action as any, extra?.reason);
+      const refreshed = await cgm.electionDetail(Number(entry.election.id));
+      setElections((current) => current.map((item) => (Number(item.election.id) === Number(entry.election.id) ? refreshed : item)));
+      onChanged();
+    } catch (failure: any) { setMessage(failure?.message || 'That did not work.'); }
+    finally { setBusy(false); }
+  };
+
+  const openEntry = openElectionId ? elections.find((entry) => Number(entry.election.id) === Number(openElectionId)) || null : null;
+
+  // A record is a PAGE, not an expandable row: the list never dumps candidates.
+  if (openEntry) {
+    return (
+      <div className="space-y-4" data-testid="cgm-election-page">
+        <button type="button" className="mini-button" data-testid="cgm-election-page-back"
+          onClick={() => { setOpenElectionId(null); setPendingOpen(null); setMessage(null); }}>
+          <ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Back to elections
+        </button>
+        {message && <Banner tone="success">{message}</Banner>}
+        {pendingOpen && Number(pendingOpen.election.id) === Number(openEntry.election.id) && (
+          <OpenVotingForm
+            entry={pendingOpen}
+            busy={busy}
+            onCancel={() => setPendingOpen(null)}
+            onConfirm={async (values) => {
+              await runAction(pendingOpen, 'open-voting', { ...values, reason: 'Voting opened by organizer' });
+              setPendingOpen(null);
+              setMessage('Voting is now open — share the voting link with this group.');
+            }}
+          />
+        )}
+        <ElectionDossier
+          entry={openEntry}
+          busy={busy}
+          onAction={(action, extra) => runAction(openEntry, action, extra)}
+          onPrefillOpenVoting={() => setPendingOpen(openEntry)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <div className={card}>
@@ -2700,46 +2761,6 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
         </select>
         {message && <div className="mt-3"><Banner tone="success">{message}</Banner></div>}
       </div>
-
-      {pendingOpen && (
-        <div className={`${card} border-amber-200 bg-amber-50/40`} data-testid="cgm-open-voting-form">
-          <div className="flex items-center justify-between">
-            <p className={label}>Open voting — {pendingOpen.election.title}</p>
-            <button type="button" className="mini-button" onClick={() => setPendingOpen(null)}>Cancel</button>
-          </div>
-          <p className="mt-1 text-[11px] font-medium text-slate-500">Prefilled from creation — edit what remains and confirm to open the ballot. Who may stand: <span className="font-bold">{pendingOpen.election.eligibleMode === 'custom' ? `${(pendingOpen.election.eligibleStudentIds || []).length} hand-picked member(s)` : 'ALL — every member of the group'}</span> · Group: <span className="font-bold">{pendingOpen.election.groupName}</span> · Role: <span className="font-bold">{pendingOpen.election.role}</span></p>
-          <form className="mt-3 grid gap-2 sm:grid-cols-2" onSubmit={async (event) => {
-            event.preventDefault();
-            const form = event.target as HTMLFormElement;
-            const votingOpenAt = String((form.elements.namedItem('votingOpenAt') as HTMLInputElement).value || '');
-            const votingCloseAt = String((form.elements.namedItem('votingCloseAt') as HTMLInputElement).value || '');
-            setBusy(true);
-            try {
-              await cgm.electionAction(Number(pendingOpen.election.id), 'open-voting' as any, undefined, {
-                votingOpenAt: votingOpenAt ? new Date(votingOpenAt).toISOString() : undefined,
-                votingCloseAt: votingCloseAt ? new Date(votingCloseAt).toISOString() : undefined,
-              } as any);
-              setMessage('Voting is now open — share the voting link with this group.');
-              setPendingOpen(null);
-              await refreshElections();
-            } catch (failure: any) { setMessage(failure?.message || 'Could not open voting.'); }
-            finally { setBusy(false); }
-          }}>
-            <div>
-              <label className="text-[10px] font-black uppercase tracking-wider text-slate-500" htmlFor="open-vote-open">Voting opens</label>
-              <input id="open-vote-open" name="votingOpenAt" type="datetime-local" className={inputClass} defaultValue={pendingOpen.election.votingOpenAt ? String(pendingOpen.election.votingOpenAt).slice(0, 16) : ''} aria-label="Voting opens" />
-            </div>
-            <div>
-              <label className="text-[10px] font-black uppercase tracking-wider text-slate-500" htmlFor="open-vote-close">Voting closes</label>
-              <input id="open-vote-close" name="votingCloseAt" type="datetime-local" className={inputClass} defaultValue={pendingOpen.election.votingCloseAt ? String(pendingOpen.election.votingCloseAt).slice(0, 16) : ''} aria-label="Voting closes" />
-            </div>
-            <div className="sm:col-span-2 flex gap-2">
-              <button type="submit" disabled={busy} className="cgm-primary-button">{busy ? 'Opening…' : 'Confirm open voting'}</button>
-              <button type="button" className="mini-button" onClick={() => setPendingOpen(null)}>Back</button>
-            </div>
-          </form>
-        </div>
-      )}
 
       {detail && (
         <div className={card}>
@@ -2847,66 +2868,181 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
 
       <div className={card}>
         <p className={label}>Election records</p>
-        <p className="mt-1 text-[11px] font-medium text-slate-400">Open voting, close it, resolve ties, and announce the winner. Anonymous ballots are never shown per voter — the organizer only ever sees counts. Voting and nomination links below are scoped to THIS group’s members only.</p>
+        <p className="mt-1 text-[11px] font-medium text-slate-400">Tap a record to open its full page: ballot, vote counts, turnout, links and the lifecycle actions. Anonymous ballots are never shown per voter — you only ever see counts.</p>
       </div>
-      {elections.map((entry) => (
-        <ElectionManager key={entry.election.id} data={entry} onPrefillOpenVoting={() => {
-          // Prefill: jump to image-2 style form with earlier data + remaining voting inputs
-          setPendingOpen(entry);
-          // Smooth scroll to top so organizer sees the prefilled form
-          if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
-        }} onAction={async (action, extra) => {
-          setBusy(true);
-          try {
-            if (action === 'delete') {
-              await cgm.deleteElection(Number(entry.election.id), String(extra?.reason || 'Deleted by organizer'));
-              setElections((current) => current.filter((item) => Number(item.election.id) !== Number(entry.election.id)));
-              setMessage('Election deleted — it can be restored from the Recycle Bin.');
-              onChanged();
-              return;
-            }
-            if (action === 'resolve') await cgm.resolveTie(Number(entry.election.id), Number(extra?.winner), extra?.reason);
-            else if (action === 'open-voting' && (extra as any)?.votingOpenAt !== undefined) {
-              await cgm.electionAction(Number(entry.election.id), action as any, extra?.reason, extra as any);
-            } else await cgm.electionAction(Number(entry.election.id), action as any, extra?.reason);
-            const refreshed = await cgm.electionDetail(Number(entry.election.id));
-            setElections((current) => current.map((item) => (Number(item.election.id) === Number(entry.election.id) ? refreshed : item)));
-            onChanged();
-          } catch (failure: any) { setMessage(failure?.message || 'That did not work.'); }
-          finally { setBusy(false); }
-        }} busy={busy} />
-      ))}
+      {!elections.length && (
+        <div className={card}>
+          <p className="text-xs font-medium text-slate-500">No elections for this activity yet — create one above and it appears here as its own record.</p>
+        </div>
+      )}
+      <div className="space-y-2" data-testid="cgm-election-records">
+        {elections.map((entry) => (
+          <ElectionRecordRow
+            key={entry.election.id}
+            entry={entry}
+            onOpen={() => setOpenElectionId(Number(entry.election.id))}
+          />
+        ))}
+      </div>
     </div>
   );
 };
 
-const ElectionManager = ({ data, onAction, onPrefillOpenVoting, busy }: { data: any; onAction: (action: string, extra?: any) => Promise<void>; onPrefillOpenVoting?: () => void; busy: boolean }) => {
-  const { election, candidates, participation } = data;
+/**
+ * One election in the list: a compact, tappable record.
+ * No candidate names here — the record opens full page with a click.
+ */
+const ElectionRecordRow = ({ entry, onOpen }: { entry: any; onOpen: () => void }) => {
+  const election = entry.election || {};
+  const participation = entry.participation || {};
+  const status = String(election.status || '');
+  const chip = status === 'voting' ? 'bg-emerald-600 text-white'
+    : status === 'nominating' ? 'bg-amber-100 text-amber-800'
+    : status === 'closed' ? 'bg-slate-800 text-white'
+    : 'bg-slate-100 text-slate-500';
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="cgm-record-row"
+      data-testid={`cgm-election-record-${election.id}`}
+      aria-label={`Open election ${election.title || election.id}`}
+    >
+      <span className="cgm-record-icon"><Vote className="h-4 w-4" /></span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-black text-slate-900">{election.title || 'Election'}</span>
+        <span className="mt-0.5 block truncate text-[11px] font-semibold text-slate-400">
+          {[election.groupName, election.role, `${participation.voted ?? 0}/${participation.groupSize ?? 0} voted`].filter(Boolean).join(' · ')}
+        </span>
+        <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${chip}`}>{status || 'election'}</span>
+          {election.results?.outcome?.winner && (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-emerald-700">
+              {election.results.outcome.announced ? 'announced' : 'winner ready'}
+            </span>
+          )}
+          {entry.candidates?.length ? (
+            <span className="text-[10px] font-bold text-slate-400">{entry.candidates.length} candidate{entry.candidates.length === 1 ? '' : 's'}</span>
+          ) : null}
+        </span>
+      </span>
+      <span className="flex flex-none items-center gap-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">
+        Open <ChevronRight className="h-4 w-4 text-slate-300" />
+      </span>
+    </button>
+  );
+};
+/** Prefilled "open voting" form — shown on the record's own page. */
+const OpenVotingForm = ({ entry, busy, onCancel, onConfirm }: { entry: any; busy: boolean; onCancel: () => void; onConfirm: (values: { votingOpenAt?: string; votingCloseAt?: string }) => Promise<void> }) => {
+  const [working, setWorking] = useState(false);
+  return (
+    <div className={`${card} border-amber-200 bg-amber-50/40`} data-testid="cgm-open-voting-form">
+      <div className="flex items-center justify-between gap-2">
+        <p className={label}>Open voting — {entry.election.title}</p>
+        <button type="button" className="mini-button" onClick={onCancel}>Cancel</button>
+      </div>
+      <p className="mt-1 text-[11px] font-medium text-slate-500">
+        Prefilled from creation — edit what remains and confirm to open the ballot. Who may stand: <span className="font-bold">{entry.election.eligibleMode === 'custom' ? `${(entry.election.eligibleStudentIds || []).length} hand-picked member(s)` : 'ALL — every member of the group'}</span>
+        {' · '}Group: <span className="font-bold">{entry.election.groupName}</span> · Role: <span className="font-bold">{entry.election.role}</span>
+      </p>
+      <form className="mt-3 grid gap-2 sm:grid-cols-2" onSubmit={async (event) => {
+        event.preventDefault();
+        const form = event.target as HTMLFormElement;
+        const votingOpenAt = String((form.elements.namedItem('votingOpenAt') as HTMLInputElement).value || '');
+        const votingCloseAt = String((form.elements.namedItem('votingCloseAt') as HTMLInputElement).value || '');
+        setWorking(true);
+        try {
+          await onConfirm({
+            votingOpenAt: votingOpenAt ? new Date(votingOpenAt).toISOString() : undefined,
+            votingCloseAt: votingCloseAt ? new Date(votingCloseAt).toISOString() : undefined,
+          });
+        } finally { setWorking(false); }
+      }}>
+        <div>
+          <label className="text-[10px] font-black uppercase tracking-wider text-slate-500" htmlFor="open-vote-open">Voting opens</label>
+          <input id="open-vote-open" name="votingOpenAt" type="datetime-local" className={inputClass} defaultValue={entry.election.votingOpenAt ? String(entry.election.votingOpenAt).slice(0, 16) : ''} aria-label="Voting opens" />
+        </div>
+        <div>
+          <label className="text-[10px] font-black uppercase tracking-wider text-slate-500" htmlFor="open-vote-close">Voting closes</label>
+          <input id="open-vote-close" name="votingCloseAt" type="datetime-local" className={inputClass} defaultValue={entry.election.votingCloseAt ? String(entry.election.votingCloseAt).slice(0, 16) : ''} aria-label="Voting closes" />
+        </div>
+        <div className="flex gap-2 sm:col-span-2">
+          <button type="submit" disabled={busy || working} className="cgm-primary-button">{working ? 'Opening…' : 'Confirm open voting'}</button>
+          <button type="button" className="mini-button" onClick={onCancel}>Back</button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+/**
+ * The full page for ONE election record.
+ *
+ * Everything about the record lives here — turnout, the ballot with real counts,
+ * the result and tie-break, the shareable links, and the lifecycle actions —
+ * instead of being dumped inline into the list. Built for a phone: one column,
+ * full-width tap targets, nothing that needs a horizontal scroll.
+ */
+const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting }: {
+  entry: any;
+  busy: boolean;
+  onAction: (action: string, extra?: any) => Promise<void>;
+  onPrefillOpenVoting?: () => void;
+}) => {
+  const { election, candidates, participation } = entry;
   const hasTie = Boolean(election.results?.outcome?.tie) && !election.results?.outcome?.resolved;
   const tiedIds: number[] = election.results?.outcome?.tiedCandidateIds || [];
   const [showVotingLink, setShowVotingLink] = useState(false);
   const [showLeaderLink, setShowLeaderLink] = useState(false);
   const [copied, setCopied] = useState(false);
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  // The voting link signs the student in and drops them straight on this
-  // ballot — share it as text or as the stamped QR image.
   const votingLink = `${origin}/#student-vote/${election.id}`;
-  // While nominations are open, organizers can also share a stand-for-leader
-  // link: students who open it volunteer themselves as candidates.
   const leaderLink = `${origin}/#leader-apply/${election.id}`;
   const linkReady = ['nominating', 'voting'].includes(String(election.status));
+  const rows: any[] = Array.isArray(candidates) ? candidates : [];
+  const cast = rows.reduce((sum, row) => sum + Number(row.votes || 0), 0);
+  const topVotes = Math.max(0, ...rows.map((row) => Number(row.votes || 0)));
+  const status = String(election.status || '');
+  const winnerName = rows.find((row) => Number(row.id) === Number(election.results?.outcome?.winner))?.fullName;
+  const turnout = Number(participation?.turnout ?? 0);
+
   return (
-    <div className={card}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <p className="text-sm font-black text-slate-900">{election.title}</p>
-          <p className="text-[11px] font-semibold text-slate-400">{election.groupName} · {election.role} · {election.status} · {election.anonymity} · turnout {participation?.turnout ?? 0}% ({participation?.voted ?? 0}/{participation?.groupSize ?? 0})</p>
+    <div className="space-y-4" data-testid={`cgm-election-dossier-${election.id}`}>
+      <div className="cgm-ballot-hero">
+        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-100">Election record</p>
+        <h2 className="mt-1 text-xl font-black leading-tight">{election.title || 'Election'}</h2>
+        <p className="mt-1 text-[11px] font-semibold text-emerald-50">
+          {[election.groupName, election.role, election.anonymity === 'anonymous' ? 'Anonymous ballot' : 'Public roll', election.tieBreak ? `tie → ${election.tieBreak}` : null].filter(Boolean).join(' · ')}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-white ring-1 ring-white/25">{status || 'election'}</span>
+          {election.eligibleMode === 'custom'
+            ? <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-white ring-1 ring-white/25">{(election.eligibleStudentIds || []).length} hand-picked</span>
+            : <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-white ring-1 ring-white/25">ALL members</span>}
+          {election.results?.outcome?.announced && <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">announced</span>}
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          {election.status === 'nominating' && <button type="button" disabled={busy} className="mini-button" onClick={() => { if (onPrefillOpenVoting) onPrefillOpenVoting(); else void onAction('open-voting'); }}>Open voting</button>}
-          {election.status === 'voting' && <button type="button" disabled={busy} className="mini-button" onClick={() => void onAction('close')}>Close</button>}
-          {election.status === 'closed' && hasTie && (
-            <button type="button" disabled={busy} className="mini-button" onClick={async () => {
+        <div className="mt-4">
+          <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-emerald-50">
+            <span>Turnout</span>
+            <span>{turnout}% · {participation?.voted ?? 0}/{participation?.groupSize ?? 0}</span>
+          </div>
+          <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-white/20">
+            <div className="h-full rounded-full bg-white" style={{ width: `${Math.min(100, Math.max(0, turnout))}%` }} />
+          </div>
+        </div>
+      </div>
+
+      <div className={card}>
+        <p className={label}>Lifecycle</p>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+          {status === 'nominating' && (
+            <button type="button" disabled={busy} className="cgm-primary-button w-full sm:w-auto" onClick={() => { if (onPrefillOpenVoting) onPrefillOpenVoting(); else void onAction('open-voting'); }}>Open voting</button>
+          )}
+          {status === 'voting' && (
+            <button type="button" disabled={busy} className="cgm-primary-button w-full sm:w-auto" onClick={() => void onAction('close')}>Close</button>
+          )}
+          {status === 'closed' && hasTie && (
+            <button type="button" disabled={busy} className="mini-button w-full sm:w-auto" onClick={async () => {
               const winner = await appDialog.prompt({
                 title: 'Resolve the tie',
                 message: `Tied candidates: ${tiedIds.join(', ')}. Enter the candidate id the tie-break lands on.`,
@@ -2915,17 +3051,19 @@ const ElectionManager = ({ data, onAction, onPrefillOpenVoting, busy }: { data: 
               if (winner) await onAction('resolve', { winner: Number(winner), reason: 'Tie resolved by organizer' });
             }}>Resolve tie</button>
           )}
-          {election.status === 'closed' && election.results?.outcome?.winner && !election.results?.outcome?.announced && (
-            <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void onAction('announce')}>Announce winner</button>
+          {status === 'closed' && election.results?.outcome?.winner && !election.results?.outcome?.announced && (
+            <button type="button" disabled={busy} className="cgm-primary-button w-full sm:w-auto" onClick={() => void onAction('announce')}>Announce winner</button>
           )}
-          {linkReady && <button type="button" className="mini-button" onClick={() => setShowVotingLink((value) => !value)}>{showVotingLink ? 'Hide voting link' : 'Voting link'}</button>}
-          {election.status === 'nominating' && (
-            <button type="button" className="mini-button" onClick={() => setShowLeaderLink((value) => !value)}>
+          {linkReady && (
+            <button type="button" className="mini-button w-full sm:w-auto" onClick={() => setShowVotingLink((value) => !value)}>{showVotingLink ? 'Hide voting link' : 'Voting link'}</button>
+          )}
+          {status === 'nominating' && (
+            <button type="button" className="mini-button w-full sm:w-auto" onClick={() => setShowLeaderLink((value) => !value)}>
               {showLeaderLink ? 'Hide leader link' : 'Leader sign-up link'}
             </button>
           )}
-          {['nominating', 'voting'].includes(election.status) && (
-            <button type="button" disabled={busy} className="mini-button text-red-600" onClick={async () => {
+          {['nominating', 'voting'].includes(status) && (
+            <button type="button" disabled={busy} className="mini-button w-full text-red-600 sm:w-auto" onClick={async () => {
               const reason = await appDialog.prompt({ title: 'Cancel this election?', label: 'Reason for cancelling', multiline: true, confirmLabel: 'Cancel election' });
               if (reason) await onAction('cancel', { reason });
             }}>Cancel</button>
@@ -2936,7 +3074,7 @@ const ElectionManager = ({ data, onAction, onPrefillOpenVoting, busy }: { data: 
             type="button"
             disabled={busy}
             data-testid={`cgm-election-delete-${election.id}`}
-            className="mini-button text-red-700"
+            className="mini-button w-full text-red-700 sm:w-auto"
             onClick={async () => {
               const reason = await appDialog.prompt({
                 title: 'Delete this election?',
@@ -2952,25 +3090,71 @@ const ElectionManager = ({ data, onAction, onPrefillOpenVoting, busy }: { data: 
           </button>
         </div>
       </div>
-      <ul className="mt-3 space-y-1">
-        {candidates.map((candidate: any) => (
-          <li key={candidate.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
-            <span className="font-bold text-slate-600">{candidate.fullName} <span className="ml-1 uppercase text-slate-400">{candidate.status}</span></span>
-            <span className="font-black text-slate-500">{candidate.votes} vote(s)</span>
-          </li>
-        ))}
-        {!candidates.length && <li className="text-[11px] text-slate-400">No candidates yet.</li>}
-      </ul>
-      {showVotingLink && (
-        <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
+
+      <div className={card}>
+        <div className="flex items-center justify-between gap-2">
+          <p className={label}>Ballot — {rows.length} candidate{rows.length === 1 ? '' : 's'}</p>
+          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">{cast} vote{cast === 1 ? '' : 's'} cast</p>
+        </div>
+        <ul className="mt-3 space-y-2">
+          {rows.map((candidate: any) => {
+            const votes = Number(candidate.votes || 0);
+            const percent = cast > 0 ? Math.round((votes / cast) * 100) : 0;
+            const leading = topVotes > 0 && votes === topVotes;
+            return (
+              <li key={candidate.id} className="rounded-xl border border-slate-100 px-3 py-2.5" data-testid={`cgm-dossier-candidate-${candidate.id}`}>
+                <div className="flex items-center gap-2.5">
+                  <span className={`grid h-9 w-9 flex-none place-items-center rounded-full text-[11px] font-black ${leading ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                    {(String(candidate.fullName || '?').trim().split(/\s+/).slice(0, 2).map((word: string) => word[0]).join('') || '?').toUpperCase()}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-black text-slate-800">{candidate.fullName || 'Candidate'}</p>
+                    <p className="text-[11px] font-semibold text-slate-400">{String(candidate.status || '').toUpperCase()}{candidate.statement ? ` · ${candidate.statement}` : ''}</p>
+                  </div>
+                  <span className="flex-none text-right">
+                    <span className="block text-sm font-black text-slate-700">{votes}</span>
+                    <span className="block text-[9px] font-black uppercase tracking-wider text-slate-400">vote{votes === 1 ? '' : 's'}</span>
+                  </span>
+                </div>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div className={`h-full rounded-full ${leading ? 'bg-emerald-500' : 'bg-slate-300'}`} style={{ width: `${percent}%` }} />
+                </div>
+              </li>
+            );
+          })}
+          {!rows.length && <li className="rounded-xl border border-dashed border-slate-200 px-3 py-6 text-center text-[11px] font-semibold text-slate-400">No candidates yet.</li>}
+        </ul>
+      </div>
+
+      {(status === 'closed' || election.results) && (
+        <div className={card} data-testid="cgm-election-result">
+          <p className={label}>Result</p>
+          <p className="mt-2 text-sm font-bold text-slate-800">
+            {hasTie ? `Tie between ${tiedIds.length} candidate(s) — resolve it to finish the election.`
+              : winnerName ? `${winnerName} ${election.results?.outcome?.announced ? 'was announced as the winner' : 'is the winner — announce it when you are ready'}`
+              : 'No winner recorded for this election yet.'}
+          </p>
+          <p className="mt-1 text-[11px] font-medium text-slate-500">
+            Tie-break: {election.tieBreak || 'random'} · Vote changes: {election.allowVoteChange ? 'allowed until close' : 'locked after voting'} · Results visible to: {election.visibility}
+          </p>
+          {election.cancelledReason && <p className="mt-2 text-[11px] font-semibold text-red-600">Cancelled: {election.cancelledReason}</p>}
+        </div>
+      )}
+
+      <div className={card}>
+        <p className={label}>Key dates</p>
+        <ul className="mt-2 grid gap-1.5 text-[11px] font-semibold text-slate-500 sm:grid-cols-2">
+          <li>Nominations: {election.nominationOpenAt ? formatWhen(election.nominationOpenAt) : 'immediately'} → {election.nominationCloseAt ? formatWhen(election.nominationCloseAt) : 'no deadline'}</li>
+          <li>Voting: {election.votingOpenAt ? formatWhen(election.votingOpenAt) : 'on open'} → {election.votingCloseAt ? formatWhen(election.votingCloseAt) : 'manual close'}</li>
+        </ul>
+      </div>
+
+      {showVotingLink && linkReady && (
+        <div className="rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4">
           <p className="text-xs font-black uppercase tracking-wider text-emerald-700">Voting link — sign in, then straight to this ballot</p>
           <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{votingLink}</p>
           <div className="mt-2 flex flex-wrap items-start gap-3">
-            <button
-              type="button"
-              className="mini-button"
-              onClick={async () => { setCopied(await copyToClipboard(votingLink)); }}
-            >
+            <button type="button" className="mini-button" onClick={async () => { setCopied(await copyToClipboard(votingLink)); }}>
               {copied ? 'Copied ✓' : 'Copy link'}
             </button>
             <QrBlock
@@ -2985,16 +3169,13 @@ const ElectionManager = ({ data, onAction, onPrefillOpenVoting, busy }: { data: 
           <p className="mt-2 text-[11px] font-medium text-slate-400">This link is scoped to THIS group’s members only — students sign in with their passkey, are checked for group membership, and land directly on this ballot. Anyone outside the group is blocked from voting.</p>
         </div>
       )}
-      {showLeaderLink && election.status === 'nominating' && (
-        <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/40 p-3" data-testid="cgm-leader-link">
+
+      {showLeaderLink && status === 'nominating' && (
+        <div className="rounded-2xl border border-sky-100 bg-sky-50/40 p-4" data-testid="cgm-leader-link">
           <p className="text-xs font-black uppercase tracking-wider text-sky-700">Leader sign-up link — volunteers stand as candidates (scoped to THIS group)</p>
           <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{leaderLink}</p>
           <div className="mt-2 flex flex-wrap items-start gap-3">
-            <button
-              type="button"
-              className="mini-button"
-              onClick={async () => { setCopied(await copyToClipboard(leaderLink)); }}
-            >
+            <button type="button" className="mini-button" onClick={async () => { setCopied(await copyToClipboard(leaderLink)); }}>
               {copied ? 'Copied ✓' : 'Copy link'}
             </button>
             <QrBlock
