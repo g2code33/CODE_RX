@@ -307,6 +307,60 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
 }
 
 // ---------------------------------------------------------------------------
+// 2b2. The control-center navigation carries the same numbers — the sum of the
+//      Class Groups sections, and it falls when PHANTOM opens one of them
+// ---------------------------------------------------------------------------
+{
+  const page = await boot('#class-groups/phantom', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('PHANTOM');
+
+  const navBoard = (await api('GET', '/api/phantom/attention', undefined, phantomToken)).json?.data || {};
+  const navSectionOf = (board, key) => (board.sections || []).find((entry) => entry.key === key) || {};
+  const navBadge = () => page.window.document.querySelector('[data-testid="phantom-nav-badge-classgroups"]');
+  const navBadgeEl = await page.waitForElement(navBadge, 20_000);
+  check('the Class Groups tab carries the sum of its sections',
+    Boolean(navBadgeEl) && Number(String(navBadgeEl.textContent).trim()) === Number(navSectionOf(navBoard, 'classgroups').unseen || 0),
+    `badge=${navBadgeEl ? String(navBadgeEl.textContent).trim() : 'missing'} api=${navSectionOf(navBoard, 'classgroups').unseen}`);
+  check('that sum is not a number of its own: it is every oversight section added up',
+    Number(navSectionOf(navBoard, 'classgroups').unseen) >= 1
+    && Number(navSectionOf(navBoard, 'classgroups').unseen) === Number(navBoard.classGroupsUnseen)
+    && Number(navSectionOf(navBoard, 'overview').unseen) >= Number(navSectionOf(navBoard, 'classgroups').unseen),
+    JSON.stringify((navBoard.sections || []).map((entry) => [entry.key, entry.unseen])));
+
+  // Open the panel, then open the section that owes the most news.
+  const cgNav = await page.waitForElement(() => page.window.document.querySelector('[data-testid="phantom-nav-classgroups"]'), 20_000);
+  cgNav && cgNav.click();
+  await page.waitForFor('Class & Group Management oversight', 20_000);
+
+  const cgmBoard = (await api('GET', '/api/cgm/phantom/attention', undefined, phantomToken)).json?.data || {};
+  const targetTab = (cgmBoard.tabs || []).find((entry) => Number(entry.unseen) > 0 && entry.key !== 'overview');
+  const before = Number(navSectionOf(navBoard, 'classgroups').unseen || 0);
+  const expected = before - Number(targetTab?.unseen || 0);
+  const sectionButton = targetTab ? await page.waitForElement(() => page.buttonByText(targetTab.label), 20_000) : null;
+  check('a section with news can be opened from inside the tab', Boolean(targetTab) && Boolean(sectionButton),
+    `target=${targetTab?.label || 'none'}`);
+  sectionButton && sectionButton.click();
+
+  const droppedTo = await page.waitForElement(() => {
+    const badge = navBadge();
+    if (expected > 0) return badge && Number(String(badge.textContent).trim()) === expected ? badge : null;
+    return !badge ? page.window.document.body : null;
+  }, 20_000);
+  check('opening that section takes its number off the Class Groups tab',
+    Boolean(droppedTo),
+    `expected=${expected} badge=${navBadge() ? String(navBadge().textContent).trim() : 'gone'} target=${targetTab?.label || 'none'} unseen=${targetTab?.unseen ?? 'none'}`);
+
+  // And the server agrees with what the sidebar is showing.
+  const navAfter = (await api('GET', '/api/phantom/attention', undefined, phantomToken)).json?.data || {};
+  check('the server agrees: the sum fell by exactly that section',
+    Number(navSectionOf(navAfter, 'classgroups').unseen) === expected
+    && (expected > 0
+      ? Number(String(navBadge()?.textContent || '').trim()) === expected
+      : !navBadge()),
+    `api=${navSectionOf(navAfter, 'classgroups').unseen} badge=${navBadge() ? String(navBadge().textContent).trim() : 'gone'}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2c. Moves & swaps: PHANTOM decides membership changes, and a decision stays
 //     on the record after it is granted
 // ---------------------------------------------------------------------------

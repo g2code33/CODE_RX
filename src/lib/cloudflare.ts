@@ -417,6 +417,12 @@ export const db = {
     updateCodename: (id: number, data: any) => apiCall(`/api/phantom/codenames/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     releaseCodename: (id: number, data: { confirm: boolean; mode?: 'available' | 'retired' }) => apiCall(`/api/phantom/codenames/${id}/release`, { method: 'POST', body: JSON.stringify(data) }),
     auditLogs: async (limit = 100) => (await apiCall<{ data: any[] }>(`/api/phantom/audit-logs?limit=${limit}`)).data || [],
+    // Control-center badges: what arrived on each navigation tab since this
+    // operator last opened it, and the work still waiting there. Opening the
+    // tab moves the watermark, so the number falls to zero for them alone.
+    navAttention: async () => (await apiCall<{ data: any }>('/api/phantom/attention')).data,
+    markNavAttentionSeen: async (key: string) =>
+      (await apiCall<{ data: any }>(`/api/phantom/attention/${encodeURIComponent(key)}/seen`, { method: 'POST' })).data,
     recycleBin: async (limit = 100) => (await apiCall<{ data: any[] }>(`/api/phantom/recycle-bin?limit=${limit}`)).data || [],
     restoreRecycleBin: (id: number) => apiCall(`/api/phantom/recycle-bin/${id}/restore`, { method: 'POST' }),
     purgeRecycleBin: (id: number) => apiCall(`/api/phantom/recycle-bin/${id}`, { method: 'DELETE' }),

@@ -54,6 +54,25 @@ instead of stacking them over the content, with a single `Queues (N)` chip
 carrying the total still waiting; the chip opens the first queue that needs a
 decision.
 
+## The control center carries the same numbers
+
+The left-hand PHANTOM navigation (`Overview`, `Applications`, `Members`,
+`Community Control`, `Class Groups`, `Audit Logs`, `Recycle Bin`) shows the same
+kind of number the oversight sections do — what arrived **since this operator
+last opened that tab** — and opening the tab clears it, for that account only.
+The watermark lives in `cgm_phantom_attention` under a `nav:`-prefixed key, so a
+section inside Class Groups and the Class Groups tab itself never clear each
+other.
+
+`Class Groups` is **derived**: its badge is the sum of the oversight panel's own
+sections (`classGroupsUnseen`), so it falls by exactly the section PHANTOM opens.
+`Overview` carries the grand total of every other tab. Tabs with nothing to watch
+(Permissions, Settings, Site Emojis…) show no badge rather than a decorative zero.
+The counts come from the tables those tabs render (`applications`,
+`member_profiles`, `public_forum_reports` + `community_group_join_requests`,
+`audit_logs`, `recycle_bin_items`) in one statement of scalar subqueries —
+`GET /api/phantom/attention`, `POST /api/phantom/attention/:key/seen`.
+
 ## One listing rule
 
 `src/components/RecentItems.tsx` (`LIST_PREVIEW = 5`) is the single list primitive:

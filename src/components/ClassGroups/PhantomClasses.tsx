@@ -178,7 +178,12 @@ const PoliciesPanel = ({ rows, busy, onSave }: {
   );
 };
 
-export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; embedded?: boolean }) => {
+export const PhantomClassGroups = ({ onExit, embedded, onAttentionChange }: {
+  onExit?: () => void;
+  embedded?: boolean;
+  /** Told when a section is opened, so the control-center badge can follow. */
+  onAttentionChange?: () => void;
+}) => {
   const [tab, setTab] = useState<Tab>('overview');
   const [overview, setOverview] = useState<any>(null);
   const [rows, setRows] = useState<PhantomRows>({} as PhantomRows);
@@ -210,7 +215,10 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
     const board = data?.board || data?.data?.board;
     if (board) setAttention(board);
     else await loadAttention();
-  }, [loadAttention]);
+    // The control center's "Class Groups" tab is the sum of these sections, so
+    // it has to fall the moment one of them is opened here.
+    onAttentionChange?.();
+  }, [loadAttention, onAttentionChange]);
   const loadTab = useCallback(async (which: Tab) => {
     const loaders: Partial<Record<Tab, () => Promise<unknown>>> = {
       policies: () => cgm.phantomPolicies(),

@@ -201,7 +201,7 @@ check('the module flag can be toggled with data preserved',
 check('delegation grants an optional batch cap and revokes immediately',
   /maxBatch/.test(phantom) && /phantomRevokeDelegation/.test(phantom));
 check('the PHANTOM area embeds into the Control Center as its own tab',
-  phantomCenter.includes("'classgroups'") && phantomCenter.includes('<PhantomClassGroups embedded />'));
+  phantomCenter.includes("'classgroups'") && phantomCenter.includes('<PhantomClassGroups embedded'));
 check('PHANTOM decisions carry a reason prompt, never silent actions',
   (phantom.match(/appDialog\.prompt/g) || []).length >= 6);
 
@@ -1255,6 +1255,38 @@ check('the chip opens the first queue that has something waiting',
 check('the chip and the strip announce themselves to a screen reader',
   /aria-label=\{queueWaiting/.test(phantomPanel)
   && /aria-label="PHANTOM sections"/.test(phantomPanel));
+
+section('32. The control-center navigation carries the same numbers');
+
+const controlCenter = src('src/components/PhantomControlCenter.tsx');
+const navAttentionLib = src('functions/lib/phantom-attention.ts');
+
+check('every navigation tab can show what arrived since PHANTOM last opened it',
+  /data-testid=\{`phantom-nav-badge-\$\{id\}`\}/.test(controlCenter)
+  && /data-testid=\{`phantom-nav-waiting-\$\{id\}`\}/.test(controlCenter)
+  && /aria-label=\{unseen \? `\$\{label\} — \$\{unseen\} new` : label\}/.test(controlCenter));
+check('opening a tab is what clears its number — not scrolling past it',
+  /const openTab = async \(target: Tab\) => \{/.test(controlCenter)
+  && /db\.phantom\.markNavAttentionSeen\(target\)/.test(controlCenter)
+  && /if \(!section\?\.markable\) return;/.test(controlCenter));
+check('Class Groups is the sum of its sections and Overview the grand total',
+  /\{ key: 'classgroups', label: 'Class Groups', derive: 'class-groups' \}/.test(navAttentionLib)
+  && /unseen\.set\('classgroups', Number\(board\.totalUnseen \|\| 0\)\)/.test(navAttentionLib)
+  && /if \(overview\) overview\.unseen = totalUnseen;/.test(navAttentionLib));
+check('the navigation counts are one statement, never a compound SELECT',
+  /const NAV_SQL =/.test(navAttentionLib)
+  && !/UNION ALL\n/.test(navAttentionLib)
+  && /NAV_WATERMARK_PREFIX = 'nav:'/.test(navAttentionLib)
+  && /cgm_phantom_attention WHERE member_profile_id = \? AND tab_key/.test(navAttentionLib));
+check('the badge API is wired through the client and refuses a derived tab',
+  /navAttention: async \(\) =>/.test(src('src/lib/cloudflare.ts'))
+  && /markNavAttentionSeen: async \(key: string\)/.test(src('src/lib/cloudflare.ts'))
+  && /app\.post\('\/api\/phantom\/attention\/:key\/seen'/.test(src('functions/[[path]].ts'))
+  && /code: 'UNKNOWN_SECTION'/.test(src('functions/[[path]].ts')));
+check('the class-groups panel tells the control center when a section is opened',
+  /onAttentionChange\?: \(\) => void/.test(phantomPanel)
+  && /onAttentionChange\?\.\(\);/.test(phantomPanel)
+  && /onAttentionChange=\{loadNavAttention\}/.test(controlCenter));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

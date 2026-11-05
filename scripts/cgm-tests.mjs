@@ -5393,6 +5393,76 @@ check('45.30 — the oversight counts only real work as pending, never the recor
   && Number(q1("SELECT COUNT(*) c FROM cgm_move_requests").c) >= 4);
 
 
+
+// ---------------------------------------------------------------------------
+// 46. The control-center navigation carries the same numbers
+// ---------------------------------------------------------------------------
+section('46. PHANTOM nav badges: the sum on the outside, cleared from the outside');
+
+const navOf = async (token = phantomToken) =>
+  (await memberCall('GET', '/api/phantom/attention', undefined, token));
+const navSection = (board, key) => (board.sections || []).find((entry) => entry.key === key) || {};
+
+const navFresh = await navOf();
+check('46.1 — PHANTOM can read the navigation badges', navFresh.status === 200 && Array.isArray(navFresh.json?.data?.sections),
+  `${navFresh.status} ${navFresh.text?.slice(0, 160)}`);
+const navBoard = navFresh.json?.data || {};
+check('46.2 — every tab that can honestly count one is listed, and only those',
+  JSON.stringify((navBoard.sections || []).map((entry) => entry.key))
+  === JSON.stringify(['overview', 'applications', 'members', 'community', 'classgroups', 'audit', 'recycle'])
+  && (navBoard.sections || []).every((entry) => Number.isInteger(entry.unseen) && Number.isInteger(entry.pending)),
+  JSON.stringify((navBoard.sections || []).map((entry) => entry.key)));
+check('46.3 — the Class Groups tab is the sum of the oversight panel, not a number of its own',
+  Number(navSection(navBoard, 'classgroups').unseen)
+  === Number(((await attentionOf()).board || {}).totalUnseen || 0)
+  && navSection(navBoard, 'classgroups').markable === false,
+  JSON.stringify(navSection(navBoard, 'classgroups')));
+check('46.4 — Overview is the grand total of every other tab',
+  Number(navSection(navBoard, 'overview').unseen)
+  === (navBoard.sections || []).filter((entry) => entry.key !== 'overview').reduce((sum, entry) => sum + Number(entry.unseen || 0), 0)
+  && Number(navBoard.totalUnseen) === Number(navSection(navBoard, 'overview').unseen),
+  JSON.stringify((navBoard.sections || []).map((entry) => [entry.key, entry.unseen])));
+check('46.5 — the counts come from the tables those tabs render',
+  Number(navSection(navBoard, 'applications').pending) === Number(q1("SELECT COUNT(*) c FROM applications WHERE status = 'pending'").c)
+  && Number(navSection(navBoard, 'community').pending) === Number(q1("SELECT COUNT(*) c FROM public_forum_reports WHERE status = 'open'").c)
+    + Number(q1("SELECT COUNT(*) c FROM community_group_join_requests WHERE status = 'pending'").c)
+  && Number(navSection(navBoard, 'members').pending) === 0,
+  JSON.stringify((navBoard.sections || []).map((entry) => [entry.key, entry.pending])));
+
+// Something new arrives in a tab that is already open elsewhere.
+sqlite.prepare("INSERT INTO recycle_bin_items (resource_type, resource_id, title, payload_json, deleted_by_user_id, deleted_at) VALUES ('document', 999, 'Nav badge fixture', '{}', NULL, datetime('now'))").run();
+const navWithNew = (await navOf()).json?.data || {};
+check('46.6 — a new arrival brings that tab\'s number up, unharmed by looking',
+  Number(navSection(navWithNew, 'recycle').unseen) >= 1
+  && Number(navSection(navWithNew, 'overview').unseen) === Number(navSection(navBoard, 'overview').unseen) + 1,
+  JSON.stringify([navSection(navWithNew, 'recycle').unseen, navSection(navWithNew, 'overview').unseen, navSection(navBoard, 'overview').unseen]));
+
+const recycleSeen = await memberCall('POST', '/api/phantom/attention/recycle/seen', undefined, phantomToken);
+check('46.7 — opening the tab clears its number for that operator',
+  recycleSeen.status === 200
+  && Number(navSection(recycleSeen.json?.data?.board || {}, 'recycle').unseen) === 0
+  && Number(navSection(recycleSeen.json?.data?.board || {}, 'overview').unseen) === Number(navSection(navWithNew, 'overview').unseen) - Number(navSection(navWithNew, 'recycle').unseen),
+  `${recycleSeen.status} ${JSON.stringify(navSection(recycleSeen.json?.data?.board || {}, 'recycle'))}`);
+check('46.8 — the work itself is untouched: the recycle row is still there',
+  Number(q1("SELECT COUNT(*) c FROM recycle_bin_items WHERE title = 'Nav badge fixture'").c) === 1
+  && navSection((await navOf()).json?.data || {}, 'recycle').unseen === 0);
+check('46.9 — a derived tab keeps no watermark of its own',
+  (await memberCall('POST', '/api/phantom/attention/classgroups/seen', undefined, phantomToken)).status === 400
+  && (await memberCall('POST', '/api/phantom/attention/not-a-tab/seen', undefined, phantomToken)).status === 400);
+check('46.10 — the badges are PHANTOM-only',
+  (await navOf(amaToken)).status === 403
+  && (await memberCall('GET', '/api/phantom/attention')).status === 401
+  && (await memberCall('POST', '/api/phantom/attention/audit/seen', undefined, amaToken)).status === 403);
+check('46.11 — opening one tab never clears another',
+  (() => {
+    const board = (recycleSeen.json?.data?.board) || {};
+    return Number(navSection(board, 'audit').unseen) >= 0
+      && Number(navSection(board, 'recycle').lastSeenId) > 0
+      && Number(navSection(board, 'audit').lastSeenId) === 0;
+  })(),
+  JSON.stringify((recycleSeen.json?.data?.board?.sections || []).map((entry) => [entry.key, entry.lastSeenId])));
+
+
 // ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);

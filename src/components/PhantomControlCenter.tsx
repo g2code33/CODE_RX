@@ -62,6 +62,32 @@ export const PhantomControlCenter = ({
   const [activationInvite, setActivationInvite] = useState<any | null>(null);
   const [codenameChangeMember, setCodenameChangeMember] = useState<any | null>(null);
   const loadedTabs = useRef<Set<Tab>>(new Set());
+  // What arrived on each navigation tab since this operator last opened it. The
+  // numbers are per PHANTOM account and fall as each tab is actually opened.
+  const [navAttention, setNavAttention] = useState<any>(null);
+
+  const loadNavAttention = async () => {
+    try { setNavAttention(await db.phantom.navAttention()); }
+    catch { /* the badges are a hint, never a gate */ }
+  };
+
+  /**
+   * Opening a tab is what clears its badge: the server moves this operator's
+   * watermark to the newest row in that tab, so the number falls for them and
+   * nobody else. Derived tabs (Class Groups, Overview) have no watermark of
+   * their own — they fall as the sections underneath are opened.
+   */
+  const openTab = async (target: Tab) => {
+    setTab(target);
+    if (window.innerWidth < 1024) setNavigationOpen(false);
+    const section = (navAttention?.sections || []).find((entry: any) => entry?.key === target);
+    if (!section?.markable) return;
+    try {
+      const result = await db.phantom.markNavAttentionSeen(target);
+      if (result?.board) setNavAttention(result.board);
+      else await loadNavAttention();
+    } catch { await loadNavAttention(); }
+  };
 
   const load = async (target = tab, background = false) => {
     const firstLoad = !loadedTabs.current.has(target);
@@ -93,6 +119,7 @@ export const PhantomControlCenter = ({
   };
 
   useEffect(() => { void load(tab); }, [tab]);
+  useEffect(() => { void loadNavAttention(); }, [tab]);
   useEffect(() => {
     const openApplicationsFromLink = () => { if (window.location.hash.startsWith('#phantom-applications')) setTab('applications'); };
     window.addEventListener('hashchange', openApplicationsFromLink);
@@ -148,8 +175,43 @@ export const PhantomControlCenter = ({
           <span>Open Community Hub</span>
         </button>
       </div>
-      {TABS.map(([id, label, Icon]) => <button key={id} onClick={() => { setTab(id); if (window.innerWidth < 1024) setNavigationOpen(false); }} className={`mt-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-bold transition ${tab === id ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 shadow-sm shadow-emerald-100' : 'text-slate-600 hover:bg-slate-50 hover:text-emerald-700'}`}><Icon className="h-4 w-4" />{label}</button>)}</aside>}
-      <main className="min-w-0 rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-7">{initialLoading ? <div className="grid min-h-64 place-items-center"><p className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Opening PHANTOM controls…</p></div> : <><div className="mb-4 min-h-5 text-xs font-bold text-emerald-700" aria-live="polite">{refreshing ? 'Saving and refreshing in the background…' : ''}</div>{tab === 'overview' && <Overview data={overview} onTab={setTab} onCreate={() => openCreate()} onOpenVault={onOpenVault} />}{tab === 'applications' && <Applications applications={applications} onCreate={openCreate} onReview={async (id, status) => { try { await db.phantom.reviewApplication(id, status); await refreshTab('applications', status === 'rejected' ? 'Application rejected.' : 'Application returned to pending review.'); } catch (error: any) { setMessage(error?.message || 'Could not update this application.'); } }} onRegenerateActivation={regenerateActivation} onRemove={async (application) => { try { await db.applications.remove(application.id); await refreshTab('applications', 'Application deleted.'); } catch (error: any) { setMessage(error?.message || 'Could not delete this application.'); } }} />}{tab === 'members' && <Members members={members} roles={roleData.roles || []} onCreate={() => openCreate()} onHistory={setHistoryMember} onChangeCodename={setCodenameChangeMember} onRegenerateActivation={regenerateActivation} onUpdate={async (id, data) => { try { await db.phantom.updateMember(id, data); await refreshTab('members'); } catch (error: any) { setMessage(error?.message || 'Could not update this member.'); } }} onSetCalcitonins={async (id, value, reason) => { try { await db.phantom.adjustScore(id, { action: 'set', points: value, reason }); await refreshTab('members', 'Calcitonin balance saved.'); } catch (error: any) { setMessage(error?.message || 'Could not update this Calcitonin balance.'); } }} />}{tab === 'roles' && <Roles data={roleData} onSaved={() => { void refreshTab('roles'); }} />}{tab === 'permissions' && <MemberPermissions members={members} sections={roleData.sections || []} onSaved={() => { setMessage('Permissions saved.'); }} />}{tab === 'website' && <WebsiteAdmins data={websiteAdmins} members={members} onSaved={() => { void refreshTab('website'); }} />}{tab === 'clients' && <ClientAccessCenter onMessage={setMessage} />}{tab === 'codenames' && <Codenames data={codenameData} members={members} onSaved={() => { void refreshTab('codenames'); }} />}{tab === 'audit' && <AuditLog logs={auditLogs} />}{tab === 'recycle' && <RecycleBin items={recycleItems} onChanged={() => { void refreshTab('recycle'); }} />}{tab === 'sharing' && <SharingControl data={sharingData} members={members} onSaved={() => { void refreshTab('sharing'); }} />}{tab === 'community' && <CommunityAdministration groups={communityGroups} reports={communityReports} members={members} onSaved={() => { void refreshTab('community'); }} />}{tab === 'classgroups' && <PhantomClassGroups embedded />}{tab === 'emojis' && (siteContent && setSiteContent
+      {TABS.map(([id, label, Icon]) => {
+        const badge = navAttention?.sections?.find((entry: any) => entry?.key === id);
+        const unseen = Number(badge?.unseen || 0);
+        const waiting = Number(badge?.pending || 0);
+        return (
+          <button
+            key={id}
+            type="button"
+            data-testid={`phantom-nav-${id}`}
+            onClick={() => void openTab(id)}
+            title={unseen
+              ? `${unseen} new since you last opened ${label}${waiting ? ` — ${waiting} still waiting` : ''}`
+              : (waiting ? `${waiting} waiting on you in ${label}` : label)}
+            aria-label={unseen ? `${label} — ${unseen} new` : label}
+            className={`mt-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-bold transition ${tab === id ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 shadow-sm shadow-emerald-100' : 'text-slate-600 hover:bg-slate-50 hover:text-emerald-700'}`}
+          >
+            <Icon className="h-4 w-4" />
+            <span className="min-w-0 flex-1 truncate">{label}</span>
+            {unseen > 0 && (
+              <span
+                data-testid={`phantom-nav-badge-${id}`}
+                className="ml-auto min-w-[1.4rem] rounded-full bg-rose-600 px-1.5 py-0.5 text-center text-[10px] font-black text-white"
+              >
+                {unseen}
+              </span>
+            )}
+            {unseen === 0 && waiting > 0 && (
+              <span
+                data-testid={`phantom-nav-waiting-${id}`}
+                aria-hidden="true"
+                className="ml-auto h-2 w-2 rounded-full bg-amber-500"
+              />
+            )}
+          </button>
+        );
+      })}</aside>}
+      <main className="min-w-0 rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-7">{initialLoading ? <div className="grid min-h-64 place-items-center"><p className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">Opening PHANTOM controls…</p></div> : <><div className="mb-4 min-h-5 text-xs font-bold text-emerald-700" aria-live="polite">{refreshing ? 'Saving and refreshing in the background…' : ''}</div>{tab === 'overview' && <Overview data={overview} onTab={setTab} onCreate={() => openCreate()} onOpenVault={onOpenVault} />}{tab === 'applications' && <Applications applications={applications} onCreate={openCreate} onReview={async (id, status) => { try { await db.phantom.reviewApplication(id, status); await refreshTab('applications', status === 'rejected' ? 'Application rejected.' : 'Application returned to pending review.'); } catch (error: any) { setMessage(error?.message || 'Could not update this application.'); } }} onRegenerateActivation={regenerateActivation} onRemove={async (application) => { try { await db.applications.remove(application.id); await refreshTab('applications', 'Application deleted.'); } catch (error: any) { setMessage(error?.message || 'Could not delete this application.'); } }} />}{tab === 'members' && <Members members={members} roles={roleData.roles || []} onCreate={() => openCreate()} onHistory={setHistoryMember} onChangeCodename={setCodenameChangeMember} onRegenerateActivation={regenerateActivation} onUpdate={async (id, data) => { try { await db.phantom.updateMember(id, data); await refreshTab('members'); } catch (error: any) { setMessage(error?.message || 'Could not update this member.'); } }} onSetCalcitonins={async (id, value, reason) => { try { await db.phantom.adjustScore(id, { action: 'set', points: value, reason }); await refreshTab('members', 'Calcitonin balance saved.'); } catch (error: any) { setMessage(error?.message || 'Could not update this Calcitonin balance.'); } }} />}{tab === 'roles' && <Roles data={roleData} onSaved={() => { void refreshTab('roles'); }} />}{tab === 'permissions' && <MemberPermissions members={members} sections={roleData.sections || []} onSaved={() => { setMessage('Permissions saved.'); }} />}{tab === 'website' && <WebsiteAdmins data={websiteAdmins} members={members} onSaved={() => { void refreshTab('website'); }} />}{tab === 'clients' && <ClientAccessCenter onMessage={setMessage} />}{tab === 'codenames' && <Codenames data={codenameData} members={members} onSaved={() => { void refreshTab('codenames'); }} />}{tab === 'audit' && <AuditLog logs={auditLogs} />}{tab === 'recycle' && <RecycleBin items={recycleItems} onChanged={() => { void refreshTab('recycle'); }} />}{tab === 'sharing' && <SharingControl data={sharingData} members={members} onSaved={() => { void refreshTab('sharing'); }} />}{tab === 'community' && <CommunityAdministration groups={communityGroups} reports={communityReports} members={members} onSaved={() => { void refreshTab('community'); }} />}{tab === 'classgroups' && <PhantomClassGroups embedded onAttentionChange={loadNavAttention} />}{tab === 'emojis' && (siteContent && setSiteContent
   ? <SiteEmojiAdmin siteContent={siteContent} setSiteContent={setSiteContent} onSaved={setMessage} />
   : <Empty label="Site emoji management opens from the PHANTOM workspace." />)}{tab === 'media' && <CommunityMediaManagement data={communityMedia} onSaved={() => { void refreshTab('media'); }} />}{tab === 'scores' && <ScoreSystem rules={scoreRules} levels={calLevels} members={members} onSaved={() => { void refreshTab('scores'); }} />}{tab === 'notifications' && <NotificationAdministration delegates={notificationDelegates} members={members} roles={roleData.roles || []} sentNotifications={sentNotifications} onSaved={() => { void refreshTab('notifications'); }} onOpenCommunity={onOpenCommunity} />}{tab === 'settings' && <Settings settings={settings} sections={vaultSections} onSaved={() => { void refreshTab('settings'); }} />}</>}</main></div>
     {showCreateMember && <CreateMemberModal application={createForApplication} roles={roleData.roles || []} onClose={() => setShowCreateMember(false)} onCreated={async () => { setShowCreateMember(false); await refreshTab(createForApplication ? 'applications' : 'members', 'Secure member invitation created.'); }} />}

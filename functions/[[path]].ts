@@ -18,6 +18,7 @@ import { generalEmailNotification, notificationTemplateId, sendEmail } from './l
 import { attachmentIdsFromBlocks, normalizeDocumentContent, normalizeTags, parseStoredDocumentContent, recordVaultActivity, syncDocumentTags } from './lib/vault-document';
 import { adjustMemberScore, awardScoreRule, readCalLevels, resolveCalcitoninLevel, type CalLevelDefinition, type ScoreAdjustmentAction, type ScoreRuleKey } from './lib/score';
 import { activeNotificationRecipients, canSendNotifications, createNotification, notifyMember } from './lib/notifications';
+import { markPhantomNavSeen, phantomNavAttention } from './lib/phantom-attention';
 import { decryptVaultShareToken, encryptVaultShareToken } from './lib/share-token';
 import { publicSiteUrl } from './lib/link-address';
 import {
@@ -5096,6 +5097,30 @@ app.get('/api/phantom/overview', requireAuth, requirePhantom, async (c) => {
     recentActivity: queries[10],
     actor: actor ? publicActor(actor) : null,
   } });
+});
+
+/**
+ * PHANTOM's control-center badges: what arrived on each navigation tab since
+ * this operator last opened it, plus the work still waiting there. "Class
+ * Groups" is the sum of the oversight panel's own sections.
+ */
+app.get('/api/phantom/attention', requireAuth, requirePhantom, async (c) => {
+  const actor = await actorFromContext(c);
+  const profileId = Number(actor?.profileId || 0);
+  if (!profileId) return c.json({ success: false, error: 'This account has no member profile to track.', code: 'NO_PROFILE' }, 400);
+  const board = await phantomNavAttention(c.env.DB, profileId);
+  return c.json({ success: true, data: board });
+});
+
+app.post('/api/phantom/attention/:key/seen', requireAuth, requirePhantom, async (c) => {
+  const actor = await actorFromContext(c);
+  const profileId = Number(actor?.profileId || 0);
+  if (!profileId) return c.json({ success: false, error: 'This account has no member profile to track.', code: 'NO_PROFILE' }, 400);
+  const key = cleanStr(c.req.param('key') || '', 1, 40) || '';
+  const marked = await markPhantomNavSeen(c.env.DB, profileId, key);
+  if (!marked) return c.json({ success: false, error: 'That PHANTOM section does not keep its own count.', code: 'UNKNOWN_SECTION' }, 400);
+  const board = await phantomNavAttention(c.env.DB, profileId);
+  return c.json({ success: true, data: { ...marked, board } });
 });
 
 app.get('/api/phantom/applications', requireAuth, requirePhantom, async (c) => {
