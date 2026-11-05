@@ -970,7 +970,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
   const queueMoveRequest = async (c: any, input: {
     member: any;
     activity: any;
-    kind: 'move' | 'swap';
+    kind: 'move' | 'swap' | 'remove';
     studentId: number;
     toGroupId: number;
     fromGroupId: number | null;
@@ -1010,7 +1010,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const requestId = Number(inserted.meta.last_row_id);
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: input.member.name, actorProfileId: input.member.profileId,
-      action: input.kind === 'swap' ? 'cgm.move.swap_requested' : 'cgm.move.requested',
+      action: input.kind === 'swap' ? 'cgm.move.swap_requested' : input.kind === 'remove' ? 'cgm.move.remove_requested' : 'cgm.move.requested',
       entityType: 'move_request', entityId: requestId,
       classId: Number(input.activity.class_id), activityId,
       context: {
@@ -1020,9 +1020,13 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     });
     await recordPhantomInboxItem(c.env.DB, {
       channel: 'class_groups',
-      title: input.kind === 'swap' ? 'Member swap awaiting PHANTOM approval' : 'Member move awaiting PHANTOM approval',
+      title: input.kind === 'swap' ? 'Member swap awaiting PHANTOM approval'
+        : input.kind === 'remove' ? 'Member removal awaiting PHANTOM approval'
+        : 'Member move awaiting PHANTOM approval',
       summary: input.kind === 'swap'
         ? `${input.member.name} asked to swap ${nameOf(input.studentId)} with ${nameOf(Number(input.partnerStudentId))} in ${input.activity.name}.`
+        : input.kind === 'remove'
+        ? `${input.member.name} asked to remove ${nameOf(input.studentId)} from their group in ${input.activity.name}.`
         : `${input.member.name} asked to move ${nameOf(input.studentId)} to another group in ${input.activity.name}.`,
       source: 'cgm_move', sourceId: String(requestId),
       actorProfileId: input.member.profileId, actorLabel: input.member.name,
@@ -1340,6 +1344,33 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (!guard.ok) return guard.response;
     const body = await readBody(c);
     const reason = cleanOrNull(body.reason, 500);
+    // REMOVING A MEMBER IS PHANTOM'S DECISION TOO — it is the same family of
+    // membership change as a move, and an organizer must not be able to empty a
+    // group on their own. Unless PHANTOM is the actor (or PHANTOM has switched
+    // the class to immediate changes), the removal is filed as a request.
+    if (!member.isPhantom && await modulePolicy(c.env.DB, 'move_approval_mode') === 'approval') {
+      const activity = await activityCore(c.env.DB, Number(assignment.activity_id));
+      if (!activity) return bad(c, 'That activity no longer exists.', 404);
+      const queued = await queueMoveRequest(c, {
+        member, activity, kind: 'remove', studentId: Number(assignment.student_id),
+        toGroupId: Number(assignment.group_id), fromGroupId: Number(assignment.group_id), reason,
+      });
+      if (queued.response) return queued.response;
+      return c.json({ success: true, data: {
+        status: 'pending', requestId: queued.id,
+        message: 'Sent to PHANTOM — the member stays in the group until PHANTOM approves the removal.',
+      } });
+    }
+    return applyMemberRemoval(c, member, assignment, reason);
+  });
+
+  /** Apply a removal now — the organizer route (direct) and PHANTOM's approval. */
+  const applyMemberRemoval = async (c: any, member: any, assignment: any, reason: string | null) => {
+    const assignmentId = Number(assignment.id);
+    const live = await asRows<{ id: number }>(c.env.DB.prepare(
+      `SELECT id FROM cgm_group_assignments WHERE id = ? AND status = 'active'`
+    ).bind(assignmentId));
+    if (!live[0]) return bad(c, 'That member is no longer in the group.', 409);
     await c.env.DB.prepare(
       `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = ? WHERE id = ?`
     ).bind(reason, assignmentId).run();
@@ -1362,13 +1393,13 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     await notifyStudent(c.env.DB, Number(assignment.student_id), 'groups', 'Removed from group',
       `You were removed from your group in ${assignment.activity_name}. ${reason || ''}`);
     await auditCgm(c.env.DB, {
-      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      actorType: member.isPhantom ? 'phantom' : 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.assignment.removed', entityType: 'assignment', entityId: assignmentId,
       classId: Number(assignment.class_id), activityId: Number(assignment.activity_id),
       context: { studentId: Number(assignment.student_id), reason },
     });
     return c.json({ success: true });
-  });
+  };
 
   /**
    * RE-CHOOSE — the organizer asks that a member start over and pick a group
@@ -2060,6 +2091,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
               EXISTS(SELECT 1 FROM cgm_group_assignments x WHERE x.activity_id = ? AND x.student_id = s.id) AS ever_assigned,
               (SELECT rc.status FROM cgm_rechoose_requests rc WHERE rc.activity_id = ? AND rc.student_id = s.id
                 ORDER BY rc.id DESC LIMIT 1) AS rechoose_status,
+              (SELECT mr.kind FROM cgm_move_requests mr WHERE mr.activity_id = ? AND mr.student_id = s.id
+                AND mr.status = 'pending' ORDER BY mr.id DESC LIMIT 1) AS move_status,
               (SELECT d.id FROM cgm_force_get_designations d WHERE d.activity_id = ? AND d.student_id = s.id
                 AND d.status = 'active' LIMIT 1) AS designation_id,
               (SELECT d.designated_group_id FROM cgm_force_get_designations d WHERE d.activity_id = ? AND d.student_id = s.id
@@ -2071,7 +2104,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
        LEFT JOIN cgm_group_assignments ga ON ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active'
        WHERE cm.class_id = ? AND cm.status = 'active' ORDER BY s.full_name`
-    ).bind(activityId, activityId, activityId, activityId, activityId, activityId, activityId, Number(activity.class_id)));
+    ).bind(activityId, activityId, activityId, activityId, activityId, activityId, activityId, activityId, Number(activity.class_id)));
     const groupNames = new Map(groups.map((row) => [Number(row.id), row.name || `Group ${row.position}`]));
     // EVERYBODY ON THE CLASS ROSTER — including the people who have not
     // registered yet. They have no student identity, so the organizer forces
@@ -2130,6 +2163,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         assignedVia: row.assigned_via || null,
         everAssigned: Number(row.ever_assigned || 0) === 1,
         rechooseStatus: row.rechoose_status || null,
+        // "awaiting PHANTOM": the organizer sees their own request in place.
+        moveStatus: row.move_status || null,
         designation: row.designation_id
           ? {
             id: Number(row.designation_id),
@@ -4642,6 +4677,23 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     });
   });
 
+  /**
+   * Tell whoever asked for the move what PHANTOM decided. The student hears the
+   * outcome separately; the organizer's own queue is otherwise a black hole.
+   */
+  const notifyMoveRequester = async (c: any, request: any, title: string, message: string) => {
+    const profileIds = [Number(request.requested_by_profile_id || 0)].filter((id) => Number.isInteger(id) && id > 0);
+    if (!profileIds.length) return;
+    try {
+      await createNotification(c.env.DB, {
+        title,
+        message,
+        audience: 'system', audienceLabel: 'Class & Groups',
+        recipientProfileIds: profileIds,
+      });
+    } catch { /* notification failure never blocks a decision */ }
+  };
+
   const decideMoveRequest = async (c: any, approve: boolean): Promise<Response> => {
     const check = await requireCgmPhantom(c);
     if (check.error) return check.error;
@@ -4657,10 +4709,15 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const activity = await activityCore(c.env.DB, Number(request.activity_id));
     if (!activity) return bad(c, 'That activity no longer exists.', 404);
 
+    // Two operators (or a double click) must not both apply the same request.
+    // The rejection is claimed with a conditional update — whoever loses the
+    // race gets 409 and changes nothing.
     if (!approve) {
-      await c.env.DB.prepare(
-        `UPDATE cgm_move_requests SET status = 'rejected', reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+      const claimed = await c.env.DB.prepare(
+        `UPDATE cgm_move_requests SET status = 'rejected', reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'pending'`
       ).bind(member.name, reason, id).run();
+      if (!claimed.meta?.changes) return bad(c, 'Somebody already decided this request.', 409);
       await auditCgm(c.env.DB, {
         actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
         action: 'cgm.move.rejected', entityType: 'move_request', entityId: id,
@@ -4669,21 +4726,51 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       });
       await notifyStudent(c.env.DB, Number(request.student_id), 'groups', 'Your move was not approved',
         `PHANTOM did not approve the change your organizer asked for in ${activity.name}. You stay in your group.`);
+      // The organizer who asked is told the answer — a request with no visible
+      // outcome is how queues rot.
+      await notifyMoveRequester(c, request, `Your ${request.kind} request was not approved`,
+        `PHANTOM did not approve moving ${request.student_name || 'the member'} in ${activity.name}${reason ? `: ${reason}` : '.'}`);
       return c.json({ success: true, data: { status: 'rejected' } });
     }
 
+    // Claim the approval BEFORE applying it: the conditional update is the
+    // lock, so a second approve (or a second operator) can never apply the move
+    // twice or leave a granted request stuck as pending.
+    const claimed = await c.env.DB.prepare(
+      `UPDATE cgm_move_requests SET status = 'approved', reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'pending'`
+    ).bind(member.name, reason, id).run();
+    if (!claimed.meta?.changes) return bad(c, 'Somebody already decided this request.', 409);
+
     // The approval goes through exactly the code the organizer would have run.
-    const applied = request.kind === 'swap'
-      ? await applyMemberSwap(c, member, activity, Number(request.student_id), Number(request.partner_student_id))
-      : await applyMemberMove(c, member, activity, Number(request.student_id), Number(request.to_group_id));
+    let applied: Response;
+    if (request.kind === 'remove') {
+      const live = await asRows<any>(c.env.DB.prepare(
+        `SELECT ga.*, a.class_id, a.name AS activity_name FROM cgm_group_assignments ga
+         JOIN cgm_activities a ON a.id = ga.activity_id
+         WHERE ga.activity_id = ? AND ga.student_id = ? AND ga.status = 'active'`
+      ).bind(Number(request.activity_id), Number(request.student_id)));
+      applied = live[0]
+        ? await applyMemberRemoval(c, member, live[0], request.reason)
+        : bad(c, 'That member is no longer in a group — nothing to remove.', 409);
+    } else if (request.kind === 'swap') {
+      applied = await applyMemberSwap(c, member, activity, Number(request.student_id), Number(request.partner_student_id));
+    } else {
+      applied = await applyMemberMove(c, member, activity, Number(request.student_id), Number(request.to_group_id));
+    }
     if (applied.status !== 200) {
-      // Capacity, gender pools or a lost race: the request stays pending so
-      // PHANTOM can look again once the group has space.
+      // Capacity, gender pools or a lost race in the roster itself: release the
+      // claim so the request is still pending and PHANTOM can look again once
+      // the group has space. Nothing was applied, so nothing is half-done.
+      await c.env.DB.prepare(
+        `UPDATE cgm_move_requests SET status = 'pending', reviewer_label = NULL, review_reason = NULL, reviewed_at = NULL
+         WHERE id = ? AND status = 'approved' AND applied_at IS NULL`
+      ).bind(id).run();
       return applied;
     }
     await c.env.DB.prepare(
-      `UPDATE cgm_move_requests SET status = 'approved', reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP, applied_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).bind(member.name, reason, id).run();
+      `UPDATE cgm_move_requests SET applied_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(id).run();
     await auditCgm(c.env.DB, {
       actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.move.approved', entityType: 'move_request', entityId: id,
@@ -4693,9 +4780,12 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         toGroupId: Number(request.to_group_id), partnerStudentId: request.partner_student_id || null,
       },
     });
+    await notifyMoveRequester(c, request, `Your ${request.kind} request was approved`,
+      `PHANTOM approved moving ${request.student_name || 'the member'} in ${activity.name} — the change is live now.`);
     return c.json({ success: true, data: {
       status: 'approved', kind: request.kind, requestId: id,
-      message: request.kind === 'swap' ? 'Swap approved and applied.' : 'Move approved and applied.',
+      message: request.kind === 'swap' ? 'Swap approved and applied.'
+        : request.kind === 'remove' ? 'Removal approved and applied.' : 'Move approved and applied.',
     } });
   };
 

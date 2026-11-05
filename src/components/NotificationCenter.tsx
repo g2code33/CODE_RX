@@ -108,7 +108,7 @@ export const NotificationCenter = () => {
           </article>} />
         </> : <div className="grid min-h-40 place-items-center text-center"><div><Check className="mx-auto h-6 w-6 text-emerald-600" /><p className="mt-2 text-sm font-bold text-slate-700">You are up to date</p><p className="mt-1 text-xs text-slate-500">New broadcasts will appear here.</p></div></div>}
       </div>}
-      <div className="border-t border-slate-100 bg-slate-50 px-4 py-2 text-[10px] text-slate-500">Three recent notifications are shown first. Open more whenever you need them.</div>
+      <div className="border-t border-slate-100 bg-slate-50 px-4 py-2 text-[10px] text-slate-500">The latest five notifications are shown first. Open more whenever you need them.</div>
     </div>}
   </div>;
 };

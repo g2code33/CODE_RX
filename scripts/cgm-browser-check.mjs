@@ -320,9 +320,28 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
   await page.waitForFor('Module settings', 20_000);
   const movesTab = await page.waitForElement(() => page.buttonByText('Moves & swaps'));
   check('the oversight panel has a Moves & swaps section', Boolean(movesTab));
+  // A crowded panel: one chip for the whole queue, and the strip scrolls
+  // instead of stacking a dozen pills over the content.
+  const boardForChip = (await api('GET', '/api/cgm/phantom/attention', undefined, phantomToken)).json?.data || {};
+  const chip = page.window.document.querySelector('[data-testid="phantom-queue-chip"]');
+  check('a crowded panel keeps one chip with the work still waiting',
+    Boolean(chip) && String(chip.textContent).trim() === `Queues (${Number(boardForChip.totalPending || 0)})`,
+    `chip=${chip ? String(chip.textContent).trim() : 'missing'} api=${boardForChip.totalPending}`);
+  const tabStrip = page.window.document.querySelector('[data-testid="phantom-tabstrip"]');
+  check('the section strip is a scrollable rail instead of a wall of chips',
+    Boolean(tabStrip) && String(tabStrip.className).includes('overflow-x-auto')
+    && tabStrip.querySelectorAll('[data-testid^="phantom-tab-"]').length >= 12,
+    tabStrip ? String(tabStrip.className) : 'missing');
+  chip && chip.click();
+  const activeQueue = await page.waitForElement(() => [...page.window.document.querySelectorAll('[data-testid]')]
+    .find((el) => /^phantom-tab-[a-z-]+$/.test(String(el.getAttribute('data-testid')))
+      && String(el.className).includes('bg-emerald-600')), 10_000);
+  check('the chip opens the first queue that has work waiting', Boolean(activeQueue),
+    `active=${activeQueue ? activeQueue.getAttribute('data-testid') : 'none'}`);
+
   movesTab && movesTab.click();
   check('opening it lists what organizers asked to move (empty state is honest)',
-    await page.waitForFor('No move or swap requests yet.', 20_000), page.body().slice(0, 200));
+    await page.waitForFor('No membership-change requests yet.', 20_000), page.body().slice(0, 200));
 
   const settingsTab = page.buttonByText('Module settings');
   settingsTab && settingsTab.click();
@@ -330,6 +349,22 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
     await page.waitForFor('Moving & swapping members', 20_000)
     && await page.waitForFor('Wait for PHANTOM approval', 5_000),
     page.body().slice(0, 200));
+
+  // The audit trail must read as facts, never as "target — #—".
+  const auditTab = await page.waitForElement(() => page.buttonByText('Audit trail'));
+  auditTab && auditTab.click();
+  await page.waitForFor('cgm', 20_000);
+  const auditDashes = /·\s*target\s*—\s*#—/.test(page.body());
+  check('the audit trail names its actor and target instead of printing dashes', !auditDashes,
+    page.body().slice(0, 260));
+  const auditRows = [...page.window.document.querySelectorAll('[data-testid="cgm-phantom-list-reveal"]')];
+  check('a long audit trail is cut to the latest five with one "view more" control',
+    auditRows.length === 0 || (await page.waitForFor('View more', 5_000)),
+    auditRows.length ? 'reveal control shown' : 'trail shorter than five');
+  if (auditRows.length) {
+    auditRows[0].click();
+    check('"view more" reveals the rest and offers the way back', await page.waitForFor('Show fewer', 5_000), page.body().slice(0, 200));
+  }
 
 }
 

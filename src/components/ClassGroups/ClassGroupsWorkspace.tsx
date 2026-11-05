@@ -14,6 +14,7 @@ import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
 import { ForceGetWorkspace } from './ForceGetWorkspace';
+import { RecentItems } from '../RecentItems';
 
 /**
  * CODE Rx — Class & Group Management (organizer workspace).
@@ -1774,7 +1775,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
         </div>
       )}
       <ul className="mt-3 space-y-1.5">
-        {visibleMembers.map((row: any) => {
+        <RecentItems items={visibleMembers} label="members" render={(row: any) => {
           const roles = rolesOf(row.roles);
           return (
             <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
@@ -1798,6 +1799,17 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
                   )}
                   {row.designation && !row.forced && !row.awaitingResample && (
                     <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-emerald-800" data-testid="cgm-member-designated">Designation approved</span>
+                  )}
+                  {/* PHANTOM decides every membership change, so the organizer
+                      sees their own request sitting in the row instead of
+                      wondering whether the move worked. */}
+                  {row.moveStatus && (
+                    <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-indigo-800" data-testid="cgm-member-move-pending">
+                      {row.moveStatus === 'remove' ? 'Removal' : row.moveStatus === 'swap' ? 'Swap' : 'Move'} awaiting PHANTOM
+                    </span>
+                  )}
+                  {row.rechooseStatus === 'pending' && (
+                    <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-indigo-800" data-testid="cgm-member-rechoose-pending">Re-choose awaiting PHANTOM</span>
                   )}
                 </span>
                 <span className="flex shrink-0 gap-1">
@@ -1840,7 +1852,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
               )}
             </li>
           );
-        })}
+        }} />
         {!visibleMembers.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">{search ? 'No member matches that search.' : 'No members yet.'}</li>}
       </ul>
       {(detail.designations || []).length > 0 && (

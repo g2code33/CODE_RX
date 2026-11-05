@@ -308,6 +308,7 @@ import {
 import { appDialog } from './AppDialog';
 import { ClientProjectRoom, type ClientPortalContext, type RoomTransport } from './ClientProjectRoom';
 import { CATEGORY_LABELS } from '../lib/projectRoom';
+import { RecentItems } from './RecentItems';
 import {
   absoluteLinkUrl,
   linkAddressUrl,
@@ -803,7 +804,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
             <p className="flex items-center gap-2 px-2 py-6 text-xs font-bold text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading clients…</p>
           ) : clients.length ? (
             <div className="space-y-1">
-              {clients.map((client) => (
+              <RecentItems items={clients} label="clients" render={(client) => (
                 <button
                   key={client.id}
                   onClick={() => setSelectedClientId(client.id)}
@@ -819,7 +820,7 @@ export const ClientAccessCenter = ({ onMessage }: { onMessage: (message: string)
                   </span>
                   <Pill tone={client.status}>{client.status}</Pill>
                 </button>
-              ))}
+              )} />
             </div>
           ) : (
             <p className="px-2 py-6 text-xs font-semibold text-slate-500">No clients yet. Create the first one to issue portal access.</p>
@@ -1128,7 +1129,7 @@ const ProjectsPanel = ({
       ) : null}
     </div>
     <div className="mt-4 space-y-3">
-      {projects.length ? projects.map((project) => (
+      {projects.length ? <RecentItems items={projects} label="projects" render={(project) => (
         <article key={project.id} className="rounded-2xl border border-slate-100 bg-white p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -1163,7 +1164,7 @@ const ProjectsPanel = ({
             </div>
           </div>
         </article>
-      )) : <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">No projects yet. Create one to publish documents to this client.</p>}
+      )} /> : <p className="rounded-2xl border border-slate-100 bg-white px-5 py-8 text-center text-sm font-semibold text-slate-500">No projects yet. Create one to publish documents to this client.</p>}
     </div>
   </div>
 );

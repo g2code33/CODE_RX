@@ -106,6 +106,30 @@ export const insertAssignmentGuarded = async (
  * record a request, so it is created once per isolate on first use.
  */
 let moveSchemaChecked = false;
+const MOVE_REQUEST_DDL = `CREATE TABLE cgm_move_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        class_id INTEGER NOT NULL,
+        activity_id INTEGER NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'move' CHECK (kind IN ('move','swap','remove')),
+        student_id INTEGER NOT NULL,
+        from_group_id INTEGER,
+        to_group_id INTEGER NOT NULL,
+        partner_student_id INTEGER,
+        partner_from_group_id INTEGER,
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+        requested_by_profile_id INTEGER,
+        requester_label TEXT,
+        reviewed_by_profile_id INTEGER,
+        reviewer_label TEXT,
+        review_reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at DATETIME,
+        applied_at DATETIME,
+        FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+        FOREIGN KEY(class_id) REFERENCES cgm_classes(id),
+        FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+      )`;
 export const ensureMoveRequestSchema = async (db: D1Database) => {
   if (moveSchemaChecked) return;
   try {
@@ -136,6 +160,25 @@ export const ensureMoveRequestSchema = async (db: D1Database) => {
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_status ON cgm_move_requests(status, created_at)`),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_activity ON cgm_move_requests(activity_id, status)`),
     ]);
+    // Removals were added to this queue after the table shipped, and SQLite
+    // cannot widen a CHECK constraint in place. The rebuild below PRESERVES
+    // every row (create → copy → drop), and only runs on a database whose DDL
+    // still refuses 'remove'. Fresh databases never take this path.
+    const ddl = await db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cgm_move_requests'"
+    ).first<{ sql: string }>();
+    if (ddl?.sql && !/remove/i.test(String(ddl.sql))) {
+      await db.batch([
+        db.prepare('ALTER TABLE cgm_move_requests RENAME TO cgm_move_requests_old'),
+        db.prepare('DROP INDEX IF EXISTS idx_cgm_move_requests_status'),
+        db.prepare('DROP INDEX IF EXISTS idx_cgm_move_requests_activity'),
+        db.prepare(MOVE_REQUEST_DDL),
+        db.prepare('INSERT INTO cgm_move_requests SELECT * FROM cgm_move_requests_old'),
+        db.prepare('DROP TABLE cgm_move_requests_old'),
+        db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_status ON cgm_move_requests(status, created_at)'),
+        db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_activity ON cgm_move_requests(activity_id, status)'),
+      ]);
+    }
     moveSchemaChecked = true;
   } catch { /* already there, or the batch will retry next request */ }
 };

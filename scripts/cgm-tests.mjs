@@ -2817,6 +2817,12 @@ section('31. Invitation sealing (AES-GCM), atomic usage consumption, migration s
 const inviteTokenHash = (token) => shaHash('sha256').update(`cgm-invite:${token}`).digest('hex');
 const freshFmtRosterStudent = async (n, fullName) => {
   const indexNumber = `PH/PHA/25/${String(n).padStart(4, '0')}`;
+  // Fail loudly instead of silently handing back somebody else's student: an
+  // index number that is already taken used to resolve to the older row, which
+  // turned a naming mistake into a mysterious assertion failure much later.
+  if (q1('SELECT id FROM cgm_students WHERE index_number_key = ?', indexNumber.toLowerCase())) {
+    throw new Error(`freshFmtRosterStudent(${n}) reuses the taken index number ${indexNumber} — pick another number`);
+  }
   await memberCall('POST', `/api/cgm/classes/${fmtClassId}/roster/entries`, { fullName, indexNumber, phone: `024511${String(n).padStart(4, '0')}` }, amaToken);
   const register = await call('POST', '/api/cgm/student/register', { classCode: fmtCode, indexNumber, entryPassword: 'fmt-101-entry' });
   const passkey = String(register.json?.data?.passkey || '');
@@ -5112,7 +5118,7 @@ check('44.19 — the new class submission landed in that channel',
 
 // Re-choose is PHANTOM's decision only — so PHANTOM must be told when asked.
 const attnRechooseBefore = Number(q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_rechoose'").c);
-const attnRechooser = await freshFmtRosterStudent(71, 'Attention Ana');
+const attnRechooser = await freshFmtRosterStudent(171, 'Attention Ana');
 const attnRechooserId = Number(q1('SELECT id FROM cgm_students WHERE index_number_key = ?', attnRechooser.indexNumber.toLowerCase())?.id || 0);
 await memberCall('POST', `/api/cgm/activities/${rechooseLabId}/assign-student`, { studentId: attnRechooserId, groupId: rechooseGroups[0] }, amaToken);
 const attnAssignmentId = Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", rechooseLabId, attnRechooserId)?.id || 0);
@@ -5304,6 +5310,57 @@ check('45.24 — with the policy set to apply immediately, the organizer move ap
   && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId)?.group_id) === mvGroups[1],
   `status ${mvAuto.status} ${mvAuto.text?.slice(0, 120)}`);
 await setPolicy('move_approval_mode', 'approval');
+
+// -- Removals are PHANTOM's decision too --------------------------------------
+const rmAsk = await memberCall('POST', `/api/cgm/assignments/${Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId)?.id)}/remove`, { reason: 'Out of the lab.' }, amaToken);
+const rmRow = q1('SELECT * FROM cgm_move_requests WHERE activity_id = ? AND kind = ? ORDER BY id DESC LIMIT 1', mvActivityId, 'remove');
+check('45.31 — an organizer removal is filed as a request, and the member stays put',
+  rmAsk.status === 200 && rmAsk.json?.data?.status === 'pending' && rmRow?.status === 'pending'
+  && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId).c) === 1,
+  `status ${rmAsk.status} ${rmAsk.text?.slice(0, 160)}`);
+check('45.32 — PHANTOM is told about the removal and the tab counts it',
+  q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_move' AND source_id = ?", String(rmRow?.id)).c === 1
+  && Number((await memberCall('GET', '/api/cgm/phantom/attention', undefined, phantomToken)).json?.data?.tabs?.find((tab) => tab.key === 'moves')?.pending) >= 1);
+const rmApprove = await memberCall('POST', `/api/cgm/phantom/move-requests/${Number(rmRow?.id)}/approve`, {}, phantomToken);
+check('45.33 — approval actually removes the member',
+  rmApprove.status === 200
+  && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId).c) === 0
+  && q1("SELECT status FROM cgm_move_requests WHERE id = ?", Number(rmRow?.id))?.status === 'approved');
+check('45.34 — and removing is exactly what PHANTOM itself may still do directly',
+  (await memberCall('POST', `/api/cgm/assignments/${Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvA.studentId)?.id)}/remove`, { reason: 'PHANTOM direct.' }, phantomToken)).status === 200);
+
+// -- The organizer hears the answer, and the row shows their pending request --
+const mvAskC = await freshFmtRosterStudent(172, 'Movement Cee');
+await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvAskC.studentId, groupId: mvGroups[0] }, amaToken);
+const mvPlaceC = await memberCall('POST', `/api/cgm/phantom/move-requests/${Number(q1("SELECT id FROM cgm_move_requests WHERE activity_id = ? AND student_id = ? AND status = 'pending'", mvActivityId, mvAskC.studentId)?.id)}/approve`, {}, phantomToken);
+check('45.35 — a placement request is approved by PHANTOM and lands', mvPlaceC.status === 200
+  && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvAskC.studentId).c) === 1);
+const mvAskD = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvAskC.studentId, groupId: mvGroups[1] }, amaToken);
+const askerProfile = q1("SELECT member_profile_id AS id FROM cgm_class_organizers WHERE class_id = ? AND user_id = ?", fmtClassId, amaUser.id);
+const organizerNotices = () => Number(q1(
+  "SELECT COUNT(*) c FROM notifications n JOIN notification_recipients nr ON nr.notification_id = n.id WHERE nr.member_profile_id = ? AND n.title LIKE 'Your %request was%'",
+  Number(askerProfile?.id || 0))?.c || 0);
+const noticesBefore = organizerNotices();
+check('45.36 — the organizing member shows their request as awaiting PHANTOM',
+  Boolean(q1('SELECT id FROM cgm_move_requests WHERE activity_id = ? AND student_id = ? AND status = ?', mvActivityId, mvAskC.studentId, 'pending')));
+await memberCall('POST', `/api/cgm/phantom/move-requests/${Number(mvAskD.json?.data?.requestId)}/reject`, { reason: 'Balanced already.' }, phantomToken);
+check('45.37 — a decided request notifies the organizer who asked', Number(askerProfile?.id || 0) > 0
+  ? organizerNotices() > noticesBefore
+  : true, `profile ${askerProfile?.id} notices ${noticesBefore}→${organizerNotices()}`);
+
+// -- A double decision is impossible: the second answer is refused ------------
+const mvRace = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvAskC.studentId, groupId: mvGroups[1] }, amaToken);
+const raceId = Number(mvRace.json?.data?.requestId);
+const racePair = await Promise.all([
+  memberCall('POST', `/api/cgm/phantom/move-requests/${raceId}/approve`, {}, phantomToken),
+  memberCall('POST', `/api/cgm/phantom/move-requests/${raceId}/approve`, {}, phantomToken),
+]);
+check('45.38 — two simultaneous approvals apply the move exactly once',
+  racePair.filter((response) => response.status === 200).length === 1
+  && racePair.filter((response) => response.status === 409).length === 1
+  && q1('SELECT status FROM cgm_move_requests WHERE id = ?', raceId)?.status === 'approved'
+  && Boolean(q1('SELECT applied_at FROM cgm_move_requests WHERE id = ?', raceId)?.applied_at),
+  racePair.map((response) => response.status).join(','));
 
 // ---------------------------------------------------------------------------
 // 45b. An approval never erases the record — every decided queue still lists it

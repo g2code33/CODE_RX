@@ -4,6 +4,7 @@ import { cgm, type ForceGetConflict } from '../../lib/cgm';
 import { ConnectionBanner } from './ConnectionBanner';
 import { appDialog } from '../AppDialog';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
+import { RecentItems } from '../RecentItems';
 
 /**
  * CODE Rx — PHANTOM Control Center (Class & Group Management oversight).
@@ -46,6 +47,12 @@ const TABS: Array<[Tab, string]> = [
   ['audit', 'Audit trail'],
 ];
 
+/**
+ * The sections where PHANTOM actually decides something. The rest only report,
+ * so the queue chip counts these and nothing else.
+ */
+const QUEUE_TABS: Tab[] = ['applications', 'classes', 'sensitive', 'rechoose', 'moves', 'force-get', 'disputes'];
+
 type PhantomRows = Record<Tab, any[] | undefined>;
 
 /**
@@ -62,6 +69,10 @@ const tabBadge = (attention: any, key: Tab): { unseen: number; pending: number }
   if (!unseen && !pending) return null;
   return { unseen, pending };
 };
+
+/** Everything still waiting on a decision, across every queue. */
+const tabQueueTotal = (attention: any) =>
+  QUEUE_TABS.reduce((sum, key) => sum + Number(tabBadge(attention, key)?.pending || 0), 0);
 
 const tabBadgeTitle = (badge: { unseen: number; pending: number }) =>
   badge.unseen
@@ -227,6 +238,14 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
     // actually on screen, so a failed load does not silently eat the count.
     void markSeen(tab);
   }, [tab, loadTab, markSeen]);
+
+  // Twelve sections do not fit on a phone, so the strip scrolls sideways and
+  // this one chip answers "is anything waiting?" without opening every tab.
+  const queueWaiting = tabQueueTotal(attention);
+  const openFirstQueue = () => {
+    const waiting = QUEUE_TABS.find((key) => Number(tabBadge(attention, key)?.pending || 0) > 0);
+    setTab(waiting || QUEUE_TABS[0]);
+  };
 
   const act = async (work: () => Promise<unknown>, note: string) => {
     setBusy(true); setMessage(null);
@@ -440,16 +459,18 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
           )}
 
           {tab === 'moves' && (
-            <ListBlock title="Moves & swaps — organizers cannot move a member without you" rows={rows.moves} emptyText="No move or swap requests yet."
+            <ListBlock title="Moves, swaps & removals — organizers cannot change a membership without you" rows={rows.moves} emptyText="No membership-change requests yet."
               render={(row) => (
                 <>
                   <div className="min-w-0">
                     <p className="flex flex-wrap items-center gap-1.5 text-sm font-black text-slate-800">
-                      {row.kind === 'swap' ? 'Swap' : 'Move'} · {row.studentName}
+                      {row.kind === 'swap' ? 'Swap' : row.kind === 'remove' ? 'Remove' : 'Move'} · {row.studentName}
                       <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-slate-500">{String(row.status)}</span>
                     </p>
                     <p className="text-[11px] font-semibold text-slate-400">
-                      {row.className}{row.classCode ? ` (${row.classCode})` : ''} · {row.activityName} · {row.fromGroupName || 'unplaced'} → {row.toGroupName || '—'}
+                      {row.className}{row.classCode ? ` (${row.classCode})` : ''} · {row.activityName} · {row.kind === 'remove'
+                        ? `removing them from ${row.fromGroupName || 'their group'}`
+                        : `${row.fromGroupName || 'unplaced'} → ${row.toGroupName || '—'}`}
                       {row.kind === 'swap' && row.partnerName ? ` · swapping with ${row.partnerName} (${row.partnerFromGroupName || '—'})` : ''}
                       {row.indexNumber ? ` · index ${row.indexNumber}` : ''} · {formatWhen(row.createdAt)}
                     </p>
@@ -723,11 +744,11 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
             <ListBlock title="Audit trail" rows={rows.audit} emptyText="No class & group events recorded yet."
               render={(row) => (
                 <div className="flex w-full flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-bold text-slate-700">{String(row.action).replace(/[._]/g, ' ')}</p>
-                    <p className="text-[11px] font-semibold text-slate-400">{row.actor_label} · target {row.entity_type || '—'} #{row.entity_id ?? '—'}{row.class_id ? ` · class #${row.class_id}` : ''}</p>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-slate-700">{auditAction(row)}</p>
+                    <p className="text-[11px] font-semibold text-slate-400">{auditActor(row)} · {auditTarget(row)}</p>
                   </div>
-                  <span className="text-xs font-bold text-slate-400">{formatWhen(row.created_at)}</span>
+                  <span className="text-xs font-bold text-slate-400">{formatWhen(auditWhen(row))}</span>
                 </div>
               )}
             />
@@ -740,7 +761,27 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
       <div className="space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm font-black text-slate-900">Class &amp; Group Management oversight</p>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="phantom-queue-chip"
+              onClick={openFirstQueue}
+              title={queueWaiting
+                ? `${queueWaiting} decision(s) waiting across the queues`
+                : 'No decision is waiting right now'}
+              aria-label={queueWaiting
+                ? `Queues — ${queueWaiting} decision(s) waiting. Open the first queue that needs you.`
+                : 'Queues — nothing waiting. Open the queue sections.'}
+              className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${queueWaiting ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-600'}`}
+            >
+              Queues ({queueWaiting})
+            </button>
+            <div
+              role="tablist"
+              aria-label="PHANTOM sections"
+              data-testid="phantom-tabstrip"
+              className="flex min-w-0 max-w-full items-center gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible md:pb-0"
+            >
             {TABS.map(([key, text]) => {
               const badge = tabBadge(attention, key);
               const active = tab === key;
@@ -757,6 +798,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                   {badge && Boolean(badge.unseen) && (
                     <span
                       data-testid={`phantom-tab-badge-${key}`}
+                      aria-label={`${badge.unseen} new ${badge.unseen === 1 ? 'item' : 'items'} in ${text}`}
                       className={`min-w-[1.1rem] rounded-full px-1.5 py-0.5 text-center text-[10px] font-black ${active ? 'bg-white text-emerald-700' : 'bg-rose-600 text-white'}`}
                     >
                       {badge.unseen}
@@ -772,6 +814,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                 </button>
               );
             })}
+            </div>
           </div>
         </div>
         {body}
@@ -827,6 +870,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                 return (
                   <span
                     data-testid={`phantom-nav-badge-${key}`}
+                    aria-label={`${badge.unseen} new ${badge.unseen === 1 ? 'item' : 'items'} in ${text}`}
                     title={tabBadgeTitle(badge)}
                     className="rounded-full bg-rose-600 px-2 py-0.5 text-[10px] font-black text-white"
                   >
@@ -844,18 +888,51 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
   );
 };
 
+/**
+ * Every oversight list shows the LATEST FIVE entries with one control to reveal
+ * the rest — the same rule the rest of the app follows (see ListReveal).
+ */
 const ListBlock = ({ title, rows, emptyText, render }: { title: string; rows?: any[]; emptyText: string; render: (row: any) => React.ReactNode }) => (
   <div className={card}>
-    <p className={label}>{title}</p>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <p className={label}>{title}</p>
+      {rows !== undefined && rows.length > 0 && (
+        <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">{rows.length} total</span>
+      )}
+    </div>
     {rows === undefined && <p className="mt-2 text-sm font-semibold text-slate-400">Loading…</p>}
     {rows !== undefined && rows.length === 0 && <p className="mt-2 text-xs font-medium text-slate-400">{emptyText}</p>}
     <ul className="divide-y divide-slate-100">
-      {(rows || []).map((row, index) => (
-        <li key={row.id ?? index} className="flex flex-wrap items-center justify-between gap-3 py-3.5">{render(row)}</li>
-      ))}
+      <RecentItems
+        items={rows || []}
+        label="entries"
+        testId="cgm-phantom-list-reveal"
+        render={(row, index) => (
+          <li key={row.id ?? index} className="flex flex-wrap items-center justify-between gap-3 py-3.5">{render(row)}</li>
+        )}
+      />
     </ul>
   </div>
 );
+
+/**
+ * The audit trail is the record of record, so it never prints a placeholder:
+ * every row names its actor, its target and its moment. Older rows written
+ * before entity ids were recorded say what they were about instead of "—".
+ */
+const auditActor = (row: any) => row.actor || row.actor_label || row.actorType || 'System';
+const auditAction = (row: any) => String(row.action || '').replace(/[._]/g, ' ').replace(/^cgm /, '');
+const auditTarget = (row: any) => {
+  const type = row.entityType || row.entity_type || '';
+  const rawId = row.entityId ?? row.entity_id;
+  const id = rawId === null || rawId === undefined || rawId === '' ? null : String(rawId);
+  const parts: string[] = [];
+  if (type) parts.push(`${String(type).replace(/_/g, ' ')}${id ? ` #${id}` : ''}`);
+  if (row.classId || row.class_id) parts.push(`class #${row.classId || row.class_id}`);
+  if (row.activityId || row.activity_id) parts.push(`activity #${row.activityId || row.activity_id}`);
+  return parts.length ? parts.join(' · ') : (row.context?.reason || row.context?.message || 'module-wide');
+};
+const auditWhen = (row: any) => row.createdAt || row.created_at || row.reviewedAt || row.reviewed_at || null;
 
 const DelegationTab = ({ rows, act, busy }: { rows?: any[]; act: (work: () => Promise<unknown>, note: string) => Promise<void>; busy: boolean }) => {
   const [memberId, setMemberId] = useState('');

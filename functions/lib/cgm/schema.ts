@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS cgm_move_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   class_id INTEGER NOT NULL,
   activity_id INTEGER NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'move' CHECK (kind IN ('move','swap')),
+  kind TEXT NOT NULL DEFAULT 'move' CHECK (kind IN ('move','swap','remove')),
   student_id INTEGER NOT NULL,
   from_group_id INTEGER,
   to_group_id INTEGER NOT NULL,

@@ -110,40 +110,64 @@ export interface PhantomAttentionBoard {
 }
 
 /**
- * Counts for one section. The comparison is on row ids, not timestamps: the
- * arrival columns are stamped to the second, so two events in the same second
- * would otherwise be indistinguishable — and a badge that misses work is worse
- * than one that shows it twice.
+ * One statement for the whole board. Every section contributes two counted
+ * columns — the decision work waiting (`<key>_pending`) and what arrived after
+ * this operator's watermark (`<key>_unseen`) — so a single round trip fills the
+ * panel.
+ *
+ * Scalar subqueries, not a `UNION ALL` chain: D1 rejects a compound SELECT with
+ * more than five terms ("too many terms in compound SELECT"), and this board has
+ * a dozen sections. Each subquery compares row ids rather than timestamps,
+ * because the arrival columns are stamped to the second and two events in the
+ * same second would otherwise be indistinguishable — a badge that misses work
+ * is worse than one that shows it twice.
  */
-const tabCounts = async (
-  db: D1Database,
-  memberProfileId: number,
-  tab: PhantomAttentionTab,
-): Promise<{ pending: number; unseen: number }> => {
-  if (!tab.table) return { pending: 0, unseen: 0 };
-  // The audit trail is the only section read straight off its own table.
-  const table = tab.key === 'audit' ? 'cgm_audit' : tab.table;
-  const pendingWhere = tab.key === 'policies' ? '' : tab.pendingSql || '';
-  // "Arrived" means: still in the set that section is about. For a decision
-  // queue that is the pending set (so a decided item stops counting), for a log
-  // it is the log itself (optionally narrowed by `arrivalSql`).
-  const arrivalWhere = tab.key === 'audit' ? '' : tab.arrivalSql || tab.pendingSql || '';
-  const sql = `SELECT
-      COALESCE(SUM(CASE WHEN ${pendingWhere || '1 = 0'} THEN 1 ELSE 0 END), 0) AS pending,
-      COALESCE(SUM(CASE WHEN t.id > COALESCE(seen.last_seen_id, 0) THEN 1 ELSE 0 END), 0) AS unseen
-    FROM ${table} t
-    LEFT JOIN cgm_phantom_attention seen
-      ON seen.member_profile_id = ? AND seen.tab_key = ?
-    WHERE 1 = 1 ${arrivalWhere ? `AND (${arrivalWhere})` : ''}`;
-  const rows = await asRows<any>(db.prepare(sql).bind(memberProfileId, tab.key)).catch(() => [] as any[]);
-  return { pending: Number(rows[0]?.pending || 0), unseen: Number(rows[0]?.unseen || 0) };
-};
+const BOARD_SQL = (() => {
+  const columns: string[] = [];
+  for (const tab of PHANTOM_ATTENTION_TABS) {
+    const table = tab.table;
+    if (!table) {
+      columns.push(`0 AS "${tab.key}_pending"`, `0 AS "${tab.key}_unseen"`);
+      continue;
+    }
+    const seenId = `COALESCE((SELECT last_seen_id FROM cgm_phantom_attention WHERE member_profile_id = ? AND tab_key = '${tab.key}'), 0)`;
+    columns.push(tab.queue && tab.pendingSql
+      ? `(SELECT COUNT(*) FROM ${table} t WHERE ${tab.pendingSql}) AS "${tab.key}_pending"`
+      : `0 AS "${tab.key}_pending"`);
+    const narrow = tab.arrivalSql || tab.pendingSql;
+    columns.push(
+      `(SELECT COUNT(*) FROM ${table} t WHERE t.id > ${seenId}${narrow ? ` AND (${narrow})` : ''}) AS "${tab.key}_unseen"`,
+    );
+  }
+  return `SELECT\n  ${columns.join(',\n  ')}`;
+})();
+
+/** Logged once per isolate so a broken statement never reads as "nothing new". */
+let boardSqlWarned = false;
 
 export const phantomAttentionBoard = async (
   db: D1Database,
   memberProfileId: number,
 ): Promise<PhantomAttentionBoard> => {
   await ensurePhantomAttentionSchema(db);
+  const counts = new Map<string, number>();
+  const unseen = new Map<string, number>();
+  try {
+    const placeholders = (BOARD_SQL.match(/\?/g) || []).length;
+    const rows = await asRows<any>(db.prepare(BOARD_SQL)
+      .bind(...Array.from({ length: placeholders }, () => memberProfileId)));
+    const row = rows[0] || {};
+    for (const tab of PHANTOM_ATTENTION_TABS) {
+      counts.set(tab.key, Number(row[`${tab.key}_pending`] || 0));
+      unseen.set(tab.key, Number(row[`${tab.key}_unseen`] || 0));
+    }
+  } catch (error) {
+    if (!boardSqlWarned) {
+      boardSqlWarned = true;
+      console.error('phantomAttentionBoard: the board statement failed, every count reads as zero', String(error));
+    }
+  }
+
   const seenRows = await asRows<any>(db.prepare(
     'SELECT tab_key, last_seen_at, last_seen_id FROM cgm_phantom_attention WHERE member_profile_id = ?'
   ).bind(memberProfileId)).catch(() => [] as any[]);
@@ -154,19 +178,15 @@ export const phantomAttentionBoard = async (
     seenId.set(String(row.tab_key), Number(row.last_seen_id || 0));
   }
 
-  const tabs: PhantomAttentionCount[] = [];
-  for (const tab of PHANTOM_ATTENTION_TABS) {
-    const counts = await tabCounts(db, memberProfileId, tab);
-    tabs.push({
-      key: tab.key,
-      label: tab.label,
-      queue: tab.queue,
-      pending: tab.queue ? counts.pending : 0,
-      unseen: counts.unseen,
-      lastSeenAt: seenAt.get(tab.key) || null,
-      lastSeenId: seenId.get(tab.key) || 0,
-    });
-  }
+  const tabs: PhantomAttentionCount[] = PHANTOM_ATTENTION_TABS.map((tab) => ({
+    key: tab.key,
+    label: tab.label,
+    queue: tab.queue,
+    pending: tab.queue ? Number(counts.get(tab.key) || 0) : 0,
+    unseen: Number(unseen.get(tab.key) || 0),
+    lastSeenAt: seenAt.get(tab.key) || null,
+    lastSeenId: seenId.get(tab.key) || 0,
+  }));
 
   return {
     tabs,
@@ -188,15 +208,17 @@ export const markPhantomTabSeen = async (
   memberProfileId: number,
   tabKey: string,
 ): Promise<{ tab: string; seenAt: string; seenId: number } | null> => {
-  const tab = PHANTOM_ATTENTION_TABS.find((entry) => entry.key === tabKey);
-  if (!tab) return null;
+  const spec = PHANTOM_ATTENTION_TABS.find((entry) => entry.key === tabKey);
+  if (!spec) return null;
   await ensurePhantomAttentionSchema(db);
 
-  const before = await tabCounts(db, memberProfileId, tab);
+  const board = await phantomAttentionBoard(db, memberProfileId);
+  const current = board.tabs.find((entry) => entry.key === tabKey);
   let newest = 0;
-  if (tab.table) {
+  const source = spec.table;
+  if (source) {
     const maxRows = await asRows<{ newest: number }>(db.prepare(
-      `SELECT COALESCE(MAX(id), 0) AS newest FROM ${tab.table}`
+      `SELECT COALESCE(MAX(id), 0) AS newest FROM ${source}`
     )).catch(() => [] as any[]);
     newest = Number(maxRows[0]?.newest || 0);
   }
@@ -205,7 +227,7 @@ export const markPhantomTabSeen = async (
   const previous = await asRows<{ seen_total: number }>(db.prepare(
     'SELECT seen_total FROM cgm_phantom_attention WHERE member_profile_id = ? AND tab_key = ?'
   ).bind(memberProfileId, tabKey)).catch(() => [] as any[]);
-  const seenTotal = Number(previous[0]?.seen_total || 0) + before.unseen;
+  const seenTotal = Number(previous[0]?.seen_total || 0) + Number(current?.unseen || 0);
 
   await db.prepare(
     `INSERT INTO cgm_phantom_attention (member_profile_id, tab_key, last_seen_at, last_seen_id, seen_total, updated_at)

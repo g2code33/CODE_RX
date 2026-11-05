@@ -1151,6 +1151,111 @@ check('the workspace reports the server\'s answer instead of claiming the member
   && /moveNotice\(result, 'Members swapped\.'\)/.test(moveWorkspace)
   && /the member stays where they are until PHANTOM approves the move/.test(activitiesRoute));
 
+section('28. One listing rule: the latest five, then "view more"');
+
+const recentItems = src('src/components/RecentItems.tsx');
+check('one shared primitive owns the rule, and its preview is five',
+  /export const LIST_PREVIEW = 5;/.test(recentItems)
+  && /limit = LIST_PREVIEW/.test(recentItems)
+  && /View more — \$\{remaining\} more/.test(recentItems)
+  && /aria-expanded=\{expanded\}/.test(recentItems)
+  && /data-testid=\{testId\}/.test(recentItems));
+check('every oversight list uses it — no list dumps every row',
+  /<RecentItems\s/.test(phantomPanel)
+  && /items=\{rows \|\| \[\]\}/.test(phantomPanel)
+  && !/\{\(rows \|\| \[\]\)\.map\(/.test(phantomPanel));
+const listSurfaces = [
+  ['src/components/CommunityHub.tsx', 5],
+  ['src/components/ClassGroups/ClassGroupsWorkspace.tsx', 1],
+  ['src/components/ClassGroups/StudentPortal.tsx', 4],
+  ['src/components/ClientAccessCenter.tsx', 2],
+  ['src/components/AdminPanel.tsx', 1],
+  ['src/components/NotificationCenter.tsx', 1],
+  ['src/components/PhantomControlCenter.tsx', 4],
+];
+for (const [file, minimum] of listSurfaces) {
+  const body = src(file);
+  check(`${file.split('/').pop()} lists through the shared rule`, (body.match(/<RecentItems/g) || []).length >= minimum,
+    `${(body.match(/<RecentItems/g) || []).length} < ${minimum}`);
+}
+check('the recycle bin is not exempt — it follows the same rule',
+  !/limit=\{items\.length\}/.test(src('src/components/PhantomControlCenter.tsx')));
+check('the copy no longer promises "three" anywhere it used to',
+  !/newest three/i.test(src('src/components/PhantomControlCenter.tsx'))
+  && !/Three recent notifications/i.test(src('src/components/NotificationCenter.tsx')));
+
+section('29. The audit trail shows real facts, never dashes');
+
+check('the audit list reads the fields the API actually returns',
+  /const auditActor = \(row: any\) => row\.actor \|\| row\.actor_label/.test(phantomPanel)
+  && /row\.entityType \|\| row\.entity_type/.test(phantomPanel)
+  && /row\.createdAt \|\| row\.created_at/.test(phantomPanel));
+check('every row names the actor, the target and the moment',
+  /\{auditActor\(row\)\} · \{auditTarget\(row\)\}/.test(phantomPanel)
+  && /formatWhen\(auditWhen\(row\)\)/.test(phantomPanel));
+check('a row with no entity still says what it was about instead of "—"',
+  /module-wide/.test(phantomPanel)
+  && !/target \{row\.entity_type \|\| '—'\}/.test(phantomPanel));
+check('the audit API returns camelCase that matches it',
+  /actorType: row\.actor_type, actor: row\.actor_label/.test(activitiesRoute)
+  && /entityType: row\.entity_type, entityId: row\.entity_id/.test(activitiesRoute)
+  && /createdAt: row\.created_at/.test(activitiesRoute));
+
+section('30. Removals are PHANTOM decisions, decisions are race-safe, organizers hear back');
+
+check('removal goes through the same queue and the same apply path',
+  /if \(!member\.isPhantom && await modulePolicy\(c\.env\.DB, 'move_approval_mode'\) === 'approval'\) \{\n      const activity = await activityCore/.test(activitiesRoute)
+  && /applyMemberRemoval\(c, member, live\[0\], request\.reason\)/.test(activitiesRoute)
+  && /kind: 'remove'/.test(activitiesRoute)
+  && /kind IN \('move','swap','remove'\)/.test(src('functions/lib/cgm/schema.ts')));
+check('a decision is claimed before it is applied, and released if the roster refuses it',
+  /UPDATE cgm_move_requests SET status = 'approved'[\s\S]{0,200}WHERE id = \? AND status = 'pending'/.test(activitiesRoute)
+  && /SET status = 'pending', reviewer_label = NULL[\s\S]{0,160}applied_at IS NULL/.test(activitiesRoute)
+  && /Somebody already decided this request\./.test(activitiesRoute));
+check('the organizer who asked is told the outcome',
+  /const notifyMoveRequester = async/.test(activitiesRoute)
+  && /Your \$\{request\.kind\} request was approved/.test(activitiesRoute)
+  && /Your \$\{request\.kind\} request was not approved/.test(activitiesRoute));
+check('the member row shows the pending request in place',
+  /moveStatus: row\.move_status \|\| null/.test(activitiesRoute)
+  && /data-testid="cgm-member-move-pending"/.test(moveWorkspace)
+  && /awaiting PHANTOM/.test(moveWorkspace));
+check('the attention board is one statement, not one query per tab',
+  /const BOARD_SQL =/.test(attentionLib2)
+  && /SELECT\\n  \$\{columns\.join/.test(attentionLib2)
+  && /BOARD_SQL\.match\(\/\\\?\/g\)/.test(attentionLib2));
+// D1 refuses a compound SELECT with more than five terms, so the board must not
+// be built as a UNION ALL chain — that is what silently zeroed every badge.
+check('the board avoids a compound SELECT D1 would reject',
+  !/UNION ALL\\n/.test(attentionLib2) && !/'\\n  UNION ALL/.test(attentionLib2)
+  && /\$\{tab\.key\}_unseen/.test(attentionLib2)
+  && /FROM cgm_phantom_attention WHERE member_profile_id = \? AND tab_key/.test(attentionLib2));
+check('badges carry a screen-reader label',
+  /aria-label=\{`\$\{badge\.unseen\} new \$\{badge\.unseen === 1 \? 'item' : 'items'\} in \$\{text\}`\}/.test(phantomPanel));
+check('the test helper refuses a reused index number instead of lying',
+  /reuses the taken index number/.test(src('scripts/cgm-tests.mjs')));
+
+section('31. A crowded panel keeps one honest number instead of a wall of chips');
+
+check('the section strip scrolls sideways instead of stacking twelve chips',
+  /data-testid="phantom-tabstrip"/.test(phantomPanel)
+  && /overflow-x-auto/.test(phantomPanel)
+  && /md:flex-wrap/.test(phantomPanel)
+  && /role="tablist"/.test(phantomPanel));
+check('one chip carries the work still waiting across every queue',
+  /data-testid="phantom-queue-chip"/.test(phantomPanel)
+  && /Queues \(\{queueWaiting\}\)/.test(phantomPanel)
+  && /const queueWaiting = tabQueueTotal\(attention\)/.test(phantomPanel)
+  && /const QUEUE_TABS: Tab\[\] = \['applications', 'classes', 'sensitive', 'rechoose', 'moves', 'force-get', 'disputes'\]/.test(phantomPanel));
+check('the chip opens the first queue that has something waiting',
+  /const openFirstQueue = \(\) => \{/.test(phantomPanel)
+  && /QUEUE_TABS\.find\(\(key\) => Number\(tabBadge\(attention, key\)\?\.pending \|\| 0\) > 0\)/.test(phantomPanel)
+  && /setTab\(waiting \|\| QUEUE_TABS\[0\]\)/.test(phantomPanel)
+  && /onClick=\{openFirstQueue\}/.test(phantomPanel));
+check('the chip and the strip announce themselves to a screen reader',
+  /aria-label=\{queueWaiting/.test(phantomPanel)
+  && /aria-label="PHANTOM sections"/.test(phantomPanel));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

@@ -10,6 +10,7 @@ import { QrBlock } from './ClassGroupsWorkspace';
 import { useCgmNoZoom } from './noZoom';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet, type GroupSheet } from '../../lib/groupSheet';
+import { RecentItems } from '../RecentItems';
 
 /**
  * CODE Rx — Student Portal.
@@ -135,14 +136,14 @@ const ClassmatesFullPage = ({ className, classmates, onBack }: { className: stri
         <p className={label}>All classmates ({classmates.length})</p>
         {classmates.length ? (
           <ul className="mt-3 grid gap-1.5 sm:grid-cols-2" data-testid="cgm-classmates-full-list">
-            {classmates.map((member: any) => (
+            <RecentItems items={classmates} label="classmates" render={(member: any) => (
               <li key={member.studentId ?? member.id ?? member.fullName} className="rounded-xl bg-slate-50 px-4 py-2.5">
                 <p className="text-sm font-bold text-slate-700">{member.fullName || member.full_name}</p>
                 {(member.phone || member.email) && (
                   <p className="text-[11px] font-semibold text-slate-400">{[member.phone, member.email].filter(Boolean).join(' · ')}</p>
                 )}
               </li>
-            ))}
+            )} />
           </ul>
         ) : (
           <p className="mt-3 text-xs font-medium text-slate-400">No classmates yet.</p>
@@ -174,7 +175,7 @@ const GroupMembersFullPage = ({ groupName, className, activityName, members, cur
       <div className={card}>
         <p className={label}>All members ({members.length})</p>
         <ul className="mt-3 space-y-1.5" data-testid="cgm-group-members-full-list">
-          {members.map((member: any) => {
+          <RecentItems items={members} label="members" render={(member: any) => {
             const isYou = Number(member.student_id ?? member.studentId) === Number(currentStudentId);
             const role = String(member.leader_role || member.leaderRole || '').trim();
             return (
@@ -195,7 +196,7 @@ const GroupMembersFullPage = ({ groupName, className, activityName, members, cur
                 {isYou && <span className="shrink-0 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-black uppercase text-sky-700">You</span>}
               </li>
             );
-          })}
+          }} />
         </ul>
       </div>
     </div>
@@ -1244,12 +1245,12 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
           <p className={label}>Leadership in my groups</p>
           {(data.leaders || []).length ? (
             <ul className="mt-3 space-y-2">
-              {data.leaders.map((row: any) => (
+              <RecentItems items={data.leaders} label="leaders" render={(row: any) => (
                 <li key={`${row.group_id}-${row.student_id}`} className="rounded-xl bg-slate-50 px-4 py-2.5 text-sm">
                   <span className="font-bold text-slate-700">{row.full_name}</span>
                   <span className="ml-2 text-[10px] font-black uppercase tracking-wider text-emerald-600">{row.role}</span>
                 </li>
-              ))}
+              )} />
             </ul>
           ) : <p className="mt-3 text-xs font-medium text-slate-400">No leaders appointed in your groups yet.</p>}
         </div>
@@ -1259,7 +1260,7 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
         <p className={label}>Announcements</p>
         {(data.announcements || []).length ? (
           <ul className="mt-3 space-y-2">
-            {data.announcements.map((row: any) => (
+            <RecentItems items={data.announcements} label="announcements" render={(row: any) => (
               <li key={row.id} className={`rounded-xl border px-4 py-3 ${row.pinned ? 'border-amber-200 bg-amber-50/50' : 'border-slate-100'}`}>
                 <p className="text-sm font-black text-slate-800">{row.pinned ? '📌 ' : ''}{row.title}</p>
                 <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{row.body}</p>
@@ -1276,7 +1277,7 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
                   ) : null}
                 </p>
               </li>
-            ))}
+            )} />
           </ul>
         ) : <p className="mt-3 text-xs font-medium text-slate-400">No announcements yet.</p>}
       </div>
