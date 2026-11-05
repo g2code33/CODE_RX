@@ -374,6 +374,68 @@ CREATE TABLE IF NOT EXISTS cgm_rechoose_requests (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+-- FORCE GET — an organizer proposes a destination for named students; PHANTOM
+-- approves it; the student still samples with the activity's own method and is
+-- then placed in the approved group. Three tables, all additive:
+--   requests      one row per submitted batch (versioned, immutable history)
+--   request items the exact student→group mapping for THAT version
+--   designations  the single live approved destination per student
+CREATE TABLE IF NOT EXISTS cgm_force_get_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  activity_id INTEGER NOT NULL,
+  class_id INTEGER NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','superseded','cancelled')),
+  explanation TEXT,
+  student_count INTEGER NOT NULL DEFAULT 0,
+  requested_by_profile_id INTEGER,
+  requester_label TEXT,
+  reviewed_by_profile_id INTEGER,
+  reviewer_label TEXT,
+  review_reason TEXT,
+  superseded_by_request_id INTEGER,
+  submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id)
+);
+
+CREATE TABLE IF NOT EXISTS cgm_force_get_request_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  student_id INTEGER NOT NULL,
+  destination_group_id INTEGER NOT NULL,
+  previous_group_id INTEGER,
+  sampled_at_submission INTEGER NOT NULL DEFAULT 0,
+  rechoose_state TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(request_id) REFERENCES cgm_force_get_requests(id),
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
+CREATE TABLE IF NOT EXISTS cgm_force_get_designations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  activity_id INTEGER NOT NULL,
+  class_id INTEGER NOT NULL,
+  student_id INTEGER NOT NULL,
+  designated_group_id INTEGER NOT NULL,
+  approved_request_id INTEGER,
+  request_version INTEGER,
+  designated_by_profile_id INTEGER,
+  designated_by_label TEXT,
+  approved_by_profile_id INTEGER,
+  approved_by_label TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','applied','superseded','cleared')),
+  applied_assignment_id INTEGER,
+  designated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  applied_at DATETIME,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_activity_waitlist (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   activity_id INTEGER NOT NULL,
@@ -725,6 +787,14 @@ CREATE INDEX IF NOT EXISTS idx_cgm_templates_class ON cgm_activity_templates(cla
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_student ON cgm_profile_change_requests(student_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_status ON cgm_profile_change_requests(status);
 CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_status ON cgm_rechoose_requests(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_requests_activity ON cgm_force_get_requests(activity_id, status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_requests_status ON cgm_force_get_requests(status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_items_request ON cgm_force_get_request_items(request_id, version);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_force_get_items_unique ON cgm_force_get_request_items(request_id, version, student_id);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_designations_student ON cgm_force_get_designations(activity_id, student_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_force_get_designations_group ON cgm_force_get_designations(designated_group_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_force_get_designations_live ON cgm_force_get_designations(activity_id, student_id) WHERE status = 'active';
+
 CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_student ON cgm_rechoose_requests(activity_id, student_id, status);
 CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_activity ON cgm_rechoose_requests(activity_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_rechoose_pending ON cgm_rechoose_requests(activity_id, student_id) WHERE status = 'pending';

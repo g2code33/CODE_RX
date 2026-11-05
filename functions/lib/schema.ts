@@ -1270,7 +1270,7 @@ const SAFE_MIGRATIONS = [
 // 2026-10-30: adds the Class & Group Management module (CGM) — student
 // identities, classes, roster, invitations, activities, groups, elections,
 // leadership, attendance, announcements and audit tables. Additive only.
-const VAULT_SCHEMA_VERSION = '2026-11-04-code-rx25-rechoose-requests';
+const VAULT_SCHEMA_VERSION = '2026-11-05-code-rx26-force-get';
 
 
 // Role codes stay stable for member history and permissions. Their visible

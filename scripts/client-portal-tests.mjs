@@ -760,10 +760,10 @@ const main = async () => {
   const lifecycleSql = db.query("SELECT sql FROM sqlite_master WHERE name = 'client_documents'")[0].sql;
   check('document lifecycle is constrained to the six named states',
     lifecycleSql.includes('published') && lifecycleSql.includes('in_review') && lifecycleSql.includes('unpublished'));
-  // The marker moves whenever a new additive migration lands. 2026-11-04
-  // (rx25) adds the CGM election-eligibility columns and the re-choose table.
+  // The marker moves whenever a new additive migration lands. 2026-11-05
+  // (rx26) adds the FORCE GET request / item / designation tables.
   check('schema version marker was advanced',
-    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-11-04-code-rx25-rechoose-requests'));
+    db.query("SELECT setting_value FROM system_settings WHERE setting_key = 'vault_schema_version'")[0].setting_value.includes('2026-11-05-code-rx26-force-get'));
   // Phase 20 adds the review section's own table: one row per answer, so a
   // client who changes their mind leaves a trail instead of overwriting.
   // Phase 20 adds the review table, the signature table and the message table:
@@ -776,10 +776,11 @@ const main = async () => {
   // attendance, announcements, notification preferences, PHANTOM approval
   // delegations and audit), all additive and all hanging off the records they
   // belong to.
-  // 2026-11-04 adds cgm_rechoose_requests (43rd CGM table): an organizer can
-  // only ASK that a member choose their group again — PHANTOM approves it.
+  // 2026-11-04 added cgm_rechoose_requests (43rd CGM table) and 2026-11-05
+  // adds the three FORCE GET tables (44-46): an organizer's proposed
+  // destinations only ever take effect after PHANTOM approves them.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 43, `${allTables.length} user tables`);
+    allTables.length === 63 + 11 + 3 + 46, `${allTables.length} user tables`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',

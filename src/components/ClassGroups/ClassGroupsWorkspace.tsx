@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, Archive, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
-  Megaphone, Plus, RefreshCw, Settings, ShieldCheck, UserCheck, Users, Vote, FileText, X, LogOut,
+  Megaphone, Plus, RefreshCw, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
@@ -13,6 +13,7 @@ import { appDialog } from '../AppDialog';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { ConnectionBanner } from './ConnectionBanner';
+import { ForceGetWorkspace } from './ForceGetWorkspace';
 
 /**
  * CODE Rx — Class & Group Management (organizer workspace).
@@ -1746,10 +1747,26 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
           return (
             <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
               <div className="flex items-center justify-between gap-2">
-                <span className="flex min-w-0 items-center gap-1.5">
+                <span className="flex min-w-0 flex-wrap items-center gap-1.5">
                   <span className="truncate font-black text-slate-700">{row.full_name}</span>
                   {roles.includes('leader') && <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Leader</span>}
                   {roles.includes('assistant') && <span className="rounded bg-teal-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white">Assistant</span>}
+                  {/* FORCE GET badges — organizer-only. A FORCED badge means an
+                      approved designation actually put them here; AWAITING
+                      RESAMPLE means their approved destination is elsewhere and
+                      their own Re-choose has to release this seat first. */}
+                  {row.forced && (
+                    <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[9px] font-black uppercase text-white" data-testid="cgm-member-forced">Forced</span>
+                  )}
+                  {row.assigned_via === 'self' && (
+                    <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-sky-700" data-testid="cgm-member-sampled">Sampled</span>
+                  )}
+                  {row.awaitingResample && (
+                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-amber-800" data-testid="cgm-member-awaiting">Awaiting resample</span>
+                  )}
+                  {row.designation && !row.forced && !row.awaitingResample && (
+                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-emerald-800" data-testid="cgm-member-designated">Designation approved</span>
+                  )}
                 </span>
                 <span className="flex shrink-0 gap-1">
                   {canMove && others.length > 0 && (
@@ -1779,11 +1796,40 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
                 {row.assigned_via && <span>joined via {String(row.assigned_via).replace(/_/g, ' ')}</span>}
                 {detail.viewer?.canSeeSensitive && row.gender && <span>{String(row.gender).replace(/_/g, ' ')}</span>}
               </p>
+              {row.designation && (
+                <p className="mt-1 rounded-lg bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-800" data-testid="cgm-member-designation-detail">
+                  Force Get → {row.designation.designatedGroupName}
+                  {row.designation.previousGroupName ? ` (was ${row.designation.previousGroupName})` : ''}
+                  {' · '}designated by {row.designation.designatedBy || 'the organizer'}
+                  {row.designation.approvedBy ? ` · approved by ${row.designation.approvedBy}` : ''}
+                  {row.designation.designatedAt ? ` · ${row.designation.designatedAt}` : ''}
+                  {' · '}{row.designation.applied ? 'applied' : 'not applied yet'}
+                </p>
+              )}
             </li>
           );
         })}
         {!visibleMembers.length && <li className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-400">{search ? 'No member matches that search.' : 'No members yet.'}</li>}
       </ul>
+      {(detail.designations || []).length > 0 && (
+        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50/60 p-3" data-testid="cgm-group-force-get">
+          <p className="text-[10px] font-black uppercase tracking-wider text-amber-800">Force Get · approved designations</p>
+          <p className="mt-1 text-[10px] font-semibold text-amber-700">
+            {Number(detail.forcedCount || 0)} forced member(s) here · {Number(detail.reservedCount || 0)} approved seat(s) reserved for students who still have to sample.
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {(detail.designations || []).map((row: any) => (
+              <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <span className="font-bold text-amber-900">{row.studentName} → {row.designatedGroupName}</span>
+                <span className="rounded-full bg-white px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-amber-700">
+                  {row.applied ? 'applied' : row.awaitingResample ? 'awaiting their re-choose' : 'waiting to sample'}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[10px] font-medium text-amber-800/80">The organizer's reasons stay with the request — students never see them here.</p>
+        </div>
+      )}
       {(detail.rechooseApproved || []).length > 0 && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3" data-testid="cgm-rechoose-approved">
           <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">PHANTOM approved a fresh choice</p>
@@ -2333,6 +2379,9 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openGroupId, setOpenGroupId] = useState<number | null>(null);
+  // Force Get is a full-page workspace of its own, opened from the button that
+  // sits beside Assign Remaining.
+  const [forceGetOpen, setForceGetOpen] = useState(false);
 
   useEffect(() => { void cgm.activities(classId).then((rows) => { setActivities(rows as any[]); }).catch(() => setActivities([])); }, [classId]);
 
@@ -2349,6 +2398,16 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
     catch (failure: any) { setError(failure?.message || 'That did not work.'); return null; }
     finally { setBusy(false); }
   };
+
+  if (forceGetOpen && activityId) {
+    return (
+      <ForceGetWorkspace
+        activityId={Number(activityId)}
+        onBack={() => { setForceGetOpen(false); if (activityId) void load(activityId); onGroupFocus?.(false); }}
+        onChanged={() => { if (activityId) void load(activityId); onChanged(); }}
+      />
+    );
+  }
 
   if (openGroupId && activityId) {
     return (
@@ -2419,6 +2478,20 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                     {data.config.method === 'random' ? 'Assign remaining (random mode)' : 'Assign remaining'}
                   </button>
                 )}
+                {/* FORCE GET — sits immediately beside Assign Remaining. It never
+                    moves anybody by itself: it opens the full-page workspace
+                    that files a request PHANTOM has to approve. */}
+                <button
+                  type="button"
+                  disabled={busy || !(data.groups || []).length}
+                  data-testid="cgm-force-get-open"
+                  title={!data.groups?.length ? 'Create the groups first — a Force Get needs real destinations.' : 'Propose a destination for named students (PHANTOM must approve)'}
+                  onClick={() => { setForceGetOpen(true); onGroupFocus?.(true); }}
+                  className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-emerald-600 px-4 py-2.5 text-sm font-black text-white shadow-sm shadow-emerald-950/10 transition hover:bg-emerald-700 hover:border-amber-400 active:bg-emerald-800 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                >
+                  <Target className="h-4 w-4 text-amber-300" aria-hidden="true" />
+                  Force Get
+                </button>
                 <button type="button" disabled={busy} className="mini-button" data-testid="cgm-edit-activity-settings" onClick={() => onEditActivity(Number(activityId))}>
                   ✎ Change in activity settings
                 </button>
@@ -2454,8 +2527,14 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
                       <span className="truncate font-black text-slate-900 group-hover/name:text-emerald-700">{group.name}</span>
                       <ChevronRight className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                     </span>
-                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-black ${full ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-black ${full ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`} data-testid="cgm-group-count">
                       {size}/{capacity ?? '∞'}
+                      {/* The bracketed number is a SUBSET of the group size and
+                          comes from the backend: members placed through an
+                          approved Force Get designation. */}
+                      {Number(group.forced || 0) > 0 && (
+                        <span className="ml-1 font-black text-red-600" data-testid="cgm-group-forced-count">({Number(group.forced)})</span>
+                      )}
                     </span>
                   </div>
                   <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
@@ -2468,6 +2547,9 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
               );
             })}
           </div>
+          <p className="mt-2 text-[10px] font-bold text-slate-400" data-testid="cgm-groups-legend">
+            <span className="font-black text-red-600">Red number</span> = organizer-forced members (a subset of the group size, approved by PHANTOM).
+          </p>
 
           <div className="grid gap-3 sm:grid-cols-2">
             <div className={card}>

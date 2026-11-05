@@ -601,6 +601,213 @@ let wsClass = null;
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Force Get: the organizer proposes a destination in the full-page workspace,
+// PHANTOM approves it in its own console, and only then does the designated
+// student's own draw land in that group. Every step is driven through the DOM.
+// ---------------------------------------------------------------------------
+{
+  const organizer = { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } };
+  const fgActivity = await api('POST', `/api/cgm/classes/${wsClass.classId}/activities`, {
+    name: `Browser Check Force Get ${stamp}`, type: 'tutorial',
+    config: { method: 'random', groupCount: 2, capacity: 5, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, phantomToken);
+  const fgActivityId = fgActivity.json?.data?.activityId ?? fgActivity.json?.data?.id;
+  await api('POST', `/api/cgm/activities/${fgActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+
+  // A member who has never sampled: their own draw must land on the approved group.
+  const fgIndex = `BRW-${stamp}-FG`;
+  await api('POST', `/api/cgm/classes/${wsClass.classId}/roster/entries`, { fullName: 'Force Faye', indexNumber: fgIndex }, phantomToken);
+  const fgRegistered = await fetch(`${BASE}/api/cgm/student/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.231' },
+    body: JSON.stringify({ classCode: wsClass.code, indexNumber: fgIndex, entryPassword: 'rechoose-entry' }),
+  }).then((response) => response.json());
+  const fgPasskey = String(fgRegistered?.data?.passkey || '');
+  const fgQueue = (await api('GET', `/api/cgm/classes/${wsClass.classId}/registrations`, undefined, phantomToken)).json?.data || [];
+  const fgPendingRegistration = fgQueue.find((row) => row.indexNumber === fgIndex);
+  if (fgPendingRegistration) {
+    await api('POST', `/api/cgm/classes/${wsClass.classId}/registrations/${fgPendingRegistration.id}/approve`, {}, phantomToken);
+  }
+  const fgLogin = await api('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: fgIndex, passkey: fgPasskey });
+  const fgSession = fgLogin.json?.data?.session?.token;
+  const fgStudentId = Number(fgLogin.json?.data?.student?.id || 0);
+  const fgStudentDraw = () => fetch(`${BASE}/api/cgm/student/activities/${fgActivityId}/random-draw`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Code-Rx-Student-Session': String(fgSession) },
+    body: JSON.stringify({}),
+  }).then((response) => response.json());
+  check('the Force Get fixture has a registered member and a live activity',
+    Boolean(fgSession) && Boolean(fgActivityId), `session=${Boolean(fgSession)} activity=${Boolean(fgActivityId)}`);
+  const fgApi = (await api('GET', `/api/cgm/activities/${fgActivityId}`, undefined, phantomToken)).json?.data || {};
+  const fgGroupIds = (fgApi.groups || []).map((group) => Number(group.id));
+  const fgGroupNames = (fgApi.groups || []).map((group) => String(group.name));
+  const fgDestination = fgGroupIds[fgGroupIds.length - 1];
+
+  const page = await boot('#class-groups', organizer);
+  const groupsNav = page.buttonByText('Groups');
+  groupsNav && groupsNav.click();
+  await page.waitForFor('Choose an activity', 20_000);
+  const chooser = page.window.document.querySelector('select[aria-label="Choose activity"]');
+  const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+  if (chooser) { setter.call(chooser, String(fgActivityId)); chooser.dispatchEvent(new page.window.Event('change', { bubbles: true })); }
+  await page.waitForFor(fgGroupNames[0], 20_000);
+
+  // 1. The button sits beside Assign Remaining.
+  const assignButton = [...page.window.document.querySelectorAll('button')].find((el) => /Assign remaining/.test(el.textContent));
+  const forceGetButton = page.window.document.querySelector('[data-testid="cgm-force-get-open"]');
+  check('the Force Get button sits beside Assign Remaining on the Groups tab',
+    Boolean(assignButton) && Boolean(forceGetButton) && assignButton.nextElementSibling === forceGetButton,
+    `next=${String(assignButton?.nextElementSibling?.getAttribute('data-testid') || 'none')}`);
+
+  // 2. It opens a dedicated full page, not a popup.
+  forceGetButton && forceGetButton.click();
+  const opened = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-force-get"]'), 20_000);
+  check('clicking Force Get opens the dedicated full-page workspace',
+    Boolean(opened) && await page.waitForFor(`Browser Check Force Get ${stamp}`, 15_000)
+    && await page.waitForFor('Nothing moves until PHANTOM approves', 10_000),
+    page.body().slice(0, 200));
+  check('the workspace is a page of its own: the board and the group grid are gone',
+    !page.window.document.querySelector('[data-testid="cgm-groups-board"]')
+    && !page.window.document.querySelector('[role="dialog"]'),
+    'no board/no dialog');
+
+  // 3. The roster lists the real member with real destination names.
+  const rows = () => [...page.window.document.querySelectorAll('[data-testid="cgm-force-get-row"]')];
+  check('the roster lists the class member with a real group-name destination picker',
+    rows().length >= 1 && rows().some((row) => /Force Faye/.test(row.textContent))
+    && rows()[0].querySelector('[data-testid="cgm-force-get-group"]'),
+    `rows=${rows().length}`);
+  const destinationSelect = rows().find((row) => /Force Faye/.test(row.textContent))
+    ?.querySelector('[data-testid="cgm-force-get-group"]');
+  const options = [...(destinationSelect?.querySelectorAll('option') || [])].map((option) => option.textContent);
+  check('the destination options are the activity\'s actual group names',
+    fgGroupNames.every((name) => options.some((text) => text.includes(name))), options.join(' | ').slice(0, 120));
+
+  // 4. Selection + bulk destination + preview.
+  const forceFayeRow = rows().find((row) => /Force Faye/.test(row.textContent));
+  const forceFayeCheckbox = forceFayeRow?.querySelector('[data-testid="cgm-force-get-select"]');
+  forceFayeCheckbox && forceFayeCheckbox.click();
+  await page.wait(200);
+  const bulkSelect = page.window.document.querySelector('[data-testid="cgm-force-get-bulk-group"]');
+  if (bulkSelect) { setter.call(bulkSelect, String(fgDestination)); bulkSelect.dispatchEvent(new page.window.Event('change', { bubbles: true })); }
+  await page.wait(200);
+  const bulkApply = page.window.document.querySelector('[data-testid="cgm-force-get-bulk-apply"]');
+  bulkApply && bulkApply.click();
+  await page.wait(300);
+  const chosen = page.window.document.querySelector('[data-testid="cgm-force-get-row"] [data-testid="cgm-force-get-group"]');
+  check('a bulk destination assigns the selected member a live proposed group',
+    Number(chosen?.value) === Number(fgDestination), `value=${chosen?.value} expected=${fgDestination}`);
+  const previewToggle = page.window.document.querySelector('[data-testid="cgm-force-get-preview-toggle"]');
+  previewToggle && previewToggle.click();
+  check('the preview shows the proposed distribution and the projected capacity',
+    await page.waitForFor('Preview & send for approval', 10_000)
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-force-get-preview"]'))
+    && /→/.test(page.body()) && /\d+ now → /.test(page.body().replace(/\s+/g, ' ')),
+    page.body().slice(0, 220));
+
+  // 5. Submit: it becomes a PENDING request, nothing moves.
+  const explanationBox = page.window.document.querySelector('[data-testid="cgm-force-get-explanation"]');
+  if (explanationBox) {
+    const taSetter = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value').set;
+    taSetter.call(explanationBox, 'Faye joined late — she must sit with her lab partner.');
+    explanationBox.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+  }
+  const submitButton = page.window.document.querySelector('[data-testid="cgm-force-get-submit"]');
+  submitButton && submitButton.click();
+  check('submitting reports the version sent to PHANTOM and that nothing moves yet',
+    await page.waitForFor('sent to PHANTOM. Nothing moves until PHANTOM approves.', 20_000), page.body().slice(0, 220));
+  check('the pending version is shown with its student count and a cancel control',
+    Boolean(await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-force-get-pending"]'), 10_000))
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-force-get-cancel"]')));
+  const afterSubmit = (await api('GET', `/api/cgm/activities/${fgActivityId}`, undefined, phantomToken)).json?.data || {};
+  check('nothing was assigned by submitting (the member is still unplaced)',
+    (afterSubmit.members || []).every((row) => Number(row.id) !== fgStudentId || row.group_id === null || row.group_id === undefined),
+    JSON.stringify((afterSubmit.members || []).filter((row) => Number(row.id) === fgStudentId)).slice(0, 160));
+  const pendingQueue = (await api('GET', '/api/cgm/phantom/force-get/requests?status=pending', undefined, phantomToken)).json?.data || [];
+  const pendingRequest = pendingQueue.find((row) => Number(row.activityId) === Number(fgActivityId));
+  check('the request reached the PHANTOM queue with the organizer, class and count',
+    Boolean(pendingRequest) && pendingRequest.studentCount === 1 && Boolean(pendingRequest.className),
+    JSON.stringify(pendingRequest || {}).slice(0, 160));
+
+  // 6. PHANTOM console: full detail, then approve.
+  const phantomPage = await boot('#class-groups/phantom', organizer);
+  const oversightTab = await phantomPage.waitForElement(() => phantomPage.buttonByText('Class Groups'));
+  oversightTab && oversightTab.click();
+  await phantomPage.waitForFor('Module settings', 20_000);
+  const forceGetTab = await phantomPage.waitForElement(() => phantomPage.buttonByText('Force Get Requests'));
+  check('PHANTOM has a Force Get Requests tab', Boolean(forceGetTab));
+  forceGetTab && forceGetTab.click();
+  check('the pending request is listed with the organizer and the explanation',
+    await phantomPage.waitForFor(`Browser Check Force Get ${stamp}`, 20_000)
+    && await phantomPage.waitForFor('must sit with her lab partner', 10_000),
+    phantomPage.body().slice(0, 220));
+  const detailButton = await phantomPage.waitForElement(() => phantomPage.window.document.querySelector('[data-testid="cgm-phantom-force-get-detail"]'));
+  detailButton && detailButton.click();
+  const panel = await phantomPage.waitForElement(() => phantomPage.window.document.querySelector('[data-testid="cgm-phantom-force-get-panel"]'), 15_000);
+  check('the full detail panel shows current vs proposed, sampling state and capacity impact',
+    Boolean(panel) && /now → \+/.test(phantomPage.body()) && /not sampled yet/.test(phantomPage.body()),
+    phantomPage.body().slice(0, 240));
+  const approveButton = await phantomPage.waitForElement(() => phantomPage.window.document.querySelector('[data-testid="cgm-phantom-approve-force-get"]'));
+  check('the queue offers PHANTOM Approve and Reject-with-reason controls',
+    Boolean(approveButton) && Boolean(phantomPage.window.document.querySelector('[data-testid="cgm-phantom-reject-force-get"]')));
+  approveButton && approveButton.click();
+  check('PHANTOM approval confirms and explains that the designations now hold seats',
+    await phantomPage.waitForFor('Force Get v', 20_000) && await phantomPage.waitForFor('designations now reserve those seats', 10_000),
+    phantomPage.body().slice(0, 220));
+
+  // 7. Approval created a designation and still moved nobody.
+  const afterApprove = (await api('GET', `/api/cgm/activities/${fgActivityId}`, undefined, phantomToken)).json?.data || {};
+  const designatedGroup = (afterApprove.groups || []).find((group) => Number(group.id) === Number(fgDestination)) || {};
+  check('approval reserves the seat without adding a member (nothing moved)',
+    Number(designatedGroup.reserved) === 1 && Number(designatedGroup.size) === 0 && Number(designatedGroup.forced) === 0
+    && (afterApprove.members || []).every((row) => Number(row.id) !== fgStudentId || row.group_id === null || row.group_id === undefined),
+    JSON.stringify({ reserved: designatedGroup.reserved, size: designatedGroup.size }));
+
+  // 8. The student still samples — and lands exactly in the approved group.
+  const draw = await fgStudentDraw();
+  check('the designated student still draws and lands in the approved group',
+    draw?.success === true && Number(draw?.data?.groupId) === Number(fgDestination) && draw?.data?.designated === true,
+    JSON.stringify(draw?.data || {}).slice(0, 160));
+  const afterDraw = (await api('GET', `/api/cgm/activities/${fgActivityId}`, undefined, phantomToken)).json?.data || {};
+  const filledGroup = (afterDraw.groups || []).find((group) => Number(group.id) === Number(fgDestination)) || {};
+  check('the board now reads n/capacity with the forced subset counted separately',
+    Number(filledGroup.size) === 1 && Number(filledGroup.forced) === 1 && Number(filledGroup.forced) <= Number(filledGroup.size)
+    && Number(filledGroup.reserved) === 0,
+    JSON.stringify(filledGroup).slice(0, 160));
+
+  // 9. Reload the organizer board: the red bracket and the legend are rendered,
+  //    and the group workspace badges the member as FORCED.
+  const boardPage = await boot('#class-groups', organizer);
+  const navAgain = boardPage.buttonByText('Groups');
+  navAgain && navAgain.click();
+  await boardPage.waitForFor('Choose an activity', 20_000);
+  const chooser3 = boardPage.window.document.querySelector('select[aria-label="Choose activity"]');
+  const setter3 = Object.getOwnPropertyDescriptor(boardPage.window.HTMLSelectElement.prototype, 'value').set;
+  if (chooser3) { setter3.call(chooser3, String(fgActivityId)); chooser3.dispatchEvent(new boardPage.window.Event('change', { bubbles: true })); }
+  await boardPage.waitForFor(fgGroupNames[0], 20_000);
+  const forcedBadge = await boardPage.waitForElement(() => boardPage.window.document.querySelector('[data-testid="cgm-group-forced-count"]'));
+  check('the board count shows the bracketed forced number in red (1/5 (1))',
+    Boolean(forcedBadge) && forcedBadge.textContent.trim() === '(1)' && /text-red-600/.test(forcedBadge.className)
+    && /1\/5/.test(boardPage.body()),
+    `${forcedBadge?.textContent || 'none'} / ${boardPage.body().slice(0, 120)}`);
+  check('a short legend explains the red bracket',
+    Boolean(boardPage.window.document.querySelector('[data-testid="cgm-groups-legend"]'))
+    && /organizer-forced members/.test(boardPage.body()));
+  const groupCardAgain = [...boardPage.window.document.querySelectorAll('[data-testid="cgm-groups-board"] [data-testid="cgm-open-group"]')]
+    .find((el) => el.textContent.includes(fgGroupNames[fgGroupIds.indexOf(fgDestination)]));
+  groupCardAgain && groupCardAgain.click();
+  check('the group workspace badges the forced member and shows who approved it',
+    Boolean(await boardPage.waitForElement(() => boardPage.window.document.querySelector('[data-testid="cgm-member-forced"]'), 20_000))
+    && await boardPage.waitForFor('Force Get →', 10_000)
+    && await boardPage.waitForFor('applied', 10_000),
+    boardPage.body().slice(0, 240));
+  check('the group workspace summarises the approved designations for the organizer',
+    Boolean(boardPage.window.document.querySelector('[data-testid="cgm-group-force-get"]'))
+    && /students never see them here/.test(boardPage.body()));
+  check('no student-facing payload leaks the organizer reasoning',
+    !JSON.stringify((await api('GET', `/api/cgm/student/activities/${fgActivityId}`, undefined, fgSession)).json || {}).includes('lab partner'));
+}
+
 // Restore the spec-default policies so the local database stays clean.
 await api('PUT', '/api/cgm/phantom/policies', { policies: [
   { key: 'student_registration_mode', value: 'approval' },

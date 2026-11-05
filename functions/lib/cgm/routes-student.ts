@@ -68,6 +68,7 @@ import {
   hashPassword,
   type CgmStudentRow,
 } from './service';
+import { claimDesignatedSeat, insertAssignmentRespectingDesignations, reservedSeatsFor } from './forceGet';
 import { sha256Hex } from '../vault';
 import { createNotification } from '../notifications';
 
@@ -760,6 +761,62 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     });
   });
 
+  /**
+   * FORCE GET hook — shared by `assign` and `random-draw`.
+   *
+   * A student with a PHANTOM-approved designation still samples with the
+   * activity's own method; the sample simply lands on the approved group. The
+   * seat claim is the same guarded INSERT as every other assignment, so a
+   * designation can never break capacity. Returns null when the student has no
+   * live designation (callers then run the ordinary path untouched).
+   */
+  const placeByDesignation = async (c: any, activity: any, student: any) => {
+    const seat = await claimDesignatedSeat(c.env.DB, {
+      activityId: Number(activity.id), studentId: Number(student.id),
+      via: 'self', label: student.full_name,
+    });
+    if (!seat) return null;
+    if (!seat.claimed) {
+      return {
+        ok: false as const,
+        error: 'Your organizer-approved group has no free seat right now. Your approved placement is saved — try again in a moment or contact your organizer.',
+      };
+    }
+    const groupRow = await asRows<any>(c.env.DB.prepare(
+      'SELECT id, name, position FROM cgm_groups WHERE id = ?'
+    ).bind(seat.designation.groupId));
+    const groupName = groupRow[0]?.name || `Group ${groupRow[0]?.position}`;
+    await c.env.DB.prepare(
+      `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
+       VALUES (?, ?, ?, 'assigned', ?, 'force get designation')`
+    ).bind(Number(activity.id), Number(student.id), seat.designation.groupId, student.full_name).run();
+    await notifyStudent(c.env.DB, Number(student.id), 'groups', 'Placed in your approved group',
+      `You joined ${groupName} in ${activity.name} — the group approved for you by PHANTOM.`);
+    const leaders = await asRows<{ student_id: number }>(c.env.DB.prepare(
+      `SELECT student_id FROM cgm_leadership_appointments WHERE group_id = ? AND status = 'active' AND role = 'leader'`
+    ).bind(seat.designation.groupId));
+    for (const leader of leaders) {
+      if (Number(leader.student_id) !== Number(student.id)) {
+        await notifyStudent(c.env.DB, Number(leader.student_id), 'groups', 'New group member',
+          `${student.full_name} joined your group in ${activity.name}.`);
+      }
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: Number(student.id),
+      action: 'cgm.force_get.applied', entityType: 'force_get_designation', entityId: seat.designation.id,
+      activityId: Number(activity.id), classId: Number(activity.class_id),
+      context: {
+        groupId: seat.designation.groupId, assignmentId: seat.assignmentId,
+        requestId: seat.designation.requestId, version: seat.designation.version,
+        appliedExactlyOnce: seat.applied, via: 'sampling',
+      },
+    });
+    return {
+      ok: true as const, groupId: seat.designation.groupId, groupName,
+      designationId: seat.designation.id, applied: seat.applied,
+    };
+  };
+
   app.post('/api/cgm/student/activities/:id/assign', async (c: any) => {
     const student = await requireStudent(c);
     if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
@@ -793,6 +850,22 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     ).bind(activity.id, student.id));
     if (existing[0]) return bad(c, 'You are already in a group for this activity.', 409);
 
+    // FORCE GET — an approved designation decides the group, whatever the
+    // client asked for. The student still goes through the normal method.
+    const designated = await placeByDesignation(c, activity, student);
+    if (designated && !designated.ok) return bad(c, designated.error, 409);
+    if (designated?.ok) {
+      await consumeRechooseGrant(c.env.DB, rechooseGrantId);
+      return c.json({
+        success: true,
+        data: {
+          groupId: designated.groupId, groupName: designated.groupName,
+          designated: true,
+          message: `You are in ${designated.groupName} — your organizer's approved placement for you.`,
+        },
+      });
+    }
+
     const body = await readBody(c);
     const requestedGroupId = body.groupId ? Number(body.groupId) : null;
 
@@ -802,11 +875,15 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
        FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active' ${requestedGroupId ? 'AND g.id = ?' : ''}
        ORDER BY g.position`
     ).bind(...(requestedGroupId ? [activity.id, requestedGroupId] : [activity.id])));
+    // Seats reserved by approved Force Get designations are NOT free seats for
+    // anybody else — they are subtracted here and again inside the INSERT.
+    const reservedSeats = await reservedSeatsFor(c.env.DB, Number(activity.id));
 
     // Load-balance: the server chooses the emptiest eligible group unless the
     // student explicitly asked for one that still has room.
     const open = candidateGroups
-      .filter((group) => group.capacity === null || Number(group.size) < Number(group.capacity))
+      .filter((group) => group.capacity === null
+        || Number(group.size) + (reservedSeats.get(Number(group.id)) || 0) < Number(group.capacity))
       .sort((a, b) => Number(a.size) - Number(b.size));
     let target = requestedGroupId ? open[0] : open[0] || null;
     if (!target) {
@@ -824,7 +901,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // §37 — the seat is claimed by one atomic statement that re-checks capacity
     // and "not already assigned" inside the INSERT, so concurrent students can
     // never both squeeze into the last seat.
-    let placed = await insertAssignmentGuarded(c.env.DB, {
+    let placed = await insertAssignmentRespectingDesignations(c.env.DB, {
       activityId: Number(activity.id), groupId: Number(target.id), studentId: student.id,
       via: 'self', label: student.full_name,
     });
@@ -841,9 +918,11 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
          FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
          ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active'), g.position`
       ).bind(activity.id));
-      const retryTarget = retryGroups.find((group) => group.capacity === null || Number(group.size) < Number(group.capacity));
+      const retryReserved = await reservedSeatsFor(c.env.DB, Number(activity.id));
+      const retryTarget = retryGroups.find((group) => group.capacity === null
+        || Number(group.size) + (retryReserved.get(Number(group.id)) || 0) < Number(group.capacity));
       if (retryTarget && !requestedGroupId) {
-        placed = await insertAssignmentGuarded(c.env.DB, {
+        placed = await insertAssignmentRespectingDesignations(c.env.DB, {
           activityId: Number(activity.id), groupId: Number(retryTarget.id), studentId: student.id,
           via: 'self', label: student.full_name,
         });
@@ -928,13 +1007,34 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     ).bind(activity.id, student.id));
     if (existing[0]) return bad(c, 'You are already in a group for this activity.', 409);
 
-    const openGroups = async () => (await asRows<any>(c.env.DB.prepare(
-      `SELECT g.id, g.name, g.position, g.capacity,
-              (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
-       FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
-         AND (g.capacity IS NULL OR (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') < g.capacity)
-       ORDER BY g.position`
-    ).bind(activity.id)));
+    // FORCE GET — the draw happens, but a live designation wins the outcome.
+    const designated = await placeByDesignation(c, activity, student);
+    if (designated && !designated.ok) return bad(c, designated.error, 409);
+    if (designated?.ok) {
+      await consumeRechooseGrant(c.env.DB, rechooseGrantId);
+      return c.json({
+        success: true,
+        data: {
+          groupId: designated.groupId, groupName: designated.groupName,
+          draw: true, designated: true,
+          message: `Your draw placed you in ${designated.groupName}.`,
+        },
+      });
+    }
+
+    const openGroups = async () => {
+      const rows = await asRows<any>(c.env.DB.prepare(
+        `SELECT g.id, g.name, g.position, g.capacity,
+                (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+         FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'
+         ORDER BY g.position`
+      ).bind(activity.id));
+      // Approved designations reserve their seats: a group is only a candidate
+      // for somebody else while free capacity remains beyond those reservations.
+      const reservedSeats = await reservedSeatsFor(c.env.DB, Number(activity.id));
+      return rows.filter((group) => group.capacity === null
+        || Number(group.size) + (reservedSeats.get(Number(group.id)) || 0) < Number(group.capacity));
+    };
 
     // Exactly-equal chance for every eligible group, then the guarded atomic
     // seat claim (capacity races lose and re-draw once among what remains).
@@ -954,7 +1054,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // `assigned_via` is CHECK-constrained to the legacy set; the draw marks
     // itself through the history reason ("random draw") and the dedicated
     // audit action below instead of a new enum value (no table rebuild).
-    let placed = await insertAssignmentGuarded(c.env.DB, {
+    let placed = await insertAssignmentRespectingDesignations(c.env.DB, {
       activityId: Number(activity.id), groupId: Number(winner.id), studentId: student.id,
       via: 'self', label: student.full_name,
     });
@@ -966,7 +1066,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       candidates = await openGroups();
       if (candidates.length) {
         winner = candidates[secureUniformIndex(candidates.length)];
-        placed = await insertAssignmentGuarded(c.env.DB, {
+        placed = await insertAssignmentRespectingDesignations(c.env.DB, {
           activityId: Number(activity.id), groupId: Number(winner.id), studentId: student.id,
           via: 'self', label: student.full_name,
         });

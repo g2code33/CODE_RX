@@ -206,7 +206,7 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 43);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 46);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -3801,7 +3801,7 @@ check('a non-numeric group id answers 404 instead of a D1 500',
 const schemaSrc = readFileSync(path.join(ROOT, 'functions/lib/schema.ts'), 'utf8');
 check('the migration discipline is pinned: new SAFE_MIGRATIONS entries REQUIRE a version bump',
   /EVERY new entry[\s\S]{0,120}VAULT_SCHEMA_VERSION bump/.test(schemaSrc)
-  && /VAULT_SCHEMA_VERSION = '2026-11-04-code-rx25-/.test(schemaSrc));
+  && /VAULT_SCHEMA_VERSION = '2026-11-05-code-rx26-/.test(schemaSrc));
 
 // ---------------------------------------------------------------------------
 // 39. Re-choose: organizer asks, PHANTOM approves, the member starts fresh
@@ -3944,6 +3944,375 @@ check('the student portal announces the approved fresh choice',
 check('the client library exposes both halves of the re-choose flow',
   /requestRechoose: \(assignmentId: number/.test(cgmRechoose)
   && /phantomDecideRechoose: \(id: number/.test(cgmRechoose));
+
+
+// ===========================================================================
+// 40. FORCE GET: organizer proposes → PHANTOM approves → the student samples
+// ===========================================================================
+section('40. Force Get: proposal, approval, sampling, reservations, versioning');
+
+const fgConfig = {
+  method: 'random', groupCount: 3, capacity: 4, genderRule: 'none', repeatRule: 'random',
+  leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true,
+  attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
+};
+const fgNewActivity = async (name, config) => {
+  const created = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, { name, type: 'tutorial', config }, amaToken);
+  const id = created.json?.data?.activityId ?? created.json?.data?.activity?.id ?? created.json?.data?.id;
+  await memberCall('POST', `/api/cgm/activities/${id}/lifecycle`, { action: 'open' }, amaToken);
+  return id;
+};
+const fgGroupsOf = async (activityId) => ((await memberCall('GET', `/api/cgm/activities/${activityId}`, undefined, amaToken)).json?.data?.groups || []);
+
+const fgDrawLab = await fgNewActivity('Force Get Draw Lab', fgConfig);
+await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/groups`, { count: 3, capacity: 4 }, amaToken);
+const fgDrawGroups = await fgGroupsOf(fgDrawLab);
+check('the Force Get draw lab opens with three named groups', fgDrawGroups.length === 3 && fgDrawGroups.every((g) => Boolean(g.name)),
+  JSON.stringify(fgDrawGroups.map((g) => g.name)));
+const fgStudents = [];
+for (const n of [60, 61, 62, 63, 64]) fgStudents.push(await freshFmtRosterStudent(n, `Force Get ${n}`));
+const [fgA, fgB, fgC, fgD, fgE] = fgStudents;
+const fgG1 = Number(fgDrawGroups[0].id); const fgG2 = Number(fgDrawGroups[1].id); const fgG3 = Number(fgDrawGroups[2].id);
+const fgName = (groupId) => (fgDrawGroups.find((g) => Number(g.id) === Number(groupId)) || {}).name;
+
+// -- The roster endpoint -----------------------------------------------------
+const fgRoster = await memberCall('GET', `/api/cgm/activities/${fgDrawLab}/force-get`, undefined, amaToken);
+check('the workspace roster loads for the organizer with real group names and live counters',
+  fgRoster.status === 200 && Array.isArray(fgRoster.json?.data?.groups) && fgRoster.json?.data?.groups?.length === 3
+  && fgRoster.json.data.groups.every((g) => typeof g.name === 'string' && g.name.length > 0 && typeof g.forced === 'number' && typeof g.reserved === 'number'),
+  `status ${fgRoster.status} ${fgRoster.text?.slice(0, 160)}`);
+check('every class member is on the roster with eligibility, group, sampling and designation state',
+  (fgRoster.json?.data?.students || []).some((row) => Number(row.id) === Number(fgA.studentId)
+    && row.eligible === true && row.groupId === null && row.everAssigned === false && row.designation === null),
+  `${(fgRoster.json?.data?.students || []).length} students`);
+const fgRosterAsStudent = await studentCall('GET', `/api/cgm/activities/${fgDrawLab}/force-get`, undefined, fgA.session);
+check('the Force Get workspace is organizer-only (student session refused)', fgRosterAsStudent.status === 401 || fgRosterAsStudent.status === 403,
+  `status ${fgRosterAsStudent.status}`);
+
+// -- Validation --------------------------------------------------------------
+const fgEmpty = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, { items: [] }, amaToken);
+check('a request with no students is refused', fgEmpty.status === 400, `status ${fgEmpty.status}`);
+const fgDuplicate = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgA.studentId, groupId: fgG1 }, { studentId: fgA.studentId, groupId: fgG2 }],
+}, amaToken);
+check('the same student twice in one request is refused', fgDuplicate.status === 400, `status ${fgDuplicate.status}`);
+const fgWrongGroup = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgA.studentId, groupId: 999999 }],
+}, amaToken);
+check('a destination that is not a group of this activity is refused', fgWrongGroup.status === 400, `status ${fgWrongGroup.status}`);
+check('no request row was created by any of the refused submissions',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_requests WHERE activity_id = ?', fgDrawLab).c === 0);
+
+// -- Submission: nothing moves ----------------------------------------------
+const fgSubmit = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgA.studentId, groupId: fgG1 }, { studentId: fgB.studentId, groupId: fgG3 }],
+  explanation: 'Two lab partners were registered late and must sit together.',
+}, amaToken);
+const fgRequestId = Number(fgSubmit.json?.data?.requestId || 0);
+check('the organizer submits a versioned Force Get request', fgSubmit.status === 200 && fgRequestId > 0 && Number(fgSubmit.json?.data?.version) === 1,
+  `status ${fgSubmit.status} ${fgSubmit.text?.slice(0, 160)}`);
+check('submission moves nobody: both students are still unassigned',
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", fgDrawLab).c === 0);
+check('no designation exists before PHANTOM approves',
+  q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ?', fgDrawLab).c === 0);
+check('the request is pending and snapshots both rows at the submitted version',
+  q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgRequestId).status === 'pending'
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_request_items WHERE request_id = ? AND version = 1', fgRequestId).c === 2);
+check('submission is audited with the request id, version and destinations',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.requested' AND entity_type = 'force_get_request' AND entity_id = ?", String(fgRequestId)).c === 1);
+
+// -- PHANTOM side ------------------------------------------------------------
+const fgOrganizerApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRequestId}/approve`, { version: 1 }, amaToken);
+check('an organizer cannot approve their own Force Get request (PHANTOM only)',
+  fgOrganizerApprove.status === 401 || fgOrganizerApprove.status === 403, `status ${fgOrganizerApprove.status}`);
+const fgQueue = await memberCall('GET', '/api/cgm/phantom/force-get/requests?status=pending', undefined, phantomToken);
+check('the request appears in the PHANTOM queue with class, activity, organizer and count',
+  (fgQueue.json?.data || []).some((row) => Number(row.id) === fgRequestId && row.studentCount === 2
+    && row.activityName === 'Force Get Draw Lab' && Boolean(row.className) && row.requesterLabel === 'Ama Boakye'),
+  `queue=${(fgQueue.json?.data || []).length}`);
+const fgDetail = await memberCall('GET', `/api/cgm/phantom/force-get/requests/${fgRequestId}`, undefined, phantomToken);
+const fgBuckets = fgDetail.json?.data?.groups || [];
+check('the PHANTOM detail groups the proposal by destination with current vs proposed counts',
+  fgDetail.status === 200 && fgBuckets.length === 2
+  && fgBuckets.every((bucket) => bucket.groupName && typeof bucket.size === 'number' && typeof bucket.projected === 'number')
+  && (fgBuckets.find((b) => b.groupId === fgG1)?.students || []).some((s) => s.studentId === fgA.studentId),
+  JSON.stringify(fgBuckets).slice(0, 220));
+check('the detail explains the request and flags no ineligible rows',
+  fgDetail.json?.data?.request?.explanation?.includes('lab partners') && fgDetail.json?.data?.invalidItems === 0);
+const fgStudentSessionDetail = await studentCall('GET', `/api/cgm/force-get/requests/${fgRequestId}`, undefined, fgA.session);
+check('a student session cannot read a Force Get request', fgStudentSessionDetail.status === 401 || fgStudentSessionDetail.status === 403,
+  `status ${fgStudentSessionDetail.status}`);
+
+// -- Stale version + rejection ----------------------------------------------
+const fgStaleApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRequestId}/approve`, { version: 99 }, phantomToken);
+check('approving a version PHANTOM did not review is refused (stale version)',
+  fgStaleApprove.status === 409 && q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgRequestId).status === 'pending',
+  `status ${fgStaleApprove.status}`);
+const fgRejectNoReason = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRequestId}/reject`, {}, phantomToken);
+check('rejecting without a reason is refused', fgRejectNoReason.status === 400, `status ${fgRejectNoReason.status}`);
+const fgReject = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRequestId}/reject`, { reason: 'Split the pair across groups' }, phantomToken);
+check('PHANTOM rejects with a reason and nothing is designated or moved',
+  fgReject.status === 200
+  && q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgRequestId).status === 'rejected'
+  && q1('SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ?', fgDrawLab).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ?', fgDrawLab).c === 0,
+  `status ${fgReject.status}`);
+check('the rejection reason, reviewer and time are recorded',
+  q1('SELECT reviewer_label, review_reason FROM cgm_force_get_requests WHERE id = ?', fgRequestId).review_reason === 'Split the pair across groups'
+  && /PHANTOM/.test(String(q1('SELECT reviewer_label FROM cgm_force_get_requests WHERE id = ?', fgRequestId).reviewer_label || '')));
+const fgRejectAudit = q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.rejected' AND entity_type = 'force_get_request' AND entity_id = ?", String(fgRequestId)).c;
+check('the rejection is audited', fgRejectAudit === 1, `rows ${fgRejectAudit}`);
+const fgApproveRejected = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRequestId}/approve`, { version: 1 }, phantomToken);
+check('a decided request can never be approved afterwards', fgApproveRejected.status === 409, `status ${fgApproveRejected.status}`);
+
+// -- Approval ----------------------------------------------------------------
+const fgSubmit2 = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgA.studentId, groupId: fgG1 }, { studentId: fgB.studentId, groupId: fgG3 }],
+  explanation: 'Late registrations must sit with their lab partners.',
+}, amaToken);
+const fgRequest2 = Number(fgSubmit2.json?.data?.requestId || 0);
+check('a fresh submission after a rejection gets the next version', Number(fgSubmit2.json?.data?.version) === 2, fgSubmit2.text?.slice(0, 120));
+const fgPhantomProfile = q1('SELECT id FROM member_profiles WHERE user_id = (SELECT id FROM users WHERE email = ?)', PHANTOM_EMAIL);
+const amaProfile = q1('SELECT id FROM member_profiles WHERE user_id = ?', amaUser.id);
+const fgApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRequest2}/approve`, { version: 2, reason: 'Partners confirmed' }, phantomToken);
+check('PHANTOM approves and the designations are created',
+  fgApprove.status === 200 && Number(fgApprove.json?.data?.designated) === 2
+  && q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND status = 'active'", fgDrawLab).c === 2,
+  `status ${fgApprove.status} ${fgApprove.text?.slice(0, 160)}`);
+check('approval still moves nobody — the students must sample for themselves',
+  q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'", fgDrawLab).c === 0);
+const fgDesignationA = q1("SELECT * FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", fgDrawLab, fgA.studentId);
+check('each designation records who approved it, when, and the request version it came from',
+  fgDesignationA?.designated_group_id === fgG1 && fgDesignationA?.request_version === 2
+  && /PHANTOM/.test(String(fgDesignationA?.approved_by_label || '')) && Boolean(fgDesignationA?.designated_at)
+  && Number(fgDesignationA?.approved_by_profile_id) === Number(fgPhantomProfile.id),
+  JSON.stringify({ group: fgDesignationA?.designated_group_id, by: fgDesignationA?.approved_by_label, at: fgDesignationA?.designated_at }));
+const fgAuditRequest = q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.approved' AND entity_type = 'force_get_request' AND entity_id = ?", String(fgRequest2)).c;
+const fgAuditDesignations = q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.approved' AND entity_type = 'force_get_designation' AND activity_id = ?", fgDrawLab).c;
+check('approval is audited at request level and per designation',
+  fgAuditRequest === 1 && fgAuditDesignations >= 2,
+  `request=${fgAuditRequest} designations=${fgAuditDesignations}`);
+check('the approving PHANTOM member is notified-of in the audit context',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.approved' AND actor_type = 'phantom'").c >= 1);
+const fgOrganizerNotified = q1(
+  `SELECT COUNT(*) c FROM notification_recipients nr JOIN notifications n ON n.id = nr.notification_id
+   WHERE nr.member_profile_id = ? AND n.title = 'Force Get approved'`, amaProfile.id).c;
+check('the organizer is notified that the request was approved', fgOrganizerNotified >= 1, `rows ${fgOrganizerNotified}`);
+const fgStudentNotified = q1(
+  "SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND title = 'Your organizer designated your group'", fgA.studentId).c;
+check('the designated student is told, without any other student data', fgStudentNotified >= 1
+  && q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND body LIKE ?", fgA.studentId, `%${fgB.indexNumber}%`).c === 0,
+  `rows ${fgStudentNotified}`);
+check('pending-then-approved requests never duplicate the PHANTOM inbox item',
+  q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_force_get' AND source_id = ?", String(fgRequest2)).c === 1,
+  `rows=${q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_force_get'").c}`);
+
+// -- Reserved seats and the board counter ------------------------------------
+const fgBoardAfterApprove = await fgGroupsOf(fgDrawLab);
+const fgBoardG1 = fgBoardAfterApprove.find((g) => Number(g.id) === fgG1) || {};
+const fgBoardG3 = fgBoardAfterApprove.find((g) => Number(g.id) === fgG3) || {};
+check('approved designations reserve their seats without changing the member count',
+  Number(fgBoardG1.reserved) === 1 && Number(fgBoardG3.reserved) === 1
+  && Number(fgBoardG1.size) === 0 && Number(fgBoardG1.forced) === 0,
+  JSON.stringify({ g1: fgBoardG1, g3: fgBoardG3 }).slice(0, 200));
+
+// -- The designated student still samples ------------------------------------
+const fgDrawA = await studentCall('POST', `/api/cgm/student/activities/${fgDrawLab}/random-draw`, {}, fgA.session);
+check('the designated student still takes the draw and lands EXACTLY in the designated group',
+  fgDrawA.status === 200 && Number(fgDrawA.json?.data?.groupId) === fgG1
+  && fgDrawA.json?.data?.draw === true && fgDrawA.json?.data?.designated === true
+  && q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgA.studentId)?.group_id === fgG1,
+  `status ${fgDrawA.status} ${fgDrawA.text?.slice(0, 160)}`);
+check('the database agrees with the reveal (persisted before the animation)',
+  q1("SELECT COUNT(*) c FROM cgm_assignment_events WHERE activity_id = ? AND student_id = ? AND reason = 'force get designation'", fgDrawLab, fgA.studentId).c === 1);
+const fgDesignationAAfter = q1('SELECT * FROM cgm_force_get_designations WHERE id = ?', fgDesignationA.id);
+check('the designation is applied exactly once and linked to the assignment it produced',
+  fgDesignationAAfter?.status === 'applied' && Number(fgDesignationAAfter?.applied_assignment_id)
+  === Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgA.studentId)?.id),
+  JSON.stringify({ status: fgDesignationAAfter?.status, applied: fgDesignationAAfter?.applied_assignment_id }));
+check('applying the designation is audited as cgm.force_get.applied',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.applied' AND entity_id = ?", String(fgDesignationA.id)).c === 1);
+const fgDrawTwice = await studentCall('POST', `/api/cgm/student/activities/${fgDrawLab}/random-draw`, {}, fgA.session);
+check('a second draw is refused and never applies the designation twice',
+  fgDrawTwice.status === 409
+  && q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgA.studentId).c === 1);
+const fgBoardForced = (await fgGroupsOf(fgDrawLab)).find((g) => Number(g.id) === fgG1) || {};
+check('the board reports 1/4 (1) — the bracket is a subset of the size, from the backend',
+  Number(fgBoardForced.size) === 1 && Number(fgBoardForced.capacity) === 4 && Number(fgBoardForced.forced) === 1
+  && Number(fgBoardForced.forced) <= Number(fgBoardForced.size) && Number(fgBoardForced.reserved) === 0,
+  JSON.stringify(fgBoardForced));
+
+// -- Self-assignment honours the designation too -----------------------------
+const fgSelfConfig = { ...fgConfig, method: 'self', groupCount: 2, capacity: 3 };
+const fgSelfLab = await fgNewActivity('Force Get Self Lab', fgSelfConfig);
+await memberCall('POST', `/api/cgm/activities/${fgSelfLab}/groups`, { count: 2, capacity: 3 }, amaToken);
+const fgSelfGroups = (await fgGroupsOf(fgSelfLab)).map((g) => Number(g.id));
+const fgSelfRequest = await memberCall('POST', `/api/cgm/activities/${fgSelfLab}/force-get/requests`, {
+  items: [{ studentId: fgC.studentId, groupId: fgSelfGroups[1] }], explanation: 'Assigned seat by the department.',
+}, amaToken);
+await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgSelfRequest.json?.data?.requestId}/approve`, { version: Number(fgSelfRequest.json?.data?.version) }, phantomToken);
+const fgSelfChoice = await studentCall('POST', `/api/cgm/student/activities/${fgSelfLab}/assign`, { groupId: fgSelfGroups[0] }, fgC.session);
+check('a designated student who picks another group is placed in their approved group instead',
+  fgSelfChoice.status === 200 && Number(fgSelfChoice.json?.data?.groupId) === fgSelfGroups[1] && fgSelfChoice.json?.data?.designated === true,
+  `status ${fgSelfChoice.status} ${fgSelfChoice.text?.slice(0, 160)}`);
+check('the self-assignment path consumes the designation exactly once',
+  q1("SELECT status FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", fgSelfLab, fgC.studentId)?.status === 'applied');
+
+// -- Reservation blocks ordinary students, not the designee ------------------
+const fgTightLab = await fgNewActivity('Force Get Tight Lab', { ...fgConfig, groupCount: 2, capacity: 1 });
+await memberCall('POST', `/api/cgm/activities/${fgTightLab}/groups`, { count: 2, capacity: 1 }, amaToken);
+const fgTightGroups = (await fgGroupsOf(fgTightLab)).map((g) => Number(g.id));
+const fgTightRequest = await memberCall('POST', `/api/cgm/activities/${fgTightLab}/force-get/requests`, {
+  items: [{ studentId: fgD.studentId, groupId: fgTightGroups[0] }], explanation: 'Reserved seat.',
+}, amaToken);
+await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgTightRequest.json?.data?.requestId}/approve`, { version: Number(fgTightRequest.json?.data?.version) }, phantomToken);
+const fgTightOther = await studentCall('POST', `/api/cgm/student/activities/${fgTightLab}/random-draw`, {}, fgE.session);
+check('an ordinary draw can never take a reserved seat (the only free seat is the reserved one)',
+  fgTightOther.status === 200
+  && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'", fgTightGroups[0]).c) === 0,
+  `status ${fgTightOther.status} ${fgTightOther.text?.slice(0, 120)}`);
+const fgTightDesignee = await studentCall('POST', `/api/cgm/student/activities/${fgTightLab}/random-draw`, {}, fgD.session);
+check('the designee still takes their reserved seat',
+  fgTightDesignee.status === 200 && Number(fgTightDesignee.json?.data?.groupId) === fgTightGroups[0],
+  fgTightDesignee.text?.slice(0, 120));
+const fgTightCapacity = await memberCall('POST', `/api/cgm/activities/${fgTightLab}/force-get/requests`, {
+  items: [{ studentId: fgE.studentId, groupId: fgTightGroups[0] }],
+}, amaToken);
+check('a proposal that would overfill a group is refused at submission with an explanation',
+  fgTightCapacity.status === 400 && /capacity/i.test(String(fgTightCapacity.json?.error || '')),
+  `status ${fgTightCapacity.status} ${fgTightCapacity.text?.slice(0, 160)}`);
+
+// -- Already-sampled student: stays put until their own Re-choose ------------
+const fgSampled = await studentCall('POST', `/api/cgm/student/activities/${fgDrawLab}/random-draw`, {}, fgD.session);
+check('a non-designated student draws into a normal group first',
+  fgSampled.status === 200 && Boolean(fgSampled.json?.data?.groupId), fgSampled.text?.slice(0, 120));
+const fgDGroup = Number(fgSampled.json?.data?.groupId);
+const fgDDest = [fgG1, fgG2, fgG3].find((groupId) => groupId !== fgDGroup);
+const fgDMove = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgD.studentId, groupId: fgDDest }], explanation: 'Department reassignment.',
+}, amaToken);
+const fgDApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgDMove.json?.data?.requestId}/approve`, { version: Number(fgDMove.json?.data?.version) }, phantomToken);
+check('approving a designation for an already-sampled student does NOT move them',
+  fgDApprove.status === 200
+  && q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgD.studentId)?.group_id === fgDGroup
+  && q1("SELECT status FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", fgDrawLab, fgD.studentId)?.status === 'active',
+  `status ${fgDApprove.status}`);
+const fgDDash = await studentCall('GET', `/api/cgm/student/activities/${fgDrawLab}`, undefined, fgD.session);
+check('the sampled student keeps their group and their approved destination is not exposed to other students',
+  Number(fgDDash.json?.data?.myAssignment?.group_id) === fgDGroup);
+const fgDNoRedraw = await studentCall('POST', `/api/cgm/student/activities/${fgDrawLab}/random-draw`, {}, fgD.session);
+check('no class-wide resampling: the sampled student cannot draw again on their own',
+  fgDNoRedraw.status === 409, `status ${fgDNoRedraw.status}`);
+// Their individual Re-choose, approved by PHANTOM, releases the seat.
+const fgDAssignmentId = Number(q1("SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgD.studentId)?.id || 0);
+const fgDRechoose = await memberCall('POST', `/api/cgm/assignments/${fgDAssignmentId}/rechoose`, { reason: 'Department reassignment' }, amaToken);
+await memberCall('POST', `/api/cgm/phantom/rechoose-requests/${fgDRechoose.json?.data?.id}/approve`, {}, phantomToken);
+const fgDResample = await studentCall('POST', `/api/cgm/student/activities/${fgDrawLab}/random-draw`, {}, fgD.session);
+check('after their own approved Re-choose the designation applies on resampling',
+  fgDResample.status === 200 && Number(fgDResample.json?.data?.groupId) === fgDDest
+  && q1("SELECT status FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", fgDrawLab, fgD.studentId)?.status === 'applied',
+  `status ${fgDResample.status} ${fgDResample.text?.slice(0, 160)}`);
+
+// -- Revision supersedes the pending version ---------------------------------
+const fgReviseBase = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgE.studentId, groupId: fgG1 }], explanation: 'First idea.',
+}, amaToken);
+const fgReviseId = Number(fgReviseBase.json?.data?.requestId || 0);
+const fgRevise = await memberCall('POST', `/api/cgm/force-get/requests/${fgReviseId}/revise`, {
+  items: [{ studentId: fgE.studentId, groupId: fgG3 }], explanation: 'Better fit.',
+}, amaToken);
+check('a revision creates a NEW pending version that supersedes the old one',
+  fgRevise.status === 200 && Number(fgRevise.json?.data?.requestId) !== fgReviseId
+  && q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgReviseId).status === 'superseded'
+  && q1('SELECT superseded_by_request_id FROM cgm_force_get_requests WHERE id = ?', fgReviseId).superseded_by_request_id === Number(fgRevise.json?.data?.requestId),
+  `status ${fgRevise.status} ${fgRevise.text?.slice(0, 160)}`);
+check('superseding is audited', q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.superseded' AND entity_type = 'force_get_request' AND entity_id = ?", String(fgReviseId)).c === 1);
+check('the revision itself is audited as cgm.force_get.updated with both versions',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.updated' AND entity_type = 'force_get_request' AND entity_id = ?", String(fgRevise.json?.data?.requestId)).c === 1);
+const fgApproveSuperseded = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgReviseId}/approve`, { version: 3 }, phantomToken);
+check('a superseded version can never be approved', fgApproveSuperseded.status === 409, `status ${fgApproveSuperseded.status}`);
+const fgReviseApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRevise.json?.data?.requestId}/approve`, { version: Number(fgRevise.json?.data?.version) }, phantomToken);
+check('the revised version approves cleanly', fgReviseApprove.status === 200
+  && q1("SELECT designated_group_id FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgE.studentId)?.designated_group_id === fgG3,
+  `status ${fgReviseApprove.status}`);
+// A later approval for the same student supersedes the earlier live designation.
+const fgRespecify = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgE.studentId, groupId: fgG2 }], explanation: 'Final placement.',
+}, amaToken);
+await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRespecify.json?.data?.requestId}/approve`, { version: Number(fgRespecify.json?.data?.version) }, phantomToken);
+check('a newer approval supersedes the older live designation for the same student',
+  q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgE.studentId).c === 1
+  && q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'superseded'", fgDrawLab, fgE.studentId).c === 1
+  && q1("SELECT designated_group_id FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status = 'active'", fgDrawLab, fgE.studentId).designated_group_id === fgG2);
+
+// -- Two PHANTOM operators racing the same approval ------------------------
+const fgRaceRequest = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgB.studentId, groupId: fgG1 }], explanation: 'Race fixture.',
+}, amaToken);
+const fgRaceId = Number(fgRaceRequest.json?.data?.requestId || 0);
+const fgRaceVersion = Number(fgRaceRequest.json?.data?.version || 0);
+const fgRaceOutcome = await Promise.all([
+  memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRaceId}/approve`, { version: fgRaceVersion }, phantomToken),
+  memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgRaceId}/approve`, { version: fgRaceVersion }, phantomToken),
+]);
+const fgRaceStatuses = fgRaceOutcome.map((row) => row.status).sort();
+check('two simultaneous approvals: exactly one succeeds and the other is refused',
+  fgRaceStatuses[0] === 200 && (fgRaceStatuses[1] === 409 || fgRaceStatuses[1] === 400),
+  fgRaceStatuses.join(','));
+check('a raced approval never creates the designation twice',
+  q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? AND status IN ('active','applied')", fgDrawLab, fgB.studentId).c === 1,
+  `designations=${q1("SELECT COUNT(*) c FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ?", fgDrawLab, fgB.studentId).c}`);
+
+// -- Cancel + organizer override clears the designation ----------------------
+const fgCancelBase = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/force-get/requests`, {
+  items: [{ studentId: fgB.studentId, groupId: fgG2 }], explanation: 'Second thoughts.',
+}, amaToken);
+const fgCancel = await memberCall('POST', `/api/cgm/force-get/requests/${fgCancelBase.json?.data?.requestId}/cancel`, {}, amaToken);
+check('the organizer can cancel a pending request', fgCancel.status === 200
+  && q1('SELECT status FROM cgm_force_get_requests WHERE id = ?', fgCancelBase.json?.data?.requestId).status === 'cancelled',
+  `status ${fgCancel.status}`);
+const fgCancelApprove = await memberCall('POST', `/api/cgm/phantom/force-get/requests/${fgCancelBase.json?.data?.requestId}/approve`, { version: Number(fgCancelBase.json?.data?.version) }, phantomToken);
+check('a cancelled request cannot be approved', fgCancelApprove.status === 409, `status ${fgCancelApprove.status}`);
+const fgOrganizerOverride = await memberCall('POST', `/api/cgm/activities/${fgDrawLab}/assign-student`, {
+  studentId: fgE.studentId, groupId: fgG1,
+}, amaToken);
+check('an organizer placement elsewhere clears the live designation (audited, never left to fight the organizer)',
+  fgOrganizerOverride.status === 200
+  && q1("SELECT status FROM cgm_force_get_designations WHERE activity_id = ? AND student_id = ? ORDER BY id DESC", fgDrawLab, fgE.studentId)?.status === 'cleared'
+  && q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.force_get.cleared' AND entity_type = 'force_get_designation'").c >= 1,
+  `status ${fgOrganizerOverride.status}`);
+
+// -- Group workspace badges --------------------------------------------------
+const fgDossier = await memberCall('GET', `/api/cgm/groups/${fgDDest}`, undefined, amaToken);
+const fgDossierMembers = fgDossier.json?.data?.members || [];
+const fgDossierD = fgDossierMembers.find((row) => Number(row.id) === fgD.studentId) || {};
+check('the group workspace marks a forced member with who approved it and when',
+  fgDossierD.forced === true && fgDossierD.designation?.approvedBy
+  && Boolean(fgDossierD.designation?.designatedAt) && Boolean(fgDossierD.designation?.appliedAt),
+  JSON.stringify({ forced: fgDossierD.forced, designation: fgDossierD.designation }).slice(0, 200));
+check('the dossier exposes the forced count and the badges list for the group',
+  Number(fgDossier.json?.data?.forcedCount) >= 1 && Array.isArray(fgDossier.json?.data?.designations)
+  && fgDossier.json.data.designations.some((row) => row.studentId === fgD.studentId && row.applied === true),
+  `forced=${fgDossier.json?.data?.forcedCount}`);
+check('the organizer reasoning is never sent to a student',
+  !JSON.stringify(fgDDash.json || {}).includes('Department reassignment')
+  && !JSON.stringify((await studentCall('GET', `/api/cgm/student/activities/${fgDrawLab}`, undefined, fgD.session)).json || {}).includes('designated_group'),
+  'student payload scanned');
+
+// -- Client + PHANTOM UI wires exist ----------------------------------------
+const fgClient = readFileSync(path.join(ROOT, 'src/lib/cgm.ts'), 'utf8');
+const fgWorkspaceSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/ForceGetWorkspace.tsx'), 'utf8');
+const fgPhantomSrc = readFileSync(path.join(ROOT, 'src/components/ClassGroups/PhantomClasses.tsx'), 'utf8');
+check('the client library exposes the Force Get surface on the existing member auth helper',
+  /forceGetRoster: \(activityId: number\)/.test(fgClient) && /submitForceGet/.test(fgClient)
+  && /phantomForceGetRequests/.test(fgClient) && /phantomDecideForceGet/.test(fgClient),
+  'client methods');
+check('the Force Get workspace submits through the approval gate, never a direct move',
+  /Nothing moves until PHANTOM approves/.test(fgWorkspaceSrc));
+check('PHANTOM has a Force Get Requests tab with approve and reject',
+  /'force-get', 'Force Get Requests'/.test(fgPhantomSrc) && /cgm-phantom-approve-force-get/.test(fgPhantomSrc)
+  && /phantomDecideForceGet/.test(fgPhantomSrc));
+
 
 // ---------------------------------------------------------------------------
 

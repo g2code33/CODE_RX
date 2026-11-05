@@ -32,6 +32,15 @@ import {
   type ClassPermission,
 } from './core';
 import {
+  activeAssignmentId,
+  activeDesignationsFor,
+  ensureForceGetSchema,
+  forcedMemberCounts,
+  insertAssignmentRespectingDesignations,
+  markDesignationApplied,
+  reservedSeatsFor,
+} from './forceGet';
+import {
   ensureRechooseSchema,
   insertAssignmentGuarded,
   requireCgmPhantom,
@@ -172,6 +181,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `SELECT r.*, s.full_name FROM cgm_group_change_requests r JOIN cgm_students s ON s.id = r.student_id
        WHERE r.activity_id = ? ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END, r.created_at DESC LIMIT 100`
     ).bind(activityId));
+    await ensureForceGetSchema(c.env.DB);
+    const forcedCounts = await forcedMemberCounts(c.env.DB, activityId);
+    const reservedCounts = await reservedSeatsFor(c.env.DB, activityId);
     const history = await asRows<any>(c.env.DB.prepare(
       `SELECT e.*, s.full_name FROM cgm_assignment_events e JOIN cgm_students s ON s.id = e.student_id
        WHERE e.activity_id = ? ORDER BY e.id DESC LIMIT 200`
@@ -197,6 +209,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         groups: groups.map((row) => ({
           id: Number(row.id), name: row.name || `Group ${row.position}`, position: Number(row.position),
           capacity: row.capacity === null ? null : Number(row.capacity), size: Number(row.size),
+          // Backend-only counters for the "6/14 (2)" board label: `forced` is a
+          // SUBSET of `size` (members placed through an approved Force Get
+          // designation), `reserved` is approved-but-not-yet-applied seats.
+          forced: forcedCounts.get(Number(row.id)) || 0,
+          reserved: reservedCounts.get(Number(row.id)) || 0,
         })),
         unassigned, members, changeRequests, history, waitlist,
         whatsapp: whatsappLinks.map((row) => ({
@@ -573,6 +590,52 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(classId));
   };
 
+  /**
+   * FORCE GET — place every approved designation whose student is still
+   * unplaced. Runs BEFORE the organizer's planner so a designated student is
+   * never shuffled into a random group (and never has a random seat claimed
+   * that their reservation was holding). Students whose designated seat cannot
+   * be taken right now are returned as `pending` and left for their own draw /
+   * Re-choose; the designation stays live either way.
+   */
+  const placeDesignatedStudents = async (
+    db: D1Database, activityId: number, activity: any, label: string,
+  ) => {
+    await ensureForceGetSchema(db);
+    const designations = await activeDesignationsFor(db, activityId);
+    const pending: number[] = [];
+    let placed = 0;
+    if (!designations.size) return { placed, pending };
+    const assignedRows = await asRows<{ student_id: number }>(db.prepare(
+      `SELECT student_id FROM cgm_group_assignments WHERE activity_id = ? AND status = 'active'`
+    ).bind(activityId));
+    const assigned = new Set(assignedRows.map((row) => Number(row.student_id)));
+    for (const designation of designations.values()) {
+      if (assigned.has(designation.studentId)) continue;
+      const ok = await insertAssignmentRespectingDesignations(db, {
+        activityId, groupId: designation.groupId, studentId: designation.studentId,
+        via: 'automatic', label,
+      });
+      if (!ok) { pending.push(designation.studentId); continue; }
+      const assignmentId = await activeAssignmentId(db, activityId, designation.studentId);
+      const applied = await markDesignationApplied(db, designation.id, assignmentId);
+      await db.prepare(
+        `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
+         VALUES (?, ?, ?, 'assigned', ?, 'force get designation')`
+      ).bind(activityId, designation.studentId, designation.groupId, label).run();
+      await notifyStudent(db, designation.studentId, 'groups', 'Placed in your approved group',
+        `Your organizer's approved placement for ${activity.name} has been applied.`);
+      await auditCgm(db, {
+        actorType: 'organizer', actorLabel: label,
+        action: 'cgm.force_get.applied', entityType: 'force_get_designation', entityId: designation.id,
+        activityId, classId: Number(activity.class_id),
+        context: { studentId: designation.studentId, groupId: designation.groupId, requestId: designation.requestId, version: designation.version, appliedExactlyOnce: applied, via: 'organizer generate' },
+      });
+      placed += 1;
+    }
+    return { placed, pending };
+  };
+
   app.post('/api/cgm/activities/:id/generate', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
@@ -590,6 +653,11 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const groupCount = body.groupCount ? Math.max(2, Math.min(50, Math.floor(Number(body.groupCount)))) : config.groupCount;
     const targetSize = body.targetSize ? Math.max(2, Math.min(200, Math.floor(Number(body.targetSize)))) : config.targetGroupSize;
     const capacity = config.capacity ?? (body.capacity ? Math.max(1, Math.min(200, Math.floor(Number(body.capacity)))) : null);
+
+    // Approved Force Get designations are honoured before any planning, so the
+    // planner sees their seats as taken and never reshuffles them.
+    const designated = await placeDesignatedStudents(c.env.DB, activityId, activity, member.name);
+    const awaitingDesignationSeat = new Set(designated.pending);
 
     const existingGroups = await asRows<any>(c.env.DB.prepare(
       `SELECT g.id, g.capacity,
@@ -634,7 +702,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(activityId))).map((row) => Number(row.student_id)));
     const roster = await eligibleStudentsFor(c.env.DB, activityId, config.eligibility, Number(activity.class_id));
     const students: AssignableStudent[] = roster
-      .filter((row: any) => !assignedIds.has(Number(row.id)))
+      .filter((row: any) => !assignedIds.has(Number(row.id)) && !awaitingDesignationSeat.has(Number(row.id)))
       .map((row: any) => ({ studentId: Number(row.id), gender: row.gender }));
 
     const previousClassmates = await repeatClassmateMap(c.env.DB, Number(activity.class_id), students.map((s) => s.studentId));
@@ -654,6 +722,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const applied = await applyPlan(c.env.DB, activityId, plan, 'automatic', member.name);
     const unplaced = students.length - applied;
     const warnings: string[] = [];
+    if (awaitingDesignationSeat.size) {
+      warnings.push(`${awaitingDesignationSeat.size} student(s) keep their approved Force Get destination — their seat is being held and will be yours to fill once it opens.`);
+    }
     if (unplaced > 0) {
       if (config.overflow === 'waitlist') {
         for (const student of students.slice(applied)) {
@@ -712,10 +783,15 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     let applied = 0;
     for (const placement of plan) {
       try {
-        await db.prepare(
-          `INSERT INTO cgm_group_assignments (activity_id, group_id, student_id, assigned_via, assigned_by_label)
-           VALUES (?, ?, ?, ?, ?)`
-        ).bind(activityId, placement.groupId, placement.studentId, via, label).run();
+        // Designation-aware guard: seats reserved for approved Force Get
+        // designations are never stolen by ordinary placement.
+        const wrote = await insertAssignmentRespectingDesignations(db, {
+          activityId, groupId: placement.groupId, studentId: placement.studentId, via, label,
+        });
+        if (!wrote) {
+          console.warn('[code-rx] assignment skipped (already active or capacity):', placement);
+          continue;
+        }
         await db.prepare(
           `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
            VALUES (?, ?, ?, 'assigned', ?, ?)`
@@ -741,6 +817,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const guard = await requireClassPermission(c, member, Number(activity.class_id), 'generate_groups');
     if (!guard.ok) return guard.response;
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    // Approved Force Get designations are placed first (and their seats are
+    // then counted as taken, never handed to somebody else).
+    const designated = await placeDesignatedStudents(c.env.DB, activityId, activity, member.name);
+    const awaitingDesignationSeat = new Set(designated.pending);
     const groups = await asRows<any>(c.env.DB.prepare(
       `SELECT g.id, g.capacity,
               (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
@@ -751,7 +831,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     ).bind(activityId));
     const assignedIds = new Set(assignedRows.map((row) => Number(row.student_id)));
     const roster = await eligibleStudentsFor(c.env.DB, activityId, config.eligibility, Number(activity.class_id));
-    const students: AssignableStudent[] = roster.filter((row: any) => !assignedIds.has(Number(row.id)))
+    const students: AssignableStudent[] = roster.filter((row: any) => !assignedIds.has(Number(row.id)) && !awaitingDesignationSeat.has(Number(row.id)))
       .map((row: any) => ({ studentId: Number(row.id), gender: row.gender }));
     const plan = planAssignments({
       groups: groups.map((row) => ({ groupId: Number(row.id), capacity: row.capacity === null ? null : Number(row.capacity), currentSize: Number(row.size) })),
@@ -777,7 +857,7 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       if (!freeGroup[0]) break;
       // Same atomic guard as self-assignment: if a concurrent request took
       // the seat, skip this waiter instead of overfilling the group.
-      const promotedSeat = await insertAssignmentGuarded(c.env.DB, {
+      const promotedSeat = await insertAssignmentRespectingDesignations(c.env.DB, {
         activityId, groupId: Number(freeGroup[0].id), studentId: Number(row.student_id),
         via: 'waitlist', label: member.name,
       });
@@ -831,11 +911,26 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         return bad(c, 'That group is full.', 409);
       }
     }
+    // An organizer move to a DIFFERENT group overrides an approved Force Get
+    // designation; the designation is cleared (audited), never left to fight
+    // the organizer later. A move INTO the designated group consumes it.
+    const liveDesignation = (await activeDesignationsFor(c.env.DB, activityId)).get(studentId) || null;
+    if (liveDesignation && liveDesignation.groupId !== groupId) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_force_get_designations SET status = 'cleared', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'`
+      ).bind(liveDesignation.id).run();
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.force_get.cleared', entityType: 'force_get_designation', entityId: liveDesignation.id,
+        classId: Number(activity.class_id), activityId,
+        context: { studentId, fromGroupId: liveDesignation.groupId, toGroupId: groupId, reason: 'organizer placement', requestId: liveDesignation.requestId },
+      });
+    }
     if (current[0]) {
       await c.env.DB.prepare(
         `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = 'moved by organizer' WHERE id = ?`
       ).bind(Number(current[0].id)).run();
-      const wrote = await insertAssignmentGuarded(c.env.DB, {
+      const wrote = await insertAssignmentRespectingDesignations(c.env.DB, {
         activityId, groupId, studentId, via: 'organizer', label: member.name,
       });
       if (!wrote) {
@@ -849,10 +944,13 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          VALUES (?, ?, ?, ?, 'moved', ?, 'organizer move')`
       ).bind(activityId, studentId, Number(current[0].group_id), groupId, member.name).run();
     } else {
-      const wrote = await insertAssignmentGuarded(c.env.DB, {
+      const wrote = await insertAssignmentRespectingDesignations(c.env.DB, {
         activityId, groupId, studentId, via: 'organizer', label: member.name,
       });
       if (!wrote) return bad(c, 'That group just filled up.', 409);
+      if (liveDesignation && liveDesignation.groupId === groupId) {
+        await markDesignationApplied(c.env.DB, liveDesignation.id, await activeAssignmentId(c.env.DB, activityId, studentId));
+      }
       await c.env.DB.prepare(
         `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
          VALUES (?, ?, ?, 'assigned', ?, 'organizer placement')`
@@ -1249,6 +1347,52 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        FROM cgm_group_assignments ga JOIN cgm_students s ON s.id = ga.student_id JOIN cgm_groups g ON g.id = ga.group_id
        WHERE ga.activity_id = ? AND ga.status = 'active' AND ga.group_id != ? ORDER BY s.full_name`
     ).bind(Number(group.activity_id), groupId));
+    // FORCE GET badges for this group: who was forced here (applied), who is
+    // still sitting here waiting for their own Re-choose (designation approved
+    // for another group), and who has a seat reserved here. Shown to organizers
+    // only — students never see these rows.
+    await ensureForceGetSchema(c.env.DB);
+    const designationRows = await asRows<any>(c.env.DB.prepare(
+      `SELECT d.id, d.student_id, d.designated_group_id, d.status, d.approved_request_id, d.request_version,
+              d.designated_by_label, d.approved_by_label, d.designated_at, d.applied_at, d.applied_assignment_id,
+              s.full_name, dg.name AS designated_name, dg.position AS designated_position,
+              i.previous_group_id, pg.name AS previous_name, pg.position AS previous_position,
+              ga.id AS current_assignment_id, ga.group_id AS current_group_id, cg.name AS current_group_name
+       FROM cgm_force_get_designations d
+       JOIN cgm_students s ON s.id = d.student_id
+       LEFT JOIN cgm_groups dg ON dg.id = d.designated_group_id
+       LEFT JOIN cgm_force_get_request_items i ON i.request_id = d.approved_request_id AND i.student_id = d.student_id
+       LEFT JOIN cgm_groups pg ON pg.id = i.previous_group_id
+       LEFT JOIN cgm_group_assignments ga ON ga.activity_id = d.activity_id AND ga.student_id = d.student_id AND ga.status = 'active'
+       LEFT JOIN cgm_groups cg ON cg.id = ga.group_id
+       WHERE d.activity_id = ? AND d.status IN ('active','applied')
+         AND (d.designated_group_id = ? OR ga.group_id = ?)
+       ORDER BY s.full_name`
+    ).bind(Number(group.activity_id), groupId, groupId));
+    const designations = designationRows.map((row) => {
+      const designatedGroupId = Number(row.designated_group_id);
+      const currentGroupId = row.current_group_id === null || row.current_group_id === undefined ? null : Number(row.current_group_id);
+      const applied = row.status === 'applied' && Number(row.applied_assignment_id || 0) > 0
+        && Number(row.current_group_id || 0) === designatedGroupId;
+      return {
+        id: Number(row.id), studentId: Number(row.student_id), studentName: row.full_name,
+        status: row.status,
+        designatedGroupId,
+        designatedGroupName: row.designated_name || `Group ${row.designated_position}`,
+        currentGroupId, currentGroupName: row.current_group_name || null,
+        previousGroupId: row.previous_group_id === null || row.previous_group_id === undefined ? null : Number(row.previous_group_id),
+        previousGroupName: row.previous_name || null,
+        designatedBy: row.designated_by_label || null,
+        approvedBy: row.approved_by_label || null,
+        designatedAt: row.designated_at || null,
+        appliedAt: row.applied_at || null,
+        applied,
+        arrivesHere: designatedGroupId === groupId && currentGroupId !== groupId,
+        awaitingResample: currentGroupId === groupId && designatedGroupId !== groupId,
+        requestId: row.approved_request_id === null || row.approved_request_id === undefined ? null : Number(row.approved_request_id),
+        version: row.request_version === null || row.request_version === undefined ? null : Number(row.request_version),
+      };
+    });
     return c.json({
       success: true,
       data: {
@@ -1262,7 +1406,19 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
           id: Number(activity.id), name: activity.name, status: activity.status,
           method: config?.method, className: activity.class_name,
         } : null,
-        members, leadership, elections, announcements, whatsapp, events, unassigned, otherMembers, rechooseApproved,
+        members: members.map((row) => {
+          const designation = designations.find((entry) => entry.studentId === Number(row.id));
+          return {
+            ...row,
+            forced: Boolean(designation?.applied),
+            designation: designation || null,
+            awaitingResample: Boolean(designation?.awaitingResample),
+          };
+        }),
+        designations,
+        forcedCount: designations.filter((entry) => entry.applied).length,
+        reservedCount: designations.filter((entry) => entry.arrivesHere && entry.status === 'active').length,
+        leadership, elections, announcements, whatsapp, events, unassigned, otherMembers, rechooseApproved,
       },
     });
   });
@@ -1585,6 +1741,650 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     });
     return c.json({ success: true, data: { studentId: successor, method: successionMethod } });
   });
+
+  // -------------------------------------------------------------------------
+  // FORCE GET — organizer proposes, PHANTOM approves, the student still samples
+  // -------------------------------------------------------------------------
+
+  /**
+   * The full roster the Force Get workspace works on: EVERY class member, with
+   * their live group, whether they have ever sampled, their latest individual
+   * Re-choose state and any approved designation. Students outside the
+   * activity's eligibility list are returned flagged `eligible: false` rather
+   * than being silently dropped (or worse, silently treated as eligible).
+   */
+  const forceGetRoster = async (c: any, activityId: number, activity: any, config: any) => {
+    await ensureForceGetSchema(c.env.DB);
+    const eligibleRows = config.eligibility === 'selected'
+      ? await asRows<{ student_id: number }>(c.env.DB.prepare(
+        'SELECT student_id FROM cgm_activity_eligible WHERE activity_id = ?'
+      ).bind(activityId))
+      : null;
+    const eligibleSet = eligibleRows ? new Set(eligibleRows.map((row) => Number(row.student_id))) : null;
+    const groups = await asRows<any>(c.env.DB.prepare(
+      `SELECT g.id, g.name, g.position, g.capacity,
+              (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+       FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active' ORDER BY g.position`
+    ).bind(activityId));
+    const reserved = await reservedSeatsFor(c.env.DB, activityId);
+    const forced = await forcedMemberCounts(c.env.DB, activityId);
+    const students = await asRows<any>(c.env.DB.prepare(
+      `SELECT s.id, s.full_name, s.index_number,
+              ga.id AS assignment_id, ga.group_id, ga.assigned_via, ga.assigned_at,
+              EXISTS(SELECT 1 FROM cgm_group_assignments x WHERE x.activity_id = ? AND x.student_id = s.id) AS ever_assigned,
+              (SELECT rc.status FROM cgm_rechoose_requests rc WHERE rc.activity_id = ? AND rc.student_id = s.id
+                ORDER BY rc.id DESC LIMIT 1) AS rechoose_status,
+              (SELECT d.id FROM cgm_force_get_designations d WHERE d.activity_id = ? AND d.student_id = s.id
+                AND d.status = 'active' LIMIT 1) AS designation_id,
+              (SELECT d.designated_group_id FROM cgm_force_get_designations d WHERE d.activity_id = ? AND d.student_id = s.id
+                AND d.status = 'active' LIMIT 1) AS designation_group_id,
+              (SELECT d.approved_by_label FROM cgm_force_get_designations d WHERE d.activity_id = ? AND d.student_id = s.id
+                AND d.status = 'active' LIMIT 1) AS designation_approved_by,
+              (SELECT d.designated_at FROM cgm_force_get_designations d WHERE d.activity_id = ? AND d.student_id = s.id
+                AND d.status = 'active' LIMIT 1) AS designation_at
+       FROM cgm_class_members cm JOIN cgm_students s ON s.id = cm.student_id
+       LEFT JOIN cgm_group_assignments ga ON ga.activity_id = ? AND ga.student_id = s.id AND ga.status = 'active'
+       WHERE cm.class_id = ? AND cm.status = 'active' ORDER BY s.full_name`
+    ).bind(activityId, activityId, activityId, activityId, activityId, activityId, activityId, Number(activity.class_id)));
+    const groupNames = new Map(groups.map((row) => [Number(row.id), row.name || `Group ${row.position}`]));
+    const pending = await asRows<any>(c.env.DB.prepare(
+      `SELECT * FROM cgm_force_get_requests WHERE activity_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`
+    ).bind(activityId));
+    return {
+      groups: groups.map((row) => ({
+        id: Number(row.id), name: row.name || `Group ${row.position}`, position: Number(row.position),
+        capacity: row.capacity === null ? null : Number(row.capacity), size: Number(row.size),
+        reserved: reserved.get(Number(row.id)) || 0,
+        forced: forced.get(Number(row.id)) || 0,
+      })),
+      students: students.map((row) => ({
+        id: Number(row.id), fullName: row.full_name, indexNumber: row.index_number,
+        eligible: eligibleSet ? eligibleSet.has(Number(row.id)) : true,
+        groupId: row.group_id === null || row.group_id === undefined ? null : Number(row.group_id),
+        groupName: row.group_id ? (groupNames.get(Number(row.group_id)) || null) : null,
+        assignmentId: row.assignment_id === null ? null : Number(row.assignment_id),
+        assignedVia: row.assigned_via || null,
+        everAssigned: Number(row.ever_assigned || 0) === 1,
+        rechooseStatus: row.rechoose_status || null,
+        designation: row.designation_id
+          ? {
+            id: Number(row.designation_id),
+            groupId: row.designation_group_id === null ? null : Number(row.designation_group_id),
+            groupName: row.designation_group_id ? (groupNames.get(Number(row.designation_group_id)) || null) : null,
+            approvedBy: row.designation_approved_by || null, approvedAt: row.designation_at || null,
+          }
+          : null,
+      })),
+      pendingRequest: pending[0] ? {
+        id: Number(pending[0].id), version: Number(pending[0].version), status: pending[0].status,
+        requesterLabel: pending[0].requester_label, submittedAt: pending[0].submitted_at,
+        explanation: pending[0].explanation, studentCount: Number(pending[0].student_count || 0),
+      } : null,
+    };
+  };
+
+  /**
+   * Validate a proposed batch. Returns normalized items plus the conflicts that
+   * make it un-approvable. Capacity is projected from live occupancy, ignoring
+   * the selected students' current seats and honouring other reserved seats.
+   */
+  const validateForceGetBatch = async (
+    c: any, activityId: number, activity: any, config: any,
+    rawItems: any[],
+  ) => {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    if (!Array.isArray(rawItems) || !rawItems.length) {
+      return { errors: ['Choose at least one student and a destination group.'], warnings, items: [] as any[] };
+    }
+    if (rawItems.length > 400) return { errors: ['A Force Get request can name at most 400 students.'], warnings, items: [] };
+    const roster = await forceGetRoster(c, activityId, activity, config);
+    const byStudent = new Map(roster.students.map((row) => [Number(row.id), row]));
+    const groupById = new Map(roster.groups.map((row) => [Number(row.id), row]));
+    const items: Array<{ studentId: number; groupId: number; previousGroupId: number | null; sampled: boolean; rechoose: string | null }> = [];
+    const seen = new Set<number>();
+    for (const raw of rawItems) {
+      const studentId = Number((raw as any)?.studentId);
+      const groupId = Number((raw as any)?.groupId ?? (raw as any)?.destinationGroupId);
+      if (!Number.isInteger(studentId) || studentId <= 0) { errors.push('Every row needs a student.'); continue; }
+      if (seen.has(studentId)) { errors.push(`Student #${studentId} appears twice in the same request.`); continue; }
+      seen.add(studentId);
+      const student = byStudent.get(studentId);
+      if (!student) { errors.push(`Student #${studentId} is not in this class.`); continue; }
+      if (!student.eligible) { errors.push(`${student.fullName} is not eligible for this activity.`); continue; }
+      if (!Number.isInteger(groupId) || groupId <= 0) { errors.push(`Choose a destination group for ${student.fullName}.`); continue; }
+      const group = groupById.get(groupId);
+      if (!group) { errors.push(`The destination group for ${student.fullName} is not part of this activity.`); continue; }
+      items.push({
+        studentId, groupId, previousGroupId: student.groupId,
+        sampled: student.everAssigned, rechoose: student.rechooseStatus,
+      });
+    }
+    // Capacity: projected occupancy = live members staying + incoming.
+    const leaving = new Map<number, number>();
+    for (const item of items) {
+      if (item.previousGroupId && item.previousGroupId !== item.groupId) {
+        leaving.set(item.previousGroupId, (leaving.get(item.previousGroupId) || 0) + 1);
+      }
+    }
+    const incoming = new Map<number, number>();
+    for (const item of items) {
+      if (item.previousGroupId !== item.groupId) incoming.set(item.groupId, (incoming.get(item.groupId) || 0) + 1);
+    }
+    const committed = new Map<number, number>();
+    for (const [groupId, count] of incoming) {
+      const group = groupById.get(groupId)!;
+      if (group.capacity === null) continue;
+      const projected = group.size - (leaving.get(groupId) || 0) + count;
+      if (projected > group.capacity) {
+        const othersReserved = Math.max(0, Number(group.reserved || 0));
+        committed.set(groupId, projected - group.capacity);
+        errors.push(
+          `${group.name} would hold ${projected} students but its capacity is ${group.capacity}` +
+          `${othersReserved ? ` (${othersReserved} seat(s) already reserved for other approved designations)` : ''}. ` +
+          `Reduce this group's incoming students or raise its capacity.`,
+        );
+      }
+      if (projected === group.capacity) warnings.push(`${group.name} would be exactly full (${projected}/${group.capacity}).`);
+    }
+    for (const item of items) {
+      if (item.rechoose) {
+        warnings.push(`A Re-choose request already exists for one student — the designation waits for their own resampling.`);
+        break;
+      }
+    }
+    return { errors, warnings, items };
+  };
+
+  app.get('/api/cgm/activities/:id/force-get', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'generate_groups');
+    if (!guard.ok) return guard.response;
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    const roster = await forceGetRoster(c, activityId, activity, config);
+    const history = await asRows<any>(c.env.DB.prepare(
+      `SELECT id, version, status, explanation, student_count, requester_label, submitted_at,
+              reviewed_at, reviewer_label, review_reason
+       FROM cgm_force_get_requests WHERE activity_id = ? ORDER BY id DESC LIMIT 20`
+    ).bind(activityId));
+    return c.json({
+      success: true,
+      data: {
+        activity: {
+          id: activityId, name: activity.name, status: activity.status,
+          className: activity.class_name, classCode: activity.class_code,
+          method: config.method, eligibility: config.eligibility, genderRule: config.genderRule,
+        },
+        canSubmit: true,
+        ...roster,
+        history: history.map((row) => ({
+          id: Number(row.id), version: Number(row.version), status: row.status,
+          explanation: row.explanation, studentCount: Number(row.student_count || 0),
+          requesterLabel: row.requester_label, submittedAt: row.submitted_at,
+          reviewedAt: row.reviewed_at, reviewerLabel: row.reviewer_label, reviewReason: row.review_reason,
+        })),
+      },
+    });
+  });
+
+  /** Submit (or revise) a Force Get request. Assignments are NOT touched. */
+  const submitForceGet = async (c: any, reviseId: number | null, activityIdOverride?: number) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = activityIdOverride ?? Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'generate_groups');
+    if (!guard.ok) return guard.response;
+    await ensureForceGetSchema(c.env.DB);
+    const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
+    const body = await readBody<{ items?: any[]; explanation?: string }>(c);
+    const validation = await validateForceGetBatch(c, activityId, activity, config, Array.isArray(body.items) ? body.items : []);
+    if (validation.errors.length) {
+      return c.json({ success: false, error: validation.errors[0], data: { errors: validation.errors, warnings: validation.warnings } }, 400);
+    }
+    const explanation = cleanOrNull(body.explanation, 1000);
+
+    // A revision (or any new submission) supersedes the pending version — an
+    // approval can never be inherited by changed content.
+    const pendings = await asRows<any>(c.env.DB.prepare(
+      `SELECT id FROM cgm_force_get_requests WHERE activity_id = ? AND status = 'pending'`
+    ).bind(activityId));
+    if (reviseId && !pendings.some((row) => Number(row.id) === reviseId)) {
+      return bad(c, 'Only a pending request can be revised.', 409);
+    }
+    const versionRows = await asRows<{ v: number }>(c.env.DB.prepare(
+      'SELECT COALESCE(MAX(version), 0) AS v FROM cgm_force_get_requests WHERE activity_id = ?'
+    ).bind(activityId));
+    const version = Number(versionRows[0]?.v || 0) + 1;
+
+    const inserted = await c.env.DB.prepare(
+      `INSERT INTO cgm_force_get_requests
+         (activity_id, class_id, version, status, explanation, student_count, requested_by_profile_id, requester_label)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`
+    ).bind(activityId, Number(activity.class_id), version, explanation, validation.items.length,
+      member.profileId, member.name).run();
+    const requestId = Number(inserted.meta.last_row_id);
+    for (const item of validation.items) {
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_force_get_request_items
+           (request_id, version, student_id, destination_group_id, previous_group_id, sampled_at_submission, rechoose_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(requestId, version, item.studentId, item.groupId, item.previousGroupId,
+        item.sampled ? 1 : 0, item.rechoose).run();
+    }
+    for (const stale of pendings) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_force_get_requests SET status = 'superseded', superseded_by_request_id = ?,
+         updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(requestId, Number(stale.id)).run();
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.force_get.superseded', entityType: 'force_get_request', entityId: Number(stale.id),
+        classId: Number(activity.class_id), activityId, context: { supersededBy: requestId, version },
+      });
+    }
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'class_groups',
+      title: 'Force Get request awaiting approval',
+      summary: `${member.name} proposed destinations for ${validation.items.length} student(s) in ${activity.name} (${activity.class_name}).`,
+      source: 'cgm_force_get', sourceId: String(requestId), actorProfileId: member.profileId,
+      actorLabel: member.name, link: '#class-groups/phantom',
+      body: explanation || '',
+    });
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.force_get.requested', entityType: 'force_get_request', entityId: requestId,
+      classId: Number(activity.class_id), activityId,
+      context: { version, students: validation.items.length, items: validation.items.map((i) => ({ studentId: i.studentId, groupId: i.groupId })) },
+    });
+    if (reviseId) {
+      // A revision is its own audited event: the old version, the new version
+      // and every student whose destination changed.
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.force_get.updated', entityType: 'force_get_request', entityId: requestId,
+        classId: Number(activity.class_id), activityId,
+        context: { revisedRequestId: reviseId, version, students: validation.items.length, explanation },
+      });
+    }
+    return c.json({
+      success: true,
+      data: {
+        requestId, version, status: 'pending', warnings: validation.warnings,
+        message: `Sent to PHANTOM for approval (version ${version}). Nothing moves until PHANTOM approves.`,
+      },
+    });
+  };
+
+  app.post('/api/cgm/activities/:id/force-get/requests', (c: any) => submitForceGet(c, null));
+  app.post('/api/cgm/force-get/requests/:id/revise', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const requestId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      'SELECT * FROM cgm_force_get_requests WHERE id = ?'
+    ).bind(requestId));
+    const request = rows[0];
+    if (!request) return bad(c, 'Force Get request not found.', 404);
+    // Route the revision through the activity-scoped submitter so all the
+    // permission and validation rules are identical.
+    return submitForceGet(c, requestId, Number(request.activity_id));
+  });
+
+  app.post('/api/cgm/force-get/requests/:id/cancel', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const requestId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, a.class_id, a.name AS activity_name FROM cgm_force_get_requests r
+       JOIN cgm_activities a ON a.id = r.activity_id WHERE r.id = ?`
+    ).bind(requestId));
+    const request = rows[0];
+    if (!request) return bad(c, 'Force Get request not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(request.class_id), 'generate_groups');
+    if (!guard.ok) return guard.response;
+    if (request.status !== 'pending') return bad(c, 'Only a pending Force Get request can be cancelled.', 409);
+    await c.env.DB.prepare(
+      `UPDATE cgm_force_get_requests SET status = 'cancelled', review_reason = ?, reviewed_at = CURRENT_TIMESTAMP,
+       updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind('cancelled by the organizer', requestId).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.force_get.cleared', entityType: 'force_get_request', entityId: requestId,
+      classId: Number(request.class_id), activityId: Number(request.activity_id), context: { version: Number(request.version) },
+    });
+    return c.json({ success: true, data: { status: 'cancelled' } });
+  });
+
+  const forceGetRequestDetail = async (c: any, requestId: number) => {
+    await ensureForceGetSchema(c.env.DB);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, a.name AS activity_name, a.config_json, cl.name AS class_name, cl.code AS class_code
+       FROM cgm_force_get_requests r
+       JOIN cgm_activities a ON a.id = r.activity_id
+       JOIN cgm_classes cl ON cl.id = r.class_id
+       WHERE r.id = ?`
+    ).bind(requestId));
+    const request = rows[0];
+    if (!request) return null;
+    const items = await asRows<any>(c.env.DB.prepare(
+      `SELECT i.*, s.full_name, s.index_number,
+              dg.name AS destination_name, dg.position AS destination_position,
+              pg.name AS previous_name, pg.position AS previous_position,
+              ga.group_id AS current_group_id, cg.name AS current_group_name,
+              (SELECT rc.status FROM cgm_rechoose_requests rc
+                WHERE rc.activity_id = ? AND rc.student_id = i.student_id
+                ORDER BY rc.id DESC LIMIT 1) AS rechoose_now
+       FROM cgm_force_get_request_items i
+       JOIN cgm_students s ON s.id = i.student_id
+       JOIN cgm_groups dg ON dg.id = i.destination_group_id
+       LEFT JOIN cgm_groups pg ON pg.id = i.previous_group_id
+       LEFT JOIN cgm_group_assignments ga ON ga.activity_id = ? AND ga.student_id = i.student_id AND ga.status = 'active'
+       LEFT JOIN cgm_groups cg ON cg.id = ga.group_id
+       WHERE i.request_id = ? AND i.version = ?
+       ORDER BY dg.position, s.full_name`
+    ).bind(Number(request.activity_id), Number(request.activity_id), requestId, Number(request.version)));
+    const groups = await asRows<any>(c.env.DB.prepare(
+      `SELECT g.id, g.name, g.position, g.capacity,
+              (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+       FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active' ORDER BY g.position`
+    ).bind(Number(request.activity_id)));
+    const reserved = await reservedSeatsFor(c.env.DB, Number(request.activity_id));
+    const config = sanitizeActivityConfig(JSON.parse(request.config_json || '{}'));
+    const eligibleRows = config.eligibility === 'selected'
+      ? await asRows<{ student_id: number }>(c.env.DB.prepare(
+        'SELECT student_id FROM cgm_activity_eligible WHERE activity_id = ?'
+      ).bind(Number(request.activity_id)))
+      : null;
+    const eligibleSet = eligibleRows ? new Set(eligibleRows.map((row) => Number(row.student_id))) : null;
+    const groupById = new Map(groups.map((row) => [Number(row.id), row]));
+    const distribution = new Map<number, { groupId: number; groupName: string; capacity: number | null; size: number; reserved: number; projected: number; students: any[] }>();
+    let invalid = 0;
+    for (const item of items) {
+      const destination = groupById.get(Number(item.destination_group_id));
+      if (!destination) invalid += 1;
+      if (!eligibleSet || eligibleSet.has(Number(item.student_id))) { /* eligible */ } else invalid += 1;
+    }
+    for (const item of items) {
+      const destination = groupById.get(Number(item.destination_group_id));
+      if (!destination) continue;
+      const key = Number(destination.id);
+      if (!distribution.has(key)) {
+        distribution.set(key, {
+          groupId: key, groupName: destination.name || `Group ${destination.position}`,
+          capacity: destination.capacity === null ? null : Number(destination.capacity),
+          size: Number(destination.size), reserved: reserved.get(key) || 0, projected: 0, students: [],
+        });
+      }
+      const bucket = distribution.get(key)!;
+      bucket.projected += 1;
+      bucket.students.push({
+        studentId: Number(item.student_id), fullName: item.full_name, indexNumber: item.index_number,
+        currentGroupId: item.current_group_id === null ? null : Number(item.current_group_id),
+        currentGroupName: item.current_group_name || null,
+        sampled: Number(item.sampled_at_submission || 0) === 1,
+        rechooseState: item.rechoose_now || item.rechoose_state || null,
+        destinationGroupId: key,
+      });
+    }
+    const buckets = [...distribution.values()].map((bucket) => ({
+      ...bucket,
+      projectedTotal: bucket.size + bucket.projected,
+      conflict: bucket.capacity !== null ? bucket.size + bucket.projected > bucket.capacity : false,
+    }));
+    return {
+      request: {
+        id: Number(request.id), version: Number(request.version), status: request.status,
+        activityId: Number(request.activity_id), activityName: request.activity_name,
+        classId: Number(request.class_id), className: request.class_name, classCode: request.class_code,
+        explanation: request.explanation, studentCount: Number(request.student_count || 0),
+        requesterLabel: request.requester_label, requestedByProfileId: request.requested_by_profile_id,
+        submittedAt: request.submitted_at, reviewerLabel: request.reviewer_label,
+        reviewedAt: request.reviewed_at, reviewReason: request.review_reason,
+      },
+      groups: buckets,
+      conflicts: buckets.filter((bucket) => bucket.conflict).map((bucket) => ({
+        groupId: bucket.groupId, groupName: bucket.groupName,
+        message: `${bucket.groupName}: ${bucket.size} member(s) now + ${bucket.projected} proposed = ${bucket.projectedTotal}, capacity ${bucket.capacity}.`,
+      })),
+      invalidItems: invalid,
+    };
+  };
+
+  app.get('/api/cgm/force-get/requests/:id', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const detail = await forceGetRequestDetail(c, Number(c.req.param('id')));
+    if (!detail) return bad(c, 'Force Get request not found.', 404);
+    const guard = await requireClassPermission(c, member, detail.request.classId, 'generate_groups');
+    if (!guard.ok) return guard.response;
+    return c.json({ success: true, data: detail });
+  });
+
+  // ------------------------------- PHANTOM ---------------------------------
+
+  app.get('/api/cgm/phantom/force-get/requests', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    await ensureForceGetSchema(c.env.DB);
+    const status = clean(c.req.query('status') || 'pending', 20);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, a.name AS activity_name, cl.name AS class_name, cl.code AS class_code
+       FROM cgm_force_get_requests r
+       JOIN cgm_activities a ON a.id = r.activity_id
+       JOIN cgm_classes cl ON cl.id = r.class_id
+       WHERE r.status = ? ORDER BY r.submitted_at DESC, r.id DESC LIMIT 200`
+    ).bind(status));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), version: Number(row.version), status: row.status,
+        activityId: Number(row.activity_id), activityName: row.activity_name,
+        className: row.class_name, classCode: row.class_code,
+        requesterLabel: row.requester_label, submittedAt: row.submitted_at,
+        studentCount: Number(row.student_count || 0), explanation: row.explanation,
+        reviewerLabel: row.reviewer_label, reviewedAt: row.reviewed_at, reviewReason: row.review_reason,
+      })),
+    });
+  });
+
+  app.get('/api/cgm/phantom/force-get/requests/:id', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const detail = await forceGetRequestDetail(c, Number(c.req.param('id')));
+    if (!detail) return bad(c, 'Force Get request not found.', 404);
+    return c.json({ success: true, data: detail });
+  });
+
+  const decideForceGet = async (c: any, approve: boolean): Promise<Response> => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    await ensureForceGetSchema(c.env.DB);
+    const requestId = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 600);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, a.name AS activity_name, a.config_json FROM cgm_force_get_requests r
+       JOIN cgm_activities a ON a.id = r.activity_id WHERE r.id = ?`
+    ).bind(requestId));
+    const request = rows[0];
+    if (!request) return bad(c, 'Force Get request not found.', 404);
+    if (request.status !== 'pending') {
+      return bad(c, `This request is ${String(request.status)} — only a pending request can be decided.`, 409);
+    }
+    // Immutable approval: PHANTOM decides a SPECIFIC version. A stale client
+    // (or a request revised after it was opened) can never be approved.
+    if (body.version !== undefined && body.version !== null && Number(body.version) !== Number(request.version)) {
+      return bad(c, `This request is version ${Number(request.version)}; you reviewed version ${Number(body.version)}. Reload and review it again.`, 409);
+    }
+    if (!approve) {
+      if (!reason) return bad(c, 'Give a reason when rejecting a Force Get request.');
+      await c.env.DB.prepare(
+        `UPDATE cgm_force_get_requests SET status = 'rejected', reviewed_by_profile_id = ?, reviewer_label = ?,
+         review_reason = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(member.profileId, `PHANTOM · ${member.name}`, reason, requestId).run();
+      if (request.requested_by_profile_id) {
+        await createNotification(c.env.DB, {
+          title: 'Force Get rejected',
+          message: `PHANTOM rejected your Force Get request for ${request.activity_name}: ${reason}`,
+          audience: 'system', audienceLabel: 'Class & Groups',
+          recipientProfileIds: [Number(request.requested_by_profile_id)],
+        });
+      }
+      await auditCgm(c.env.DB, {
+        actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.force_get.rejected', entityType: 'force_get_request', entityId: requestId,
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: { version: Number(request.version), reason },
+      });
+      return c.json({ success: true, data: { status: 'rejected' } });
+    }
+
+    // ---- approval: revalidate everything against LIVE data -----------------
+    const items = await asRows<any>(c.env.DB.prepare(
+      `SELECT i.*, s.full_name FROM cgm_force_get_request_items i JOIN cgm_students s ON s.id = i.student_id
+       WHERE i.request_id = ? AND i.version = ?`
+    ).bind(requestId, Number(request.version)));
+    if (!items.length) return bad(c, 'This request has no students to approve.', 409);
+    const config = sanitizeActivityConfig(JSON.parse(request.config_json || '{}'));
+    const activity = await activityCore(c.env.DB, Number(request.activity_id));
+    if (!activity) return bad(c, 'The activity no longer exists.', 409);
+    if (config.eligibility === 'selected') {
+      const eligibleRows = await asRows<{ student_id: number }>(c.env.DB.prepare(
+        'SELECT student_id FROM cgm_activity_eligible WHERE activity_id = ?'
+      ).bind(Number(request.activity_id)));
+      const eligibleSet = new Set(eligibleRows.map((row) => Number(row.student_id)));
+      const ineligible = items.filter((item) => !eligibleSet.has(Number(item.student_id)));
+      if (ineligible.length) {
+        return bad(c, `${ineligible.map((item) => item.full_name).join(', ')} no longer eligible for this activity. Reject the request and ask the organizer to revise it.`, 409);
+      }
+    }
+    const groups = await asRows<any>(c.env.DB.prepare(
+      `SELECT g.id, g.name, g.position, g.capacity,
+              (SELECT COUNT(*) FROM cgm_group_assignments ga WHERE ga.group_id = g.id AND ga.status = 'active') AS size
+       FROM cgm_groups g WHERE g.activity_id = ? AND g.status = 'active'`
+    ).bind(Number(request.activity_id)));
+    const groupById = new Map(groups.map((row) => [Number(row.id), row]));
+    for (const item of items) {
+      if (!groupById.has(Number(item.destination_group_id))) {
+        return bad(c, `${item.full_name}'s destination group no longer exists in this activity. Reject and ask the organizer to revise.`, 409);
+      }
+    }
+    // Capacity with reservations already granted to other students.
+    const reserved = await reservedSeatsFor(c.env.DB, Number(request.activity_id));
+    const incoming = new Map<number, number>();
+    const leaving = new Map<number, number>();
+    for (const item of items) {
+      const target = Number(item.destination_group_id);
+      incoming.set(target, (incoming.get(target) || 0) + 1);
+      if (item.previous_group_id && Number(item.previous_group_id) !== target) {
+        leaving.set(Number(item.previous_group_id), (leaving.get(Number(item.previous_group_id)) || 0) + 1);
+      }
+    }
+    for (const [groupId, count] of incoming) {
+      const group = groupById.get(groupId)!;
+      if (group.capacity === null) continue;
+      const projected = Number(group.size) - (leaving.get(groupId) || 0) + count;
+      if (projected > Number(group.capacity)) {
+        const name = group.name || `Group ${group.position}`;
+        return bad(c,
+          `${name} cannot hold this batch: ${Number(group.size)} member(s) now, ${count} proposed, capacity ${Number(group.capacity)}` +
+          `${reserved.get(groupId) ? `, ${reserved.get(groupId)} seat(s) reserved for other approved designations` : ''}. ` +
+          `Reject and ask the organizer to revise the destinations or raise the capacity.`, 409);
+      }
+    }
+
+    const claimed = await c.env.DB.prepare(
+      `UPDATE cgm_force_get_requests SET status = 'approved', reviewed_by_profile_id = ?, reviewer_label = ?,
+       review_reason = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`
+    ).bind(member.profileId, `PHANTOM · ${member.name}`, reason, requestId).run();
+    if (!(Number((claimed as any)?.meta?.changes || 0) > 0)) {
+      // Two PHANTOM operators raced: the first one owns this decision and the
+      // designations must never be created twice.
+      return bad(c, 'Another PHANTOM operator already decided this request. Reload the queue.', 409);
+    }
+
+    let designated = 0;
+    let appliedNow = 0;
+    for (const item of items) {
+      const studentId = Number(item.student_id);
+      const groupId = Number(item.destination_group_id);
+      const student = await asRows<{ full_name: string }>(c.env.DB.prepare(
+        'SELECT full_name FROM cgm_students WHERE id = ?'
+      ).bind(studentId));
+      const studentName = student[0]?.full_name || item.full_name;
+      // Supersede any previous live designation for this student.
+      const previous = await asRows<any>(c.env.DB.prepare(
+        `SELECT id, designated_group_id FROM cgm_force_get_designations
+         WHERE activity_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(Number(request.activity_id), studentId));
+      for (const row of previous) {
+        await c.env.DB.prepare(
+          `UPDATE cgm_force_get_designations SET status = 'superseded', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+        ).bind(Number(row.id)).run();
+        await auditCgm(c.env.DB, {
+          actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+          action: 'cgm.force_get.superseded', entityType: 'force_get_designation', entityId: Number(row.id),
+          classId: Number(request.class_id), activityId: Number(request.activity_id),
+          context: { studentId, oldGroupId: Number(row.designated_group_id), newGroupId: groupId, version: Number(request.version) },
+        });
+      }
+      const currentAssignment = await activeAssignmentId(c.env.DB, Number(request.activity_id), studentId);
+      const currentRows = currentAssignment
+        ? await asRows<any>(c.env.DB.prepare('SELECT group_id FROM cgm_group_assignments WHERE id = ?').bind(currentAssignment))
+        : [];
+      const alreadyThere = currentRows[0] && Number(currentRows[0].group_id) === groupId;
+      const result = await c.env.DB.prepare(
+        `INSERT INTO cgm_force_get_designations
+           (activity_id, class_id, student_id, designated_group_id, approved_request_id, request_version,
+            designated_by_profile_id, designated_by_label, approved_by_profile_id, approved_by_label,
+            status, applied_assignment_id, applied_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        Number(request.activity_id), Number(request.class_id), studentId, groupId, requestId, Number(request.version),
+        request.requested_by_profile_id, request.requester_label, member.profileId, `PHANTOM · ${member.name}`,
+        alreadyThere ? 'applied' : 'active', alreadyThere ? currentAssignment : null,
+        alreadyThere ? new Date().toISOString() : null,
+      ).run();
+      designated += 1;
+      if (alreadyThere) appliedNow += 1;
+      await auditCgm(c.env.DB, {
+        actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+        action: alreadyThere ? 'cgm.force_get.applied' : 'cgm.force_get.approved',
+        entityType: 'force_get_designation', entityId: Number(result.meta.last_row_id),
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: { studentId, studentName, groupId, requestId, version: Number(request.version), alreadyThere },
+      });
+      await notifyStudent(c.env.DB, studentId, 'groups', 'Your organizer designated your group',
+        alreadyThere
+          ? `Your organizer's placement for you in ${request.activity_name} was approved. You are already in that group.`
+          : `PHANTOM approved a destination group for you in ${request.activity_name}. Keep using your normal group selection — you will be placed in the approved group when you do. If you have already been placed, your organizer will ask you to re-choose.`);
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.force_get.approved', entityType: 'force_get_request', entityId: requestId,
+      classId: Number(request.class_id), activityId: Number(request.activity_id),
+      context: { version: Number(request.version), students: designated, appliedImmediately: appliedNow, reason },
+    });
+    if (request.requested_by_profile_id) {
+      await createNotification(c.env.DB, {
+        title: 'Force Get approved',
+        message: `PHANTOM approved your Force Get request for ${request.activity_name} — ${designated} student(s).`,
+        audience: 'system', audienceLabel: 'Class & Groups',
+        recipientProfileIds: [Number(request.requested_by_profile_id)],
+      });
+    }
+    return c.json({ success: true, data: { status: 'approved', designated, appliedImmediately: appliedNow } });
+  };
+
+  app.post('/api/cgm/phantom/force-get/requests/:id/approve', (c: any) => decideForceGet(c, true));
+  app.post('/api/cgm/phantom/force-get/requests/:id/reject', (c: any) => decideForceGet(c, false));
 
   // -------------------------------------------------------------------------
   // Elections (organizer side)

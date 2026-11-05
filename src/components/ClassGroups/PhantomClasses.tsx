@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ClipboardList, FileText, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { ClipboardList, FileText, RefreshCw, ShieldCheck, Target, Users } from 'lucide-react';
 import { cgm } from '../../lib/cgm';
 import { ConnectionBanner } from './ConnectionBanner';
 import { appDialog } from '../AppDialog';
@@ -29,7 +29,7 @@ const formatWhen = (value: unknown) => {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
-type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'rechoose' | 'delegation' | 'disputes' | 'organizers' | 'audit';
+type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'rechoose' | 'force-get' | 'delegation' | 'disputes' | 'organizers' | 'audit';
 
 const TABS: Array<[Tab, string]> = [
   ['overview', 'Overview'],
@@ -38,6 +38,7 @@ const TABS: Array<[Tab, string]> = [
   ['classes', 'Class approvals'],
   ['sensitive', 'Sensitive changes'],
   ['rechoose', 'Re-choose requests'],
+  ['force-get', 'Force Get Requests'],
   ['delegation', 'Registration delegation'],
   ['disputes', 'Disputes'],
   ['organizers', 'Organizer activity'],
@@ -144,6 +145,9 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
   const [rows, setRows] = useState<PhantomRows>({} as PhantomRows);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The Force Get queue row currently expanded, with its full detail payload.
+  const [forceGetDetail, setForceGetDetail] = useState<any>(null);
+  const [forceGetLoading, setForceGetLoading] = useState(false);
   // The section list is a drawer on small screens; any click off it closes it.
   const [navOpen, setNavOpen] = useState(false);
   useOutsideDismiss(navOpen, () => setNavOpen(false), '.cgm-sidenav, [data-testid="phantom-nav-toggle"]');
@@ -156,6 +160,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
       classes: () => cgm.phantomClasses(),
       sensitive: () => cgm.phantomSensitiveChanges(),
       rechoose: () => cgm.phantomRechooseRequests(),
+      'force-get': () => cgm.phantomForceGetRequests(),
       delegation: () => cgm.phantomDelegations(),
       disputes: () => cgm.phantomDisputes(),
       organizers: () => cgm.phantomOrganizerActivity(),
@@ -350,6 +355,129 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                 </>
               )}
             />
+          )}
+
+          {tab === 'force-get' && (
+            <>
+              <ListBlock
+                title="Force Get requests — organizers proposing a destination"
+                rows={rows['force-get']}
+                emptyText="No Force Get requests await review."
+                render={(row) => (
+                  <>
+                    <div className="min-w-0">
+                      <p className="flex items-center gap-1.5 text-sm font-black text-slate-800">
+                        <Target className="h-3.5 w-3.5 text-amber-500" aria-hidden="true" />
+                        {row.activityName} · {row.studentCount} student(s) · v{row.version}
+                      </p>
+                      <p className="text-[11px] font-semibold text-slate-400">
+                        Request #{row.id} · {row.className}{row.classCode ? ` (${row.classCode})` : ''} · by {row.requesterLabel || 'the organizer'} · {formatWhen(row.submittedAt)}
+                      </p>
+                      {row.explanation && <p className="mt-1 text-xs italic text-slate-500">“{row.explanation}”</p>}
+                      {row.status !== 'pending' && (
+                        <p className={`mt-1 text-[11px] font-bold ${row.status === 'approved' ? 'text-emerald-700' : 'text-red-600'}`}>
+                          {String(row.status).toUpperCase()}{row.reviewerLabel ? ` by ${row.reviewerLabel}` : ''}{row.reviewReason ? ` — ${row.reviewReason}` : ''}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        className="mt-1 text-[11px] font-black text-emerald-700 underline decoration-emerald-300"
+                        data-testid="cgm-phantom-force-get-detail"
+                        onClick={() => {
+                          setForceGetLoading(true);
+                          void cgm.phantomForceGetRequest(Number(row.id))
+                            .then((detail) => setForceGetDetail({ ...detail, queueRow: row }))
+                            .catch(() => setForceGetDetail(null))
+                            .finally(() => setForceGetLoading(false));
+                        }}
+                      >
+                        {forceGetLoading ? 'Loading detail…' : 'View full detail'}
+                      </button>
+                    </div>
+                    {row.status === 'pending' && (
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          data-testid="cgm-phantom-approve-force-get"
+                          className="cgm-primary-button"
+                          onClick={() => void act(
+                            () => cgm.phantomDecideForceGet(Number(row.id), 'approve', undefined, Number(row.version)),
+                            `Force Get v${row.version} approved — the designations now reserve those seats.`,
+                          )}
+                        >Approve</button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          className="mini-button text-red-600"
+                          data-testid="cgm-phantom-reject-force-get"
+                          onClick={async () => {
+                            const reason = await appDialog.prompt({ title: 'Reject this Force Get request', label: 'Why are you rejecting it? (the organizer sees this)', multiline: true, confirmLabel: 'Reject' });
+                            if (reason === null) return;
+                            if (!String(reason).trim()) { setMessage('A rejection needs a reason.'); return; }
+                            await act(() => cgm.phantomDecideForceGet(Number(row.id), 'reject', String(reason).trim(), Number(row.version)), 'Force Get request rejected.');
+                          }}
+                        >Reject</button>
+                      </div>
+                    )}
+                  </>
+                )}
+              />
+              {forceGetDetail && (
+                <div className={card} data-testid="cgm-phantom-force-get-panel">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className={label}>Request #{forceGetDetail.request?.id} · version {forceGetDetail.request?.version}</p>
+                      <p className="mt-1 text-sm font-black text-slate-900">{forceGetDetail.request?.activityName} — {forceGetDetail.request?.className}</p>
+                      <p className="text-[11px] font-semibold text-slate-400">
+                        {forceGetDetail.request?.studentCount} student(s) · organizer {forceGetDetail.request?.requesterLabel || '—'} · submitted {formatWhen(forceGetDetail.request?.submittedAt)}
+                      </p>
+                    </div>
+                    <button type="button" className="mini-button" onClick={() => setForceGetDetail(null)}>Close detail</button>
+                  </div>
+                  {forceGetDetail.request?.explanation && (
+                    <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs italic text-slate-600">“{forceGetDetail.request.explanation}”</p>
+                  )}
+                  {(forceGetDetail.conflicts || []).length > 0 && (
+                    <div className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-[11px] font-bold text-red-700">
+                      {(forceGetDetail.conflicts || []).map((conflict: any) => <p key={conflict.groupId}>{conflict.message}</p>)}
+                    </div>
+                  )}
+                  {Number(forceGetDetail.invalidItems || 0) > 0 && (
+                    <p className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-[11px] font-bold text-red-700">
+                      {forceGetDetail.invalidItems} row(s) are no longer valid (ineligible student or deleted group) — reject and ask for a revision.
+                    </p>
+                  )}
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {(forceGetDetail.groups || []).map((bucket: any) => (
+                      <div key={bucket.groupId} className={`rounded-xl border px-3 py-2 ${bucket.conflict ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-black text-slate-900">{bucket.groupName}</p>
+                          <p className={`text-[11px] font-black ${bucket.conflict ? 'text-red-600' : 'text-slate-500'}`}>
+                            {bucket.size} now → +{bucket.projected} = {bucket.projectedTotal}/{bucket.capacity ?? '∞'}
+                            {bucket.reserved ? ` · ${bucket.reserved} reserved` : ''}
+                          </p>
+                        </div>
+                        <ul className="mt-1 space-y-0.5">
+                          {(bucket.students || []).map((student: any) => (
+                            <li key={student.studentId} className="text-[11px] font-semibold text-slate-600">
+                              {student.fullName}
+                              <span className="text-slate-400"> · now {student.currentGroupName || 'unplaced'}</span>
+                              <span className="text-slate-400"> · {student.sampled ? 'sampled' : 'not sampled yet'}</span>
+                              {student.rechooseState ? <span className="text-amber-600"> · re-choose {student.rechooseState}</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[10px] font-semibold text-slate-400">
+                    Approving creates designations only — nobody is moved. Each student is placed in the approved group when they sample,
+                    and students who already have a group keep it until their own approved Re-choose releases it.
+                  </p>
+                </div>
+              )}
+            </>
           )}
 
           {tab === 'sensitive' && (

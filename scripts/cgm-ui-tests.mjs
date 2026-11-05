@@ -372,8 +372,9 @@ check('assignment inserts re-check capacity and uniqueness inside one atomic sta
   /insertAssignmentGuarded/.test(service) && /WHERE NOT EXISTS \(SELECT 1 FROM cgm_group_assignments/.test(service)
   && /< COALESCE\(\(SELECT capacity FROM cgm_groups/.test(service));
 check('self-assignment, waitlist promotion and organizer placement all use the atomic guard',
-  (studentRoutes.match(/insertAssignmentGuarded/g) || []).length >= 2
-  && (backend.match(/insertAssignmentGuarded/g) || []).length >= 4);
+  (studentRoutes.match(/insertAssignmentRespectingDesignations/g) || []).length >= 3
+  && (backend.match(/insertAssignmentRespectingDesignations/g) || []).length >= 4
+  && /insertAssignmentGuarded/.test(service));
 check('a lost move restores the student\'s original seat instead of leaving them seatless',
   /restoreAssignment/.test(service) && /keeps their current group/.test(backend));
 check('the vote ledger commits participation and ballot together with a clean 409 on double votes',
@@ -793,6 +794,84 @@ check('the add-student picker falls back to the class roster when eligibility is
   /config\.eligibility === 'selected'/.test(src('functions/lib/cgm/routes-activities.ts'))
   && /config\?\.eligibility === 'selected'/.test(src('functions/lib/cgm/routes-activities.ts'))
   && /FROM cgm_class_members cm JOIN cgm_students s ON s\.id = cm\.student_id/.test(src('functions/lib/cgm/routes-activities.ts')));
+
+section('23. Force Get — organizer proposal, PHANTOM approval, real destinations');
+
+const forceGetWs = src('src/components/ClassGroups/ForceGetWorkspace.tsx');
+const clientLib = src('src/lib/cgm.ts');
+const routesActivities = src('functions/lib/cgm/routes-activities.ts');
+const forceGetLib = src('functions/lib/cgm/forceGet.ts');
+
+check('the Force Get button sits immediately beside Assign Remaining, emerald + gold, target icon',
+  /data-testid="cgm-force-get-open"[\s\S]{0,1200}?<Target className="h-4 w-4 text-amber-300"/.test(workspace)
+  && workspace.indexOf('Assign remaining') < workspace.indexOf('cgm-force-get-open')
+  && /bg-emerald-600/.test(workspace.slice(workspace.indexOf('cgm-force-get-open') - 400, workspace.indexOf('cgm-force-get-open') + 900))
+  && /hover:bg-emerald-700/.test(workspace) && /active:bg-emerald-800/.test(workspace)
+  && /disabled:cursor-not-allowed disabled:opacity-50/.test(workspace));
+check('the Force Get button is gated by the generate_groups permission and needs real groups',
+  /disabled=\{busy \|\| !\(data\.groups \|\| \[\]\)\.length\}/.test(workspace)
+  && workspace.indexOf("canGenerate && (") < workspace.indexOf('cgm-force-get-open'));
+check('clicking it opens a dedicated FULL-PAGE workspace (returns a page, not a popup/dialog)',
+  /if \(forceGetOpen && activityId\) \{\s*return \(\s*<ForceGetWorkspace/.test(workspace)
+  && !/modal|dialog/i.test(forceGetWs.slice(0, 4000)));
+check('the workspace lists every state: sampled, unsampled, re-choose and ineligible',
+  /SAMPLED/.test(forceGetWs) && /NOT SAMPLED/.test(forceGetWs) && /AWAITING RESAMPLE/.test(forceGetWs)
+  && /RE-CHOOSE PENDING/.test(forceGetWs) && /INELIGIBLE/.test(forceGetWs) && /DESIGNATION APPROVED/.test(forceGetWs));
+check('destinations come from the real group names returned by the backend (never assumed numbering)',
+  /groups\.map\(\(group\) => \(/.test(forceGetWs) && /group\.name/.test(forceGetWs)
+  && /cgm-force-get-group/.test(forceGetWs));
+check('selection supports single, multi, select-all-filtered and clear',
+  /data-testid="cgm-force-get-select"/.test(forceGetWs) && /selectAllFiltered/.test(forceGetWs)
+  && /data-testid="cgm-force-get-select-all"/.test(forceGetWs) && /data-testid="cgm-force-get-clear"/.test(forceGetWs));
+check('bulk destination assignment exists for the selected rows',
+  /data-testid="cgm-force-get-bulk-group"/.test(forceGetWs) && /data-testid="cgm-force-get-bulk-apply"/.test(forceGetWs)
+  && /applyBulk/.test(forceGetWs));
+check('a live preview shows current vs projected capacity and blocks over-capacity proposals',
+  /data-testid="cgm-force-get-preview"/.test(forceGetWs) && /projected/.test(forceGetWs)
+  && /over capacity/.test(forceGetWs) && /const canSubmit = readyItems\.length > 0 && !missingDestination && !blockedIneligible && !overfilled\.length/.test(forceGetWs));
+check('the workspace states that nothing moves until PHANTOM approves',
+  /Nothing moves until PHANTOM approves/.test(forceGetWs));
+check('a pending version can be revised or cancelled from the workspace',
+  /data-testid="cgm-force-get-pending"/.test(forceGetWs) && /reviseForceGet/.test(forceGetWs)
+  && /data-testid="cgm-force-get-cancel"/.test(forceGetWs));
+check('PHANTOM has a Force Get Requests tab with full detail, approve and reject-with-reason',
+  /'force-get', 'Force Get Requests'/.test(phantom)
+  && /data-testid="cgm-phantom-force-get-panel"/.test(phantom)
+  && /cgm-phantom-approve-force-get/.test(phantom) && /cgm-phantom-reject-force-get/.test(phantom)
+  && /A rejection needs a reason/.test(phantom));
+check('the PHANTOM detail shows distribution, current vs proposed, sampling/re-choose state and capacity impact',
+  /bucket\.size/.test(phantom) && /bucket\.projected/.test(phantom) && /sampled \? 'sampled' : 'not sampled yet'/.test(phantom)
+  && /re-choose \{student\.rechooseState\}/.test(phantom) && /conflicts/.test(phantom));
+check('the board count renders n/capacity with the bracketed forced number in red plus a legend',
+  /data-testid="cgm-group-forced-count"/.test(workspace) && /text-red-600/.test(workspace)
+  && /data-testid="cgm-groups-legend"/.test(workspace) && /organizer-forced members/.test(workspace)
+  && /\{size\}\//.test(workspace) && /\?\? '∞'/.test(workspace));
+check('group members carry FORCED / SAMPLED / AWAITING RESAMPLE / DESIGNATION APPROVED badges',
+  /cgm-member-forced/.test(workspace) && /cgm-member-sampled/.test(workspace)
+  && /cgm-member-awaiting/.test(workspace) && /cgm-member-designated/.test(workspace)
+  && /designation\.approvedBy/.test(workspace) && /designation\.designatedAt/.test(workspace)
+  && /designation\.applied/.test(workspace));
+check('the group workspace summarises approved designations without exposing the organizer reasoning',
+  /data-testid="cgm-group-force-get"/.test(workspace) && /students never see them here/.test(workspace));
+check('the client library exposes the Force Get surface with typed responses and existing auth helpers',
+  /forceGetRoster: \(activityId: number\) =>\s*memberCall<ForceGetRoster>/.test(clientLib)
+  && /submitForceGet: \(activityId: number, items: ForceGetItemInput\[\]/.test(clientLib)
+  && /reviseForceGet: \(requestId: number/.test(clientLib) && /cancelForceGet: \(requestId: number/.test(clientLib)
+  && /phantomForceGetRequests: \(status = 'pending'\)/.test(clientLib)
+  && /phantomDecideForceGet: \(id: number, decision: 'approve' \| 'reject'/.test(clientLib));
+check('the backend keeps designation separate from assignment and applies it exactly once',
+  /status = 'active'/.test(forceGetLib) && /markDesignationApplied/.test(forceGetLib)
+  && /WHERE id = \? AND status = 'active'/.test(forceGetLib)
+  && /insertAssignmentRespectingDesignations/.test(forceGetLib));
+check('sampling honours the designation on both the draw and the self-assignment path',
+  /claimDesignatedSeat/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /placeByDesignation/.test(src('functions/lib/cgm/routes-student.ts'))
+  && (src('functions/lib/cgm/routes-student.ts').match(/placeByDesignation\(c, activity, student\)/g) || []).length === 2);
+check('organizer planners place approved designations first, before any planning',
+  /placeDesignatedStudents/.test(routesActivities)
+  && (routesActivities.match(/placeDesignatedStudents\(c\.env\.DB/g) || []).length >= 2);
+check('the rejection reason is stored and surfaced back to the organizer',
+  /review_reason = \?/.test(routesActivities) && /reviewReason/.test(forceGetWs));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

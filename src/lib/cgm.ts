@@ -266,6 +266,77 @@ export async function importRosterFile(
 // Organizer / PHANTOM surface
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// FORCE GET — organizer proposes a destination, PHANTOM approves it, and the
+// student still samples normally (the sample lands on the approved group).
+// ---------------------------------------------------------------------------
+export interface ForceGetGroup {
+  id: number; name: string; position: number; capacity: number | null;
+  size: number; reserved: number; forced: number;
+}
+export interface ForceGetDesignation {
+  id: number; groupId: number | null; groupName: string | null;
+  approvedBy: string | null; approvedAt: string | null;
+}
+export interface ForceGetStudent {
+  id: number; fullName: string; indexNumber: string;
+  eligible: boolean;
+  groupId: number | null; groupName: string | null;
+  assignmentId: number | null; assignedVia: string | null;
+  everAssigned: boolean; rechooseStatus: string | null;
+  designation: ForceGetDesignation | null;
+}
+export interface ForceGetPendingRequest {
+  id: number; version: number; status: string; requesterLabel: string | null;
+  submittedAt: string | null; explanation: string | null; studentCount: number;
+}
+export interface ForceGetRoster {
+  activity: {
+    id: number; name: string; status: string; className: string | null;
+    classCode: string | null; method: string; eligibility: string; genderRule: string;
+  };
+  canSubmit: boolean;
+  groups: ForceGetGroup[];
+  students: ForceGetStudent[];
+  pendingRequest: ForceGetPendingRequest | null;
+  history: Array<{
+    id: number; version: number; status: string; explanation: string | null;
+    studentCount: number; requesterLabel: string | null; submittedAt: string | null;
+    reviewedAt: string | null; reviewerLabel: string | null; reviewReason: string | null;
+  }>;
+}
+export interface ForceGetItemInput { studentId: number; groupId: number }
+export interface ForceGetSubmitResult {
+  requestId: number; version: number; status: string; warnings: string[]; message: string;
+}
+export interface ForceGetBucket {
+  groupId: number; groupName: string; capacity: number | null; size: number;
+  reserved: number; projected: number; projectedTotal: number; conflict: boolean;
+  students: Array<{
+    studentId: number; fullName: string; indexNumber: string;
+    currentGroupId: number | null; currentGroupName: string | null;
+    sampled: boolean; rechooseState: string | null; destinationGroupId: number;
+  }>;
+}
+export interface ForceGetRequestDetail {
+  request: {
+    id: number; version: number; status: string; activityId: number; activityName: string;
+    classId: number; className: string | null; classCode: string | null;
+    explanation: string | null; studentCount: number; requesterLabel: string | null;
+    requestedByProfileId: number | null; submittedAt: string | null;
+    reviewerLabel: string | null; reviewedAt: string | null; reviewReason: string | null;
+  };
+  groups: ForceGetBucket[];
+  conflicts: Array<{ groupId: number; groupName: string; message: string }>;
+  invalidItems: number;
+}
+export interface ForceGetQueueRow {
+  id: number; version: number; status: string; activityId: number; activityName: string;
+  className: string | null; classCode: string | null; requesterLabel: string | null;
+  submittedAt: string | null; studentCount: number; explanation: string | null;
+  reviewerLabel: string | null; reviewedAt: string | null; reviewReason: string | null;
+}
+
 export const cgm = {
   // organizer applications
   applyOrganizer: (body: { institution: string; motivation?: string }) =>
@@ -382,6 +453,23 @@ export const cgm = {
     memberCall(`/api/cgm/activities/${activityId}/generate`, { method: 'POST', body }),
   assignRemaining: (activityId: number) =>
     memberCall(`/api/cgm/activities/${activityId}/assign-remaining`, { method: 'POST', body: {} }),
+  // FORCE GET (organizer side). Submitting never moves anybody: the request
+  // waits for PHANTOM, and the destination only becomes a live designation
+  // when PHANTOM approves that exact version.
+  forceGetRoster: (activityId: number) =>
+    memberCall<ForceGetRoster>(`/api/cgm/activities/${activityId}/force-get`),
+  submitForceGet: (activityId: number, items: ForceGetItemInput[], explanation?: string) =>
+    memberCall<ForceGetSubmitResult>(`/api/cgm/activities/${activityId}/force-get/requests`, {
+      method: 'POST', body: { items, explanation },
+    }),
+  reviseForceGet: (requestId: number, items: ForceGetItemInput[], explanation?: string) =>
+    memberCall<ForceGetSubmitResult>(`/api/cgm/force-get/requests/${requestId}/revise`, {
+      method: 'POST', body: { items, explanation },
+    }),
+  cancelForceGet: (requestId: number) =>
+    memberCall<{ status: string }>(`/api/cgm/force-get/requests/${requestId}/cancel`, { method: 'POST', body: {} }),
+  forceGetRequest: (requestId: number) =>
+    memberCall<ForceGetRequestDetail>(`/api/cgm/force-get/requests/${requestId}`),
   assignStudent: (activityId: number, studentId: number, groupId: number) =>
     memberCall(`/api/cgm/activities/${activityId}/assign-student`, { method: 'POST', body: { studentId, groupId } }),
   swapStudents: (activityId: number, studentIdA: number, studentIdB: number) =>
@@ -500,6 +588,15 @@ export const cgm = {
     memberCall(`/api/cgm/phantom/rechoose-requests${status ? `?status=${status}` : ''}`),
   phantomDecideRechoose: (id: number, decision: 'approve' | 'reject', reason?: string) =>
     memberCall(`/api/cgm/phantom/rechoose-requests/${id}/${decision}`, { method: 'POST', body: { reason } }),
+  phantomForceGetRequests: (status = 'pending') =>
+    memberCall<ForceGetQueueRow[]>(`/api/cgm/phantom/force-get/requests${status ? `?status=${status}` : ''}`),
+  phantomForceGetRequest: (id: number) =>
+    memberCall<ForceGetRequestDetail>(`/api/cgm/phantom/force-get/requests/${id}`),
+  phantomDecideForceGet: (id: number, decision: 'approve' | 'reject', reason?: string, version?: number) =>
+    memberCall<{ status: string; designated?: number; appliedImmediately?: number }>(
+      `/api/cgm/phantom/force-get/requests/${id}/${decision}`,
+      { method: 'POST', body: { reason, version } },
+    ),
   phantomDelegations: () => memberCall('/api/cgm/phantom/delegations'),
   phantomGrantDelegation: (body: { memberId: number; classId: number; maxBatch?: number }) =>
     memberCall('/api/cgm/phantom/delegations', { method: 'POST', body }),
