@@ -858,7 +858,7 @@ check('the client library exposes the Force Get surface with typed responses and
   /forceGetRoster: \(activityId: number\) =>\s*memberCall<ForceGetRoster>/.test(clientLib)
   && /submitForceGet: \(activityId: number, items: ForceGetItemInput\[\]/.test(clientLib)
   && /reviseForceGet: \(requestId: number/.test(clientLib) && /cancelForceGet: \(requestId: number/.test(clientLib)
-  && /phantomForceGetRequests: \(status = 'pending'\)/.test(clientLib)
+  && /phantomForceGetRequests: \(status = 'all'\)/.test(clientLib)
   && /phantomDecideForceGet: \(id: number, decision: 'approve' \| 'reject'/.test(clientLib));
 check('the backend keeps designation separate from assignment and applies it exactly once',
   /status = 'active'/.test(forceGetLib) && /markDesignationApplied/.test(forceGetLib)
@@ -1067,9 +1067,11 @@ check('the Overview keeps the live backlog, since the tab numbers clear on view'
   && /nothing waiting can go unseen/.test(phantomPanel)
   && /attention\?\.totalPending/.test(phantomPanel));
 const attentionLib = src('functions/lib/cgm/attention.ts');
+const attentionLib2 = src('functions/lib/cgm/attention.ts');
+const moveWorkspace = src('src/components/ClassGroups/ClassGroupsWorkspace.tsx');
 check('every oversight section is described once, with where its number comes from',
   /PHANTOM_ATTENTION_TABS/.test(attentionLib)
-  && ['overview', 'policies', 'applications', 'classes', 'sensitive', 'rechoose', 'force-get', 'delegation', 'disputes', 'organizers', 'audit']
+  && ['overview', 'policies', 'applications', 'classes', 'sensitive', 'rechoose', 'moves', 'force-get', 'delegation', 'disputes', 'organizers', 'audit']
     .every((key) => new RegExp(`key: '${key}'`).test(attentionLib))
   && /queue: true/.test(attentionLib) && /queue: false/.test(attentionLib));
 check('the seen watermark is per PHANTOM account and per tab (row ids, not timestamps)',
@@ -1091,6 +1093,63 @@ check('a re-choose request, a sensitive change and a dispute each raise a PHANTO
 check('the class & group table count is pinned for the attention watermark',
   /cgm_phantom_attention/.test(src('functions/lib/cgm/schema.ts'))
   && /code-rx29-phantom-attention/.test(src('functions/lib/schema.ts')));
+
+section("27. Moves & swaps: PHANTOM decides, and a decision stays visible");
+
+check('the oversight panel has a Moves & swaps tab that lists the queue',
+  /\['moves', 'Moves & swaps'\]/.test(phantomPanel)
+  && /moves: \(\) => cgm\.phantomMoveRequests\(\)/.test(phantomPanel)
+  && /tab === 'moves'/.test(phantomPanel)
+  && /data-testid="cgm-phantom-approve-move"/.test(phantomPanel)
+  && /data-testid="cgm-phantom-reject-move"/.test(phantomPanel));
+check('an approved move says so — with who approved it and when it was applied',
+  /Approved\{row\.reviewerLabel/.test(phantomPanel)
+  && /applied \$\{formatWhen\(row\.appliedAt\)\}/.test(phantomPanel)
+  && /the change is live/.test(phantomPanel)
+  && /Nobody moved\./.test(phantomPanel));
+check('a swap shows both members and both groups before PHANTOM decides',
+  /swapping with \$\{row\.partnerName\}/.test(phantomPanel)
+  && /partnerFromGroupName/.test(phantomPanel));
+check('the module settings expose moving & swapping as a process PHANTOM controls',
+  /key: 'move_approval_mode'/.test(phantomPanel)
+  && /Moving & swapping members/.test(phantomPanel)
+  && /Wait for PHANTOM approval/.test(phantomPanel)
+  && /Apply immediately/.test(phantomPanel));
+check('the client can queue and decide moves',
+  /phantomMoveRequests: \(status = 'all'\)/.test(attentionClient)
+  && /phantomDecideMove: \(id: number, decision: 'approve' \| 'reject'/.test(attentionClient)
+  && /\/api\/cgm\/phantom\/move-requests\/\$\{id\}\/\$\{decision\}/.test(attentionClient));
+check('the decided queues are read in full, so an approval never vanishes',
+  /phantomForceGetRequests: \(status = 'all'\)/.test(attentionClient)
+  && /phantomRechooseRequests: \(status = 'all'\)/.test(attentionClient)
+  && /phantomSensitiveChanges: \(status = 'all'\)/.test(attentionClient));
+check('the server lists decided rows first-class, pending work ordered first',
+  /WHERE \(\? = 'all' OR r\.status = \?\)/.test(activitiesRoute)
+  && /CASE WHEN r\.status = 'pending' THEN 0 ELSE 1 END/.test(activitiesRoute)
+  && /WHERE \(\? = 'all' OR pcr\.status = \?\)/.test(activitiesRoute));
+check('every decided row carries its verdict, reviewer and moment',
+  /toUpperCase\(\)\}\{row\.reviewerLabel/.test(phantomPanel)
+  && /row\.reviewedAt/.test(phantomPanel)
+  && /Approved\{row\.reviewerLabel \? ` by \$\{row\.reviewerLabel\}` : ''\}/.test(phantomPanel));
+check('the server never applies an organizer move or swap without PHANTOM',
+  /move_approval_mode/.test(activitiesRoute)
+  && /!member\.isPhantom && await modulePolicy\(c\.env\.DB, 'move_approval_mode'\) === 'approval'/.test(activitiesRoute)
+  && (activitiesRoute.match(/queueMoveRequest\(c, \{/g) || []).length >= 2
+  && /applyMemberMove\(c, member, activity, studentId, groupId\)/.test(activitiesRoute)
+  && /applyMemberSwap\(c, member, activity, studentAId, studentBId\)/.test(activitiesRoute));
+check('an approved request is applied through exactly the same code path',
+  /decideMoveRequest/.test(activitiesRoute)
+  && /\/api\/cgm\/phantom\/move-requests\/\:id\/approve/.test(activitiesRoute)
+  && /await applyMemberSwap\(c, member, activity, Number\(request\.student_id\)/.test(activitiesRoute)
+  && /await applyMemberMove\(c, member, activity, Number\(request\.student_id\)/.test(activitiesRoute));
+check('a queued move tells PHANTOM through the notice system and the attention badge',
+  /source: 'cgm_move'/.test(activitiesRoute)
+  && /key: 'moves', label: 'Moves & swaps', queue: true/.test(attentionLib2));
+check('the workspace reports the server\'s answer instead of claiming the member moved',
+  /const moveNotice = \(result: any, applied: string\)/.test(moveWorkspace)
+  && /moveNotice\(result, 'Member moved\.'\)/.test(moveWorkspace)
+  && /moveNotice\(result, 'Members swapped\.'\)/.test(moveWorkspace)
+  && /the member stays where they are until PHANTOM approves the move/.test(activitiesRoute));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

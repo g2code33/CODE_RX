@@ -29,7 +29,7 @@ const formatWhen = (value: unknown) => {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
-type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'rechoose' | 'force-get' | 'delegation' | 'disputes' | 'organizers' | 'audit';
+type Tab = 'overview' | 'policies' | 'applications' | 'classes' | 'sensitive' | 'rechoose' | 'moves' | 'force-get' | 'delegation' | 'disputes' | 'organizers' | 'audit';
 
 const TABS: Array<[Tab, string]> = [
   ['overview', 'Overview'],
@@ -38,6 +38,7 @@ const TABS: Array<[Tab, string]> = [
   ['classes', 'Class approvals'],
   ['sensitive', 'Sensitive changes'],
   ['rechoose', 'Re-choose requests'],
+  ['moves', 'Moves & swaps'],
   ['force-get', 'Force Get Requests'],
   ['delegation', 'Registration delegation'],
   ['disputes', 'Disputes'],
@@ -89,6 +90,11 @@ const POLICY_META: Array<{ key: string; title: string; description: string; valu
     key: 'membership_request_mode', title: 'Join &amp; membership requests',
     description: 'Students joining an extra class with an invitation code.',
     valueLabels: { approval: 'Wait for organizer approval', auto: 'Automatic — join instantly', closed: 'Closed — no join requests' },
+  },
+  {
+    key: 'move_approval_mode', title: 'Moving & swapping members',
+    description: 'What happens when an organizer moves or swaps a member between groups.',
+    valueLabels: { approval: 'Wait for PHANTOM approval', auto: 'Apply immediately' },
   },
   {
     key: 'profile_change_mode', title: 'Profile changes',
@@ -201,6 +207,7 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
       classes: () => cgm.phantomClasses(),
       sensitive: () => cgm.phantomSensitiveChanges(),
       rechoose: () => cgm.phantomRechooseRequests(),
+      moves: () => cgm.phantomMoveRequests(),
       'force-get': () => cgm.phantomForceGetRequests(),
       delegation: () => cgm.phantomDelegations(),
       disputes: () => cgm.phantomDisputes(),
@@ -432,6 +439,51 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
             />
           )}
 
+          {tab === 'moves' && (
+            <ListBlock title="Moves & swaps — organizers cannot move a member without you" rows={rows.moves} emptyText="No move or swap requests yet."
+              render={(row) => (
+                <>
+                  <div className="min-w-0">
+                    <p className="flex flex-wrap items-center gap-1.5 text-sm font-black text-slate-800">
+                      {row.kind === 'swap' ? 'Swap' : 'Move'} · {row.studentName}
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-slate-500">{String(row.status)}</span>
+                    </p>
+                    <p className="text-[11px] font-semibold text-slate-400">
+                      {row.className}{row.classCode ? ` (${row.classCode})` : ''} · {row.activityName} · {row.fromGroupName || 'unplaced'} → {row.toGroupName || '—'}
+                      {row.kind === 'swap' && row.partnerName ? ` · swapping with ${row.partnerName} (${row.partnerFromGroupName || '—'})` : ''}
+                      {row.indexNumber ? ` · index ${row.indexNumber}` : ''} · {formatWhen(row.createdAt)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">Asked by {row.requesterLabel || 'the organizer'}{row.reason ? `: “${row.reason}”` : ''}</p>
+                    {row.status === 'approved' && (
+                      <p className="mt-1 text-[11px] font-bold text-emerald-700">
+                        Approved{row.reviewerLabel ? ` by ${row.reviewerLabel}` : ''}{row.appliedAt ? ` · applied ${formatWhen(row.appliedAt)}` : ''} — the change is live.
+                      </p>
+                    )}
+                    {row.status === 'rejected' && (
+                      <p className="mt-1 text-[11px] font-bold text-red-600">Rejected{row.reviewReason ? ` — ${row.reviewReason}` : ''}. Nobody moved.</p>
+                    )}
+                  </div>
+                  {row.status === 'pending' && (
+                    <div className="flex flex-wrap gap-1.5">
+                      <button type="button" disabled={busy} data-testid="cgm-phantom-approve-move" className="cgm-primary-button"
+                        onClick={() => void act(() => cgm.phantomDecideMove(Number(row.id), 'approve'), `${row.studentName} — ${row.kind} approved and applied.`)}>
+                        Approve &amp; apply
+                      </button>
+                      <button type="button" disabled={busy} data-testid="cgm-phantom-reject-move" className="mini-button text-red-600"
+                        onClick={async () => {
+                          const reason = await appDialog.prompt({ title: 'Reject this move', label: 'Why are you rejecting it? (the organizer sees this)', multiline: true, confirmLabel: 'Reject' });
+                          if (reason === null) return;
+                          await act(() => cgm.phantomDecideMove(Number(row.id), 'reject', String(reason).trim() || undefined), 'Move rejected — nobody moved.');
+                        }}>
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            />
+          )}
+
           {tab === 'force-get' && (
             <>
               <ListBlock
@@ -613,6 +665,11 @@ export const PhantomClassGroups = ({ onExit, embedded }: { onExit?: () => void; 
                     <p className="text-sm font-black text-slate-800">{row.studentName} — {String(row.field).replace(/_/g, ' ')}</p>
                     <p className="text-[11px] font-semibold text-slate-400"><span className="line-through">{row.oldValue || '—'}</span> → <span className="text-emerald-700">{row.newValue}</span> · index {row.indexNumber} · {formatWhen(row.createdAt)}</p>
                     {row.reason && <p className="mt-1 text-xs text-slate-500">“{row.reason}”</p>}
+                    {row.status !== 'pending' && (
+                      <p className={`mt-1 text-[11px] font-bold ${row.status === 'approved' ? 'text-emerald-700' : 'text-red-600'}`}>
+                        {String(row.status).toUpperCase()}{row.reviewerLabel ? ` by ${row.reviewerLabel}` : ''}{row.reviewedAt ? ` · ${formatWhen(row.reviewedAt)}` : ''}{row.reviewReason ? ` — ${row.reviewReason}` : ''}
+                      </p>
+                    )}
                   </div>
                   {row.status === 'pending' && (
                     <div className="flex flex-wrap gap-1.5">

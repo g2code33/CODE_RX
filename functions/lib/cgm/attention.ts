@@ -46,6 +46,9 @@ export const PHANTOM_ATTENTION_TABS: PhantomAttentionTab[] = [
   { key: 'classes', label: 'Class approvals', queue: true, table: 'cgm_classes', pendingSql: "status = 'pending'" },
   { key: 'sensitive', label: 'Sensitive changes', queue: true, table: 'cgm_profile_change_requests', pendingSql: "status = 'pending' AND field IN ('gender','index_number','phone')" },
   { key: 'rechoose', label: 'Re-choose requests', queue: true, table: 'cgm_rechoose_requests', pendingSql: "status = 'pending'" },
+  // Organizers no longer move or swap members directly: those are requests
+  // PHANTOM approves, so they belong in the same attention board as the rest.
+  { key: 'moves', label: 'Moves & swaps', queue: true, table: 'cgm_move_requests', pendingSql: "status = 'pending'" },
   { key: 'force-get', label: 'Force Get Requests', queue: true, table: 'cgm_force_get_requests', pendingSql: "status = 'pending'" },
   { key: 'delegation', label: 'Registration delegation', queue: false, table: 'cgm_approval_delegations', arrivalSql: "status = 'active'" },
   { key: 'disputes', label: 'Disputes', queue: true, table: 'cgm_announcement_reports', pendingSql: "status = 'open'" },

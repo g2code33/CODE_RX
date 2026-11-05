@@ -101,6 +101,46 @@ export const insertAssignmentGuarded = async (
 
 /** Re-activates a row that a move deactivated before its insert was rejected. */
 /**
+ * Move & swap requests are a newer table too. Same discipline as the re-choose
+ * queue: a warm isolate that booted before the deploy must still be able to
+ * record a request, so it is created once per isolate on first use.
+ */
+let moveSchemaChecked = false;
+export const ensureMoveRequestSchema = async (db: D1Database) => {
+  if (moveSchemaChecked) return;
+  try {
+    await db.batch([
+      db.prepare(`CREATE TABLE IF NOT EXISTS cgm_move_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        class_id INTEGER NOT NULL,
+        activity_id INTEGER NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'move' CHECK (kind IN ('move','swap')),
+        student_id INTEGER NOT NULL,
+        from_group_id INTEGER,
+        to_group_id INTEGER NOT NULL,
+        partner_student_id INTEGER,
+        partner_from_group_id INTEGER,
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+        requested_by_profile_id INTEGER,
+        requester_label TEXT,
+        reviewer_label TEXT,
+        review_reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at DATETIME,
+        applied_at DATETIME,
+        FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+        FOREIGN KEY(class_id) REFERENCES cgm_classes(id),
+        FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_status ON cgm_move_requests(status, created_at)`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_activity ON cgm_move_requests(activity_id, status)`),
+    ]);
+    moveSchemaChecked = true;
+  } catch { /* already there, or the batch will retry next request */ }
+};
+
+/**
  * Re-choose requests are a newer table. The schema bootstrap creates it on the
  * next cold start, but a request that arrives against a warm database which was
  * booted BEFORE the deploy must still work — so the routes ensure it once per
@@ -244,7 +284,8 @@ export type CgmModulePolicyKey =
   | 'class_creation_mode'
   | 'student_registration_mode'
   | 'membership_request_mode'
-  | 'profile_change_mode';
+  | 'profile_change_mode'
+  | 'move_approval_mode';
 
 /** The value each policy accepts; 'approval' is always the spec default. */
 export const MODULE_POLICY_VALUES: Record<CgmModulePolicyKey, string[]> = {
@@ -253,6 +294,11 @@ export const MODULE_POLICY_VALUES: Record<CgmModulePolicyKey, string[]> = {
   student_registration_mode: ['approval', 'auto', 'closed'],
   membership_request_mode: ['approval', 'auto', 'closed'],
   profile_change_mode: ['approval', 'auto'],
+  // Moving or swapping a member between groups is a PHANTOM decision: by
+  // default an organizer's move/swap becomes a request PHANTOM approves, and
+  // nobody bypasses that. PHANTOM can lift it for a class that runs its own
+  // composition ('auto'), exactly like the other process policies.
+  move_approval_mode: ['approval', 'auto'],
 };
 
 const MODULE_POLICY_DEFAULTS: Record<CgmModulePolicyKey, string> = {
@@ -261,6 +307,7 @@ const MODULE_POLICY_DEFAULTS: Record<CgmModulePolicyKey, string> = {
   student_registration_mode: 'approval',
   membership_request_mode: 'approval',
   profile_change_mode: 'approval',
+  move_approval_mode: 'approval',
 };
 
 export const isModulePolicyKey = (key: string): key is CgmModulePolicyKey =>

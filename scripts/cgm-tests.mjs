@@ -206,10 +206,15 @@ section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 49);
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 50);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
+// §45 proves that MOVING/SWAPPING needs PHANTOM's approval (the spec default).
+// Every earlier section builds its fixtures by moving members directly, so until
+// then PHANTOM has switched the class over to immediate moves — the alternative
+// the policy offers — and the composition tests exercise that code path.
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'move_approval_mode', value: 'auto' }, phantomToken);
 check('the seeded PHANTOM operator can sign in', Boolean(phantomToken), `status ${phantomLogin.status}`);
 
 // A second member (organizer of the second class) is created with the same
@@ -1705,14 +1710,21 @@ const policiesOrganizerPut = await memberCall('PUT', '/api/cgm/phantom/policies'
 check('a non-PHANTOM organizer cannot change policies', policiesOrganizerPut.status === 403, `status ${policiesOrganizerPut.status}`);
 check('the denied write stored nothing', !q1("SELECT value FROM cgm_module_policies WHERE key = 'class_creation_mode'"));
 
+// The console assertions read the spec defaults, so the fixture override above
+// is put back for this section and restored immediately after it.
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'move_approval_mode', value: 'approval' }, phantomToken);
 const policies = await memberCall('GET', '/api/cgm/phantom/policies', undefined, phantomToken);
 check('PHANTOM reads the policy console', policies.status === 200, `status ${policies.status}`);
 const policyKeys = (policies.json?.data || []).map((row) => row.key);
-check('all five processes are manageable from the console', JSON.stringify(policyKeys) === JSON.stringify([
+check('every process is manageable from the console — including moves & swaps', JSON.stringify(policyKeys) === JSON.stringify([
   'organizer_application_mode', 'class_creation_mode', 'student_registration_mode', 'membership_request_mode', 'profile_change_mode',
+  'move_approval_mode',
 ]), JSON.stringify(policyKeys));
 check('unset policies read as the spec default — wait for approval', (policies.json?.data || []).every((row) => row.value === 'approval'));
 check('the console reports the allowed modes per process', (policies.json?.data || []).every((row) => Array.isArray(row.allowedValues) && row.allowedValues.length >= 2));
+check('moving and swapping members waits for PHANTOM by default', (policies.json?.data || []).find((row) => row.key === 'move_approval_mode')?.value === 'approval'
+  && JSON.stringify((policies.json?.data || []).find((row) => row.key === 'move_approval_mode')?.allowedValues) === JSON.stringify(['approval', 'auto']));
+await memberCall('PUT', '/api/cgm/phantom/policies', { key: 'move_approval_mode', value: 'auto' }, phantomToken);
 
 const badMode = await setPolicy('class_creation_mode', 'sometimes');
 check('an unknown mode is refused', badMode.status === 400, `status ${badMode.status}`);
@@ -1877,7 +1889,10 @@ await setPolicy('profile_change_mode', 'approval');
 
 // The console ends back at the spec default: every process waits for approval.
 const finalPolicies = await memberCall('GET', '/api/cgm/phantom/policies', undefined, phantomToken);
-check('the module ends at the spec default — approval everywhere', (finalPolicies.json?.data || []).every((row) => row.value === 'approval'), JSON.stringify(finalPolicies.json?.data));
+check('the module ends at the spec default — approval everywhere',
+  (finalPolicies.json?.data || []).filter((row) => row.key !== 'move_approval_mode').every((row) => row.value === 'approval')
+  && (finalPolicies.json?.data || []).find((row) => row.key === 'move_approval_mode')?.value === 'auto',
+  JSON.stringify(finalPolicies.json?.data));
 
 
 // ===========================================================================
@@ -5002,18 +5017,18 @@ check('44.1 — PHANTOM can read its own attention board', Boolean(phantomToken)
 const freshBoard = (await attentionOf()).board;
 check('44.2 — the board lists every oversight section, in panel order, labelled',
   JSON.stringify((freshBoard.tabs || []).map((tab) => tab.key))
-  === JSON.stringify(['overview', 'policies', 'applications', 'classes', 'sensitive', 'rechoose', 'force-get', 'delegation', 'disputes', 'organizers', 'audit'])
+  === JSON.stringify(['overview', 'policies', 'applications', 'classes', 'sensitive', 'rechoose', 'moves', 'force-get', 'delegation', 'disputes', 'organizers', 'audit'])
   && (freshBoard.tabs || []).every((tab) => typeof tab.label === 'string' && tab.label.length > 0),
   JSON.stringify((freshBoard.tabs || []).map((tab) => tab.key)));
 check('44.3 — every queue tab carries a numeric pending and unseen count',
-  ['applications', 'classes', 'sensitive', 'rechoose', 'force-get', 'disputes'].every((key) => {
+  ['applications', 'classes', 'sensitive', 'rechoose', 'moves', 'force-get', 'disputes'].every((key) => {
     const tab = attentionTab(freshBoard, key);
     return tab.queue === true && Number.isInteger(tab.pending) && Number.isInteger(tab.unseen);
   }) && ['overview', 'policies', 'organizers', 'audit', 'delegation'].every((key) => attentionTab(freshBoard, key).queue === false),
   JSON.stringify(freshBoard.tabs || []));
 check('44.4 — the counts are read from the queue tables, not invented',
   (freshBoard.tabs || []).filter((tab) => tab.queue).every((tab) => {
-    const tables = { applications: "cgm_organizer_applications WHERE status IN ('pending','email_verified')", classes: "cgm_classes WHERE status = 'pending'", rechoose: "cgm_rechoose_requests WHERE status = 'pending'", 'force-get': "cgm_force_get_requests WHERE status = 'pending'", disputes: "cgm_announcement_reports WHERE status = 'open'" };
+    const tables = { applications: "cgm_organizer_applications WHERE status IN ('pending','email_verified')", classes: "cgm_classes WHERE status = 'pending'", rechoose: "cgm_rechoose_requests WHERE status = 'pending'", moves: "cgm_move_requests WHERE status = 'pending'", 'force-get': "cgm_force_get_requests WHERE status = 'pending'", disputes: "cgm_announcement_reports WHERE status = 'open'" };
     const from = tables[tab.key];
     if (!from) return true;
     return tab.pending === Number(q1(`SELECT COUNT(*) c FROM ${from}`)?.c || 0);
@@ -5163,6 +5178,162 @@ check('44.29 — the cursor is stored once per PHANTOM account and section',
 check('44.26 — seen state never deletes or resolves the queue rows',
   q1("SELECT status FROM cgm_classes WHERE id = ?", attnClassId)?.status === 'pending'
   && q1("SELECT COUNT(*) c FROM cgm_classes WHERE name LIKE 'Attention Badge Lab%' AND status = 'pending'").c === 2);
+
+
+// ---------------------------------------------------------------------------
+// 45. Moving and swapping members is PHANTOM's decision — and a decision stays
+//     visible after it is granted
+// ---------------------------------------------------------------------------
+section("45. Moves & swaps need PHANTOM's approval, and an approval stays on record");
+
+const mvConfig = { method: 'automatic', groupCount: 2, capacity: 10, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' };
+const mvActivity = await memberCall('POST', `/api/cgm/classes/${fmtClassId}/activities`, { name: 'Movement Lab', type: 'tutorial', config: mvConfig }, amaToken);
+const mvActivityId = Number(mvActivity.json?.data?.activityId ?? mvActivity.json?.data?.id ?? 0);
+await memberCall('POST', `/api/cgm/activities/${mvActivityId}/lifecycle`, { action: 'open' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${mvActivityId}/groups`, { count: 2, capacity: 10 }, amaToken);
+const mvGroups = ((await memberCall('GET', `/api/cgm/activities/${mvActivityId}`, undefined, amaToken)).json?.data?.groups || []).map((g) => Number(g.id));
+const mvA = await freshFmtRosterStudent(160, 'Movement Ada');
+const mvB = await freshFmtRosterStudent(161, 'Movement Ben');
+// The roster index may already belong to an earlier fixture; the assertions use
+// the names the database actually holds for those two students.
+const mvAName = String(q1('SELECT full_name FROM cgm_students WHERE id = ?', mvA.studentId)?.full_name || 'Movement Ada');
+const mvBName = String(q1('SELECT full_name FROM cgm_students WHERE id = ?', mvB.studentId)?.full_name || 'Movement Ben');
+const mvCount = (groupId) => Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND group_id = ? AND status = 'active'", mvActivityId, groupId)?.c || 0);
+check('45.1 — the movement fixture has two groups and two members', mvGroups.length === 2 && mvA.studentId > 0 && mvB.studentId > 0,
+  `groups=${mvGroups.length} students=${mvA.studentId}/${mvB.studentId}`);
+
+// The spec default: an organizer's move is a REQUEST, not an action.
+await setPolicy('move_approval_mode', 'approval');
+check('45.2 — moving members waits for PHANTOM by default', (await memberCall('GET', '/api/cgm/phantom/policies', undefined, phantomToken)).json?.data?.find((row) => row.key === 'move_approval_mode')?.value === 'approval');
+const mvAsk = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvA.studentId, groupId: mvGroups[0], reason: 'Needs a partner for the lab.' }, amaToken);
+check('45.3 — the organizer move is filed as a request, not applied', mvAsk.status === 200 && mvAsk.json?.data?.status === 'pending' && Number(mvAsk.json?.data?.requestId) > 0,
+  `status ${mvAsk.status} ${mvAsk.text?.slice(0, 160)}`);
+check('45.4 — and NOBODY moved: the member is still unplaced', mvCount(mvGroups[0]) === 0 && mvCount(mvGroups[1]) === 0
+  && q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvA.studentId).c === 0);
+const mvRequestRow = q1('SELECT * FROM cgm_move_requests WHERE activity_id = ? AND student_id = ?', mvActivityId, mvA.studentId);
+check('45.5 — the request is stored with the destination, the requester and the reason',
+  mvRequestRow?.status === 'pending' && mvRequestRow?.kind === 'move' && Number(mvRequestRow?.to_group_id) === mvGroups[0]
+  && mvRequestRow?.requester_label === 'Ama Boakye' && /partner/.test(String(mvRequestRow?.reason || '')),
+  JSON.stringify(mvRequestRow || {}));
+check('45.6 — it is audited as a request, never as a move',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.move.requested' AND entity_id = ?", String(mvRequestRow?.id)).c === 1
+  && Number(q1("SELECT COUNT(*) c FROM cgm_audit WHERE action IN ('cgm.assignment.moved','cgm.assignment.placed') AND activity_id = ?", mvActivityId).c) === 0);
+check('45.7 — PHANTOM is told through the notice system, not only the queue',
+  q1("SELECT COUNT(*) c FROM phantom_inbox WHERE source = 'cgm_move' AND source_id = ?", String(mvRequestRow?.id)).c === 1
+  && q1("SELECT channel_key FROM phantom_inbox WHERE source = 'cgm_move' ORDER BY id DESC LIMIT 1")?.channel_key === 'class_groups');
+const mvAttention = await memberCall('GET', '/api/cgm/phantom/attention', undefined, phantomToken);
+check('45.8 — the Moves & swaps tab counts it', Number((mvAttention.json?.data?.tabs || []).find((tab) => tab.key === 'moves')?.pending) >= 1,
+  JSON.stringify((mvAttention.json?.data?.tabs || []).find((tab) => tab.key === 'moves')));
+
+const mvQueue = await memberCall('GET', '/api/cgm/phantom/move-requests', undefined, phantomToken);
+const mvQueueRow = (mvQueue.json?.data || []).find((row) => Number(row.id) === Number(mvRequestRow?.id)) || {};
+check('45.9 — PHANTOM sees who, where from, where to, and who asked',
+  mvQueue.status === 200 && mvQueueRow.studentName === mvAName && mvQueueRow.toGroupId === mvGroups[0]
+  && mvQueueRow.activityName === 'Movement Lab' && mvQueueRow.requesterLabel === 'Ama Boakye',
+  JSON.stringify(mvQueueRow).slice(0, 200));
+check('45.10 — an organizer cannot approve their own move request',
+  (await memberCall('POST', `/api/cgm/phantom/move-requests/${mvRequestRow?.id}/approve`, {}, amaToken)).status === 403
+  && q1('SELECT status FROM cgm_move_requests WHERE id = ?', mvRequestRow?.id)?.status === 'pending');
+
+const mvApprove = await memberCall('POST', `/api/cgm/phantom/move-requests/${mvRequestRow?.id}/approve`, {}, phantomToken);
+check('45.11 — PHANTOM approval applies the move', mvApprove.status === 200 && mvApprove.json?.data?.status === 'approved'
+  && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvA.studentId)?.group_id) === mvGroups[0],
+  `status ${mvApprove.status} ${mvApprove.text?.slice(0, 160)}`);
+check('45.12 — the approval is recorded on the request and in the audit trail',
+  q1('SELECT status, applied_at, reviewer_label FROM cgm_move_requests WHERE id = ?', mvRequestRow?.id)?.status === 'approved'
+  && Boolean(q1('SELECT applied_at FROM cgm_move_requests WHERE id = ?', mvRequestRow?.id)?.applied_at)
+  && q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.move.approved' AND entity_id = ?", String(mvRequestRow?.id)).c === 1);
+check('45.13 — the approved move stays VISIBLE in the queue, marked approved',
+  (await memberCall('GET', '/api/cgm/phantom/move-requests', undefined, phantomToken)).json?.data?.some((row) => Number(row.id) === Number(mvRequestRow?.id) && row.status === 'approved' && row.appliedAt)
+  && !(await memberCall('GET', '/api/cgm/phantom/move-requests?status=pending', undefined, phantomToken)).json?.data?.some((row) => Number(row.id) === Number(mvRequestRow?.id)));
+check('45.14 — a decision cannot be granted twice', (await memberCall('POST', `/api/cgm/phantom/move-requests/${mvRequestRow?.id}/approve`, {}, phantomToken)).status === 409);
+check('45.15 — the member is told their group changed only after approval',
+  q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE student_id = ? AND title = 'Your group changed'", mvA.studentId).c === 1);
+
+// Rejection: nothing moves, and the refusal stays on record too.
+const mvAskB = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvB.studentId, groupId: mvGroups[0] }, amaToken);
+const mvBRequest = Number(mvAskB.json?.data?.requestId);
+const mvReject = await memberCall('POST', `/api/cgm/phantom/move-requests/${mvBRequest}/reject`, { reason: 'Keep the pods balanced.' }, phantomToken);
+check('45.16 — PHANTOM can refuse a move and nobody moves', mvReject.status === 200
+  && mvCount(mvGroups[0]) === 1
+  && Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId).c) === 0,
+  `status ${mvReject.status}`);
+check('45.17 — a refused move is still listed with its reason',
+  (await memberCall('GET', '/api/cgm/phantom/move-requests', undefined, phantomToken)).json?.data?.some((row) => Number(row.id) === mvBRequest && row.status === 'rejected' && row.reviewReason === 'Keep the pods balanced.'));
+
+// Swapping is the same decision.
+const mvPlaceB = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvB.studentId, groupId: mvGroups[1] }, amaToken);
+await memberCall('POST', `/api/cgm/phantom/move-requests/${Number(mvPlaceB.json?.data?.requestId)}/approve`, {}, phantomToken);
+check('45.18 — a placement approval puts the second member in their group', mvCount(mvGroups[1]) === 1);
+const mvSwap = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/swap-students`, { studentIdA: mvA.studentId, studentIdB: mvB.studentId }, amaToken);
+const mvSwapRow = q1('SELECT * FROM cgm_move_requests WHERE activity_id = ? AND kind = ? ORDER BY id DESC LIMIT 1', mvActivityId, 'swap');
+check('45.19 — a swap is filed as a request too, and neither member moves yet',
+  mvSwap.status === 200 && mvSwap.json?.data?.status === 'pending' && mvSwapRow?.status === 'pending'
+  && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvA.studentId)?.group_id) === mvGroups[0]
+  && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId)?.group_id) === mvGroups[1],
+  `status ${mvSwap.status} ${mvSwap.text?.slice(0, 160)}`);
+const mvSwapQueue = (await memberCall('GET', '/api/cgm/phantom/move-requests', undefined, phantomToken)).json?.data?.find((row) => Number(row.id) === Number(mvSwapRow?.id)) || {};
+check('45.20 — PHANTOM sees both members and both groups before deciding',
+  mvSwapQueue.kind === 'swap' && mvSwapQueue.studentName === mvAName && mvSwapQueue.partnerName === mvBName
+  && mvSwapQueue.toGroupName && mvSwapQueue.partnerFromGroupName);
+await memberCall('POST', `/api/cgm/phantom/move-requests/${Number(mvSwapRow?.id)}/approve`, {}, phantomToken);
+check('45.21 — an approved swap exchanges the two members and stays on record',
+  Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvA.studentId)?.group_id) === mvGroups[1]
+  && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId)?.group_id) === mvGroups[0]
+  && q1('SELECT status FROM cgm_move_requests WHERE id = ?', Number(mvSwapRow?.id))?.status === 'approved');
+
+// Asking twice reuses the pending request instead of piling duplicates up.
+const mvDup1 = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvA.studentId, groupId: mvGroups[0] }, amaToken);
+const mvDup2 = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvA.studentId, groupId: mvGroups[0] }, amaToken);
+check('45.22 — a second ask reuses the pending request', Number(mvDup1.json?.data?.requestId) === Number(mvDup2.json?.data?.requestId)
+  && Number(q1("SELECT COUNT(*) c FROM cgm_move_requests WHERE activity_id = ? AND student_id = ? AND status = 'pending'", mvActivityId, mvA.studentId).c) === 1);
+await memberCall('POST', `/api/cgm/phantom/move-requests/${Number(mvDup1.json?.data?.requestId)}/reject`, { reason: 'Not needed.' }, phantomToken);
+
+// PHANTOM's own move is the approval — it applies at once.
+const mvDirect = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvA.studentId, groupId: mvGroups[0] }, phantomToken);
+check('45.23 — PHANTOM moves a member directly; the override is the approval',
+  mvDirect.status === 200 && mvDirect.json?.data?.status === undefined
+  && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvA.studentId)?.group_id) === mvGroups[0],
+  `status ${mvDirect.status} ${mvDirect.text?.slice(0, 160)}`);
+
+// The alternative PHANTOM can choose: immediate moves (what §1–§44 run on).
+await setPolicy('move_approval_mode', 'auto');
+const mvAuto = await memberCall('POST', `/api/cgm/activities/${mvActivityId}/assign-student`, { studentId: mvB.studentId, groupId: mvGroups[1] }, amaToken);
+check('45.24 — with the policy set to apply immediately, the organizer move applies at once',
+  mvAuto.status === 200 && mvAuto.json?.data?.status === undefined
+  && Number(q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", mvActivityId, mvB.studentId)?.group_id) === mvGroups[1],
+  `status ${mvAuto.status} ${mvAuto.text?.slice(0, 120)}`);
+await setPolicy('move_approval_mode', 'approval');
+
+// ---------------------------------------------------------------------------
+// 45b. An approval never erases the record — every decided queue still lists it
+// ---------------------------------------------------------------------------
+const fgVisible = await memberCall('GET', '/api/cgm/phantom/force-get/requests', undefined, phantomToken);
+check('45.25 — Force Get requests PHANTOM approved are still listed, marked approved',
+  Array.isArray(fgVisible.json?.data) && fgVisible.json.data.some((row) => row.status === 'approved'),
+  JSON.stringify((fgVisible.json?.data || []).map((row) => row.status)));
+check('45.26 — and pending work is still listed first',
+  (fgVisible.json?.data || []).findIndex((row) => row.status === 'pending') === 0
+  || !(fgVisible.json?.data || []).some((row) => row.status === 'pending'),
+  JSON.stringify((fgVisible.json?.data || []).map((row) => row.status)));
+check('45.27 — narrowing to pending hides the decided ones',
+  ((await memberCall('GET', '/api/cgm/phantom/force-get/requests?status=pending', undefined, phantomToken)).json?.data || []).every((row) => row.status === 'pending'));
+const rcVisible = await memberCall('GET', '/api/cgm/phantom/rechoose-requests', undefined, phantomToken);
+check('45.28 — approved re-choose requests stay visible too',
+  Array.isArray(rcVisible.json?.data) && rcVisible.json.data.some((row) => row.status === 'approved'),
+  JSON.stringify((rcVisible.json?.data || []).map((row) => row.status)));
+const scPending = (await memberCall('GET', '/api/cgm/phantom/sensitive-changes', undefined, phantomToken)).json?.data || [];
+const scTarget = scPending.find((row) => row.status === 'pending');
+if (scTarget) {
+  await memberCall('POST', `/api/cgm/phantom/sensitive-changes/${scTarget.id}/approve`, {}, phantomToken);
+}
+const scAfter = (await memberCall('GET', '/api/cgm/phantom/sensitive-changes', undefined, phantomToken)).json?.data || [];
+check('45.29 — an approved sensitive change stays listed as approved',
+  !scTarget || scAfter.some((row) => Number(row.id) === Number(scTarget.id) && row.status === 'approved'),
+  JSON.stringify(scAfter.map((row) => [row.id, row.status])));
+check('45.30 — the oversight counts only real work as pending, never the record',
+  Number(q1("SELECT COUNT(*) c FROM cgm_move_requests WHERE status = 'pending'").c) === 0
+  && Number(q1("SELECT COUNT(*) c FROM cgm_move_requests").c) >= 4);
 
 
 // ---------------------------------------------------------------------------

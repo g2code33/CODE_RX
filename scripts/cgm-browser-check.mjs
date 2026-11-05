@@ -268,7 +268,7 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
   const boardBefore = (await api('GET', '/api/cgm/phantom/attention', undefined, phantomToken)).json?.data || {};
   const classesTabBefore = (boardBefore.tabs || []).find((tab) => tab.key === 'classes') || {};
   check('the attention board lists every section with a number',
-    (boardBefore.tabs || []).length === 11 && (boardBefore.tabs || []).every((tab) => Number.isInteger(tab.unseen)),
+    (boardBefore.tabs || []).length === 12 && (boardBefore.tabs || []).every((tab) => Number.isInteger(tab.unseen)),
     JSON.stringify((boardBefore.tabs || []).map((tab) => tab.key)));
   check('the new submission is counted as unseen work on the Class approvals tab',
     Number(classesTabBefore.unseen) >= 1 && Number(classesTabBefore.pending) >= 1, JSON.stringify(classesTabBefore));
@@ -304,6 +304,53 @@ const boot = async (address, { memberToken = null, memberUser = null } = {}) => 
   check('clearing Class approvals left the other tabs\' numbers alone',
     otherTabs.every((tab) => Number(tab.unseen) > 0),
     JSON.stringify(otherTabs.map((tab) => [tab.key, tab.unseen])));
+}
+
+// ---------------------------------------------------------------------------
+// 2c. Moves & swaps: PHANTOM decides membership changes, and a decision stays
+//     on the record after it is granted
+// ---------------------------------------------------------------------------
+{
+  // The queue is part of the oversight panel, with the policy that governs it
+  // exposed in the same place.
+  const page = await boot('#class-groups/phantom', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('PHANTOM');
+  const cgTab = await page.waitForElement(() => page.buttonByText('Class Groups'));
+  cgTab && cgTab.click();
+  await page.waitForFor('Module settings', 20_000);
+  const movesTab = await page.waitForElement(() => page.buttonByText('Moves & swaps'));
+  check('the oversight panel has a Moves & swaps section', Boolean(movesTab));
+  movesTab && movesTab.click();
+  check('opening it lists what organizers asked to move (empty state is honest)',
+    await page.waitForFor('No move or swap requests yet.', 20_000), page.body().slice(0, 200));
+
+  const settingsTab = page.buttonByText('Module settings');
+  settingsTab && settingsTab.click();
+  check('the module settings offer the choice PHANTOM asked for: moves wait, or apply at once',
+    await page.waitForFor('Moving & swapping members', 20_000)
+    && await page.waitForFor('Wait for PHANTOM approval', 5_000),
+    page.body().slice(0, 200));
+
+  // A decision that has been granted must still be readable afterwards.
+  const fgQueue = (await api('GET', '/api/cgm/phantom/force-get/requests', undefined, phantomToken)).json?.data || [];
+  const approvedRequest = fgQueue.find((row) => row.status === 'approved');
+  check('an approved Force Get request is still returned by its queue', Boolean(approvedRequest),
+    JSON.stringify(fgQueue.map((row) => row.status)).slice(0, 160));
+  if (approvedRequest) {
+    const second = await boot('#class-groups/phantom', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+    await second.waitForFor('PHANTOM');
+    const tab = await second.waitForElement(() => second.buttonByText('Class Groups'));
+    tab && tab.click();
+    await second.waitForFor('Module settings', 20_000);
+    const fgTab = await second.waitForElement(() => second.buttonByText('Force Get Requests'));
+    fgTab && fgTab.click();
+    check('the approved request is still on the Force Get tab, marked APPROVED',
+      await second.waitForFor(`Request #${approvedRequest.id}`, 20_000)
+      && await second.waitForFor('APPROVED', 5_000),
+      second.body().slice(0, 240));
+    check('the decided row names who approved it', await second.waitForFor(/APPROVED by PHANTOM/, 5_000),
+      second.body().slice(0, 240));
+  }
 }
 
 // ---------------------------------------------------------------------------

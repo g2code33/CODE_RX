@@ -48,8 +48,10 @@ import {
   rosterReservationsFor,
 } from './forceGet';
 import {
+  ensureMoveRequestSchema,
   ensureRechooseSchema,
   insertAssignmentGuarded,
+  modulePolicy,
   requireCgmPhantom,
   restoreAssignment,
   asRows,
@@ -959,21 +961,87 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     return c.json({ success: true, data: { placed: applied, promoted, unplaced: students.length - applied } });
   });
 
-  app.post('/api/cgm/activities/:id/assign-student', async (c: any) => {
-    const member = await memberFromRequest(c);
-    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
-    const activityId = Number(c.req.param('id'));
-    const activity = await activityCore(c.env.DB, activityId);
-    if (!activity) return bad(c, 'Activity not found.', 404);
-    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'move_students');
-    if (!guard.ok) return guard.response;
-    const body = await readBody(c);
-    const studentId = Number(body.studentId);
-    const groupId = Number(body.groupId);
-    if (!studentId || !groupId) return bad(c, 'Choose a student and a group.');
+  /**
+   * File a move/swap as a REQUEST. Nothing is written to the roster: the member
+   * stays exactly where they are, the request waits for PHANTOM, and PHANTOM is
+   * told immediately (inbox + notification bell + attention badge). Asking twice
+   * reuses the pending request instead of piling up duplicates.
+   */
+  const queueMoveRequest = async (c: any, input: {
+    member: any;
+    activity: any;
+    kind: 'move' | 'swap';
+    studentId: number;
+    toGroupId: number;
+    fromGroupId: number | null;
+    partnerStudentId?: number | null;
+    partnerFromGroupId?: number | null;
+    reason?: string | null;
+  }): Promise<{ id: number; response?: Response }> => {
+    await ensureMoveRequestSchema(c.env.DB);
+    const activityId = Number(input.activity.id);
+    const pending = await asRows<{ id: number }>(c.env.DB.prepare(
+      `SELECT id FROM cgm_move_requests WHERE activity_id = ? AND student_id = ? AND status = 'pending'`
+    ).bind(activityId, input.studentId));
+    if (pending[0]) {
+      return {
+        id: Number(pending[0].id),
+        response: c.json({ success: true, data: {
+          status: 'pending', requestId: Number(pending[0].id),
+          message: 'This member already has a move waiting for PHANTOM.',
+        } }),
+      };
+    }
+    const names = await asRows<{ id: number; full_name: string; index_number: string }>(c.env.DB.prepare(
+      `SELECT id, full_name, index_number FROM cgm_students WHERE id IN (?, ?)`
+    ).bind(input.studentId, input.partnerStudentId || input.studentId));
+    const nameOf = (id: number) => names.find((row) => Number(row.id) === Number(id))?.full_name || 'A member';
+    const inserted = await c.env.DB.prepare(
+      `INSERT INTO cgm_move_requests
+         (class_id, activity_id, kind, student_id, from_group_id, to_group_id,
+          partner_student_id, partner_from_group_id, reason, requested_by_profile_id, requester_label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      Number(input.activity.class_id), activityId, input.kind, input.studentId,
+      input.fromGroupId, input.toGroupId,
+      input.partnerStudentId || null, input.partnerFromGroupId || null,
+      input.reason || null, input.member.profileId || null, input.member.name,
+    ).run();
+    const requestId = Number(inserted.meta.last_row_id);
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: input.member.name, actorProfileId: input.member.profileId,
+      action: input.kind === 'swap' ? 'cgm.move.swap_requested' : 'cgm.move.requested',
+      entityType: 'move_request', entityId: requestId,
+      classId: Number(input.activity.class_id), activityId,
+      context: {
+        studentId: input.studentId, toGroupId: input.toGroupId, fromGroupId: input.fromGroupId,
+        partnerStudentId: input.partnerStudentId || null,
+      },
+    });
+    await recordPhantomInboxItem(c.env.DB, {
+      channel: 'class_groups',
+      title: input.kind === 'swap' ? 'Member swap awaiting PHANTOM approval' : 'Member move awaiting PHANTOM approval',
+      summary: input.kind === 'swap'
+        ? `${input.member.name} asked to swap ${nameOf(input.studentId)} with ${nameOf(Number(input.partnerStudentId))} in ${input.activity.name}.`
+        : `${input.member.name} asked to move ${nameOf(input.studentId)} to another group in ${input.activity.name}.`,
+      source: 'cgm_move', sourceId: String(requestId),
+      actorProfileId: input.member.profileId, actorLabel: input.member.name,
+      link: '#class-groups/phantom', body: input.reason || '',
+    });
+    return { id: requestId };
+  };
+
+  /**
+   * Apply an organizer move/placement NOW. One implementation serves both the
+   * organizer route (when the module applies moves immediately, or when PHANTOM
+   * is the actor) and PHANTOM's approval of a queued move — so an approved move
+   * can never behave differently from a direct one: same capacity check, same
+   * gender gate, same designation handling, same audit rows.
+   */
+  const applyMemberMove = async (c: any, member: any, activity: any, studentId: number, groupId: number) => {
+    const activityId = Number(activity.id);
     const group = await groupCore(c.env.DB, groupId);
     if (!group || Number(group.activity_id) !== activityId) return bad(c, 'That group is not part of this activity.', 400);
-
     const current = await asRows<any>(c.env.DB.prepare(
       `SELECT ga.id, ga.group_id FROM cgm_group_assignments ga
        WHERE ga.activity_id = ? AND ga.student_id = ? AND ga.status = 'active'`
@@ -1089,19 +1157,9 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       context: { studentId, groupId, from: current[0]?.group_id || null },
     });
     return c.json({ success: true });
-  });
+  };
 
-  /**
-   * Organizer direct swap: exchange two assigned members between their groups
-   * in one action. Group sizes never change, so hard capacities are preserved
-   * by construction. PHANTOM-regulated: guarded by the same `move_students`
-   * permission as every other membership change, PHANTOM overrides it in every
-   * class, and each swap writes two assignment-history events plus an audit
-   * row (`cgm.assignment.swapped`) the oversight browser can see. A leader who
-   * is swapped out of a group ends that leadership appointment, so the
-   * activity's succession rule resolves the vacancy exactly as a removal does.
-   */
-  app.post('/api/cgm/activities/:id/swap-students', async (c: any) => {
+  app.post('/api/cgm/activities/:id/assign-student', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
     const activityId = Number(c.req.param('id'));
@@ -1110,10 +1168,41 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const guard = await requireClassPermission(c, member, Number(activity.class_id), 'move_students');
     if (!guard.ok) return guard.response;
     const body = await readBody(c);
-    const studentAId = Number(body.studentIdA);
-    const studentBId = Number(body.studentIdB);
-    if (!studentAId || !studentBId) return bad(c, 'Choose two students to swap.');
-    if (studentAId === studentBId) return bad(c, 'Pick two different students.', 400);
+    const studentId = Number(body.studentId);
+    const groupId = Number(body.groupId);
+    if (!studentId || !groupId) return bad(c, 'Choose a student and a group.');
+    const group = await groupCore(c.env.DB, groupId);
+    if (!group || Number(group.activity_id) !== activityId) return bad(c, 'That group is not part of this activity.', 400);
+
+    // MOVING A MEMBER IS PHANTOM'S DECISION. Unless PHANTOM is the one doing it,
+    // or PHANTOM has switched the class to immediate moves, an organizer's move
+    // is filed as a request and NOTHING changes until PHANTOM approves it.
+    if (!member.isPhantom && await modulePolicy(c.env.DB, 'move_approval_mode') === 'approval') {
+      const current = await asRows<any>(c.env.DB.prepare(
+        `SELECT ga.id, ga.group_id FROM cgm_group_assignments ga
+         WHERE ga.activity_id = ? AND ga.student_id = ? AND ga.status = 'active'`
+      ).bind(activityId, studentId));
+      if (current[0] && Number(current[0].group_id) === groupId) return bad(c, 'The student is already in that group.', 409);
+      const queued = await queueMoveRequest(c, {
+        member, activity, kind: 'move', studentId, toGroupId: groupId,
+        fromGroupId: current[0] ? Number(current[0].group_id) : null,
+        reason: cleanOrNull(body.reason, 500),
+      });
+      if (queued.response) return queued.response;
+      return c.json({ success: true, data: {
+        status: 'pending', requestId: queued.id,
+        message: 'Sent to PHANTOM — the member stays where they are until PHANTOM approves the move.',
+      } });
+    }
+    return applyMemberMove(c, member, activity, studentId, groupId);
+  });
+
+  /**
+   * Apply a swap NOW — one implementation for the organizer route (immediate
+   * mode or PHANTOM acting) and for PHANTOM approving a queued swap.
+   */
+  const applyMemberSwap = async (c: any, member: any, activity: any, studentAId: number, studentBId: number) => {
+    const activityId = Number(activity.id);
     const config = sanitizeActivityConfig(JSON.parse(activity.config_json || '{}'));
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT ga.id, ga.group_id, ga.student_id, g.status AS group_status
@@ -1185,6 +1274,56 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       studentA: { from: Number(a.group_id), to: Number(b.group_id) },
       studentB: { from: Number(b.group_id), to: Number(a.group_id) },
     } });
+  };
+
+  /**
+   * Organizer direct swap: exchange two assigned members between their groups
+   * in one action. Group sizes never change, so hard capacities are preserved
+   * by construction. PHANTOM-regulated: guarded by the same `move_students`
+   * permission as every other membership change, PHANTOM overrides it in every
+   * class, and each swap writes two assignment-history events plus an audit
+   * row (`cgm.assignment.swapped`) the oversight browser can see. A leader who
+   * is swapped out of a group ends that leadership appointment, so the
+   * activity's succession rule resolves the vacancy exactly as a removal does.
+   */
+  app.post('/api/cgm/activities/:id/swap-students', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const activityId = Number(c.req.param('id'));
+    const activity = await activityCore(c.env.DB, activityId);
+    if (!activity) return bad(c, 'Activity not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(activity.class_id), 'move_students');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const studentAId = Number(body.studentIdA);
+    const studentBId = Number(body.studentIdB);
+    if (!studentAId || !studentBId) return bad(c, 'Choose two students to swap.');
+    if (studentAId === studentBId) return bad(c, 'Pick two different students.', 400);
+    // SWAPPING MEMBERS IS PHANTOM'S DECISION, exactly like a move.
+    if (!member.isPhantom && await modulePolicy(c.env.DB, 'move_approval_mode') === 'approval') {
+      const rows = await asRows<any>(c.env.DB.prepare(
+        `SELECT ga.id, ga.group_id, ga.student_id, g.status AS group_status
+         FROM cgm_group_assignments ga JOIN cgm_groups g ON g.id = ga.group_id
+         WHERE ga.activity_id = ? AND ga.status = 'active' AND ga.student_id IN (?, ?)`
+      ).bind(activityId, studentAId, studentBId));
+      const a = rows.find((row: any) => Number(row.student_id) === studentAId);
+      const b = rows.find((row: any) => Number(row.student_id) === studentBId);
+      if (!a || !b) return bad(c, 'Both students must already be in a group for this activity.', 404);
+      if (Number(a.group_id) === Number(b.group_id)) return bad(c, 'Those students are in the same group — there is nothing to swap.', 409);
+      if (a.group_status !== 'active' || b.group_status !== 'active') return bad(c, 'One of those groups is no longer active.', 409);
+      const queued = await queueMoveRequest(c, {
+        member, activity, kind: 'swap', studentId: studentAId,
+        toGroupId: Number(b.group_id), fromGroupId: Number(a.group_id),
+        partnerStudentId: studentBId, partnerFromGroupId: Number(b.group_id),
+        reason: cleanOrNull(body.reason, 500),
+      });
+      if (queued.response) return queued.response;
+      return c.json({ success: true, data: {
+        status: 'pending', requestId: queued.id,
+        message: 'Sent to PHANTOM — nobody moves until PHANTOM approves the swap.',
+      } });
+    }
+    return applyMemberSwap(c, member, activity, studentAId, studentBId);
   });
 
   app.post('/api/cgm/assignments/:id/remove', async (c: any) => {
@@ -2531,14 +2670,18 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const check = await requireCgmPhantom(c);
     if (check.error) return check.error;
     await ensureForceGetSchema(c.env.DB);
-    const status = clean(c.req.query('status') || 'pending', 20);
+    // Decided requests stay in the queue (marked approved/rejected): an approval
+    // must remain visible after PHANTOM grants it. `?status=pending` narrows.
+    const status = clean(c.req.query('status') || 'all', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT r.*, a.name AS activity_name, cl.name AS class_name, cl.code AS class_code
        FROM cgm_force_get_requests r
        JOIN cgm_activities a ON a.id = r.activity_id
        JOIN cgm_classes cl ON cl.id = r.class_id
-       WHERE r.status = ? ORDER BY r.submitted_at DESC, r.id DESC LIMIT 200`
-    ).bind(status));
+       WHERE (? = 'all' OR r.status = ?)
+       ORDER BY CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.submitted_at DESC, r.id DESC
+       LIMIT 200`
+    ).bind(status, status));
     return c.json({
       success: true,
       data: rows.map((row) => ({
@@ -4339,7 +4482,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     const check = await requireCgmPhantom(c);
     if (check.error) return check.error;
     await ensureRechooseSchema(c.env.DB);
-    const status = clean(c.req.query('status') || 'pending', 20);
+    // Every request stays listed with its verdict, so an approval never vanishes.
+    const status = clean(c.req.query('status') || 'all', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT r.*, s.full_name AS student_name, s.index_number,
               COALESCE(g.name, 'Group ' || g.position) AS group_name,
@@ -4349,8 +4493,10 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        JOIN cgm_activities a ON a.id = r.activity_id
        JOIN cgm_classes cl ON cl.id = a.class_id
        LEFT JOIN cgm_groups g ON g.id = r.group_id
-       WHERE r.status = ? ORDER BY r.created_at DESC LIMIT 200`
-    ).bind(status));
+       WHERE (? = 'all' OR r.status = ?)
+       ORDER BY CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.created_at DESC, r.id DESC
+       LIMIT 200`
+    ).bind(status, status));
     return c.json({
       success: true,
       data: rows.map((row) => ({
@@ -4444,19 +4590,133 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
   app.post('/api/cgm/phantom/rechoose-requests/:id/reject', (c: any) => decideRechoose(c, false));
 
   // -------------------------------------------------------------------------
+  // Moves & swaps — organizers ask, PHANTOM decides, the approval applies
+  // -------------------------------------------------------------------------
+
+  /**
+   * The queue PHANTOM reads. Decided requests stay in the list (marked approved
+   * or rejected) — an approval must remain visible, not vanish the moment it is
+   * granted. `?status=pending` narrows it for anyone who only wants the work.
+   */
+  app.get('/api/cgm/phantom/move-requests', async (c: any) => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    await ensureMoveRequestSchema(c.env.DB);
+    const status = clean(c.req.query('status') || 'all', 20);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, s.full_name AS student_name, s.index_number,
+              p.full_name AS partner_name,
+              COALESCE(fg.name, 'Group ' || fg.position) AS from_group_name,
+              COALESCE(tg.name, 'Group ' || tg.position) AS to_group_name,
+              COALESCE(pg.name, 'Group ' || pg.position) AS partner_from_group_name,
+              a.name AS activity_name, cl.name AS class_name, cl.code AS class_code
+       FROM cgm_move_requests r
+       JOIN cgm_students s ON s.id = r.student_id
+       JOIN cgm_activities a ON a.id = r.activity_id
+       JOIN cgm_classes cl ON cl.id = r.class_id
+       LEFT JOIN cgm_groups fg ON fg.id = r.from_group_id
+       LEFT JOIN cgm_groups tg ON tg.id = r.to_group_id
+       LEFT JOIN cgm_groups pg ON pg.id = r.partner_from_group_id
+       LEFT JOIN cgm_students p ON p.id = r.partner_student_id
+       WHERE (? = 'all' OR r.status = ?)
+       ORDER BY CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.created_at DESC, r.id DESC
+       LIMIT 200`
+    ).bind(status, status));
+    return c.json({
+      success: true,
+      data: rows.map((row) => ({
+        id: Number(row.id), kind: row.kind, status: row.status,
+        studentId: Number(row.student_id), studentName: row.student_name, indexNumber: row.index_number,
+        partnerStudentId: row.partner_student_id ? Number(row.partner_student_id) : null,
+        partnerName: row.partner_name || null,
+        fromGroupId: row.from_group_id ? Number(row.from_group_id) : null,
+        fromGroupName: row.from_group_name || null,
+        toGroupId: Number(row.to_group_id), toGroupName: row.to_group_name || null,
+        partnerFromGroupName: row.partner_from_group_name || null,
+        activityId: Number(row.activity_id), activityName: row.activity_name,
+        className: row.class_name, classCode: row.class_code,
+        reason: row.reason, requesterLabel: row.requester_label, createdAt: row.created_at,
+        reviewerLabel: row.reviewer_label, reviewReason: row.review_reason,
+        reviewedAt: row.reviewed_at, appliedAt: row.applied_at,
+      })),
+    });
+  });
+
+  const decideMoveRequest = async (c: any, approve: boolean): Promise<Response> => {
+    const check = await requireCgmPhantom(c);
+    if (check.error) return check.error;
+    const member = check.member;
+    await ensureMoveRequestSchema(c.env.DB);
+    const id = Number(c.req.param('id'));
+    const body = await readBody(c);
+    const reason = cleanOrNull(body.reason, 500);
+    const rows = await asRows<any>(c.env.DB.prepare('SELECT * FROM cgm_move_requests WHERE id = ?').bind(id));
+    const request = rows[0];
+    if (!request) return bad(c, 'Move request not found.', 404);
+    if (request.status !== 'pending') return bad(c, `This request is already ${request.status}.`, 409);
+    const activity = await activityCore(c.env.DB, Number(request.activity_id));
+    if (!activity) return bad(c, 'That activity no longer exists.', 404);
+
+    if (!approve) {
+      await c.env.DB.prepare(
+        `UPDATE cgm_move_requests SET status = 'rejected', reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(member.name, reason, id).run();
+      await auditCgm(c.env.DB, {
+        actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.move.rejected', entityType: 'move_request', entityId: id,
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: { studentId: Number(request.student_id), reason },
+      });
+      await notifyStudent(c.env.DB, Number(request.student_id), 'groups', 'Your move was not approved',
+        `PHANTOM did not approve the change your organizer asked for in ${activity.name}. You stay in your group.`);
+      return c.json({ success: true, data: { status: 'rejected' } });
+    }
+
+    // The approval goes through exactly the code the organizer would have run.
+    const applied = request.kind === 'swap'
+      ? await applyMemberSwap(c, member, activity, Number(request.student_id), Number(request.partner_student_id))
+      : await applyMemberMove(c, member, activity, Number(request.student_id), Number(request.to_group_id));
+    if (applied.status !== 200) {
+      // Capacity, gender pools or a lost race: the request stays pending so
+      // PHANTOM can look again once the group has space.
+      return applied;
+    }
+    await c.env.DB.prepare(
+      `UPDATE cgm_move_requests SET status = 'approved', reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP, applied_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(member.name, reason, id).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'phantom', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.move.approved', entityType: 'move_request', entityId: id,
+      classId: Number(request.class_id), activityId: Number(request.activity_id),
+      context: {
+        kind: request.kind, studentId: Number(request.student_id),
+        toGroupId: Number(request.to_group_id), partnerStudentId: request.partner_student_id || null,
+      },
+    });
+    return c.json({ success: true, data: {
+      status: 'approved', kind: request.kind, requestId: id,
+      message: request.kind === 'swap' ? 'Swap approved and applied.' : 'Move approved and applied.',
+    } });
+  };
+
+  app.post('/api/cgm/phantom/move-requests/:id/approve', (c: any) => decideMoveRequest(c, true));
+  app.post('/api/cgm/phantom/move-requests/:id/reject', (c: any) => decideMoveRequest(c, false));
+
+  // -------------------------------------------------------------------------
   // §30 — Sensitive profile changes (PHANTOM queue)
   // -------------------------------------------------------------------------
 
   app.get('/api/cgm/phantom/sensitive-changes', async (c: any) => {
     const check = await requireCgmPhantom(c);
     if (check.error) return check.error;
-    const status = clean(c.req.query('status') || 'pending', 20);
+    const status = clean(c.req.query('status') || 'all', 20);
     const rows = await asRows<any>(c.env.DB.prepare(
       `SELECT pcr.*, s.full_name AS student_name, s.index_number
        FROM cgm_profile_change_requests pcr JOIN cgm_students s ON s.id = pcr.student_id
-       WHERE pcr.status = ? AND pcr.field IN ('gender','index_number','phone')
-       ORDER BY pcr.created_at DESC LIMIT 200`
-    ).bind(status));
+       WHERE (? = 'all' OR pcr.status = ?) AND pcr.field IN ('gender','index_number','phone')
+       ORDER BY CASE WHEN pcr.status = 'pending' THEN 0 ELSE 1 END, pcr.created_at DESC, pcr.id DESC
+       LIMIT 200`
+    ).bind(status, status));
     return c.json({
       success: true,
       data: rows.map((row) => ({

@@ -630,16 +630,22 @@ export const cgm = {
   phantomModule: (enabled: boolean) => memberCall('/api/cgm/phantom/module', { method: 'POST', body: { enabled } }),
   phantomTransfer: (classId: number, toProfileId: number) =>
     memberCall(`/api/cgm/phantom/classes/${classId}/transfer`, { method: 'POST', body: { toProfileId } }),
-  phantomSensitiveChanges: (status = 'pending') =>
+  // 'all' by default: a decided request stays in the list, marked approved, so
+  // an approval never disappears the moment it is granted.
+  phantomSensitiveChanges: (status = 'all') =>
     memberCall(`/api/cgm/phantom/sensitive-changes${status ? `?status=${status}` : ''}`),
   phantomDecideSensitiveChange: (id: number, decision: 'approve' | 'reject', reason?: string) =>
     memberCall(`/api/cgm/phantom/sensitive-changes/${id}/${decision}`, { method: 'POST', body: { reason } }),
-  phantomRechooseRequests: (status = 'pending') =>
+  phantomRechooseRequests: (status = 'all') =>
     memberCall(`/api/cgm/phantom/rechoose-requests${status ? `?status=${status}` : ''}`),
   phantomDecideRechoose: (id: number, decision: 'approve' | 'reject', reason?: string) =>
     memberCall(`/api/cgm/phantom/rechoose-requests/${id}/${decision}`, { method: 'POST', body: { reason } }),
-  phantomForceGetRequests: (status = 'pending') =>
+  phantomForceGetRequests: (status = 'all') =>
     memberCall<ForceGetQueueRow[]>(`/api/cgm/phantom/force-get/requests${status ? `?status=${status}` : ''}`),
+  phantomMoveRequests: (status = 'all') =>
+    memberCall(`/api/cgm/phantom/move-requests?status=${status}`),
+  phantomDecideMove: (id: number, decision: 'approve' | 'reject', reason?: string) =>
+    memberCall(`/api/cgm/phantom/move-requests/${id}/${decision}`, { method: 'POST', body: { reason } }),
   phantomForceGetRequest: (id: number) =>
     memberCall<ForceGetRequestDetail>(`/api/cgm/phantom/force-get/requests/${id}`),
   phantomDecideForceGet: (id: number, decision: 'approve' | 'reject', reason?: string, version?: number) =>

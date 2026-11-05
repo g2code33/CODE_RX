@@ -1653,9 +1653,22 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { if (detail) { setTopic(detail.group?.topic ?? ''); setAgenda(detail.group?.agenda ?? ''); setCapacity(detail.group?.capacity != null ? String(detail.group.capacity) : ''); setWaUrl(detail.whatsapp?.url ?? ''); } }, [detail]);
 
-  const run = async (work: () => Promise<any>, done?: string) => {
+  /**
+   * A move or a swap is a REQUEST now: the server answers "pending" when PHANTOM
+   * has to approve it, and only applies it on the spot when PHANTOM has allowed
+   * that. The message follows the answer, so an organizer is never told a member
+   * moved when they did not.
+   */
+  const moveNotice = (result: any, applied: string) =>
+    String(result?.message || result?.data?.message || applied);
+
+  const run = async (work: () => Promise<any>, done?: string | ((result: any) => string)) => {
     setBusy(true); setMessage(null); setError(null);
-    try { await work(); if (done) setMessage(done); await load(); onChanged(); }
+    try {
+      const result = await work();
+      if (done) setMessage(typeof done === 'function' ? done(result) : done);
+      await load(); onChanged();
+    }
     catch (failure: any) { setError(failure?.message || 'That did not work.'); }
     finally { setBusy(false); }
   };
@@ -1789,13 +1802,13 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
                 </span>
                 <span className="flex shrink-0 gap-1">
                   {canMove && others.length > 0 && (
-                    <select className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Move ${row.full_name}`} onChange={(event) => { const target = Number(event.target.value); if (target) void run(() => cgm.assignStudent(Number(activityId), Number(row.id), target), 'Member moved.'); }}>
+                    <select className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value="" aria-label={`Move ${row.full_name}`} onChange={(event) => { const target = Number(event.target.value); if (target) void run(() => cgm.assignStudent(Number(activityId), Number(row.id), target), (result) => moveNotice(result, 'Member moved.')); }}>
                       <option value="">Move…</option>
                       {others.map((other: any) => <option key={other.id} value={other.id}>{other.name}</option>)}
                     </select>
                   )}
                   {canMove && (detail.otherMembers || []).length > 0 && (
-                    <select className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700" value="" aria-label={`Swap ${row.full_name}`} onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(row.id), partner), 'Members swapped.'); }}>
+                    <select className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-bold text-amber-700" value="" aria-label={`Swap ${row.full_name}`} onChange={(event) => { const partner = Number(event.target.value); if (partner) void run(() => cgm.swapStudents(Number(activityId), Number(row.id), partner), (result) => moveNotice(result, 'Members swapped.')); }}>
                       <option value="">Swap…</option>
                       {detail.otherMembers.map((partner: any) => <option key={partner.id} value={partner.id}>{partner.full_name} ({partner.group_name})</option>)}
                     </select>
@@ -1866,7 +1879,7 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
       {canMove && (detail.unassigned || []).length > 0 && (
         <div className="mt-3 border-t border-slate-100 pt-3">
           <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Add a student ({(detail.unassigned || []).length} waiting)</p>
-          <select className={`${inputClass} mt-1.5`} value="" aria-label="Add a student to this group" onChange={(event) => { const studentId = Number(event.target.value); if (studentId) void run(() => cgm.assignStudent(Number(activityId), studentId, groupId), 'Student added to the group.'); }}>
+          <select className={`${inputClass} mt-1.5`} value="" aria-label="Add a student to this group" onChange={(event) => { const studentId = Number(event.target.value); if (studentId) void run(() => cgm.assignStudent(Number(activityId), studentId, groupId), (result) => moveNotice(result, 'Student added to the group.')); }}>
             <option value="">Choose an unassigned student…</option>
             {detail.unassigned.map((student: any) => <option key={student.id} value={student.id}>{student.full_name}</option>)}
           </select>

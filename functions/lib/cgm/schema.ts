@@ -374,6 +374,35 @@ CREATE TABLE IF NOT EXISTS cgm_rechoose_requests (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+-- MOVES & SWAPS — an organizer moving (or swapping) a member between groups is
+-- a request, not an action: PHANTOM approves it, and the approved move is what
+-- actually applies. One row per request, whichever kind, so the oversight queue,
+-- the attention badge and the audit trail all read the same table.
+CREATE TABLE IF NOT EXISTS cgm_move_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER NOT NULL,
+  activity_id INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'move' CHECK (kind IN ('move','swap')),
+  student_id INTEGER NOT NULL,
+  from_group_id INTEGER,
+  to_group_id INTEGER NOT NULL,
+  partner_student_id INTEGER,
+  partner_from_group_id INTEGER,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+  requested_by_profile_id INTEGER,
+  requester_label TEXT,
+  reviewed_by_profile_id INTEGER,
+  reviewer_label TEXT,
+  review_reason TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME,
+  applied_at DATETIME,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+  FOREIGN KEY(class_id) REFERENCES cgm_classes(id),
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
 -- FORCE GET — an organizer proposes a destination for named students; PHANTOM
 -- approves it; the student still samples with the activity's own method and is
 -- then placed in the approved group. Three tables, all additive:
@@ -859,6 +888,8 @@ CREATE INDEX IF NOT EXISTS idx_cgm_templates_class ON cgm_activity_templates(cla
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_student ON cgm_profile_change_requests(student_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_change_requests_status ON cgm_profile_change_requests(status);
 CREATE INDEX IF NOT EXISTS idx_cgm_rechoose_status ON cgm_rechoose_requests(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_status ON cgm_move_requests(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_move_requests_activity ON cgm_move_requests(activity_id, status);
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_requests_activity ON cgm_force_get_requests(activity_id, status, id DESC);
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_requests_status ON cgm_force_get_requests(status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_cgm_force_get_items_request ON cgm_force_get_request_items(request_id, version);
