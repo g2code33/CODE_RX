@@ -31,19 +31,19 @@ jobs:
         run: npm run typecheck
 
       - name: CGM backend tests (real worker + SQLite)
-        run: npm run test:cgm
+        run: node scripts/ci-run.mjs "npm run test:cgm"
 
       - name: CGM UI checks
-        run: npm run test:cgm-ui
+        run: node scripts/ci-run.mjs "npm run test:cgm-ui"
 
       - name: Client Portal tests
-        run: npm run test:client-portal
+        run: node scripts/ci-run.mjs "npm run test:client-portal"
 
       - name: Client Portal UI checks
-        run: npm run test:client-portal-ui
+        run: node scripts/ci-run.mjs "npm run test:client-portal-ui"
 
       - name: Raw delivery tests
-        run: npm run test:raw-delivery
+        run: node scripts/ci-run.mjs "npm run test:raw-delivery"
 
       - name: Production build
         run: npm run build

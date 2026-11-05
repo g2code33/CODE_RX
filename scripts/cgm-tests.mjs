@@ -5599,10 +5599,26 @@ await memberCall('POST', `/api/cgm/activities/${modeActivityId}/lifecycle`, { ac
 await memberCall('POST', `/api/cgm/activities/${modeActivityId}/generate`, {}, amaToken);
 const modeDetail = await memberCall('GET', `/api/cgm/activities/${modeActivityId}`, undefined, amaToken);
 const modeGroups = modeDetail.json?.data?.groups || [];
-const groupA1 = Number(modeGroups[0]?.id || 0);
-const groupA2 = Number(modeGroups[1]?.id || 0);
 const seatsOf = (groupId) => Number(q1("SELECT COUNT(*) c FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'", groupId)?.c || 0);
 const studentIdsOf = (groupId) => q("SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active' ORDER BY id", groupId).map((row) => Number(row.student_id));
+
+// Assignment is randomised, so the fixture is normalised by hand: the two
+// groups this section uses are guaranteed 3 seats each, whatever the draw.
+const modeGroupIds = modeGroups.map((group) => Number(group.id)).sort((a, b) => seatsOf(b) - seatsOf(a));
+const groupA1 = Number(modeGroupIds[0] || 0);
+const groupA2 = Number(modeGroupIds[1] || 0);
+const fillGroup = (groupId, want) => {
+  while (seatsOf(groupId) < want) {
+    const donor = q(`SELECT id, group_id FROM cgm_group_assignments
+                      WHERE activity_id = ? AND status = 'active' AND group_id != ?
+                      ORDER BY (SELECT COUNT(*) FROM cgm_group_assignments x WHERE x.group_id = cgm_group_assignments.group_id AND x.status = 'active') DESC
+                      LIMIT 1`, modeActivityId, groupId)[0];
+    if (!donor) break;
+    sqlite.prepare('UPDATE cgm_group_assignments SET group_id = ? WHERE id = ?').run(groupId, donor.id);
+  }
+};
+fillGroup(groupA1, 3);
+fillGroup(groupA2, 3);
 
 // ALL, with no hand-picked list at all — the exact request the form sends.
 const allMode = await memberCall('POST', `/api/cgm/groups/${groupA1}/elections`, {
