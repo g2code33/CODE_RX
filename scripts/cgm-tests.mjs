@@ -5712,28 +5712,31 @@ const customOpen = await memberCall('POST', `/api/cgm/elections/${customModeId}/
 check('48.8 — once a picked member stands, CUSTOMIZE opens normally', customOpen.status === 200, customOpen.text?.slice(0, 160));
 
 // An ALL election that somehow has an empty ballot heals when opened.
-// The heal group must exist AND have seats of its own: with a live draw a
-// third group can end up empty, which made this fixture data-dependent.
-let healGroup = Number(modeGroups[2]?.id || 0);
-if (!healGroup) {
-  await memberCall('POST', `/api/cgm/activities/${modeActivityId}/groups`, { count: (modeGroups.length || 2) + 1, capacity: 100 }, amaToken);
-  const reRead = await memberCall('GET', `/api/cgm/activities/${modeActivityId}`, undefined, amaToken);
-  healGroup = Number((reRead.json?.data?.groups || [])[2]?.id || 0);
-}
+// The group is CHOSEN, not assumed: any group of this activity with no live
+// election of its own, topped up to two seats. A random draw used to decide
+// this fixture, which made the check data-dependent.
+const liveElectionGroups = new Set(q(
+  "SELECT group_id FROM cgm_elections WHERE activity_id = ? AND status IN ('nominating','voting')", modeActivityId
+).map((row) => Number(row.group_id)));
+const modeGroupList = q("SELECT id FROM cgm_groups WHERE activity_id = ? AND status = 'active' ORDER BY position", modeActivityId)
+  .map((row) => Number(row.id));
+let healGroup = modeGroupList.find((id) => !liveElectionGroups.has(id)) || 0;
 if (healGroup && seatsOf(healGroup) < 2) fillGroup(healGroup, 2);
-const healElection = await memberCall('POST', `/api/cgm/groups/${healGroup}/elections`, {
-  title: 'Half-built ballot', role: 'leader', eligibility: 'all',
-}, amaToken);
+const healElection = healGroup
+  ? await memberCall('POST', `/api/cgm/groups/${healGroup}/elections`, { title: 'Half-built ballot', role: 'leader', eligibleMode: 'all' }, amaToken)
+  : { status: 0, text: 'no group without a live election' };
 const healId = Number(healElection.json?.data?.electionId || 0);
 if (healId) {
   sqlite.prepare('DELETE FROM cgm_candidates WHERE election_id = ?').run(healId);
 }
-const healOpen = await memberCall('POST', `/api/cgm/elections/${healId}/open-voting`, {}, amaToken);
+const healOpen = healId
+  ? await memberCall('POST', `/api/cgm/elections/${healId}/open-voting`, {}, amaToken)
+  : { status: 0, text: 'no election to open' };
 check('48.9 — an ALL election with an empty ballot fills itself when opened, instead of dead-ending',
   healId > 0 && healOpen.status === 200
   && Number(q1("SELECT COUNT(*) c FROM cgm_candidates WHERE election_id = ? AND status = 'active'", healId)?.c) === seatsOf(healGroup)
   && Boolean(q1("SELECT id FROM cgm_audit WHERE action = 'cgm.election.ballot_filled' AND entity_id = ?", String(healId))),
-  `${healOpen.status} ${healOpen.text?.slice(0, 200)}`);
+  `group=${healGroup} seats=${healGroup ? seatsOf(healGroup) : 0} create=${healElection.status} ${String(healElection.text || '').slice(0, 120)} open=${healOpen.status} ${String(healOpen.text || '').slice(0, 160)}`);
 const customEmpty = await memberCall('POST', `/api/cgm/groups/${groupA1}/elections`, {
   title: 'Empty custom', role: 'assistant', eligibleMode: 'custom', eligibleStudentIds: studentIdsOf(groupA1).slice(0, 1),
 }, amaToken);
