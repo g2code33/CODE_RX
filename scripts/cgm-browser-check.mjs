@@ -1524,7 +1524,49 @@ let ballotStudent = null;
   check('every member is one tappable row, with their passkey state and last sign-in',
     Boolean(memberRow) && /rx30/.test(memberRow.textContent) && /signed in/.test(memberRow.textContent),
     String(memberRow?.textContent || '').slice(0, 160));
-  memberRow && memberRow.click();
+  // --- The desk has its own search (76 members is not a browse list) -------
+  const setField = (element, value) => {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLInputElement.prototype, 'value').set;
+    setter.call(element, value);
+    element.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+  };
+  const memberRows = () => [...page.window.document.querySelectorAll('[data-testid^="cgm-passkey-member-"]')]
+    .filter((el) => /^\d+$/.test(String(el.getAttribute('data-testid')).replace('cgm-passkey-member-', '')));
+  const searchInput = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-passkey-search-input"]'), 20_000);
+  check('the passkey desk carries a search bar above the member list',
+    Boolean(searchInput) && Boolean(page.window.document.querySelector('[data-testid="cgm-passkey-search-count"]')),
+    page.body().slice(0, 200));
+
+  setField(searchInput, 'Pickey');
+  const searched = await page.waitForElement(() => (memberRows().length === 1 ? memberRows() : null), 10_000);
+  check('typing a name narrows the desk to that one member',
+    Boolean(searched) && /Pickey Peta/.test(String(searched[0].textContent || ''))
+    && /1 of \d+ member/.test(page.body()),
+    (searched || []).map((el) => String(el.textContent).slice(0, 50)).join(' | ').slice(0, 200));
+
+  setField(searchInput, deskIndex);
+  check('the index number finds the same member',
+    await page.waitForElement(() => (memberRows().length === 1 ? memberRows() : null), 10_000) !== null,
+    page.body().slice(0, 160));
+
+  setField(searchInput, 'no-such-member-zzz');
+  check('a search with no match says so plainly and offers the way out',
+    await page.waitForFor('No member matches', 10_000)
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-passkey-search-empty"]'))
+    && memberRows().length === 0,
+    page.body().slice(0, 200));
+
+  const clearSearch = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-passkey-search-clear"]'), 10_000);
+  clearSearch && clearSearch.click();
+  const restored = await page.waitForElement(() => {
+    const input = page.window.document.querySelector('[data-testid="cgm-passkey-search-input"]');
+    return input && input.value === '' && memberRows().length > 0 ? input : null;
+  }, 10_000);
+  check('clearing the search puts every member back', Boolean(restored),
+    page.body().slice(0, 200));
+
+  const memberRowNow = await page.waitForElement(() => memberRows().find((el) => /Pickey Peta/.test(el.textContent)), 10_000);
+  memberRowNow && memberRowNow.click();
   const memberPage = await page.waitForElement(() => page.window.document.querySelector('[data-testid^="cgm-passkey-member-page-"]'), 20_000);
   check('tapping a member opens their own page with the full passkey state',
     Boolean(memberPage) && /Passkey state/.test(page.body()) && /Devices signed in/.test(page.body())
@@ -1644,6 +1686,116 @@ let ballotStudent = null;
   const revokedRedeem = await api('POST', `/api/cgm/passkey-links/${secondCode}/redeem`, {});
   check('a revoked link cannot mint a passkey (410, nothing issued)',
     revokedRedeem.status === 410, `status ${revokedRedeem.status}`);
+}
+
+// ---------------------------------------------------------------------------
+// 8d. The Random Group Selection reveal owns the whole screen: portalled to
+//     <body>, a FIXED backdrop that cannot scroll away, the page behind frozen
+//     — and the result panel brought into view when the draw lands
+// ---------------------------------------------------------------------------
+{
+  const revealClass = await makeClass(`Browser Check Reveal ${stamp}`);
+  await api('POST', `/api/cgm/classes/${revealClass.classId}/entry-password`, { entryPassword: 'reveal-entry' }, phantomToken);
+  const revealIndex = `BRW-${stamp}-RVL`;
+  await api('POST', `/api/cgm/classes/${revealClass.classId}/roster/entries`, { fullName: 'Reveal Rita', indexNumber: revealIndex }, phantomToken);
+  const revealRegister = await fetch(`${BASE}/api/cgm/student/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.197' },
+    body: JSON.stringify({ classCode: revealClass.code, indexNumber: revealIndex, entryPassword: 'reveal-entry' }),
+  }).then((response) => response.json()).catch(() => ({}));
+  const revealPasskey = String(revealRegister?.data?.passkey || '');
+  const revealLogin = await api('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: revealIndex, passkey: revealPasskey });
+  const revealToken = String(revealLogin.json?.data?.session?.token || '');
+  const revealActivity = await api('POST', `/api/cgm/classes/${revealClass.classId}/activities`, {
+    name: `Browser Check Reveal Activity ${stamp}`, type: 'tutorial',
+    config: { method: 'random', groupCount: 2, capacity: 3, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: false, attendanceEnabled: false, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
+  }, phantomToken);
+  const revealActivityId = revealActivity.json?.data?.activityId ?? revealActivity.json?.data?.id;
+  await api('POST', `/api/cgm/activities/${revealActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+  check('the reveal fixture is a published random-selection activity with a signed-in student',
+    Boolean(revealToken) && Boolean(revealActivityId), `student=${Boolean(revealToken)} activity=${revealActivityId}`);
+
+  const portal = await boot(`#class-invite/${revealClass.code}`, {
+    studentSession: revealToken ? { token: revealToken, expiresAt: new Date(Date.now() + 86_400_000).toISOString() } : null,
+  });
+  await portal.waitForFor('CODE Rx Student Portal', 30_000);
+  // The student's own journey: My Classes → the class → the activity card.
+  // Every tap re-queries its node first: the portal polls, so a node captured a
+  // moment earlier can already be detached by the time it is clicked.
+  const clickUntil = async (pick, marker, timeoutMs = 25_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const landed = marker();
+      if (landed) return landed;
+      const target = pick();
+      if (target) target.click();
+      await portal.wait(500);
+    }
+    return marker();
+  };
+  const classesNav = await portal.waitForElement(() => portal.buttonByText('My Classes'));
+  classesNav && classesNav.click();
+  const classCards = [...portal.window.document.querySelectorAll('[data-testid="cgm-class-nav-card"]')];
+  check('the student sees their own class in My Classes',
+    classCards.some((el) => new RegExp(`Reveal ${stamp}`).test(String(el.textContent || ''))),
+    portal.body().slice(0, 200));
+  const classOpened = await clickUntil(
+    () => [...portal.window.document.querySelectorAll('[data-testid="cgm-class-nav-card"]')]
+      .find((el) => new RegExp(`Reveal ${stamp}`).test(String(el.textContent || ''))),
+    () => portal.window.document.querySelector('[data-testid="cgm-student-activity-card"]'),
+  );
+  check('opening the class lists its grouping activities', Boolean(classOpened), portal.body().slice(0, 240));
+  const drawButton = await clickUntil(
+    () => [...portal.window.document.querySelectorAll('[data-testid="cgm-student-activity-card"]')]
+      .find((el) => /Random selection/.test(String(el.textContent || ''))),
+    () => portal.window.document.querySelector('[data-testid="cgm-random-open"]'),
+  );
+  check('the draw control is offered on the activity page', Boolean(drawButton), portal.body().slice(0, 240));
+
+  const overlay = await clickUntil(
+    () => portal.window.document.querySelector('[data-testid="cgm-random-open"]'),
+    () => portal.window.document.querySelector('[data-testid="cgm-random-reveal"]'),
+  );
+  check('the reveal overlay opens as a direct child of <body> — no ancestor can clip it',
+    Boolean(overlay) && overlay.parentElement === portal.window.document.body,
+    `parent=${overlay?.parentElement?.tagName || 'none'}`);
+  check('the overlay is a full-screen fixed surface above every bar',
+    Boolean(overlay) && /fixed/.test(overlay.className) && /inset-0/.test(overlay.className) && /z-\[120\]/.test(overlay.className),
+    String(overlay?.className || '').slice(0, 140));
+  const backdrop = overlay ? [...overlay.children].find((el) => /bg-gradient-to-b/.test(el.className)) : null;
+  check('its backdrop is FIXED, so scrolling the overlay can never reveal the page behind',
+    Boolean(backdrop) && /fixed/.test(backdrop.className) && /inset-0/.test(backdrop.className) && !/\babsolute\b/.test(backdrop.className),
+    String(backdrop?.className || 'none').slice(0, 140));
+  check('the page behind is frozen while the overlay is open (body scroll locked)',
+    portal.window.document.body.style.overflow === 'hidden',
+    `overflow=${portal.window.document.body.style.overflow || 'empty'}`);
+  check('the app own chrome is not printed inside the overlay',
+    Boolean(overlay) && !/JOIN VARIOUS WHATSAPP GROUP/.test(String(overlay.textContent || '')),
+    String(overlay?.textContent || '').replace(/\s+/g, ' ').slice(0, 160));
+
+  const resultPanel = await clickUntil(
+    () => portal.window.document.querySelector('[data-testid="cgm-random-skip"]'),
+    () => portal.window.document.querySelector('[data-testid="cgm-random-result"]'),
+  );
+  const winner = String(resultPanel?.querySelector('[data-testid="cgm-random-winner"]')?.textContent || '').trim();
+  check('the result panel announces the real group with a Continue control',
+    Boolean(resultPanel) && /Congratulations!/.test(String(resultPanel.textContent || '')) && /Group \d/.test(winner)
+    && Boolean([...resultPanel.querySelectorAll('button')].find((el) => /Continue/.test(el.textContent))),
+    `winner=${winner || 'none'}`);
+  const stillFixed = overlay ? [...overlay.children].find((el) => /bg-gradient-to-b/.test(el.className)) : null;
+  check('the backdrop is still the fixed full-screen layer once the result is showing',
+    Boolean(stillFixed) && /fixed/.test(stillFixed.className),
+    String(stillFixed?.className || 'none').slice(0, 120));
+
+  const closed = await clickUntil(
+    () => {
+      const panel = portal.window.document.querySelector('[data-testid="cgm-random-result"]');
+      return panel ? [...panel.querySelectorAll('button')].find((el) => /Continue/.test(el.textContent)) : null;
+    },
+    () => (portal.window.document.querySelector('[data-testid="cgm-random-reveal"]') ? null : portal.window.document.body),
+  );
+  check('Continue closes the overlay and hands the page back with scrolling restored',
+    Boolean(closed) && portal.window.document.body.style.overflow !== 'hidden',
+    `overflow=${portal.window.document.body.style.overflow || 'empty'}`);
 }
 
 // Restore the spec-default policies so the local database stays clean.

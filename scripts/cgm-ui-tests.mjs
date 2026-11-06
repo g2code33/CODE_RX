@@ -1521,6 +1521,59 @@ check('a time still ahead of us is not printed as "just now" (link expiry)', (()
   return /if \(minutes <= -1\)/.test(body) && /`in \$\{ahead\}m`/.test(body) && /`in \$\{Math\.round\(ahead \/ 60\)\}h`/.test(body);
 })(), 'expires_at sits in the future, so it must read "in 3h", never "just now"');
 
+// ---------------------------------------------------------------------------
+// 36. The passkey desk is searchable, and the reveal overlay cannot be bled
+//     through by the page behind it
+// ---------------------------------------------------------------------------
+section('36. Passkey desk search + a reveal overlay that owns the screen');
+
+check('the passkey desk carries its own search bar (76 members is not a browse list)',
+  /data-testid="cgm-passkey-search"/.test(workspace)
+  && /data-testid="cgm-passkey-search-input"/.test(workspace)
+  && /aria-label="Search members"/.test(workspace)
+  && /placeholder="Search name, index number, passkey or state…"/.test(workspace)
+  && /const \[query, setQuery\] = useState\(''\)/.test(workspace));
+
+check('the search matches name, index number, passkey mark AND the state the desk shows',
+  /const memberText = \(student: any\) => \{/.test(workspace)
+  && /student\.passkeyHint \|\| ''\} \$\{state\}/.test(workspace)
+  && /student\.lockedUntil \? 'locked' : 'unlocked'/.test(workspace)
+  && /student\.passkeyHint \? 'has passkey' : 'no passkey'/.test(workspace)
+  && /student\.link \? 'one-time link live' : ''/.test(workspace)
+  && /words\.every\(\(word\) => memberText\(student\)\.includes\(word\)\)/.test(workspace));
+
+check('the filtered list is what renders, with a live count and a one-tap clear',
+  /items=\{matched\}/.test(workspace)
+  && /data-testid="cgm-passkey-search-count"/.test(workspace)
+  && /data-testid="cgm-passkey-search-clear"/.test(workspace)
+  && /data-testid="cgm-passkey-search-empty"/.test(workspace)
+  && workspace.includes('No member matches “{query.trim()}”.'));
+
+check('the state badge is declared BEFORE the search reads it (no use-before-init)',
+  workspace.indexOf('const flag = (student: any) =>') > -1
+  && workspace.indexOf('const flag = (student: any) =>') < workspace.indexOf('const memberText = (student: any) =>')
+  && workspace.indexOf('const matched =') > workspace.indexOf('const flag = (student: any) =>'));
+
+check('the reveal is portalled to <body> — no ancestor can clip it into a small card',
+  /import \{ createPortal \} from 'react-dom'/.test(reveal)
+  && /return createPortal\(overlay, document\.body\)/.test(reveal)
+  && /data-testid="cgm-random-reveal"/.test(reveal));
+
+check('the reveal backdrop is FIXED, so it cannot scroll away and let the page show through',
+  /pointer-events-none fixed inset-0 bg-gradient-to-b/.test(reveal)
+  && !/<div className="absolute inset-0 bg-gradient-to-b/.test(reveal)
+  && /overflow-x-hidden overscroll-contain/.test(reveal));
+
+check('the page behind is frozen while the reveal is open (body scroll locked, then restored)',
+  /body\.style\.overflow = 'hidden'/.test(reveal)
+  && /body\.style\.overscrollBehavior = 'contain'/.test(reveal)
+  && /body\.style\.overflow = previousOverflow/.test(reveal));
+
+check('on a short screen the result panel is scrolled into view when the draw lands',
+  /const resultRef = useRef<HTMLDivElement \| null>\(null\)/.test(reveal)
+  && /if \(panelBox\.top < surfaceBox\.top \|\| panelBox\.bottom > surfaceBox\.bottom\)/.test(reveal)
+  && /panel\.scrollIntoView\(\{ block: 'center'/.test(reveal));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

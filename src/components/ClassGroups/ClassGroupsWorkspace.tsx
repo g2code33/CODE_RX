@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, Link2, ListChecks,
-  Megaphone, Plus, Recycle, RefreshCw, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
+  Megaphone, Plus, Recycle, RefreshCw, Search, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
@@ -3886,6 +3886,10 @@ const PasskeysArea = ({ classId, canEdit, className, onChanged }: { classId: num
   const [linkDraft, setLinkDraft] = useState<{ studentId: number; url: string; code: string; name: string; hours: number } | null>(null);
   const [hours, setHours] = useState(72);
   const [copied, setCopied] = useState<string | null>(null);
+  // 76 members is not a list anyone reads top to bottom: the desk carries its
+  // own search so one member can be found by name, index number, passkey mark
+  // or state ("locked", "waiting", "no passkey", "link").
+  const [query, setQuery] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -3903,6 +3907,32 @@ const PasskeysArea = ({ classId, canEdit, className, onChanged }: { classId: num
   const students: any[] = desk?.students || [];
   const counts = desk?.counts || {};
   const open = openStudentId ? students.find((row) => Number(row.studentId) === Number(openStudentId)) || null : null;
+
+  // The one state badge a member carries (locked, a waiting request, an
+  // uncollected approval, a live one-time link). Declared before the search so
+  // the search can match on the very words the desk shows.
+  const flag = (student: any) => {
+    if (student.lockedUntil) return { text: 'locked', tone: 'bg-red-100 text-red-700' };
+    if (student.request?.status === 'pending') return { text: 'request waiting', tone: 'bg-amber-100 text-amber-800' };
+    if (student.request?.status === 'approved') return { text: 'approved · not collected', tone: 'bg-sky-100 text-sky-800' };
+    if (student.link) return { text: 'link live', tone: 'bg-emerald-100 text-emerald-700' };
+    return null;
+  };
+
+  const memberText = (student: any) => {
+    const badge = flag(student);
+    const state = [
+      badge?.text || '',
+      student.passkeyHint ? 'has passkey' : 'no passkey',
+      student.lockedUntil ? 'locked' : 'unlocked',
+      student.request?.status ? `request ${student.request.status}` : '',
+      student.link ? 'one-time link live' : '',
+      Number(student.liveSessions) > 0 ? 'signed in' : 'never signed in',
+    ].join(' ');
+    return `${student.fullName} ${student.indexNumber} ${student.passkeyHint || ''} ${state}`.toLowerCase();
+  };
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const matched = words.length ? students.filter((student: any) => words.every((word) => memberText(student).includes(word))) : students;
 
   const act = async (run: () => Promise<any>, after?: (result: any) => void) => {
     setBusy(true); setError(null); setMessage(null);
@@ -3957,14 +3987,6 @@ const PasskeysArea = ({ classId, canEdit, className, onChanged }: { classId: num
   );
 
   const copy = async (text: string, key: string) => { setCopied((await copyToClipboard(text)) ? key : null); };
-
-  const flag = (student: any) => {
-    if (student.lockedUntil) return { text: 'locked', tone: 'bg-red-100 text-red-700' };
-    if (student.request?.status === 'pending') return { text: 'request waiting', tone: 'bg-amber-100 text-amber-800' };
-    if (student.request?.status === 'approved') return { text: 'approved · not collected', tone: 'bg-sky-100 text-sky-800' };
-    if (student.link) return { text: 'link live', tone: 'bg-emerald-100 text-emerald-700' };
-    return null;
-  };
 
   // ---- one member, full page ------------------------------------------------
   if (open) {
@@ -4133,11 +4155,45 @@ const PasskeysArea = ({ classId, canEdit, className, onChanged }: { classId: num
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-2" data-testid="cgm-passkey-search">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden />
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search name, index number, passkey or state…"
+            aria-label="Search members"
+            data-testid="cgm-passkey-search-input"
+            className={`${inputClass} pl-9`}
+          />
+        </div>
+        {query && (
+          <button type="button" className="mini-button" data-testid="cgm-passkey-search-clear" onClick={() => setQuery('')}>
+            <X className="mr-1 inline h-3.5 w-3.5" /> Clear
+          </button>
+        )}
+        <p className="w-full text-[11px] font-semibold text-slate-400" data-testid="cgm-passkey-search-count">
+          {desk === null
+            ? 'Loading every member…'
+            : query
+              ? `${matched.length} of ${students.length} member(s) match “${query.trim()}” — try a name, an index number or a state like locked.`
+              : `${students.length} member(s). Search by name, index number, passkey mark or state.`}
+        </p>
+      </div>
+
       <div className="space-y-2" data-testid="cgm-passkey-members">
         {desk === null && <div className={card}><p className="text-xs font-semibold text-slate-400">Loading the passkey desk…</p></div>}
         {desk !== null && !students.length && <div className={card}><p className="text-xs font-medium text-slate-500">No active members in this class yet.</p></div>}
+        {desk !== null && students.length > 0 && !matched.length && (
+          <div className={card} data-testid="cgm-passkey-search-empty">
+            <p className="text-sm font-black text-slate-700">No member matches “{query.trim()}”.</p>
+            <p className="mt-1 text-[11px] font-medium text-slate-500">Search works on the name, the index number, the passkey mark and the state — for example “locked”, “waiting”, “no passkey” or a link.</p>
+            <button type="button" className="mini-button mt-2" onClick={() => setQuery('')}>Clear the search</button>
+          </div>
+        )}
         <RecentItems
-          items={students}
+          items={matched}
           label="members"
           testId="cgm-passkey-members-more"
           render={(student: any) => {

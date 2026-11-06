@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { RefreshCw, Users, X } from 'lucide-react';
 
 /**
@@ -94,6 +95,8 @@ export const RandomGroupReveal = ({
   const rafRef = useRef(0);
   const tickRef = useRef(-1);
   const audioRef = useRef<AudioContext | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null); // the scrolling overlay itself
+  const resultRef = useRef<HTMLDivElement | null>(null); // the result panel
 
   // The strip: several full passes, then the round that ends on the winner,
   // then one more round so the right side never runs empty.
@@ -144,6 +147,36 @@ export const RandomGroupReveal = ({
     return () => { cancelled = true; cancelAnimationFrame(rafRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, landingIndex, reducedMotion]);
+
+  // The overlay owns the whole screen while it is open. Without this the page
+  // behind keeps scrolling under the panel — which is exactly how the app's
+  // own text ended up bleeding through the result panel on a short screen.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const { body } = document;
+    const previousOverflow = body.style.overflow;
+    const previousOverscroll = body.style.overscrollBehavior;
+    body.style.overflow = 'hidden';
+    body.style.overscrollBehavior = 'contain';
+    return () => { body.style.overflow = previousOverflow; body.style.overscrollBehavior = previousOverscroll; };
+  }, []);
+
+  // On a short screen the panel was below the fold when the draw landed: bring
+  // the result itself into view instead of leaving the student on the carousel.
+  useEffect(() => {
+    if (phase !== 'revealed') return;
+    const timer = window.setTimeout(() => {
+      const surface = surfaceRef.current;
+      const panel = resultRef.current;
+      if (!surface || !panel) return;
+      const panelBox = panel.getBoundingClientRect();
+      const surfaceBox = surface.getBoundingClientRect();
+      if (panelBox.top < surfaceBox.top || panelBox.bottom > surfaceBox.bottom) {
+        panel.scrollIntoView({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
+      }
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [phase, reducedMotion]);
 
   useEffect(() => {
     const onResize = () => setCardW(cardWidth());
@@ -208,10 +241,12 @@ export const RandomGroupReveal = ({
   const gap = 18;
   const progress = phase === 'revealed' ? 1 : eased;
 
-  return (
-    <div className="fixed inset-0 z-[80] overflow-y-auto" role="dialog" aria-modal="true" aria-label="Random group selection" data-testid="cgm-random-reveal">
-      {/* Atmospheric backdrop over the blurred app */}
-      <div className="absolute inset-0 bg-gradient-to-b from-sky-100/95 via-blue-50/95 to-emerald-50/95 backdrop-blur-xl" />
+  const overlay = (
+    <div ref={surfaceRef} className="fixed inset-0 z-[120] overflow-y-auto overflow-x-hidden overscroll-contain" role="dialog" aria-modal="true" aria-label="Random group selection" data-testid="cgm-random-reveal">
+      {/* Atmospheric backdrop. It is FIXED (not absolute inside the scroller):
+          an absolute layer scrolls away with the content and lets the app's own
+          text show through the result panel. */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 bg-gradient-to-b from-sky-100/95 via-blue-50/95 to-emerald-50/95 backdrop-blur-xl" />
       {/* Floating sparkles */}
       {sparkles.map((sparkle) => (
         <span
@@ -239,7 +274,7 @@ export const RandomGroupReveal = ({
         />
       ))}
 
-      <div className="relative mx-auto flex min-h-full w-full max-w-3xl flex-col items-center px-3 py-5 sm:py-8">
+      <div className="relative mx-auto flex min-h-full w-full max-w-3xl flex-col items-center px-3 py-4 sm:py-8">
         {/* A. Top title panel */}
         <div className="relative w-full rounded-3xl border-[3px] border-emerald-500/80 bg-white/95 px-4 py-4 shadow-[0_18px_50px_-12px_rgba(6,95,70,0.45)] sm:px-8">
           <button
@@ -262,14 +297,14 @@ export const RandomGroupReveal = ({
         </div>
 
         {/* C. The golden orbital carousel */}
-        <div className="relative mt-7 w-full">
+        <div className="relative mt-4 w-full sm:mt-7">
           {/* Orbit halos behind the strip */}
           <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 h-[62%] w-[130%] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border-2 border-amber-300/60 blur-[1px] cgm-reveal-anim" style={{ animation: 'cgmOrbit 7s linear infinite' }} />
           <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 h-[48%] w-[112%] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border border-amber-200/70 cgm-reveal-anim" style={{ animation: 'cgmOrbit 11s linear infinite reverse' }} />
           {/* Light rays bursting from the centre */}
           <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 h-64 w-64 -translate-x-1/2 -translate-y-1/2 opacity-40 cgm-reveal-anim" style={{ background: 'conic-gradient(from 0deg, rgba(251,191,36,0) 0deg, rgba(251,191,36,.55) 12deg, rgba(251,191,36,0) 24deg, rgba(251,191,36,0) 90deg, rgba(251,191,36,.45) 102deg, rgba(251,191,36,0) 114deg, rgba(251,191,36,0) 180deg, rgba(251,191,36,.55) 192deg, rgba(251,191,36,0) 204deg, rgba(251,191,36,0) 270deg, rgba(251,191,36,.45) 282deg, rgba(251,191,36,0) 294deg)', borderRadius: '9999px', filter: 'blur(6px)', animation: 'cgmRay 14s linear infinite' }} />
 
-          <div ref={laneRef} className="relative overflow-hidden py-6" style={{ maskImage: 'linear-gradient(90deg, transparent, black 12%, black 88%, transparent)', WebkitMaskImage: 'linear-gradient(90deg, transparent, black 12%, black 88%, transparent)' }}>
+          <div ref={laneRef} className="relative overflow-hidden py-4 sm:py-6" style={{ maskImage: 'linear-gradient(90deg, transparent, black 12%, black 88%, transparent)', WebkitMaskImage: 'linear-gradient(90deg, transparent, black 12%, black 88%, transparent)' }}>
             {/* The centre selection ring sits above the cards */}
             <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-20 h-[calc(100%-8px)] w-28 -translate-x-1/2 -translate-y-1/2 rounded-2xl border-[3px] border-amber-400 bg-amber-200/10 shadow-[0_0_38px_10px_rgba(251,191,36,0.55)] sm:w-32" />
             <div
@@ -282,7 +317,7 @@ export const RandomGroupReveal = ({
                   <div
                     key={entry.key}
                     className={`flex shrink-0 flex-col items-center justify-center rounded-2xl border-2 bg-white px-3 py-4 shadow-[0_10px_24px_-8px_rgba(15,23,42,0.25)] transition-all duration-300 ${isWinnerCard ? 'z-10 scale-110 border-amber-400 shadow-[0_0_34px_6px_rgba(251,191,36,0.6)]' : 'border-slate-100'}`}
-                    style={{ width: cardW, minHeight: 108 }}
+                    style={{ width: cardW, minHeight: 96 }}
                   >
                     <span className={`flex h-10 w-10 items-center justify-center rounded-xl text-white shadow ${isWinnerCard ? 'bg-amber-400' : ['bg-emerald-500', 'bg-sky-500', 'bg-purple-500', 'bg-teal-500'][index % 4]}`}>
                       <Users className="h-5 w-5" />
@@ -305,7 +340,7 @@ export const RandomGroupReveal = ({
             </div>
           </div>
         ) : (
-          <div className="cgm-reveal-anim mt-4 w-full max-w-xl rounded-3xl border-2 border-amber-300 bg-gradient-to-b from-white to-amber-50/70 px-5 py-6 text-center shadow-[0_24px_60px_-16px_rgba(180,83,9,0.45)]" style={{ animation: 'cgmPop 460ms ease-out both' }} data-testid="cgm-random-result">
+          <div ref={resultRef} className="cgm-reveal-anim mt-4 w-full max-w-xl rounded-3xl border-2 border-amber-300 bg-gradient-to-b from-white to-amber-50/70 px-5 py-5 text-center sm:py-6 shadow-[0_24px_60px_-16px_rgba(180,83,9,0.45)]" style={{ animation: 'cgmPop 460ms ease-out both' }} data-testid="cgm-random-result">
             <p className="text-base font-black uppercase tracking-wide text-emerald-600">Congratulations!</p>
             <p className="mt-1 text-2xl font-black text-emerald-900 sm:text-3xl">You are assigned to</p>
             <span data-testid="cgm-random-winner" className="mt-3 inline-block max-w-full break-words rounded-full bg-gradient-to-r from-emerald-600 to-emerald-500 px-8 py-2.5 text-2xl font-black text-white shadow-[0_10px_26px_-8px_rgba(5,150,105,0.8)] sm:text-3xl">{resolved.name}</span>
@@ -316,7 +351,7 @@ export const RandomGroupReveal = ({
         )}
 
         {/* F. Three-stage progress indicator */}
-        <div className="mt-6 flex w-full max-w-xl items-center" data-testid="cgm-random-progress">
+        <div className="mt-4 flex w-full max-w-xl items-center sm:mt-6" data-testid="cgm-random-progress">
           {['Processing…', 'Random Selection…', 'Complete!'].map((label, index) => (
             <div key={label} className={`flex items-center ${index < 2 ? 'flex-1' : ''}`}>
               <div className="flex flex-col items-center gap-1">
@@ -333,7 +368,7 @@ export const RandomGroupReveal = ({
         </div>
 
         {/* Controls: skip, sound (off by default) — never blocking navigation */}
-        <div className="mt-6 flex w-full max-w-xl items-center justify-between pb-4">
+        <div className="mt-4 flex w-full max-w-xl items-center justify-between pb-4 sm:mt-6">
           <button
             type="button"
             className="rounded-full border border-slate-200 bg-white/80 px-4 py-2 text-[11px] font-black uppercase tracking-wider text-slate-500 transition hover:bg-white"
@@ -349,4 +384,9 @@ export const RandomGroupReveal = ({
       </div>
     </div>
   );
+
+  // Portalled to <body>: no ancestor transform, filter or max-width can ever
+  // clip the overlay or turn it into a small floating card again.
+  if (typeof document === 'undefined') return overlay;
+  return createPortal(overlay, document.body);
 };
