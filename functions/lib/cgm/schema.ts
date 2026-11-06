@@ -779,6 +779,31 @@ CREATE TABLE IF NOT EXISTS cgm_passkey_requests (
   claim_issued_at DATETIME
 );
 
+-- One-time self-service passkey links. An organizer issues a link for ONE
+-- member; opening it mints a new system-generated passkey without an approval
+-- step, exactly once. The raw code is never stored — only its SHA-256 hash —
+-- and the single-use guarantee is the conditional UPDATE in the redeem route.
+CREATE TABLE IF NOT EXISTS cgm_passkey_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER NOT NULL,
+  student_id INTEGER NOT NULL,
+  code_hash TEXT NOT NULL UNIQUE,
+  code_hint TEXT,
+  expires_at DATETIME NOT NULL,
+  note TEXT,
+  created_by_profile_id INTEGER,
+  created_by_label TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  used_at DATETIME,
+  used_ip_hash TEXT,
+  revoked_at DATETIME,
+  revoked_by_profile_id INTEGER,
+  revoked_by_label TEXT,
+  revoked_reason TEXT,
+  FOREIGN KEY(class_id) REFERENCES cgm_classes(id),
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_student_notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL,
@@ -856,6 +881,8 @@ export const CGM_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_student ON cgm_passkey_requests(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_claim ON cgm_passkey_requests(claim_token_hash);
 CREATE INDEX IF NOT EXISTS idx_cgm_passkey_requests_class ON cgm_passkey_requests(class_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_passkey_links_student ON cgm_passkey_links(student_id, class_id);
+CREATE INDEX IF NOT EXISTS idx_cgm_passkey_links_code ON cgm_passkey_links(code_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_students_identity ON cgm_students(institution_key, index_number_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_students_sequence ON cgm_students(passkey_sequence);
 CREATE INDEX IF NOT EXISTS idx_cgm_students_status ON cgm_students(status);

@@ -404,6 +404,18 @@ export const cgm = {
   submitClass: (classId: number) => memberCall(`/api/cgm/classes/${classId}/submit`, { method: 'POST', body: {} }),
   passkeyRequests: (classId: number) =>
     memberCall(`/api/cgm/classes/${classId}/passkey-requests`),
+  // The passkey desk: every member's passkey state, their tries, their links,
+  // and the passkey history of this class.
+  passkeyDesk: (classId: number) => memberCall(`/api/cgm/classes/${classId}/passkeys`),
+  unlockPasskey: (classId: number, studentId: number) =>
+    memberCall(`/api/cgm/classes/${classId}/passkeys/${studentId}/unlock`, { method: 'POST', body: {} }),
+  rotatePasskey: (classId: number, studentId: number, reason?: string) =>
+    memberCall(`/api/cgm/classes/${classId}/passkeys/${studentId}/rotate`, { method: 'POST', body: { reason } }),
+  createPasskeyLinks: (classId: number, body: { studentId?: number; studentIds?: number[]; expiresInHours?: number; note?: string }) =>
+    memberCall(`/api/cgm/classes/${classId}/passkeys/links`, { method: 'POST', body }),
+  passkeyLinks: (classId: number) => memberCall(`/api/cgm/classes/${classId}/passkeys/links`),
+  revokePasskeyLink: (classId: number, linkId: number, reason?: string) =>
+    memberCall(`/api/cgm/classes/${classId}/passkeys/links/${linkId}/revoke`, { method: 'POST', body: { reason } }),
   decidePasskeyRequest: (classId: number, requestId: number, decision: 'approve' | 'decline') =>
     memberCall(`/api/cgm/classes/${classId}/passkey-requests/${requestId}/${decision}`, { method: 'POST', body: {} }),
   setPasskeyPrefix: (classId: number, prefix: string) =>
@@ -733,6 +745,12 @@ export const cgmStudent = {
     studentCall('/api/cgm/student/passkey/reset/request', { method: 'POST', body }),
   resetPasskeyGenerate: (claimCode: string) =>
     studentCall('/api/cgm/student/passkey/reset/generate', { method: 'POST', body: { claimCode } }),
+  // One-time passkey links: no session, no approval — the organizer already
+  // decided. Inspect first (so the student sees it is really their link), then
+  // redeem exactly once.
+  passkeyLinkInfo: (code: string) => studentCall(`/api/cgm/passkey-links/${encodeURIComponent(code)}`),
+  redeemPasskeyLink: (code: string) =>
+    studentCall(`/api/cgm/passkey-links/${encodeURIComponent(code)}/redeem`, { method: 'POST', body: {} }),
   invitationInfo: (code: string) => studentCall(`/api/cgm/invitations/${encodeURIComponent(code)}`),
   joinClass: (code: string) => studentCall('/api/cgm/student/join', { method: 'POST', body: { code } }),
   claimInvitation: (code: string) => studentCall(`/api/cgm/student/invitations/${encodeURIComponent(code)}/claim`, { method: 'POST', body: {} }),

@@ -9,6 +9,7 @@ import { Vault } from './components/Vault';
 import { VaultSharedDocument } from './components/VaultSharedDocument';
 import { ClientPortal } from './components/ClientPortal';
 import { StudentPortal } from './components/ClassGroups/StudentPortal';
+import { PasskeyLinkPage } from './components/ClassGroups/PasskeyLinkPage';
 import { ClassGroupsWorkspace } from './components/ClassGroups/ClassGroupsWorkspace';
 import { PhantomClassGroups } from './components/ClassGroups/PhantomClasses';
 import { ResetPassword } from './components/ResetPassword';
@@ -64,6 +65,13 @@ function App() {
   // organizer workspace, the student portal (also the invitation landing page)
   // and the PHANTOM oversight area — each reachable by hash, never rendered
   // inside the member shell.
+  // A one-time passkey link (#passkey-link/<code>) is its own page: it needs no
+  // sign-in at all, because the organizer already granted the reset.
+  const [passkeyLinkCode, setPasskeyLinkCode] = useState<string | null>(() => {
+    const hash = window.location.hash;
+    if (!hash.startsWith('#passkey-link/')) return null;
+    return decodeURIComponent(hash.replace('#passkey-link/', '').trim()) || null;
+  });
   const [classGroupsView, setClassGroupsView] = useState<null | 'workspace' | 'student' | 'phantom'>(() => {
     const hash = window.location.hash;
     if (hash.startsWith('#class-groups/phantom')) return 'phantom';
@@ -201,7 +209,7 @@ function App() {
         }
         return;
       }
-      if (window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/') || window.location.hash.startsWith('#student-vote/') || window.location.hash.startsWith('#leader-apply/')) {
+      if (window.location.hash.startsWith('#passkey-link/') || window.location.hash.startsWith('#class-groups') || window.location.hash.startsWith('#class-invite/') || window.location.hash.startsWith('#student-vote/') || window.location.hash.startsWith('#leader-apply/')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(false);
         setIsSharedVaultView(false);
@@ -211,6 +219,13 @@ function App() {
         setIsMemberVault(false);
         setActiveTab('home');
         const hash = window.location.hash;
+        // Leaving a one-time passkey link closes that page.
+        if (!hash.startsWith('#passkey-link/')) setPasskeyLinkCode(null);
+        if (hash.startsWith('#passkey-link/')) {
+          setPasskeyLinkCode(decodeURIComponent(hash.replace('#passkey-link/', '').trim()) || null);
+          setClassGroupsView(null);
+          return;
+        }
         if (hash.startsWith('#student-vote/')) {
           setClassInviteCode(null);
           setStudentVoteTarget(Number(decodeURIComponent(hash.replace('#student-vote/', '').trim())) || null);
@@ -499,6 +514,11 @@ function App() {
   // appDialog prompt or confirmation inside them therefore waited forever and
   // the buttons looked dead. Each standalone view mounts the dialog host too.
   const withDialogs = (node: React.ReactNode) => (<>{node}<AppDialogHost /></>);
+
+  // A one-time passkey link stands alone: no member shell, no sign-in.
+  if (passkeyLinkCode) {
+    return withDialogs(<PasskeyLinkPage code={passkeyLinkCode} onExit={() => { window.location.hash = ''; setPasskeyLinkCode(null); }} />);
+  }
 
   // Class & Group Management workspaces: standalone, like the client portal.
   if (classGroupsView === 'student') {

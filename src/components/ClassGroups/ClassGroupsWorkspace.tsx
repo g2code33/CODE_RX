@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, ListChecks,
+  Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, Link2, ListChecks,
   Megaphone, Plus, Recycle, RefreshCw, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
@@ -27,12 +27,13 @@ import { ForceGetWorkspace } from './ForceGetWorkspace';
 type Area =
   | 'overview' | 'classes' | 'students' | 'invitations' | 'activities' | 'groups' | 'elections'
   | 'leadership' | 'attendance' | 'calendar' | 'announcements' | 'notifications' | 'reports'
-  | 'templates' | 'approvals' | 'permissions' | 'archives' | 'recycle' | 'settings';
+  | 'templates' | 'approvals' | 'permissions' | 'archives' | 'recycle' | 'settings' | 'passkeys';
 
 const AREAS: Array<[Area, string, any]> = [
   ['overview', 'Overview', Activity],
   ['classes', 'My Classes', GraduationCap],
   ['students', 'Students', Users],
+  ['passkeys', 'Passkeys', KeyRound],
   ['invitations', 'Class Invitations', KeyRound],
   ['activities', 'Grouping Activities', Layers],
   ['groups', 'Groups', Users],
@@ -114,6 +115,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
     if (!activeClass) return false;
     switch (key) {
       case 'students': return can('view_roster');
+      case 'passkeys': return can('view_roster');
       case 'invitations': return can('manage_invitations');
       case 'activities': case 'groups': return can('manage_activities') || can('generate_groups');
       case 'elections': return can('manage_elections');
@@ -234,6 +236,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'overview' && <OverviewArea classEntry={activeClass} onGo={setArea} />}
           {activeClass && area === 'classes' && <ClassesArea classes={classes} activeClassId={activeClassId} onSwitch={setActiveClassId} onCreated={() => void refresh()} />}
           {activeClass && area === 'students' && can('view_roster') && <StudentsArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} canImport={can('import_roster')} sensitive={activeClass.role === 'primary' || activeClass.role === 'phantom' || permissions.has('view_sensitive_profiles')} onChanged={() => void refresh()} />}
+          {activeClass && area === 'passkeys' && can('view_roster') && <PasskeysArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} className={String(activeClass.name || 'Class')} onChanged={() => void refresh()} />}
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} openActivityId={editActivityRequest} onEditConsumed={() => setEditActivityRequest(null)} />}
           {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} onGroupFocus={(open) => setNavCollapsed(open)} />}
@@ -3563,6 +3566,14 @@ const formatWhen = (value: unknown) => {
   const date = new Date(String(value).replace(' ', 'T'));
   if (Number.isNaN(date.getTime())) return String(value);
   const minutes = Math.round((Date.now() - date.getTime()) / 60000);
+  // A time still ahead of us (a link that expires in three days) is not "just
+  // now" — say how far ahead it is instead of making it read as the present.
+  if (minutes <= -1) {
+    const ahead = -minutes;
+    if (ahead < 60) return `in ${ahead}m`;
+    if (ahead < 60 * 24) return `in ${Math.round(ahead / 60)}h`;
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
   if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`;
@@ -3849,6 +3860,387 @@ const PermissionsArea = ({ classId, onChanged }: { classId: number; onChanged: (
  * announcement down, deleting a template — is snapped into the bin first, so
  * the organizer can reverse it instead of living with it.
  */
+/**
+ * PASSKEY DESK — one page for every passkey in a class.
+ *
+ * This is the organizer's control room, reached from the hamburger navigation:
+ * every member's passkey state, their failed attempts and lock, their waiting
+ * request, their live one-time link — and every change that has ever been made,
+ * with real names and real times.
+ *
+ * Two ways to give somebody a new passkey, and this page drives both:
+ *   1. issue it here, on the spot (shown once — the organizer hands it over);
+ *   2. create a ONE-TIME LINK for that one member: they open it, press the
+ *      button, and the system generates their passkey immediately — no
+ *      approval, because the organizer already granted it. The link dies the
+ *      moment it is used, and the organizer decides when it expires or kills it.
+ */
+const PasskeysArea = ({ classId, canEdit, className, onChanged }: { classId: number; canEdit: boolean; className: string; onChanged: () => void }) => {
+  const [desk, setDesk] = useState<any>(null);
+  const [links, setLinks] = useState<any[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [openStudentId, setOpenStudentId] = useState<number | null>(null);
+  const [issued, setIssued] = useState<{ name: string; passkey: string } | null>(null);
+  const [linkDraft, setLinkDraft] = useState<{ studentId: number; url: string; code: string; name: string; hours: number } | null>(null);
+  const [hours, setHours] = useState(72);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [data, linkRows] = await Promise.all([
+        (cgm as any).passkeyDesk(classId),
+        (cgm as any).passkeyLinks(classId).catch(() => []),
+      ]);
+      setDesk(data);
+      setLinks(Array.isArray(linkRows) ? linkRows : (linkRows?.data || []));
+      setError(null);
+    } catch (failure: any) { setError(failure?.message || 'The passkey desk could not be loaded.'); }
+  }, [classId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const students: any[] = desk?.students || [];
+  const counts = desk?.counts || {};
+  const open = openStudentId ? students.find((row) => Number(row.studentId) === Number(openStudentId)) || null : null;
+
+  const act = async (run: () => Promise<any>, after?: (result: any) => void) => {
+    setBusy(true); setError(null); setMessage(null);
+    try {
+      const result = await run();
+      if (after) after(result || {});
+      await load();
+      onChanged();
+    } catch (failure: any) { setError(failure?.message || 'That did not work.'); }
+    finally { setBusy(false); }
+  };
+
+  const issueNow = (student: any) => act(async () => {
+    const reason = await appDialog.prompt({
+      title: `Issue a new passkey for ${student.fullName}?`,
+      message: 'The system generates the passkey, their current one stops working immediately, and every device they are signed in on is signed out. You will see the new passkey once — give it to them directly.',
+      label: 'Why is this needed? (recorded)',
+      multiline: true,
+      confirmLabel: 'Issue new passkey',
+    });
+    if (!reason) return null;
+    return cgm.rotatePasskey(classId, Number(student.studentId), String(reason));
+  }, (result: any) => {
+    if (result?.passkey) setIssued({ name: String(result.fullName || student.fullName), passkey: String(result.passkey) });
+    setMessage(String(result?.message || 'New passkey issued.'));
+  });
+
+  const makeLink = (student: any) => act(async () => (cgm as any).createPasskeyLinks(classId, { studentId: Number(student.studentId), expiresInHours: hours }), (result: any) => {
+    const link = (result?.links || [])[0];
+    if (link) setLinkDraft({ studentId: Number(student.studentId), url: String(link.url), code: String(link.code), name: String(link.fullName || student.fullName), hours: Number(link.expiresInHours || hours) });
+    setMessage(String(result?.message || 'One-time link created.'));
+  });
+
+  const revokeLink = (link: any) => act(async () => {
+    const reason = await appDialog.prompt({
+      title: 'Revoke this link?',
+      message: `${link.fullName} will no longer be able to use it. They can still ask you for a new one.`,
+      label: 'Reason (recorded)', multiline: true, confirmLabel: 'Revoke link',
+    });
+    if (!reason) return null;
+    return (cgm as any).revokePasskeyLink(classId, Number(link.id ?? link.linkId), String(reason));
+  }, (result: any) => setMessage(String(result?.message || 'Link revoked.')));
+
+  const decideRequest = (student: any, decision: 'approve' | 'decline') => act(
+    async () => cgm.decidePasskeyRequest(classId, Number(student.request?.id), decision),
+    (result: any) => setMessage(String(result?.message || 'Done.')),
+  );
+
+  const unlock = (student: any) => act(
+    async () => (cgm as any).unlockPasskey(classId, Number(student.studentId)),
+    (result: any) => setMessage(String(result?.message || 'Unlocked.')),
+  );
+
+  const copy = async (text: string, key: string) => { setCopied((await copyToClipboard(text)) ? key : null); };
+
+  const flag = (student: any) => {
+    if (student.lockedUntil) return { text: 'locked', tone: 'bg-red-100 text-red-700' };
+    if (student.request?.status === 'pending') return { text: 'request waiting', tone: 'bg-amber-100 text-amber-800' };
+    if (student.request?.status === 'approved') return { text: 'approved · not collected', tone: 'bg-sky-100 text-sky-800' };
+    if (student.link) return { text: 'link live', tone: 'bg-emerald-100 text-emerald-700' };
+    return null;
+  };
+
+  // ---- one member, full page ------------------------------------------------
+  if (open) {
+    const badge = flag(open);
+    return (
+      <div className="space-y-4" data-testid={`cgm-passkey-member-page-${open.studentId}`}>
+        <button type="button" className="mini-button" data-testid="cgm-passkey-member-back" onClick={() => {
+          setOpenStudentId(null); setIssued(null); setLinkDraft(null); setMessage(null);
+          // Going back re-reads the desk: a link the student has just used must
+          // not still read "live" because this page was opened beforehand.
+          void load();
+        }}>
+          <ArrowLeft className="mr-1 inline h-3.5 w-3.5" /> Back to passkeys
+        </button>
+        {message && <Banner tone="success">{message}</Banner>}
+        {error && <Banner tone="error">{error}</Banner>}
+
+        <div className="cgm-ballot-hero">
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-100">{className} · passkey</p>
+          <h2 className="mt-1 text-xl font-black leading-tight">{open.fullName}</h2>
+          <p className="mt-1 text-[11px] font-semibold text-emerald-50">{open.indexNumber}{open.phone ? ` · ${open.phone}` : ''}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-white ring-1 ring-white/25">{open.passkeyHint || 'no passkey yet'}</span>
+            {badge && <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wider ${badge.tone}`}>{badge.text}</span>}
+          </div>
+        </div>
+
+        {issued && (
+          <div className="rounded-2xl border-2 border-amber-300 bg-amber-50/70 p-4" data-testid="cgm-passkey-issued-now">
+            <p className="text-[10px] font-black uppercase tracking-wider text-amber-800">New passkey for {issued.name} — shown only now</p>
+            <p className="mt-2 select-all rounded-xl border-2 border-amber-400 bg-white px-3 py-3 text-center font-mono text-xl font-black tracking-[0.12em] text-amber-900 sm:text-2xl">{issued.passkey}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button type="button" className="mini-button" onClick={() => void copy(issued.passkey, 'issued')}>{copied === 'issued' ? 'Copied ✓' : 'Copy passkey'}</button>
+              <button type="button" className="mini-button" onClick={() => setIssued(null)}>Hide it</button>
+            </div>
+            <p className="mt-2 text-[11px] font-semibold text-amber-900">Hand it over directly. It is never shown again, and the old passkey stopped working.</p>
+          </div>
+        )}
+
+        <div className={card}>
+          <p className={label}>Passkey state</p>
+          <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px] font-semibold text-slate-500">
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><dt className="text-[9px] font-black uppercase tracking-wider text-slate-400">Issued</dt><dd>{formatWhen(open.passkeyIssuedAt)}</dd></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><dt className="text-[9px] font-black uppercase tracking-wider text-slate-400">Last changed</dt><dd>{formatWhen(open.lastIssuedAt)}</dd></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><dt className="text-[9px] font-black uppercase tracking-wider text-slate-400">Last sign-in</dt><dd>{formatWhen(open.lastLoginAt)}</dd></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><dt className="text-[9px] font-black uppercase tracking-wider text-slate-400">Devices signed in</dt><dd>{open.liveSessions}</dd></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><dt className="text-[9px] font-black uppercase tracking-wider text-slate-400">Failed attempts</dt><dd>{open.failedAttempts}</dd></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><dt className="text-[9px] font-black uppercase tracking-wider text-slate-400">Locked until</dt><dd>{open.lockedUntil ? new Date(open.lockedUntil).toLocaleString() : 'not locked'}</dd></div>
+          </dl>
+        </div>
+
+        {open.request && (
+          <div className={card} data-testid="cgm-passkey-member-request">
+            <p className={label}>Their request</p>
+            <p className="mt-2 text-sm font-bold text-slate-800">
+              {open.request.status === 'pending' ? 'Waiting for you' : 'Approved — they still have to collect it'}
+              <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-slate-500">{open.request.source === 'login' ? 'from sign-in' : 'from their profile'}</span>
+            </p>
+            <p className="mt-1 text-[11px] font-medium text-slate-500">Asked {formatWhen(open.request.requestedAt)}{open.request.source === 'login' ? ' — they could not prove their current passkey, so confirm it is really them.' : '.'}</p>
+            {canEdit && open.request.status === 'pending' && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" disabled={busy} className="cgm-primary-button" onClick={() => void decideRequest(open, 'approve')}>Approve &amp; notify</button>
+                <button type="button" disabled={busy} className="mini-button text-red-600" onClick={() => void decideRequest(open, 'decline')}>Decline</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className={card}>
+          <p className={label}>Give them a new passkey</p>
+          <p className="mt-1 text-[11px] font-medium text-slate-400">Two ways — both use a system-generated passkey, so two students can never end up with the same one.</p>
+          <div className="mt-3 grid gap-2">
+            <button type="button" disabled={busy || !canEdit} data-testid="cgm-passkey-issue-now" className="cgm-primary-button w-full !rounded-xl !py-3" onClick={() => void issueNow(open)}>
+              <KeyRound className="mr-1 inline h-4 w-4" /> Issue a new passkey now — show it to me once
+            </button>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="flex items-center gap-1.5 text-xs font-black text-slate-700"><Link2 className="h-3.5 w-3.5" /> One-time link — no approval needed</p>
+              <p className="mt-1 text-[11px] font-medium text-slate-500">Send this to {open.fullName.split(' ')[0]}: they open it, press the button, and their new passkey appears immediately. It works <span className="font-bold">once</span>.</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <select className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-[11px] font-bold text-slate-700" value={hours} onChange={(event) => setHours(Number(event.target.value))} aria-label="Link expiry">
+                  <option value={1}>Expires in 1 hour</option>
+                  <option value={24}>Expires in 24 hours</option>
+                  <option value={72}>Expires in 3 days</option>
+                  <option value={168}>Expires in 7 days</option>
+                  <option value={720}>Expires in 30 days</option>
+                </select>
+                <button type="button" disabled={busy || !canEdit} data-testid="cgm-passkey-make-link" className="mini-button" onClick={() => void makeLink(open)}>Create one-time link</button>
+              </div>
+            </div>
+            {open.lockedUntil && (
+              <button type="button" disabled={busy || !canEdit} data-testid="cgm-passkey-unlock" className="mini-button w-full !py-3" onClick={() => void unlock(open)}>Unlock their sign-in (currently locked)</button>
+            )}
+          </div>
+        </div>
+
+        {linkDraft && linkDraft.studentId === Number(open.studentId) && (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-4" data-testid="cgm-passkey-link-created">
+            <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">One-time link for {linkDraft.name} — works once, expires in {linkDraft.hours} hour(s)</p>
+            <p className="mt-1 break-all font-mono text-[11px] text-slate-600">{linkDraft.url}</p>
+            <p className="mt-1 font-mono text-sm font-black tracking-[0.1em] text-slate-800">code: {linkDraft.code}</p>
+            <div className="mt-2 flex flex-wrap items-start gap-3">
+              <button type="button" className="mini-button" onClick={() => void copy(linkDraft.url, 'link')}>{copied === 'link' ? 'Copied ✓' : 'Copy link'}</button>
+              <button type="button" className="mini-button" onClick={() => setLinkDraft(null)}>Hide</button>
+              <QrBlock url={linkDraft.url} headerText="One-time passkey link" footerText="Scan → generate → sign in" downloadName={`passkey-link-${linkDraft.studentId}.png`} downloadable small />
+            </div>
+            <p className="mt-2 text-[11px] font-medium text-slate-500">Anyone with this link can issue {linkDraft.name}’s next passkey once. Revoke it from the links list below if you change your mind.</p>
+          </div>
+        )}
+
+        <div className={card}>
+          <p className={label}>This person’s passkey history</p>
+          <ul className="mt-3 space-y-1.5" data-testid="cgm-passkey-member-history">
+            <RecentItems
+              items={(desk?.history || []).filter((row: any) => Number(row.entityId) === Number(open.studentId))}
+              label="changes"
+              testId="cgm-passkey-member-history-more"
+              render={(row: any) => (
+                <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-[11px]">
+                  <span className="font-black text-slate-700">{passkeyActionLabel(row.action)}</span>
+                  <span className="ml-2 font-semibold text-slate-400">{formatWhen(row.at)}{row.actorLabel ? ` · ${row.actorLabel}` : ''}</span>
+                </li>
+              )}
+            />
+          </ul>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- the desk -------------------------------------------------------------
+  return (
+    <div className="space-y-4" data-testid="cgm-passkey-desk">
+      <div className={card}>
+        <p className={label}>Passkeys — {className}</p>
+        <p className="mt-1 text-[11px] font-medium text-slate-500">
+          Every member’s passkey, their waiting request, their lock and their one-time link in one place.
+          Passkeys are always system-generated; you never type one. Tap a member to open their page.
+          The mark in front of every passkey is <span className="font-mono font-black text-slate-700">{desk?.passkeyPrefix || 'rx30'}</span> — change it in Settings.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {[
+            ['Members', counts.members ?? 0],
+            ['Requests', counts.pendingRequests ?? 0],
+            ['Locked', counts.locked ?? 0],
+            ['Live links', counts.liveLinks ?? 0],
+          ].map(([text, value]) => (
+            <div key={String(text)} className="rounded-xl bg-slate-50 px-3 py-2">
+              <p className="text-lg font-black text-slate-800">{String(value)}</p>
+              <p className="text-[9px] font-black uppercase tracking-wider text-slate-400">{String(text)}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {message && <Banner tone="success">{message}</Banner>}
+      {error && <Banner tone="error">{error}</Banner>}
+
+      {issued && (
+        <div className="rounded-2xl border-2 border-amber-300 bg-amber-50/70 p-4" data-testid="cgm-passkey-issued-now">
+          <p className="text-[10px] font-black uppercase tracking-wider text-amber-800">New passkey for {issued.name} — shown only now</p>
+          <p className="mt-2 select-all rounded-xl border-2 border-amber-400 bg-white px-3 py-3 text-center font-mono text-xl font-black tracking-[0.12em] text-amber-900 sm:text-2xl">{issued.passkey}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button type="button" className="mini-button" onClick={() => void copy(issued.passkey, 'issued')}>{copied === 'issued' ? 'Copied ✓' : 'Copy passkey'}</button>
+            <button type="button" className="mini-button" onClick={() => setIssued(null)}>Hide it</button>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2" data-testid="cgm-passkey-members">
+        {desk === null && <div className={card}><p className="text-xs font-semibold text-slate-400">Loading the passkey desk…</p></div>}
+        {desk !== null && !students.length && <div className={card}><p className="text-xs font-medium text-slate-500">No active members in this class yet.</p></div>}
+        <RecentItems
+          items={students}
+          label="members"
+          testId="cgm-passkey-members-more"
+          render={(student: any) => {
+            const badge = flag(student);
+            return (
+              <button
+                key={student.studentId}
+                type="button"
+                data-testid={`cgm-passkey-member-${student.studentId}`}
+                className="cgm-record-row"
+                onClick={() => { setOpenStudentId(Number(student.studentId)); setIssued(null); setLinkDraft(null); setMessage(null); setError(null); }}
+              >
+                <span className="cgm-record-icon"><KeyRound className="h-4 w-4" /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-black text-slate-900">{student.fullName}</span>
+                  <span className="mt-0.5 block truncate text-[11px] font-semibold text-slate-400">
+                    {student.indexNumber} · {student.passkeyHint || 'no passkey'} · signed in {formatWhen(student.lastLoginAt)}
+                  </span>
+                  {badge && (
+                    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${badge.tone}`}>{badge.text}</span>
+                    </span>
+                  )}
+                </span>
+                <ChevronRight className="h-4 w-4 flex-none text-slate-300" />
+              </button>
+            );
+          }}
+        />
+      </div>
+
+      <div className={card}>
+        <p className={label}>One-time links in this class</p>
+        <p className="mt-1 text-[11px] font-medium text-slate-400">Each link belongs to one member, works once, and stops working the moment it is used, expires or is revoked here.</p>
+        <ul className="mt-3 space-y-1.5" data-testid="cgm-passkey-links">
+          <RecentItems
+            items={links}
+            label="links"
+            testId="cgm-passkey-links-more"
+            render={(link: any) => (
+              <li key={link.id} className="rounded-xl bg-slate-50 px-3 py-2 text-xs" data-testid={`cgm-passkey-link-${link.id}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="font-black text-slate-700">{link.fullName}</span>
+                    <span className="ml-2 font-semibold text-slate-400">{link.indexNumber}</span>
+                    <span className={`ml-2 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${link.state === 'live' ? 'bg-emerald-100 text-emerald-700' : link.state === 'used' ? 'bg-slate-200 text-slate-600' : link.state === 'expired' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-700'}`}>{link.state}</span>
+                    <span className="mt-0.5 block font-semibold text-slate-400">
+                      created {formatWhen(link.createdAt)}{link.createdBy ? ` by ${link.createdBy}` : ''} · {link.state === 'used' ? `used ${formatWhen(link.usedAt)}` : link.state === 'revoked' ? `revoked ${formatWhen(link.revokedAt)}${link.revokedReason ? ` (${link.revokedReason})` : ''}` : `expires ${formatWhen(link.expiresAt)}`}
+                    </span>
+                  </span>
+                  {link.state === 'live' && canEdit && (
+                    <button type="button" disabled={busy} className="mini-button text-red-600" data-testid={`cgm-passkey-link-revoke-${link.id}`} onClick={() => void revokeLink(link)}>Revoke</button>
+                  )}
+                </div>
+              </li>
+            )}
+          />
+        </ul>
+        {!links.length && <p className="mt-2 text-[11px] font-medium text-slate-400">No one-time links yet. Open a member and create one.</p>}
+      </div>
+
+      <div className={card}>
+        <p className={label}>Passkey changes in this class</p>
+        <ul className="mt-3 space-y-1.5" data-testid="cgm-passkey-history">
+          <RecentItems
+            items={desk?.history || []}
+            label="changes"
+            testId="cgm-passkey-history-more"
+            render={(row: any) => (
+              <li key={row.id} className="rounded-lg bg-slate-50 px-3 py-2 text-[11px]">
+                <span className="font-black text-slate-700">{passkeyActionLabel(row.action)}</span>
+                {row.fullName && <span className="ml-1 font-semibold text-slate-500">· {row.fullName}</span>}
+                <span className="ml-2 font-semibold text-slate-400">{formatWhen(row.at)}{row.actorLabel ? ` · ${row.actorLabel}` : ''}</span>
+              </li>
+            )}
+          />
+        </ul>
+        {!(desk?.history || []).length && <p className="mt-2 text-[11px] font-medium text-slate-400">No passkey changes recorded yet.</p>}
+      </div>
+    </div>
+  );
+};
+
+/** Plain-English labels for the passkey audit actions this desk shows. */
+const passkeyActionLabel = (action: string) => {
+  const map: Record<string, string> = {
+    'cgm.passkey.generated': 'New passkey generated',
+    'cgm.passkey.rotated_by_organizer': 'Passkey issued by the organizer',
+    'cgm.passkey.link_created': 'One-time link created',
+    'cgm.passkey.link_revoked': 'One-time link revoked',
+    'cgm.passkey.link_redeemed': 'Passkey reset from a one-time link',
+    'cgm.passkey.unlocked': 'Sign-in lock cleared by the organizer',
+    'cgm.passkey.change_requested': 'Passkey change requested',
+    'cgm.passkey.reset_requested': 'Reset requested from the sign-in page',
+    'cgm.passkey.request_approved': 'Request approved',
+    'cgm.passkey.request_declined': 'Request declined',
+    'cgm.student.login': 'Signed in',
+    'cgm.student.locked': 'Locked after failed attempts',
+    'cgm.student.logout': 'Signed out',
+  };
+  return map[action] || action.replace(/^cgm\.(passkey|student)\./, '').replace(/_/g, ' ');
+};
+
 const RecycleArea = ({ classId }: { classId: number }) => {
   const [items, setItems] = useState<any[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);

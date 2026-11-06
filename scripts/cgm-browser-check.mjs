@@ -1487,6 +1487,165 @@ let ballotStudent = null;
     votePage.body().slice(0, 240));
 }
 
+// ---------------------------------------------------------------------------
+// 8c. Passkey desk: the organizer tracks a passkey, issues one, and hands out a
+//     one-time link that the student redeems — no approval, exactly once
+// ---------------------------------------------------------------------------
+{
+  const deskClass = await makeClass(`Browser Check Pickey ${stamp}`);
+  await api('POST', `/api/cgm/classes/${deskClass.classId}/entry-password`, { entryPassword: 'pickey-entry' }, phantomToken);
+  const deskIndex = `BRW-${stamp}-PK`;
+  await api('POST', `/api/cgm/classes/${deskClass.classId}/roster/entries`, { fullName: 'Pickey Peta', indexNumber: deskIndex }, phantomToken);
+  const deskRegister = await fetch(`${BASE}/api/cgm/student/register`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.196' },
+    body: JSON.stringify({ classCode: deskClass.code, indexNumber: deskIndex, entryPassword: 'pickey-entry' }),
+  });
+  const deskPayload = await deskRegister.json().catch(() => ({}));
+  const deskPasskey = String(deskPayload?.data?.passkey || '');
+  check('the passkey fixture registered a member with a real passkey', Boolean(deskPasskey), `status ${deskRegister.status}`);
+
+  // --- The organizer opens the desk from the hamburger ----------------------
+  const page = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('Class & Group Management', 20_000);
+  const switcher = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Switch class"]'));
+  if (switcher) {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(switcher, String(deskClass.classId));
+    switcher.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  const passkeysNav = await page.waitForElement(() => page.buttonByText('Passkeys'));
+  check('the organizer hamburger carries a Passkeys page', Boolean(passkeysNav), page.body().slice(0, 200));
+  passkeysNav && passkeysNav.click();
+  const desk = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-passkey-desk"]'), 20_000);
+  check('it opens the passkey desk with the class counts', Boolean(desk) && /Members/.test(page.body()) && /Live links/.test(page.body()),
+    page.body().slice(0, 240));
+  const memberRow = await page.waitForElement(() => [...page.window.document.querySelectorAll('[data-testid^="cgm-passkey-member-"]')]
+    .find((el) => /Pickey Peta/.test(el.textContent)), 20_000);
+  check('every member is one tappable row, with their passkey state and last sign-in',
+    Boolean(memberRow) && /rx30/.test(memberRow.textContent) && /signed in/.test(memberRow.textContent),
+    String(memberRow?.textContent || '').slice(0, 160));
+  memberRow && memberRow.click();
+  const memberPage = await page.waitForElement(() => page.window.document.querySelector('[data-testid^="cgm-passkey-member-page-"]'), 20_000);
+  check('tapping a member opens their own page with the full passkey state',
+    Boolean(memberPage) && /Passkey state/.test(page.body()) && /Devices signed in/.test(page.body())
+    && Boolean(page.window.document.querySelector('[data-testid="cgm-passkey-member-back"]')),
+    page.body().slice(0, 240));
+
+  // --- Issue a passkey on the spot -----------------------------------------
+  const issueButton = page.window.document.querySelector('[data-testid="cgm-passkey-issue-now"]');
+  issueButton && issueButton.click();
+  const reasonBox = await page.waitForElement(() => page.window.document.querySelector('[id^="app-dialog-input-"]'), 10_000);
+  check('issuing asks why first (the reason is recorded)', Boolean(reasonBox), page.body().slice(0, 200));
+  if (reasonBox) {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLTextAreaElement.prototype, 'value')?.set
+      || Object.getOwnPropertyDescriptor(page.window.HTMLInputElement.prototype, 'value').set;
+    setter.call(reasonBox, 'Card lost in the lab');
+    reasonBox.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+    const confirm = [...page.window.document.querySelectorAll('button')].find((el) => /Issue new passkey/.test(el.textContent));
+    confirm && confirm.click();
+  }
+  const issuedBox = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-passkey-issued-now"]'), 20_000);
+  const issuedText = String(issuedBox?.textContent || '');
+  check('the new passkey is shown once, with a copy control and the one-time warning',
+    Boolean(issuedBox) && /rx30/.test(issuedText) && /Copy passkey/.test(issuedText) && /shown only now/.test(issuedText),
+    issuedText.slice(0, 160));
+
+  // --- A one-time link, used exactly once ----------------------------------
+  const makeLink = page.window.document.querySelector('[data-testid="cgm-passkey-make-link"]');
+  makeLink && makeLink.click();
+  const linkBox = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-passkey-link-created"]'), 20_000);
+  const linkText = String(linkBox?.textContent || '');
+  const linkCode = (/code:\s*([A-Z0-9]{4}(?:-[A-Z0-9]{4}){3})/.exec(linkText) || [])[1] || '';
+  check('the organizer gets a one-time link for that ONE member, with its code',
+    Boolean(linkBox) && Boolean(linkCode) && /works once/.test(linkText)
+    && /Copy link/.test(linkText),
+    linkText.slice(0, 200));
+
+  const linkPage = await boot(`#passkey-link/${linkCode}`);
+  const ready = await linkPage.waitForFor('Generate my new passkey', 30_000);
+  check('the student opens the link with no sign-in and sees it is theirs',
+    ready && /Pickey Peta/.test(linkPage.body()) && /works once/.test(linkPage.body()),
+    linkPage.body().slice(0, 240));
+  const generate = await linkPage.waitForElement(() => linkPage.window.document.querySelector('[data-testid="cgm-passkey-link-generate"]'), 10_000);
+  generate && generate.click();
+  const issuedOnLink = await linkPage.waitForElement(() => linkPage.window.document.querySelector('[data-testid="cgm-passkey-link-issued"]'), 30_000);
+  const newPasskey = String(issuedOnLink?.querySelector('[data-testid="cgm-passkey-link-passkey"]')?.textContent || '').trim();
+  check('pressing the button generates a new passkey straight away — no approval step',
+    Boolean(issuedOnLink) && /^rx30/.test(newPasskey) && /shown only now/.test(String(issuedOnLink.textContent || '')),
+    `passkey=${newPasskey} body=${linkPage.body().slice(0, 160)}`);
+
+  // The same link, opened again (a forwarded link, a second device): refused.
+  const reuse = await boot(`#passkey-link/${linkCode}`);
+  check('the link cannot be used a second time — reopening it says so',
+    await reuse.waitForFor('This link was already used', 30_000) && !await reuse.waitForFor('Generate my new passkey', 2_000),
+    reuse.body().slice(0, 200));
+  const reuseApi = await api('POST', `/api/cgm/passkey-links/${linkCode}/redeem`, {});
+  check('and the server refuses the second redemption too (409, nothing minted)',
+    reuseApi.status === 409, `status ${reuseApi.status}`);
+
+  // The new passkey really is the live one.
+  const deskLogin = await api('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: deskIndex, passkey: newPasskey });
+  check('the passkey from the one-time link signs the student in',
+    deskLogin.status === 200 && Boolean(deskLogin.json?.data?.session?.token), `status ${deskLogin.status}`);
+
+  // --- The organizer regulates the links ------------------------------------
+  // A fresh organizer page: the student's journey above happened in other
+  // tabs, so this is what an organizer reopening the desk actually sees.
+  const deskAgain = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await deskAgain.waitForFor('Class & Group Management', 20_000);
+  const switcherAgain = await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('select[aria-label="Switch class"]'));
+  if (switcherAgain) {
+    const setterAgain = Object.getOwnPropertyDescriptor(deskAgain.window.HTMLSelectElement.prototype, 'value').set;
+    setterAgain.call(switcherAgain, String(deskClass.classId));
+    switcherAgain.dispatchEvent(new deskAgain.window.Event('change', { bubbles: true }));
+  }
+  const passkeysAgain = await deskAgain.waitForElement(() => deskAgain.buttonByText('Passkeys'));
+  passkeysAgain && passkeysAgain.click();
+  await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('[data-testid="cgm-passkey-desk"]'), 20_000);
+  const linkRowsHere = () => [...deskAgain.window.document.querySelectorAll('[data-testid="cgm-passkey-links"] li')];
+  const usedRow = await deskAgain.waitForElement(() => linkRowsHere().find((el) => /used/.test(el.textContent)) || null, 25_000);
+  check('the links list shows each link with its real state (used, not "live")',
+    Boolean(usedRow) && !/\blive\b/.test(String(usedRow.textContent))
+    && !usedRow.querySelector('[data-testid^="cgm-passkey-link-revoke-"]'),
+    String(usedRow?.textContent || deskAgain.body()).replace(/\s+/g, ' ').slice(0, 200));
+  const historyPresent = await deskAgain.waitForFor('Passkey changes in this class', 10_000)
+    && /One-time link created/.test(deskAgain.body()) && /Passkey issued by the organizer/.test(deskAgain.body());
+  check('the class history names the real changes ("Passkey issued by the organizer", "One-time link created")',
+    historyPresent, deskAgain.body().slice(0, 240));
+
+  // A second link can be revoked before anyone uses it.
+  const memberAgain = await deskAgain.waitForElement(() => [...deskAgain.window.document.querySelectorAll('[data-testid^="cgm-passkey-member-"]')]
+    .find((el) => /Pickey Peta/.test(el.textContent)), 20_000);
+  memberAgain && memberAgain.click();
+  const makeLinkAgain = await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('[data-testid="cgm-passkey-make-link"]'), 20_000);
+  makeLinkAgain && makeLinkAgain.click();
+  const secondBox = await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('[data-testid="cgm-passkey-link-created"]'), 20_000);
+  const secondCode = (/code:\s*([A-Z0-9]{4}(?:-[A-Z0-9]{4}){3})/.exec(String(secondBox?.textContent || '')) || [])[1] || '';
+  const backAgain = await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('[data-testid="cgm-passkey-member-back"]'), 10_000);
+  backAgain && backAgain.click();
+  const revokeButton = await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('[data-testid^="cgm-passkey-link-revoke-"]'), 20_000);
+  check('a link nobody has used yet offers a Revoke control', Boolean(secondCode) && Boolean(revokeButton),
+    deskAgain.body().slice(0, 240));
+  revokeButton && revokeButton.click();
+  const reasonInput = await deskAgain.waitForElement(() => deskAgain.window.document.querySelector('[id^="app-dialog-input-"]'), 15_000);
+  if (reasonInput) {
+    const areaSetter = Object.getOwnPropertyDescriptor(deskAgain.window.HTMLTextAreaElement.prototype, 'value')?.set
+      || Object.getOwnPropertyDescriptor(deskAgain.window.HTMLInputElement.prototype, 'value').set;
+    areaSetter.call(reasonInput, 'Handed to the wrong person');
+    reasonInput.dispatchEvent(new deskAgain.window.Event('input', { bubbles: true }));
+  }
+  const revokeConfirm = await deskAgain.waitForElement(() => [...deskAgain.window.document.querySelectorAll('button')]
+    .find((el) => /Revoke link/.test(el.textContent)), 15_000);
+  revokeConfirm && revokeConfirm.click();
+  const revokedRow = await deskAgain.waitForElement(() => linkRowsHere().find((el) => /revoked/.test(el.textContent)) || null, 25_000);
+  check('the revoked link reads revoked in the desk, with the reason recorded',
+    Boolean(revokedRow) && /Handed to the wrong person/.test(String(revokedRow.textContent)),
+    String(revokedRow?.textContent || deskAgain.body()).replace(/\s+/g, ' ').slice(0, 220));
+  const revokedRedeem = await api('POST', `/api/cgm/passkey-links/${secondCode}/redeem`, {});
+  check('a revoked link cannot mint a passkey (410, nothing issued)',
+    revokedRedeem.status === 410, `status ${revokedRedeem.status}`);
+}
+
 // Restore the spec-default policies so the local database stays clean.
 await api('PUT', '/api/cgm/phantom/policies', { policies: [
   { key: 'student_registration_mode', value: 'approval' },

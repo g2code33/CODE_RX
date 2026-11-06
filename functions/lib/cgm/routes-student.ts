@@ -73,6 +73,7 @@ import {
   claimDesignatedSeat, convertReservationsForEntry, groupGenderPools, groupHoldsOtherPool,
   insertAssignmentRespectingDesignations, reservedSeatsFor, studentGenders,
 } from './forceGet';
+import { ensurePasskeyLinkSchema, linkCodeHash, normaliseLinkCode } from './routes-passkeys';
 import { sha256Hex } from '../vault';
 import { createNotification } from '../notifications';
 import { recordPhantomInboxItem } from '../phantom-inbox';
@@ -2135,6 +2136,131 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       fullName: request.full_name,
       classLabel: request.class_name || null,
       message: 'New passkey generated — it is shown only now. Sign in with it immediately.',
+    } });
+  });
+
+  // -------------------------------------------------------------------------
+  // ONE-TIME PASSKEY LINKS (organizer-issued, no approval, used exactly once)
+  //
+  // An organizer generates a link for ONE member. Whoever opens it can mint a
+  // new, system-generated passkey for that member — no approval step, because
+  // the organizer already decided. The guarantees live in the SQL, not in the
+  // UI:
+  //
+  //   * the code is stored only as a SHA-256 hash, so the database cannot leak
+  //     a working link;
+  //   * collecting it is a conditional UPDATE (used_at IS NULL, not revoked,
+  //     not expired). Two tabs, two people, a double tap — exactly one wins,
+  //     and the losers are told the link was already used;
+  //   * collecting it revokes every open session for that member, because a
+  //     new passkey must not leave the old one alive on another device.
+  // -------------------------------------------------------------------------
+  const linkLookupSql = `
+    SELECT l.id, l.class_id, l.student_id, l.code_hint, l.expires_at, l.used_at, l.revoked_at,
+           l.created_by_label,
+           s.full_name, s.index_number, s.status AS student_status,
+           cl.name AS class_name, cl.code AS class_code, cl.passkey_prefix
+    FROM cgm_passkey_links l
+    JOIN cgm_students s ON s.id = l.student_id
+    JOIN cgm_classes cl ON cl.id = l.class_id
+    WHERE l.code_hash = ?`;
+
+  app.get('/api/cgm/passkey-links/:code', async (c: any) => {
+    const dark = await requireModuleEnabled(c);
+    if (dark) return dark;
+    if (!throttle(c, 30, 3600)) return bad(c, 'Too many attempts. Try again shortly.', 429);
+    await ensurePasskeyLinkSchema(c.env.DB);
+    const code = normaliseLinkCode(c.req.param('code'));
+    if (code.length < 12) return bad(c, 'That passkey link is not valid.', 404);
+    const rows = await asRows<any>(c.env.DB.prepare(linkLookupSql).bind(await linkCodeHash(code)));
+    const link = rows[0];
+    if (!link) return bad(c, 'That passkey link is not valid. Ask your organizer for a new one.', 404);
+    const expired = new Date(String(link.expires_at).replace(' ', 'T') + 'Z').getTime() < Date.now();
+    const state = link.used_at ? 'used' : link.revoked_at ? 'revoked' : expired ? 'expired' : 'live';
+    return c.json({
+      success: true,
+      data: {
+        state,
+        // The name is shown so the student can confirm the link is really
+        // theirs — never the passkey itself, which does not exist yet.
+        student: {
+          fullName: link.full_name,
+          indexNumber: link.index_number,
+          passkeyHint: String(link.passkey_prefix || 'rx30') + '…',
+        },
+        className: link.class_name || null,
+        classCode: link.class_code || null,
+        expiresAt: link.expires_at,
+        createdBy: link.created_by_label || null,
+        usedAt: link.used_at || null,
+        revokedAt: link.revoked_at || null,
+      },
+    });
+  });
+
+  app.post('/api/cgm/passkey-links/:code/redeem', async (c: any) => {
+    const dark = await requireModuleEnabled(c);
+    if (dark) return dark;
+    if (!throttle(c, 12, 3600)) return bad(c, 'Too many attempts. Try again shortly.', 429);
+    await ensurePasskeyLinkSchema(c.env.DB);
+    const code = normaliseLinkCode(c.req.param('code'));
+    if (code.length < 12) return bad(c, 'That passkey link is not valid.', 404);
+    const digest = await linkCodeHash(code);
+    const rows = await asRows<any>(c.env.DB.prepare(linkLookupSql).bind(digest));
+    const link = rows[0];
+    if (!link) return bad(c, 'That passkey link is not valid. Ask your organizer for a new one.', 404);
+    if (link.used_at) {
+      return c.json({ success: false, code: 'link_used',
+        error: 'This link was already used — it can only ever issue one passkey. Ask your organizer for a new one.' }, 409);
+    }
+    if (link.revoked_at) {
+      return c.json({ success: false, code: 'link_revoked',
+        error: 'Your organizer revoked this link. Ask them for a new one.' }, 410);
+    }
+
+    // THE single-use gate. Whoever's UPDATE changes the row wins; everyone
+    // else is refused by the same statement that expired/revoked links fail.
+    const claimed = await c.env.DB.prepare(
+      `UPDATE cgm_passkey_links SET used_at = CURRENT_TIMESTAMP, used_ip_hash = ?
+       WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL
+         AND expires_at > strftime('%Y-%m-%d %H:%M:%S', 'now')`
+    ).bind(await sha256Hex(`ip:${String(c.req.header('cf-connecting-ip') || '')}`), Number(link.id)).run();
+    if (!(Number((claimed as any)?.meta?.changes || 0) > 0)) {
+      return c.json({ success: false, code: 'link_used',
+        error: 'This link can no longer be used — it expired, was revoked, or was already used once.' }, 409);
+    }
+
+    const classPrefix = String(link.passkey_prefix || 'rx30');
+    const allocation = await allocateStudentPasskey(c.env.DB);
+    const issued = `${classPrefix}${allocation.suffix}`;
+    await c.env.DB.prepare(
+      `UPDATE cgm_students SET passkey_verifier = ?, passkey_sequence = ?, passkey_suffix = ?, passkey_prefix = ?,
+         passkey_issued_at = CURRENT_TIMESTAMP, passkey_reset_at = CURRENT_TIMESTAMP,
+         failed_attempts = 0, locked_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).bind(await hashPassword(issued), allocation.sequence, allocation.suffix, classPrefix, Number(link.student_id)).run();
+    // The previous passkey is dead from this moment.
+    await revokeStudentSessions(c.env.DB, Number(link.student_id));
+    // Any request this replaced is finished too, so nothing can mint a second.
+    await c.env.DB.prepare(
+      `UPDATE cgm_passkey_requests SET status = 'completed', handled_at = COALESCE(handled_at, CURRENT_TIMESTAMP)
+       WHERE student_id = ? AND class_id = ? AND status IN ('pending','approved')`
+    ).bind(Number(link.student_id), Number(link.class_id)).run();
+
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: String(link.full_name || 'Student'), actorStudentId: Number(link.student_id),
+      action: 'cgm.passkey.link_redeemed', entityType: 'student', entityId: Number(link.student_id),
+      classId: Number(link.class_id), context: { linkId: Number(link.id) },
+    });
+    await notifyStudent(c.env.DB, Number(link.student_id), 'security', 'Your passkey was reset from a one-time link',
+      'A new system-generated passkey was issued from the one-time link your organizer gave you, and shown once. '
+      + 'If this was not you, contact your organizer immediately.');
+
+    return c.json({ success: true, data: {
+      passkey: issued,
+      fullName: link.full_name,
+      indexNumber: link.index_number,
+      classLabel: link.class_name || null,
+      message: 'New passkey generated — it is shown only now, and this link can never be used again. Save it, then sign in.',
     } });
   });
 

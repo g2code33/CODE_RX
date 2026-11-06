@@ -1413,6 +1413,114 @@ check('the ballot is mobile-first CSS: full-width cards, thumb-height targets, a
 check('the record rows and the student list share the same thumb-sized hit area',
   /className="cgm-record-row"/.test(workspace) && /className="cgm-record-row"/.test(studentPortal));
 
+section('35. Passkeys are tracked, issued and handed out as one-time links');
+
+const passkeyRoutes = src('functions/lib/cgm/routes-passkeys.ts');
+const linkPage = src('src/components/ClassGroups/PasskeyLinkPage.tsx');
+
+check('the hamburger carries a Passkeys page for the organizer',
+  /\['passkeys', 'Passkeys', KeyRound\]/.test(workspace)
+  && /case 'passkeys': return can\('view_roster'\);/.test(workspace)
+  && /area === 'passkeys' && can\('view_roster'\) && <PasskeysArea/.test(workspace)
+  && /const PasskeysArea = /.test(workspace));
+
+check('it tracks every member: passkey, sign-in, devices, attempts, lock, request, link',
+  /passkeyDesk: \(classId: number\) => memberCall\(`\/api\/cgm\/classes\/\$\{classId\}\/passkeys`\)/.test(src('src/lib/cgm.ts'))
+  && /passkeyHint/.test(passkeyRoutes) && /liveSessions/.test(passkeyRoutes)
+  && /failedAttempts/.test(passkeyRoutes) && /lockedUntil/.test(passkeyRoutes)
+  && /last_login_at/.test(passkeyRoutes) && /last_issued_at/.test(passkeyRoutes));
+
+check('the desk is a list of tappable members that opens a full page with a way back',
+  /data-testid="cgm-passkey-members"/.test(workspace)
+  && /data-testid=\{`cgm-passkey-member-\$\{student\.studentId\}`\}/.test(workspace)
+  && /data-testid=\{`cgm-passkey-member-page-\$\{open\.studentId\}`\}/.test(workspace)
+  && /data-testid="cgm-passkey-member-back"/.test(workspace)
+  && /Back to passkeys/.test(workspace));
+
+check('the organizer can issue a passkey on the spot, and it is shown exactly once',
+  /data-testid="cgm-passkey-issue-now"/.test(workspace)
+  && /data-testid="cgm-passkey-issued-now"/.test(workspace)
+  && /shown only now/.test(workspace)
+  && /rotatePasskey: \(classId: number, studentId: number, reason\?: string\)/.test(src('src/lib/cgm.ts'))
+  && /app\.post\('\/api\/cgm\/classes\/:id\/passkeys\/:studentId\/rotate'/.test(passkeyRoutes));
+
+check('a lock can be seen and cleared from the desk',
+  /data-testid="cgm-passkey-unlock"/.test(workspace)
+  && /unlockPasskey: \(classId: number, studentId: number\)/.test(src('src/lib/cgm.ts'))
+  && /app\.post\('\/api\/cgm\/classes\/:id\/passkeys\/:studentId\/unlock'/.test(passkeyRoutes));
+
+check('a ONE-TIME link can be generated for one individual member, with an expiry the organizer picks',
+  /data-testid="cgm-passkey-make-link"/.test(workspace)
+  && /createPasskeyLinks: \(classId: number, body: \{ studentId\?: number; studentIds\?: number\[\]; expiresInHours\?: number; note\?: string \}\)/.test(src('src/lib/cgm.ts'))
+  && /app\.post\('\/api\/cgm\/classes\/:id\/passkeys\/links'/.test(passkeyRoutes)
+  && /Expires in 1 hour[\s\S]{0,400}Expires in 30 days/.test(workspace)
+  && /works <span className="font-bold">once<\/span>/.test(workspace));
+
+check('the link needs no approval: the student opens it and the passkey is generated there and then',
+  /app\.post\('\/api\/cgm\/passkey-links\/:code\/redeem'/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /redeemPasskeyLink: \(code: string\)/.test(src('src/lib/cgm.ts'))
+  && /data-testid="cgm-passkey-link-generate"/.test(linkPage)
+  && /Generate my new passkey/.test(linkPage)
+  && /data-testid="cgm-passkey-link-issued"/.test(linkPage)
+  && /#passkey-link\//.test(src('src/App.tsx')));
+
+check('the link is single-use by construction — a conditional UPDATE decides the winner',
+  /UPDATE cgm_passkey_links SET used_at = CURRENT_TIMESTAMP, used_ip_hash = \?/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /WHERE id = \? AND used_at IS NULL AND revoked_at IS NULL/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /AND expires_at > strftime\('%Y-%m-%d %H:%M:%S', 'now'\)/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /link_used/.test(src('functions/lib/cgm/routes-student.ts')));
+
+check('the raw link code is never stored — only its hash — and the schema keeps the table',
+  /const linkCodeHash = \(raw: unknown\) => sha256Hex\(`cgm-passkey-link:\$\{normaliseLinkCode\(raw\)\}`\)/.test(passkeyRoutes)
+  && /code_hash TEXT NOT NULL UNIQUE/.test(src('functions/lib/cgm/schema.ts'))
+  && /CREATE TABLE IF NOT EXISTS cgm_passkey_links/.test(passkeyRoutes)
+  && /ensurePasskeyLinkSchema/.test(src('functions/lib/cgm/routes-student.ts')));
+
+check('the organizer regulates links: expiry, one live link per member, revoke with a reason, and the list shows real states',
+  /expiresInHours/.test(passkeyRoutes)
+  && /Superseded by a newer link/.test(passkeyRoutes)
+  && /app\.post\('\/api\/cgm\/classes\/:id\/passkeys\/links\/:linkId\/revoke'/.test(passkeyRoutes)
+  && /data-testid=\{`cgm-passkey-link-revoke-\$\{link\.id\}`\}/.test(workspace)
+  && /\['live', 'used', 'expired', 'revoked'\]|state === 'live' \? 'bg-emerald-100/.test(workspace)
+  && /data-testid="cgm-passkey-links"/.test(workspace));
+
+check('every passkey change is on the record with real names, and the lists obey the latest-five rule',
+  /action: 'cgm\.passkey\.link_created'/.test(passkeyRoutes)
+  && /action: 'cgm\.passkey\.link_revoked'/.test(passkeyRoutes)
+  && /action: 'cgm\.passkey\.rotated_by_organizer'/.test(passkeyRoutes)
+  && /action: 'cgm\.passkey\.link_redeemed'/.test(src('functions/lib/cgm/routes-student.ts'))
+  && /<RecentItems[\s\S]{0,200}testId="cgm-passkey-history-more"/.test(workspace)
+  && /testId="cgm-passkey-links-more"/.test(workspace)
+  && /testId="cgm-passkey-members-more"/.test(workspace));
+
+check('the passkey desk and the link page are mobile-first',
+  /className="cgm-record-row"/.test(workspace)
+  && /cgm-ballot-hero/.test(workspace)
+  && /cgm-ballot-hero/.test(linkPage)
+  && /!\?rounded-xl !py-3|!rounded-xl !py-3/.test(workspace)
+  && /className="cgm-primary-button mt-4 w-full/.test(linkPage)
+  && /viewport/.test(linkPage) === false); // no second viewport meta is introduced
+
+check('a student cannot reach the organizer desk, and the link page needs no session',
+  /requireClassPermission\(c, member, classId, 'view_roster'\)/.test(passkeyRoutes)
+  && /requireClassPermission\(c, member, classId, 'edit_roster'\)/.test(passkeyRoutes)
+  && !/studentSession\.read\(\)/.test(linkPage)
+  && /cgmStudent\.passkeyLinkInfo\(code\)/.test(linkPage));
+
+check('the desk re-reads when the organizer comes back from a member page', (() => {
+  const back = workspace.indexOf('data-testid="cgm-passkey-member-back"');
+  if (back < 0) return false;
+  const handler = workspace.slice(back, back + 700);
+  return /setOpenStudentId\(null\)/.test(handler) && /void load\(\)/.test(handler);
+})(), 'the way back out of a member page must refetch, or a link the student just used still reads "live"');
+
+check('a time still ahead of us is not printed as "just now" (link expiry)', (() => {
+  const fn = workspace.indexOf('const formatWhen = ');
+  if (fn < 0) return false;
+  const body = workspace.slice(fn, fn + 900);
+  return /if \(minutes <= -1\)/.test(body) && /`in \$\{ahead\}m`/.test(body) && /`in \$\{Math\.round\(ahead \/ 60\)\}h`/.test(body);
+})(), 'expires_at sits in the future, so it must read "in 3h", never "just now"');
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');
