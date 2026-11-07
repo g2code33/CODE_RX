@@ -3022,11 +3022,15 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContex
   // record can never say different things.
   const [exporting, setExporting] = useState<'print' | 'pdf' | 'png' | null>(null);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  // "Only candidates with a vote" is an OPTION, off by default: the full ballot
+  // is the record, and leaving voters out is a deliberate, printed choice.
+  const [onlyVoted, setOnlyVoted] = useState(false);
   const buildDoc = () => buildElectionRecordDoc({
     ...docContext,
     issuedAt: new Date(),
     election: { ...election, activityName: activityName || undefined },
     candidates, participation,
+    onlyVotedCandidates: onlyVoted,
   });
   const runExport = async (mode: 'print' | 'pdf' | 'png') => {
     setExporting(mode); setExportNote(null);
@@ -3035,9 +3039,12 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContex
       if (mode === 'print') printPrintDoc(document_);
       else if (mode === 'pdf') await downloadPrintPdf(document_);
       else await downloadPrintPng(document_);
-      setExportNote(mode === 'print'
+      const scope = onlyVoted && votedCandidates > 0
+        ? ` Ballot: ${votedCandidates} of ${rows.length} candidate${rows.length === 1 ? '' : 's'} with a vote (${rows.length - votedCandidates} left out and counted).`
+        : '';
+      setExportNote((mode === 'print'
         ? 'The print sheet is open — choose your printer or Save as PDF.'
-        : `Saved ${document_.fileName}.${mode} with the CODE Rx letterhead.`);
+        : `Saved ${document_.fileName}.${mode} with the CODE Rx letterhead.`) + scope);
     } catch (failure: any) {
       setExportNote(failure?.message || 'That document could not be produced.');
     } finally { setExporting(null); }
@@ -3053,6 +3060,7 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContex
   const linkReady = ['nominating', 'voting'].includes(String(election.status));
   const rows: any[] = Array.isArray(candidates) ? candidates : [];
   const cast = rows.reduce((sum, row) => sum + Number(row.votes || 0), 0);
+  const votedCandidates = rows.filter((row) => Number(row.votes || 0) > 0).length;
   const topVotes = Math.max(0, ...rows.map((row) => Number(row.votes || 0)));
   const status = String(election.status || '');
   const winnerName = rows.find((row) => Number(row.id) === Number(election.results?.outcome?.winner))?.fullName;
@@ -3149,6 +3157,29 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContex
           The paper carries the CODE Rx letterhead, the class &amp; grouping mark, this group’s voting link, the date,
           voted and not-voted numbers, and a footer naming you and PHANTOM.
         </p>
+        <label
+          className={`mt-3 flex cursor-pointer items-start gap-2.5 rounded-xl border px-3 py-2.5 transition ${onlyVoted ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+          data-testid={`cgm-election-only-votes-${election.id}`}
+        >
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 flex-none accent-emerald-600"
+            checked={onlyVoted}
+            disabled={Boolean(exporting) || votedCandidates === 0}
+            data-testid={`cgm-election-only-votes-input-${election.id}`}
+            onChange={(event) => { setOnlyVoted(event.target.checked); setExportNote(null); }}
+          />
+          <span className="min-w-0">
+            <span className="block text-[12px] font-black text-slate-800">Leave out candidates with no votes</span>
+            <span className="block text-[11px] font-medium text-slate-500">
+              {votedCandidates === 0
+                ? 'No candidate has a vote yet — the printed ballot would be empty, so this stays off.'
+                : onlyVoted
+                  ? `The printed ballot shows ${votedCandidates} of ${rows.length} candidate${rows.length === 1 ? '' : 's'}, and states how many were left out. Voted and not-voted numbers never change.`
+                  : `Off: all ${rows.length} candidate${rows.length === 1 ? '' : 's'} print, including the ${rows.length - votedCandidates} with no vote.`}
+            </span>
+          </span>
+        </label>
         <div className="mt-3 grid grid-cols-3 gap-2">
           <button type="button" disabled={Boolean(exporting)} className="cgm-primary-button w-full" data-testid={`cgm-election-print-${election.id}`} onClick={() => void runExport('print')}>
             <Printer className="mr-1 inline h-4 w-4" /> {exporting === 'print' ? 'Opening…' : 'Print'}

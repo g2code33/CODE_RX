@@ -1915,8 +1915,12 @@ let ballotGroupSize = 0;
     && Boolean(page.window.document.querySelector(`[data-testid="cgm-election-png-${ballotElectionId}"]`)),
     page.body().slice(0, 200));
 
+  // A disabled control silently swallows the click, so wait for it to be ready.
   const click = async (testid) => {
-    const button = await page.waitForElement(() => page.window.document.querySelector(`[data-testid="${testid}"]`), 15_000);
+    const button = await page.waitForElement(() => {
+      const element = page.window.document.querySelector(`[data-testid="${testid}"]`);
+      return element && !element.disabled ? element : null;
+    }, 20_000);
     button && button.click();
     return Boolean(button);
   };
@@ -1984,6 +1988,81 @@ let ballotGroupSize = 0;
   const noted = await page.waitForFor('Saved election-', 15_000);
   check('the record reports each export instead of failing silently', noted,
     `status=${exportStatus()} jsdom=${page.jsdomErrors.join(' | ').slice(0, 200)}`);
+
+  // --- "Leave out candidates with no votes" ---------------------------------
+  const zeroVoteCandidates = (printed.candidates || [])
+    .filter((row) => Number(row.votes || 0) === 0)
+    .map((row) => String(row.fullName || '').trim())
+    .filter(Boolean);
+  const votedCandidateNames = (printed.candidates || [])
+    .filter((row) => Number(row.votes || 0) > 0)
+    .map((row) => String(row.fullName || '').trim())
+    .filter(Boolean);
+  const filterToggle = page.window.document.querySelector(`[data-testid="cgm-election-only-votes-input-${ballotElectionId}"]`);
+  check('the print card offers a checkbox to leave out candidates with no votes, and it is OFF by default',
+    Boolean(filterToggle) && filterToggle.type === 'checkbox' && filterToggle.checked === false
+    && Boolean(page.window.document.querySelector(`[data-testid="cgm-election-only-votes-${ballotElectionId}"]`)),
+    `toggle=${Boolean(filterToggle)} checked=${filterToggle?.checked}`);
+
+  const lastFrameSheet = () => String(
+    [...page.window.document.querySelectorAll('[data-testid="cgm-print-frame"]')].pop()?.srcdoc || '');
+
+  filterToggle && filterToggle.click();
+  const armed = await page.waitForElement(
+    () => (filterToggle.checked ? filterToggle : null), 10_000);
+  check('ticking it is reflected in the form before anything is printed', Boolean(armed));
+
+  await click(`cgm-election-print-${ballotElectionId}`);
+  const filteredSheet = await page.waitForElement(
+    () => { const sheet = lastFrameSheet(); return /with a vote|none were left out/.test(sheet) ? sheet : null; }, 20_000)
+    .then((value) => String(value || ''));
+  check('the filtered print leaves the zero-vote candidates off the paper',
+    Boolean(filteredSheet) && votedCandidateNames.every((name) => filteredSheet.includes(name))
+    && zeroVoteCandidates.every((name) => !filteredSheet.includes(name)),
+    `voted=${votedCandidateNames.length} zero=${zeroVoteCandidates.length} sheet=${filteredSheet.slice(0, 120)}`);
+  check('the filtered paper says how many candidates it left out (it never silently shrinks)',
+    new RegExp(`Ballot — ${votedCandidateNames.length} of ${(printed.candidates || []).length} candidates? with a vote`).test(filteredSheet)
+    && new RegExp(`${zeroVoteCandidates.length} candidates? with no vote (is|are) not printed here`).test(filteredSheet),
+    filteredSheet.slice(0, 200));
+  check('voted and not-voted numbers are unchanged by the filter',
+    new RegExp(`<span class="v">${voted}</span>`).test(filteredSheet)
+    && new RegExp(`<span class="v">${groupSize - voted}</span>`).test(filteredSheet));
+
+  const pdfCountBefore = blobs.filter((blob) => blob.type === 'application/pdf').length;
+  await click(`cgm-election-pdf-${ballotElectionId}`);
+  const filteredPdfBlob = await page.waitForElement(() => {
+    const found = blobs.filter((blob) => blob.type === 'application/pdf');
+    return found.length > pdfCountBefore ? found[found.length - 1] : null;
+  }, 25_000);
+  const filteredPdf = filteredPdfBlob ? Buffer.from(await filteredPdfBlob.arrayBuffer()).toString('latin1') : '';
+  check('the filtered PDF drops the same candidates and keeps the letterhead and the footer',
+    Boolean(filteredPdfBlob) && zeroVoteCandidates.every((name) => !filteredPdf.includes(name))
+    && votedCandidateNames.every((name) => filteredPdf.includes(name))
+    && filteredPdf.includes('CODE Rx SOCIETY') && filteredPdf.includes('Prepared by PHANTOM')
+    && /with no vote (is|are) not printed here/.test(filteredPdf.replace(/\s+/g, ' ')),
+    `bytes=${filteredPdfBlob?.size || 0} zero=${zeroVoteCandidates.length}`);
+
+  // Always re-query: a re-render can replace the node a stale handle points at.
+  const toggleInput = () => page.window.document.querySelector(
+    `[data-testid="cgm-election-only-votes-input-${ballotElectionId}"]`);
+  // An export in flight disables the control (and a disabled input swallows the
+  // click), so wait for the tick AND for the card to be idle again.
+  const currentToggle = await page.waitForElement(() => {
+    const element = toggleInput();
+    return element && element.checked && !element.disabled ? element : null;
+  }, 15_000);
+  currentToggle && currentToggle.click();
+  const unticked = await page.waitForElement(() => {
+    const element = toggleInput();
+    return element && element.checked === false ? true : null;
+  }, 10_000);
+  await click(`cgm-election-print-${ballotElectionId}`);
+  const restoredSheet = await page.waitForElement(
+    () => { const sheet = lastFrameSheet(); return /every candidate on the ballot/.test(sheet) ? sheet : null; }, 25_000)
+    .then((value) => String(value || ''));
+  check('unticking it restores the full ballot (the choice is never sticky)',
+    Boolean(restoredSheet) && zeroVoteCandidates.every((name) => restoredSheet.includes(name)),
+    `unticked=${Boolean(unticked)} hadToggle=${Boolean(currentToggle)} sheet=${restoredSheet.slice(0, 160)}`);
 }
 
 // Restore the spec-default policies so the local database stays clean.

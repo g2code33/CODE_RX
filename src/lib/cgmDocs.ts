@@ -65,6 +65,12 @@ export interface ElectionRecordInput extends DocContext {
   election: any;
   candidates?: any[];
   participation?: any;
+  /**
+   * Leave candidates who received no vote off the printed ballot. The count of
+   * who was left out is always printed, so the paper never looks like the
+   * ballot was smaller than it was.
+   */
+  onlyVotedCandidates?: boolean;
 }
 
 /**
@@ -92,15 +98,36 @@ export const buildElectionRecordDoc = (input: ElectionRecordInput): PrintDoc => 
 
   const share = (votes: number) => (cast > 0 ? `${Math.round((votes / cast) * 100)}%` : '0%');
 
-  const ballotRows = [...rows]
-    .sort((a, b) => Number(b.votes || 0) - Number(a.votes || 0) || String(a.fullName).localeCompare(String(b.fullName)))
-    .map((row, index) => [
-      String(index + 1),
-      clean(row.fullName, 'Candidate'),
-      titleCase(row.status || 'nominated'),
-      String(Number(row.votes || 0)),
-      share(Number(row.votes || 0)),
-    ]);
+  // The ballot is ranked by votes, then by name. `onlyVotedCandidates` prints
+  // just the candidates who actually received a vote — and says how many were
+  // left out, because a printed ballot must never silently shrink.
+  const ranked = [...rows].sort((a, b) =>
+    Number(b.votes || 0) - Number(a.votes || 0) || String(a.fullName).localeCompare(String(b.fullName)));
+  const withVotes = ranked.filter((row) => Number(row.votes || 0) > 0);
+  const onlyVoted = Boolean(input.onlyVotedCandidates);
+  const printed = onlyVoted ? withVotes : ranked;
+  const leftOut = rows.length - printed.length;
+  const ballotRows = printed.map((row, index) => [
+    String(index + 1),
+    clean(row.fullName, 'Candidate'),
+    titleCase(row.status || 'nominated'),
+    String(Number(row.votes || 0)),
+    share(Number(row.votes || 0)),
+  ]);
+  const ballotHeading = onlyVoted
+    ? `Ballot — ${printed.length} of ${rows.length} candidate${rows.length === 1 ? '' : 's'} with a vote`
+    : `Ballot — ${rows.length} candidate${rows.length === 1 ? '' : 's'}`;
+  const ballotNote = [
+    `Votes counted: ${cast}. ${anonymity === 'public' ? 'This is a public roll — every vote is attributable.' : 'This is an anonymous ballot — no vote is linked back to a voter.'}`,
+    onlyVoted
+      ? (rows.length === printed.length
+        ? 'Every candidate on this ballot received at least one vote, so none were left out.'
+        : `${leftOut} candidate${leftOut === 1 ? '' : 's'} with no vote ${leftOut === 1 ? 'is' : 'are'} not printed here. The full ballot has ${rows.length}.`)
+      : null,
+  ].filter(Boolean).join(' ');
+  const emptyBallot: string[][] = onlyVoted
+    ? [['—', 'No candidate has a vote yet — this print leaves out the whole ballot', '—', '0', '0%']]
+    : [['—', 'No candidates stood in this election', '—', '0', '0%']];
 
   const sections: PrintSection[] = [
     {
@@ -122,11 +149,11 @@ export const buildElectionRecordDoc = (input: ElectionRecordInput): PrintDoc => 
     },
     {
       kind: 'table',
-      heading: `Ballot — ${rows.length} candidate${rows.length === 1 ? '' : 's'}`,
+      heading: ballotHeading,
       columns: ['#', 'Candidate', 'Status', 'Votes', 'Share'],
-      rows: ballotRows.length ? ballotRows : [['—', 'No candidates stood in this election', '—', '0', '0%']],
+      rows: ballotRows.length ? ballotRows : emptyBallot,
       align: ['right', 'left', 'left', 'right', 'right'],
-      note: `Votes counted: ${cast}. ${anonymity === 'public' ? 'This is a public roll — every vote is attributable.' : 'This is an anonymous ballot — no vote is linked back to a voter.'}`,
+      note: ballotNote,
     },
     {
       kind: 'keyvalues',
@@ -159,6 +186,9 @@ export const buildElectionRecordDoc = (input: ElectionRecordInput): PrintDoc => 
         'Every voter signed in with their own system-generated passkey — no one can cast another member’s vote.',
         `The ballot is ${anonymity === 'public' ? 'public: each vote is recorded against the voter' : 'anonymous: the count is kept, the voter is not'}.`,
         `Ties are settled by ${titleCase(election?.tieBreak || 'random')}, and the tie-break is recorded on the election.`,
+        onlyVoted
+          ? `This print lists only candidates with at least one vote; ${leftOut} with no vote ${leftOut === 1 ? 'is' : 'are'} left out.`
+          : 'This print lists every candidate on the ballot.',
         'This sheet was printed from the organizer’s own record — the numbers here are the numbers on screen.',
       ],
     },
@@ -190,7 +220,9 @@ export const buildElectionRecordDoc = (input: ElectionRecordInput): PrintDoc => 
       { label: 'Not voted', value: String(notVoted), hint: 'members' },
       { label: 'Turnout', value: `${turnout}%`, hint: 'voted ÷ eligible' },
       { label: 'Votes cast', value: String(cast), hint: 'on the paper' },
-      { label: 'Candidates', value: String(rows.length), hint: 'on the ballot' },
+      onlyVoted
+        ? { label: 'With a vote', value: String(printed.length), hint: `of ${rows.length} on the ballot` }
+        : { label: 'Candidates', value: String(rows.length), hint: 'on the ballot' },
     ],
     sections,
     links,

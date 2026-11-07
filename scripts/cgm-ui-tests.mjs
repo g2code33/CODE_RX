@@ -1628,6 +1628,38 @@ check('the print sheet is a real A4 document with a page footer on every page',
   /@page \{ size: A4/.test(printEngine) && /class="foot"/.test(printEngine)
   && /position: fixed/.test(printEngine));
 
+// ---------------------------------------------------------------------------
+// 38. "Leave out candidates with no votes" — an option, off by default
+// ---------------------------------------------------------------------------
+section('38. The printed ballot can leave out candidates with no votes');
+
+check('the export card offers the choice as a real checkbox, not a hidden default',
+  /data-testid=\{`cgm-election-only-votes-\$\{election\.id\}`\}/.test(workspace)
+  && /type="checkbox"/.test(workspace)
+  && /data-testid=\{`cgm-election-only-votes-input-\$\{election\.id\}`\}/.test(workspace));
+
+check('the choice starts OFF, so the default print is still the whole ballot',
+  /const \[onlyVoted, setOnlyVoted\] = useState\(false\)/.test(workspace));
+
+check('the choice is carried into the document builder on every output',
+  /onlyVotedCandidates: onlyVoted/.test(workspace)
+  && /const buildDoc = \(\) => buildElectionRecordDoc\(\{[\s\S]{0,400}?onlyVotedCandidates: onlyVoted/.test(workspace)
+  && /printPrintDoc\(document_\)/.test(workspace) && /downloadPrintPdf\(document_\)/.test(workspace)
+  && /downloadPrintPng\(document_\)/.test(workspace));
+
+check('the control explains itself: how many print, how many are left out, and that the counts hold',
+  /Leave out candidates with no votes/.test(workspace)
+  && /The printed ballot shows \$\{votedCandidates\} of \$\{rows\.length\}/.test(workspace)
+  && /Voted and not-voted numbers never change/.test(workspace));
+
+check('with no votes cast the option is disabled rather than printing an empty ballot',
+  /disabled=\{Boolean\(exporting\) \|\| votedCandidates === 0\}/.test(workspace)
+  && /No candidate has a vote yet/.test(workspace));
+
+check('the export note reports the ballot scope it just printed',
+  /Ballot: \$\{votedCandidates\} of \$\{rows\.length\}/.test(workspace)
+  && /left out and counted/.test(workspace));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

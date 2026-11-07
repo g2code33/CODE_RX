@@ -6022,6 +6022,129 @@ if (printModule) {
 }
 
 // ---------------------------------------------------------------------------
+// 51. "Only candidates with a vote" — a deliberate, printed choice
+// ---------------------------------------------------------------------------
+section('51. The printed ballot can leave out candidates with no votes');
+
+const mixedCandidates = [
+  { id: 1, fullName: 'Bonsu, Emmanuel Nana Asare', status: 'active', votes: 3 },
+  { id: 2, fullName: 'Zero Voter', status: 'active', votes: 0 },
+  { id: 3, fullName: 'Oppong, Emmanuella', status: 'active', votes: 1 },
+  { id: 4, fullName: 'Another Zero', status: 'active', votes: 0 },
+];
+const mixedBase = {
+  election: sampleElection, candidates: mixedCandidates,
+  participation: { voted: 4, groupSize: 13, turnout: 31 },
+  className: 'RX 30 CLASS B', classCode: 'CRX-CLS-0002', organizer: 'PHANTOM',
+  origin: 'https://coderxsociety.pages.dev',
+};
+const fullBallotText = (doc) => {
+  const table = doc.sections.find((section) => section.kind === 'table');
+  return table.rows.map((row) => row[1]).join(' | ');
+};
+const fullDoc = docLib.buildElectionRecordDoc({ ...mixedBase });
+const votesOnlyDoc = docLib.buildElectionRecordDoc({ ...mixedBase, onlyVotedCandidates: true });
+const votesOnlyTable = votesOnlyDoc.sections.find((section) => section.kind === 'table');
+const fullTable = fullDoc.sections.find((section) => section.kind === 'table');
+
+check('51.1 — OFF by default: the full ballot prints, zero-vote candidates included',
+  fullTable.rows.length === 4 && /Zero Voter/.test(fullBallotText(fullDoc))
+  && /Another Zero/.test(fullBallotText(fullDoc))
+  && /Ballot — 4 candidates/.test(fullTable.heading)
+  && fullDoc.stats.some((stat) => stat.label === 'Candidates' && stat.value === '4'),
+  fullTable.heading);
+check('51.2 — ON: only the candidates who received a vote are printed',
+  votesOnlyTable.rows.length === 2
+  && votesOnlyTable.rows.map((row) => row[1]).join(' | ') === 'Bonsu, Emmanuel Nana Asare | Oppong, Emmanuella'
+  && !/Zero Voter/.test(fullBallotText(votesOnlyDoc)) && !/Another Zero/.test(fullBallotText(votesOnlyDoc)),
+  fullBallotText(votesOnlyDoc));
+check('51.3 — the printed rows stay ranked by votes (highest first) and are renumbered 1..n',
+  votesOnlyTable.rows[0][0] === '1' && votesOnlyTable.rows[1][0] === '2'
+  && votesOnlyTable.rows[0][3] === '3' && votesOnlyTable.rows[1][3] === '1',
+  JSON.stringify(votesOnlyTable.rows.map((row) => row.slice(0, 4))));
+check('51.4 — the heading and the note say how many were left out (a print never silently shrinks)',
+  /Ballot — 2 of 4 candidates with a vote/.test(votesOnlyTable.heading)
+  && /2 candidates with no vote are not printed here\. The full ballot has 4\./.test(votesOnlyTable.note),
+  `${votesOnlyTable.heading} || ${votesOnlyTable.note}`);
+check('51.5 — shares are still shares of every vote cast, so the maths never shifts',
+  votesOnlyTable.rows[0][4] === '75%' && votesOnlyTable.rows[1][4] === '25%',
+  votesOnlyTable.rows.map((row) => row[4]).join(','));
+check('51.6 — voted, not voted and turnout are untouched by the filter',
+  JSON.stringify(fullDoc.stats.slice(0, 4)) === JSON.stringify(votesOnlyDoc.stats.slice(0, 4))
+  && votesOnlyDoc.stats.some((stat) => stat.label === 'Voted' && stat.value === '4')
+  && votesOnlyDoc.stats.some((stat) => stat.label === 'Not voted' && stat.value === '9'),
+  JSON.stringify(votesOnlyDoc.stats));
+check('51.7 — the headline swaps to "With a vote: n of m" so the paper cannot be misread',
+  votesOnlyDoc.stats.some((stat) => stat.label === 'With a vote' && stat.value === '2' && /of 4/.test(stat.hint))
+  && !votesOnlyDoc.stats.some((stat) => stat.label === 'Candidates'),
+  JSON.stringify(votesOnlyDoc.stats));
+check('51.8 — the "how this election was run" lines state the filter',
+  votesOnlyDoc.sections.find((section) => section.kind === 'lines').lines
+    .some((line) => /only candidates with at least one vote/.test(line) && /2 with no vote are left out/.test(line))
+  && fullDoc.sections.find((section) => section.kind === 'lines').lines
+    .some((line) => /every candidate on the ballot/.test(line)));
+check('51.9 — when nobody has a vote the filter prints a plain sentence, never a blank table',
+  (() => {
+    const noneDoc = docLib.buildElectionRecordDoc({
+      ...mixedBase,
+      candidates: mixedCandidates.map((row) => ({ ...row, votes: 0 })),
+      onlyVotedCandidates: true,
+    });
+    const table = noneDoc.sections.find((section) => section.kind === 'table');
+    return table.rows.length === 1
+      && /No candidate has a vote yet/.test(table.rows[0][1])
+      && noneDoc.stats.some((stat) => stat.label === 'With a vote' && stat.value === '0');
+  })());
+check('51.10 — a ballot where everybody voted still says so instead of a left-out count',
+  (() => {
+    const allVoted = docLib.buildElectionRecordDoc({
+      ...mixedBase,
+      candidates: mixedCandidates.map((row) => ({ ...row, votes: Math.max(1, Number(row.votes || 0)) })),
+      onlyVotedCandidates: true,
+    });
+    const table = allVoted.sections.find((section) => section.kind === 'table');
+    return table.rows.length === 4 && /none were left out/.test(table.note);
+  })());
+if (printModule) {
+  const votesPdf = Buffer.from(printModule.buildPrintPdf(votesOnlyDoc, null)).toString('latin1');
+  const fullPdf = Buffer.from(printModule.buildPrintPdf(fullDoc, null)).toString('latin1');
+  check('51.11 — the PDF carries only the voted candidates, and says how many were left out',
+    votesPdf.includes('Bonsu, Emmanuel Nana Asare') && votesPdf.includes('Oppong, Emmanuella')
+    && !votesPdf.includes('Zero Voter') && !votesPdf.includes('Another Zero')
+    && /2 candidates with no vote are not printed/.test(votesPdf.replace(/\s+/g, ' '))
+    && votesPdf.includes('Prepared by PHANTOM'),
+    `leftOutMentions=${(votesPdf.match(/not printed here/g) || []).length}`);
+  check('51.12 — the unfiltered PDF still prints the whole ballot (the option is not sticky)',
+    fullPdf.includes('Zero Voter') && fullPdf.includes('Another Zero'));
+  const votesHtml = printModule.buildPrintHtml(votesOnlyDoc);
+  check('51.13 — the print sheet honours the same filter and keeps the letterhead',
+    /Oppong, Emmanuella/.test(votesHtml) && !/Zero Voter/.test(votesHtml)
+    && /CODE%20RX11\.png/.test(votesHtml) && /CGP\.jpg/.test(votesHtml) && /Prepared by PHANTOM/.test(votesHtml));
+  // The PNG path draws the filtered table too.
+  const painted = [];
+  const makeContext = () => ({
+    font: '', fillStyle: '', strokeStyle: '', textAlign: 'left', textBaseline: 'alphabetic',
+    measureText: (text) => ({ width: String(text ?? '').length * 7 }),
+    fillRect() {}, strokeRect() {}, fillText: (text) => painted.push(String(text)),
+    beginPath() {}, moveTo() {}, lineTo() {}, arcTo() {}, closePath() {},
+    fill() {}, stroke() {}, save() {}, restore() {}, clip() {}, drawImage() {},
+  });
+  const nodeDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: makeContext, toBlob: () => {}, toDataURL: () => 'data:image/jpeg;base64,' }) };
+  try {
+    printModule.renderPrintCanvas(votesOnlyDoc, {});
+    // The canvas wraps long text into several fillText calls, so the sheet is
+    // read as one page of words rather than one call at a time.
+    const sheetText = painted.join(' ').replace(/\s+/g, ' ');
+    check('51.14 — the PNG draws the filtered ballot, with the left-out count on the sheet',
+      /Oppong, Emmanuella/.test(sheetText) && !/Zero Voter/.test(sheetText)
+      && /2 candidates with no vote are not printed/.test(sheetText)
+      && /Prepared by PHANTOM · Code Rx Society oversight/.test(sheetText),
+      sheetText.slice(0, 200));
+  } finally { globalThis.document = nodeDocument; }
+}
+
+// ---------------------------------------------------------------------------
 
 console.log(`\nCGM TESTS: ${passed} passed, ${failures.length} failed`);
 
