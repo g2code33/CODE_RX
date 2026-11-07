@@ -194,6 +194,33 @@ const boot = async (address, { memberToken = null, memberUser = null, studentSes
   return { window, body, wait, waitFor, waitForFor: waitFor, jsdomErrors, inputByLabel, setNativeValue, buttonByText, submitButtonByText, waitForElement };
 };
 
+/**
+ * Picks an activity in the workspace picker. The picker only carries the
+ * activities the class list has already returned, so a select made before the
+ * options arrive silently keeps the empty value — wait for the option itself.
+ */
+const chooseActivity = async (page, activityId, timeoutMs = 25_000) => {
+  const select = await page.waitForElement(() => {
+    const element = page.window.document.querySelector('select[aria-label="Choose activity"]');
+    if (!element) return null;
+    return [...element.options].some((option) => option.value === String(activityId)) ? element : null;
+  }, timeoutMs);
+  if (!select) return false;
+  Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set.call(select, String(activityId));
+  select.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  return true;
+};
+
+/** Switches the workspace to a class before touching its activities. */
+const switchClass = async (page, classId, timeoutMs = 20_000) => {
+  const select = await page.waitForElement(
+    () => page.window.document.querySelector('select[aria-label="Switch class"]'), timeoutMs);
+  if (!select) return false;
+  Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set.call(select, String(classId));
+  select.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  return true;
+};
+
 // ---------------------------------------------------------------------------
 // 1. Organizer workspace: My Classes + class creation through the UI
 // ---------------------------------------------------------------------------
@@ -583,15 +610,16 @@ let wsClass = null;
   await api('POST', `/api/cgm/classes/${wsClass.classId}/entry-password`, { entryPassword: 'rechoose-entry' }, phantomToken);
 
   const page = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  // Be explicit about BOTH pickers — the fixture's class first, then its own
+  // activity — so the board can never be read off a different class.
+  await switchClass(page, wsClass.classId);
   const groupsNav = page.buttonByText('Groups');
   groupsNav && groupsNav.click();
   check('the organizer reaches the Groups page', await page.waitForFor('Choose an activity', 20_000));
-  const chooser = page.window.document.querySelector('select[aria-label="Choose activity"]');
-  const selectSetter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
-  selectSetter.call(chooser, String(wsActivityId));
-  chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  const choseActivity = await chooseActivity(page, wsActivityId);
   check('the planned groups appear after publishing (defined at publish time)',
-    await page.waitForFor('Group 1', 20_000) && await page.waitForFor('Group 3', 5_000));
+    choseActivity && await page.waitForFor('Group 1', 20_000) && await page.waitForFor('Group 3', 5_000),
+    `chose=${choseActivity} body=${page.body().slice(0, 160)}`);
   // The board is a status board: each card is the group name plus its seat
   // count — no member lists — and the whole card opens the workspace.
   const boardCards = [...page.window.document.querySelectorAll('[data-testid="cgm-groups-board"] [data-testid="cgm-open-group"]')];
@@ -1871,20 +1899,10 @@ let ballotGroupSize = 0;
   globalThis.Image = FakeImage;
   page.window.Image = FakeImage;
 
-  const switcher = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Switch class"]'));
-  if (switcher) {
-    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
-    setter.call(switcher, String(ballotClassId));
-    switcher.dispatchEvent(new page.window.Event('change', { bubbles: true }));
-  }
+  await switchClass(page, ballotClassId);
   const electionsNav = await page.waitForElement(() => page.buttonByText('Elections'));
   electionsNav && electionsNav.click();
-  const chooser = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Choose activity"]'));
-  if (chooser) {
-    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
-    setter.call(chooser, String(ballotActivityId));
-    chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
-  }
+  await chooseActivity(page, ballotActivityId);
   const recordRow = await page.waitForElement(
     () => page.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 25_000);
   recordRow && recordRow.click();
