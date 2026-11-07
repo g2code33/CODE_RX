@@ -5911,21 +5911,57 @@ const electionDoc = docLib.buildElectionRecordDoc({
 check('50.1 — the election document is titled by the record and letterheaded by the class',
   electionDoc.title === 'Group leadership election' && electionDoc.className === 'RX 30 CLASS B'
   && electionDoc.classCode === 'CRX-CLS-0002' && electionDoc.kind === 'Election record');
-check('50.2 — VOTED and NOT VOTED are both headline numbers (never a turnout without its halves)',
-  electionDoc.stats.some((stat) => stat.label === 'Voted' && stat.value === '4')
+check('50.2 — VOTED and NOT VOTED are both headline numbers, and nothing is lost to fit a phone',
+  electionDoc.stats.length === 3
+  && electionDoc.stats.some((stat) => stat.label === 'Voted' && stat.value === '4' && /13/.test(stat.hint))
   && electionDoc.stats.some((stat) => stat.label === 'Not voted' && stat.value === '9')
-  && electionDoc.stats.some((stat) => stat.label === 'Turnout' && stat.value === '31%')
-  && electionDoc.stats.some((stat) => stat.label === 'Eligible' && stat.value === '13'),
+  && electionDoc.stats.some((stat) => stat.label === 'Turnout' && stat.value === '31%' && /4 votes/.test(stat.hint)),
   JSON.stringify(electionDoc.stats));
-const turnoutSection = electionDoc.sections.find((section) => section.heading === 'Turnout — voted and not voted');
-check('50.3 — the turnout block spells out voted, not voted and the counted ballots',
-  Boolean(turnoutSection) && turnoutSection.rows.some((row) => row[0] === 'Voted' && /4 of 13/.test(row[1]))
-  && turnoutSection.rows.some((row) => row[0] === 'Not voted' && /9/.test(row[1])));
-const ballotSection = electionDoc.sections.find((section) => section.kind === 'table');
-check('50.4 — the ballot prints every candidate with votes and share, highest first',
-  ballotSection.rows.length === 3 && ballotSection.rows[0][1] === 'Bonsu, Emmanuel Nana Asare'
-  && ballotSection.rows[0][3] === '2' && ballotSection.rows[0][4] === '50%',
+check('50.3 — the result is the FIRST block on the sheet, and it names the leader plainly',
+  electionDoc.sections[0].kind === 'hero'
+  && /Voting|counted so far/i.test(electionDoc.sections[0].label)
+  && electionDoc.sections[0].value === 'Bonsu, Emmanuel Nana Asare'
+  && /2 of 4 votes/.test(electionDoc.sections[0].detail),
+  JSON.stringify(electionDoc.sections[0]));
+const ballotSection = electionDoc.sections.find((section) => section.kind === 'bars');
+check('50.4 — the ballot is a ranked bar list with votes and share, highest first',
+  ballotSection.rows.length === 3 && ballotSection.rows[0].label === 'Bonsu, Emmanuel Nana Asare'
+  && ballotSection.rows[0].value === '2 votes' && ballotSection.rows[0].share === '50%'
+  && ballotSection.rows[0].ratio === 0.5
+  && /Ballot — 3 candidates/.test(ballotSection.heading),
   JSON.stringify(ballotSection.rows[0]));
+check('50.4b — a phone-friendly sheet stays short: no duplicate turnout/result tables',
+  electionDoc.sections.filter((section) => section.kind === 'keyvalues').length === 1
+  && electionDoc.sections.filter((section) => section.kind === 'table').length === 0
+  && electionDoc.sections.length <= 3,
+  electionDoc.sections.map((section) => section.kind).join(','));
+check('50.4c — a closed election prints the winner, with their votes and share',
+  (() => {
+    const closed = docLib.buildElectionRecordDoc({
+      election: {
+        ...sampleElection, status: 'closed',
+        results: { outcome: { winner: 1, announced: true, tie: false, resolved: true, tiedCandidateIds: [] } },
+      },
+      candidates: sampleCandidates, participation: { voted: 4, groupSize: 13, turnout: 31 },
+      className: 'RX 30 CLASS B', organizer: 'PHANTOM',
+    });
+    return /Winner/.test(closed.sections[0].label) && closed.sections[0].value === 'Bonsu, Emmanuel Nana Asare'
+      && /2 of 4 votes · 50%/.test(closed.sections[0].detail) && closed.sections[0].tone === 'good';
+  })());
+check('50.4d — a tie prints the tied names instead of inventing a winner',
+  (() => {
+    const tie = docLib.buildElectionRecordDoc({
+      election: {
+        ...sampleElection, status: 'closed',
+        results: { outcome: { winner: null, announced: false, tie: true, resolved: false, tiedCandidateIds: [2, 3] } },
+      },
+      candidates: sampleCandidates, participation: { voted: 4, groupSize: 13, turnout: 31 },
+      className: 'RX 30 CLASS B', organizer: 'PHANTOM',
+    });
+    return /Tie/.test(tie.sections[0].label)
+      && /Oppong, Emmanuella/.test(tie.sections[0].value) && /Bonney, Benjamin Abeka/.test(tie.sections[0].value)
+      && !/Bonsu/.test(tie.sections[0].value);
+  })());
 check('50.5 — the voting link and the date travel with the paper',
   electionDoc.links.some((link) => link.url === 'https://coderxsociety.pages.dev/#student-vote/77')
   && docLib.buildElectionRecordDoc({ election: sampleElection, candidates: [], participation: {}, className: 'C', organizer: 'PHANTOM' })
@@ -6038,72 +6074,74 @@ const mixedBase = {
   className: 'RX 30 CLASS B', classCode: 'CRX-CLS-0002', organizer: 'PHANTOM',
   origin: 'https://coderxsociety.pages.dev',
 };
-const fullBallotText = (doc) => {
-  const table = doc.sections.find((section) => section.kind === 'table');
-  return table.rows.map((row) => row[1]).join(' | ');
-};
+const ballotOf = (doc) => doc.sections.find((section) => section.kind === 'bars');
+const fullBallotText = (doc) => ballotOf(doc).rows.map((row) => row.label).join(' | ');
 const fullDoc = docLib.buildElectionRecordDoc({ ...mixedBase });
 const votesOnlyDoc = docLib.buildElectionRecordDoc({ ...mixedBase, onlyVotedCandidates: true });
-const votesOnlyTable = votesOnlyDoc.sections.find((section) => section.kind === 'table');
-const fullTable = fullDoc.sections.find((section) => section.kind === 'table');
+const votesOnlyBallot = ballotOf(votesOnlyDoc);
+const fullBallot = ballotOf(fullDoc);
 
 check('51.1 — OFF by default: the full ballot prints, zero-vote candidates included',
-  fullTable.rows.length === 4 && /Zero Voter/.test(fullBallotText(fullDoc))
+  fullBallot.rows.length === 4 && /Zero Voter/.test(fullBallotText(fullDoc))
   && /Another Zero/.test(fullBallotText(fullDoc))
-  && /Ballot — 4 candidates/.test(fullTable.heading)
-  && fullDoc.stats.some((stat) => stat.label === 'Candidates' && stat.value === '4'),
-  fullTable.heading);
+  && /Ballot — 4 candidates/.test(fullBallot.heading),
+  fullBallot.heading);
 check('51.2 — ON: only the candidates who received a vote are printed',
-  votesOnlyTable.rows.length === 2
-  && votesOnlyTable.rows.map((row) => row[1]).join(' | ') === 'Bonsu, Emmanuel Nana Asare | Oppong, Emmanuella'
+  votesOnlyBallot.rows.length === 2
+  && votesOnlyBallot.rows.map((row) => row.label).join(' | ') === 'Bonsu, Emmanuel Nana Asare | Oppong, Emmanuella'
   && !/Zero Voter/.test(fullBallotText(votesOnlyDoc)) && !/Another Zero/.test(fullBallotText(votesOnlyDoc)),
   fullBallotText(votesOnlyDoc));
-check('51.3 — the printed rows stay ranked by votes (highest first) and are renumbered 1..n',
-  votesOnlyTable.rows[0][0] === '1' && votesOnlyTable.rows[1][0] === '2'
-  && votesOnlyTable.rows[0][3] === '3' && votesOnlyTable.rows[1][3] === '1',
-  JSON.stringify(votesOnlyTable.rows.map((row) => row.slice(0, 4))));
+check('51.3 — the printed rows stay ranked by votes (highest first) and carry their own count',
+  votesOnlyBallot.rows[0].value === '3 votes' && votesOnlyBallot.rows[1].value === '1 vote',
+  JSON.stringify(votesOnlyBallot.rows.map((row) => row.label + ':' + row.value)));
 check('51.4 — the heading and the note say how many were left out (a print never silently shrinks)',
-  /Ballot — 2 of 4 candidates with a vote/.test(votesOnlyTable.heading)
-  && /2 candidates with no vote are not printed here\. The full ballot has 4\./.test(votesOnlyTable.note),
-  `${votesOnlyTable.heading} || ${votesOnlyTable.note}`);
+  /Ballot — 2 of 4 with a vote/.test(votesOnlyBallot.heading)
+  && /2 candidates with no vote are not printed here\. The full ballot has 4\./.test(votesOnlyBallot.note),
+  `${votesOnlyBallot.heading} || ${votesOnlyBallot.note}`);
 check('51.5 — shares are still shares of every vote cast, so the maths never shifts',
-  votesOnlyTable.rows[0][4] === '75%' && votesOnlyTable.rows[1][4] === '25%',
-  votesOnlyTable.rows.map((row) => row[4]).join(','));
+  votesOnlyBallot.rows[0].share === '75%' && votesOnlyBallot.rows[1].share === '25%'
+  && votesOnlyBallot.rows[0].ratio === 0.75 && votesOnlyBallot.rows[1].ratio === 0.25,
+  votesOnlyBallot.rows.map((row) => row.share).join(','));
 check('51.6 — voted, not voted and turnout are untouched by the filter',
-  JSON.stringify(fullDoc.stats.slice(0, 4)) === JSON.stringify(votesOnlyDoc.stats.slice(0, 4))
+  JSON.stringify(fullDoc.stats) === JSON.stringify(votesOnlyDoc.stats)
   && votesOnlyDoc.stats.some((stat) => stat.label === 'Voted' && stat.value === '4')
   && votesOnlyDoc.stats.some((stat) => stat.label === 'Not voted' && stat.value === '9'),
   JSON.stringify(votesOnlyDoc.stats));
-check('51.7 — the headline swaps to "With a vote: n of m" so the paper cannot be misread',
-  votesOnlyDoc.stats.some((stat) => stat.label === 'With a vote' && stat.value === '2' && /of 4/.test(stat.hint))
-  && !votesOnlyDoc.stats.some((stat) => stat.label === 'Candidates'),
-  JSON.stringify(votesOnlyDoc.stats));
-check('51.8 — the "how this election was run" lines state the filter',
-  votesOnlyDoc.sections.find((section) => section.kind === 'lines').lines
-    .some((line) => /only candidates with at least one vote/.test(line) && /2 with no vote are left out/.test(line))
-  && fullDoc.sections.find((section) => section.kind === 'lines').lines
-    .some((line) => /every candidate on the ballot/.test(line)));
-check('51.9 — when nobody has a vote the filter prints a plain sentence, never a blank table',
+check('51.7 — the ballot heading carries the "n of m" so the paper cannot be misread',
+  /2 of 4/.test(votesOnlyBallot.heading) && !/of 4 candidates with a vote$/.test(votesOnlyBallot.heading)
+  && votesOnlyDoc.stats.length === 3,
+  votesOnlyBallot.heading);
+check('51.8 — the ballot note states the filter plainly',
+  /only candidates with at least one vote|with no vote are not printed here/.test(votesOnlyBallot.note)
+  && /Every candidate on this ballot received at least one vote/.test(
+    (() => {
+      const allVoted = docLib.buildElectionRecordDoc({
+        ...mixedBase,
+        candidates: mixedCandidates.map((row) => ({ ...row, votes: Math.max(1, Number(row.votes || 0)) })),
+        onlyVotedCandidates: true,
+      });
+      return allVoted.sections.find((section) => section.kind === 'bars').note;
+    })()),
+  votesOnlyBallot.note);
+check('51.9 — when nobody has a vote the filter prints a plain sentence, never a blank list',
   (() => {
     const noneDoc = docLib.buildElectionRecordDoc({
       ...mixedBase,
       candidates: mixedCandidates.map((row) => ({ ...row, votes: 0 })),
       onlyVotedCandidates: true,
     });
-    const table = noneDoc.sections.find((section) => section.kind === 'table');
-    return table.rows.length === 1
-      && /No candidate has a vote yet/.test(table.rows[0][1])
-      && noneDoc.stats.some((stat) => stat.label === 'With a vote' && stat.value === '0');
+    const ballot = noneDoc.sections.find((section) => section.kind === 'bars');
+    return ballot.rows.length === 1 && /No candidates stood/.test(ballot.rows[0].label)
+      && noneDoc.sections[0].value === 'No votes counted yet';
   })());
-check('51.10 — a ballot where everybody voted still says so instead of a left-out count',
+check('51.10 — a ballot where everybody voted says so instead of reporting a left-out count',
   (() => {
     const allVoted = docLib.buildElectionRecordDoc({
       ...mixedBase,
       candidates: mixedCandidates.map((row) => ({ ...row, votes: Math.max(1, Number(row.votes || 0)) })),
       onlyVotedCandidates: true,
     });
-    const table = allVoted.sections.find((section) => section.kind === 'table');
-    return table.rows.length === 4 && /none were left out/.test(table.note);
+    return allVoted.sections.find((section) => section.kind === 'bars').rows.length === 4;
   })());
 if (printModule) {
   const votesPdf = Buffer.from(printModule.buildPrintPdf(votesOnlyDoc, null)).toString('latin1');
@@ -6143,6 +6181,47 @@ if (printModule) {
       sheetText.slice(0, 200));
   } finally { globalThis.document = nodeDocument; }
 }
+
+// ---------------------------------------------------------------------------
+// 52. The organizer's position lives in the address (reload keeps the tab)
+// ---------------------------------------------------------------------------
+section('52. Reloading a tab reopens that tab, not the overview');
+
+await build({
+  entryPoints: [path.join(ROOT, 'src/lib/cgmNav.ts')],
+  outfile: path.join(CACHE, 'cgmNav.mjs'), bundle: true, format: 'esm', logLevel: 'silent',
+});
+const navLib = await import(path.join(CACHE, 'cgmNav.mjs'));
+
+check('52.1 — the plain workspace link still means the overview',
+  navLib.parseWorkspaceNav('#class-groups') === null
+  && navLib.buildWorkspaceHash({}) === '#class-groups/w/overview');
+check('52.2 — a tab round-trips: area, class and activity survive being written and read',
+  (() => {
+    const hash = navLib.buildWorkspaceHash({ area: 'elections', classId: 12, activityId: 7 });
+    const parsed = navLib.parseWorkspaceNav(hash);
+    return hash === '#class-groups/w/elections?class=12&activity=7'
+      && parsed.area === 'elections' && parsed.classId === 12 && parsed.activityId === 7;
+  })());
+check('52.3 — a tab alone round-trips (no class or activity picked yet)',
+  (() => {
+    const parsed = navLib.parseWorkspaceNav(navLib.buildWorkspaceHash({ area: 'students' }));
+    return parsed.area === 'students' && parsed.classId === null && parsed.activityId === null;
+  })());
+check('52.4 — the Students tab can never be mistaken for the student PORTAL',
+  // App routes '#class-groups/student' to the portal; the workspace tab is 'students'.
+  navLib.buildWorkspaceHash({ area: 'students' }).startsWith('#class-groups/w/')
+  && !navLib.buildWorkspaceHash({ area: 'students' }).includes('#class-groups/student'));
+check('52.5 — rubbish in the address is ignored, never a crash',
+  (() => {
+    const parsed = navLib.parseWorkspaceNav('#class-groups/w/elections?class=abc&activity=-4');
+    return parsed.area === 'elections' && parsed.classId === null && parsed.activityId === null;
+  })()
+  && navLib.parseWorkspaceNav('#something-else') === null
+  && navLib.parseWorkspaceNav('') === null);
+check('52.6 — a missing area falls back to the overview rather than a blank page',
+  navLib.parseWorkspaceNav('#class-groups/w/?class=3').area === navLib.DEFAULT_AREA
+  && navLib.buildWorkspaceHash({ area: '' }) === '#class-groups/w/overview');
 
 // ---------------------------------------------------------------------------
 

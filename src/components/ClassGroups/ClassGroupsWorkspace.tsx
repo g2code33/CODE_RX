@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, Link2, ListChecks,
   Megaphone, Plus, Recycle, RefreshCw, Search, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
@@ -11,6 +11,7 @@ import {
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
 import { downloadPrintPdf, downloadPrintPng, printPrintDoc } from '../../lib/cgmPrint';
 import { buildElectionRecordDoc, type DocContext } from '../../lib/cgmDocs';
+import { DEFAULT_AREA, parseWorkspaceNav, rememberWorkspaceNav } from '../../lib/cgmNav';
 import { useCgmNoZoom } from './noZoom';
 import { appDialog } from '../AppDialog';
 import { RecentItems } from '../RecentItems';
@@ -69,8 +70,21 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
   useCgmNoZoom();
   const [status, setStatus] = useState<any>(null);
   const [classes, setClasses] = useState<any[]>([]);
-  const [activeClassId, setActiveClassId] = useState<number | null>(null);
-  const [area, setArea] = useState<Area>('overview');
+  // Where the organizer is lives in the address (see lib/cgmNav), so a phone
+  // reload, a pull-to-refresh or a tap on the app's own Refresh reopens the
+  // SAME tab — never the overview.
+  const [nav] = useState(() => parseWorkspaceNav(typeof window !== 'undefined' ? window.location.hash : '') || { area: DEFAULT_AREA, classId: null, activityId: null });
+  const [activeClassId, setActiveClassId] = useState<number | null>(nav.classId);
+  const [area, setAreaState] = useState<Area>(() => {
+    const key = String(nav.area || DEFAULT_AREA);
+    return (AREAS.some(([value]) => value === key) ? key : DEFAULT_AREA) as Area;
+  });
+  // The activity chosen inside an area (elections, groups, attendance…) is part
+  // of the position too: reopening the tab should reopen the same activity.
+  const [activityId, setActivityId] = useState<number | null>(nav.activityId);
+  // Bumped by Refresh: every area re-reads its data from the server.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   // A request from the Groups page to edit an activity in its own settings —
   // group counts and target sizes live ONLY in the activity editor, so every
   // change happens there and reflects uniformly here.
@@ -105,6 +119,58 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  // Write the position down whenever it changes…
+  useEffect(() => {
+    rememberWorkspaceNav({ area, classId: activeClassId, activityId });
+  }, [area, activeClassId, activityId]);
+
+  // …and read it back if the address changes underneath us (Back, a pasted
+  // link, or the browser restoring the page after a reload).
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = parseWorkspaceNav(window.location.hash);
+      if (!next) return;
+      if (AREAS.some(([value]) => value === next.area)) setAreaState(next.area as Area);
+      setActiveClassId(next.classId);
+      setActivityId(next.activityId);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  // Switching class drops the activity: an id from another class would load
+  // nothing (and look like an empty tab).
+  const previousClass = useRef<number | null>(activeClassId);
+  useEffect(() => {
+    if (previousClass.current !== activeClassId) {
+      setActivityId(null);
+      rememberWorkspaceNav({ area, classId: activeClassId, activityId: null });
+      previousClass.current = activeClassId;
+    }
+  }, [activeClassId, area]);
+
+  // Changing tab keeps the class; a new position is remembered immediately.
+  const setArea = (next: Area) => {
+    setAreaState(next);
+    setActivityId(null);
+    rememberWorkspaceNav({ area: next, classId: activeClassId, activityId: null });
+  };
+  const pickActivity = (next: number | null) => {
+    setActivityId(next);
+    rememberWorkspaceNav({ area, classId: activeClassId, activityId: next });
+  };
+  /**
+   * Refresh means refresh: re-read the workspace AND make the open tab re-read
+   * its own data. It never changes the tab, the class or the activity.
+   */
+  const refreshEverything = useCallback(async () => {
+    setRefreshing(true);
+    try { await refresh(); } finally {
+      setRefreshNonce((value) => value + 1);
+      setRefreshing(false);
+    }
+  }, [refresh]);
 
   const activeClass = classes.find((entry) => Number(entry.id) === activeClassId) || null;
   const permissions = new Set<string>(activeClass?.permissions || []);
@@ -180,7 +246,18 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
               {classes.map((entry) => <option key={entry.id} value={Number(entry.id)}>{entry.name}</option>)}
             </select>
           )}
-          <button type="button" className="mini-button" onClick={() => { void refresh(); }} aria-label="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
+          <button
+            type="button"
+            className="mini-button"
+            data-testid="cgm-refresh"
+            onClick={() => { void refreshEverything(); }}
+            disabled={refreshing}
+            aria-busy={refreshing}
+            aria-label={refreshing ? 'Refreshing' : 'Refresh this page'}
+            title="Refresh this page — you stay where you are"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
           <button
             type="button"
             className="mini-button"
@@ -221,6 +298,9 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
         </nav>
 
         <main className="cgm-main">
+          {/* Refreshing remounts the open tab so it re-reads the server, while the
+              tab, the class and the chosen activity stay exactly where they were. */}
+          <div key={`${area}-${activeClassId ?? 0}-${refreshNonce}`} data-testid="cgm-area-body" data-refresh-nonce={refreshNonce}>
           {applyOpen && <OrganizerApplication status={status} onClose={() => setApplyOpen(false)} onDone={() => { setApplyOpen(false); void refresh(); }} />}
 
           {!activeClass && !showApplication && area === 'overview' && (
@@ -242,7 +322,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'passkeys' && can('view_roster') && <PasskeysArea classId={Number(activeClass.id)} canEdit={can('edit_roster')} className={String(activeClass.name || 'Class')} onChanged={() => void refresh()} />}
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} openActivityId={editActivityRequest} onEditConsumed={() => setEditActivityRequest(null)} />}
-          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} onGroupFocus={(open) => setNavCollapsed(open)} />}
+          {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} onGroupFocus={(open) => setNavCollapsed(open)} initialActivityId={activityId} onActivityChange={pickActivity} />}
           {activeClass && area === 'elections' && can('manage_elections') && (
             <ElectionsArea
               classId={activeClass.id}
@@ -254,10 +334,12 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
                 origin: typeof window !== 'undefined' ? window.location.origin : '',
               }}
               onChanged={() => void refresh()}
+              initialActivityId={activityId}
+              onActivityChange={pickActivity}
             />
           )}
-          {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} />}
-          {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} />}
+          {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} initialActivityId={activityId} onActivityChange={pickActivity} />}
+          {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} initialActivityId={activityId} onActivityChange={pickActivity} />}
           {activeClass && area === 'calendar' && <CalendarArea classId={activeClass.id} />}
           {activeClass && area === 'announcements' && can('manage_announcements') && <AnnouncementsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'notifications' && <NotificationsArea classId={activeClass.id} />}
@@ -268,6 +350,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'archives' && <ArchivesArea classId={Number(activeClass.id)} />}
           {activeClass && area === 'recycle' && <RecycleArea classId={Number(activeClass.id)} />}
           {activeClass && area === 'settings' && <SettingsArea classId={activeClass.id} onChanged={() => void refresh()} />}
+          </div>
         </main>
       </div>
     </div>
@@ -2442,9 +2525,11 @@ const ActivityLifecycleButtons = ({ activity, onChanged }: { activity: any; onCh
   );
 };
 
-const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onEditActivity, onGroupFocus }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void; onGroupFocus?: (open: boolean) => void }) => {
+const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsapp, canAppoint, canAnnounce, canManage, onChanged, onEditActivity, onGroupFocus, initialActivityId, onActivityChange }: { classId: number; canGenerate: boolean; canMove: boolean; canRemove: boolean; canManageWhatsapp: boolean; canAppoint: boolean; canAnnounce: boolean; canManage: boolean; onChanged: () => void; onEditActivity: (activityId: number) => void; onGroupFocus?: (open: boolean) => void; initialActivityId?: number | null; onActivityChange?: (id: number | null) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
-  const [activityId, setActivityId] = useState<number | null>(null);
+  const [activityId, setActivityIdState] = useState<number | null>(initialActivityId ?? null);
+  // The chosen activity is part of the address: reopening the tab reopens it.
+  const setActivityId = (next: number | null) => { setActivityIdState(next); onActivityChange?.(next); };
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -2664,9 +2749,10 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
   );
 };
 
-const ElectionsArea = ({ classId, onChanged, docContext }: { classId: number; onChanged: () => void; docContext: Omit<DocContext, 'issuedAt'> }) => {
+const ElectionsArea = ({ classId, onChanged, docContext, initialActivityId, onActivityChange }: { classId: number; onChanged: () => void; docContext: Omit<DocContext, 'issuedAt'>; initialActivityId?: number | null; onActivityChange?: (id: number | null) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
-  const [activityId, setActivityId] = useState<number | null>(null);
+  const [activityId, setActivityIdState] = useState<number | null>(initialActivityId ?? null);
+  const setActivityId = (next: number | null) => { setActivityIdState(next); onActivityChange?.(next); };
   const [detail, setDetail] = useState<any>(null);
   const [elections, setElections] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
@@ -3297,9 +3383,10 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContex
   );
 };
 
-const LeadershipArea = ({ classId, canAppoint, onChanged }: { classId: number; canAppoint: boolean; onChanged: () => void }) => {
+const LeadershipArea = ({ classId, canAppoint, onChanged, initialActivityId, onActivityChange }: { classId: number; canAppoint: boolean; onChanged: () => void; initialActivityId?: number | null; onActivityChange?: (id: number | null) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
-  const [activityId, setActivityId] = useState<number | null>(null);
+  const [activityId, setActivityIdState] = useState<number | null>(initialActivityId ?? null);
+  const setActivityId = (next: number | null) => { setActivityIdState(next); onActivityChange?.(next); };
   const [data, setData] = useState<any>(null);
   const [detail, setDetail] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -3402,9 +3489,10 @@ const LeadershipArea = ({ classId, canAppoint, onChanged }: { classId: number; c
   );
 };
 
-const AttendanceArea = ({ classId, onChanged }: { classId: number; onChanged: () => void }) => {
+const AttendanceArea = ({ classId, onChanged, initialActivityId, onActivityChange }: { classId: number; onChanged: () => void; initialActivityId?: number | null; onActivityChange?: (id: number | null) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
-  const [activityId, setActivityId] = useState<number | null>(null);
+  const [activityId, setActivityIdState] = useState<number | null>(initialActivityId ?? null);
+  const setActivityId = (next: number | null) => { setActivityIdState(next); onActivityChange?.(next); };
   const [sessions, setSessions] = useState<any[]>([]);
   const [openSession, setOpenSession] = useState<any>(null);
   const [records, setRecords] = useState<Record<number, string>>({});

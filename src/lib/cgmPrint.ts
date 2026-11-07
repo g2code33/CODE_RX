@@ -159,11 +159,28 @@ export interface PrintStat { label: string; value: string; hint?: string }
 
 export interface PrintLink { label: string; url: string; hint?: string }
 
+/**
+ * One bar on a ranked list — a candidate with their votes. `ratio` is 0…1 and
+ * drives the bar length; the number and the share are always printed beside it,
+ * so a phone reader never has to measure a bar to read a result.
+ */
+export interface PrintBar {
+  label: string;
+  value: string;
+  share?: string;
+  ratio: number;
+  note?: string;
+}
+
 export type PrintSection =
   | { kind: 'table'; heading: string; columns: string[]; rows: string[][]; note?: string; align?: Array<'left' | 'right'> }
   | { kind: 'keyvalues'; heading: string; rows: Array<[string, string]> }
   | { kind: 'lines'; heading: string; lines: string[]; tone?: 'plain' | 'good' | 'warn' }
-  | { kind: 'callout'; heading: string; body: string };
+  | { kind: 'callout'; heading: string; body: string }
+  /** The one thing the reader opened the paper for — printed big, near the top. */
+  | { kind: 'hero'; heading?: string; label: string; value: string; detail?: string; tone?: 'good' | 'warn' | 'plain' }
+  /** A ranked list with bars: readable on a phone without zooming. */
+  | { kind: 'bars'; heading: string; rows: PrintBar[]; note?: string };
 
 export interface PrintDoc {
   /** Small caps line above the title — "Election record", "Member sheet". */
@@ -183,6 +200,8 @@ export interface PrintDoc {
   stats?: PrintStat[];
   sections: PrintSection[];
   links?: PrintLink[];
+  /** Heading over the links block — the group link is worth naming plainly. */
+  linksTitle?: string;
   notes?: string[];
   fileName: string;
 }
@@ -357,6 +376,10 @@ const textWidth = (value: string, size: number, bold = false): number =>
 
 // ---------------------------------------------------------------------------
 // PDF — A4, multi-page, letterhead on every page
+//
+// The type here is deliberately LARGE (10–24pt body, 20pt table rows). These
+// sheets are opened on phones far more often than they are filed, and 8pt type
+// on an A4 page is unreadable once the page is scaled to a phone screen.
 // ---------------------------------------------------------------------------
 
 export const buildPrintPdf = (doc: PrintDoc, brand?: PrintBrand | null): Uint8Array => {
@@ -380,221 +403,293 @@ export const buildPrintPdf = (doc: PrintDoc, brand?: PrintBrand | null): Uint8Ar
   const rect = (x: number, at: number, width: number, height: number, color: string) =>
     ops.push(`${color} rg ${x.toFixed(2)} ${at.toFixed(2)} ${width.toFixed(2)} ${height.toFixed(2)} re f`);
   const rule = (at: number, color = PRINT_COLORS.lineRgb, thickness = 0.6) =>
-    ops.push(`${color} rg ${MARGIN} ${at.toFixed(2)} ${usable} ${thickness} re f`);
+    ops.push(`${color} rg ${MARGIN} ${at.toFixed(2)} ${usable} ${thickness.toFixed(2)} re f`);
   const image = (id: number, x: number, at: number, width: number, height: number) =>
     ops.push(`q ${width.toFixed(2)} 0 0 ${height.toFixed(2)} ${x.toFixed(2)} ${at.toFixed(2)} cm /Im${id} Do Q`);
+
+  /** Nothing but the footer may live below this line. */
+  const pageFloor = FOOTER_TOP + 16;
+  /** Every page is a solid white sheet — a printed page is never transparent. */
+  const whitePage = () => ops.push(`1 1 1 rg 0 0 ${A4.width.toFixed(2)} ${A4.height.toFixed(2)} re f`);
 
   /** The letterhead: society mark left, class mark right, rule under both. */
   const letterhead = (full: boolean) => {
     const top = A4.height - MARGIN;
-    const markSize = full ? 34 : 22;
-    if (codeRxId) image(codeRxId, MARGIN, top - markSize + 2, markSize, markSize);
-    const leftText = MARGIN + (codeRxId ? markSize + 12 : 0);
-    text(leftText, top - 10, full ? 12.5 : 9, true, 'CODE Rx SOCIETY', PRINT_COLORS.deepRgb);
-    text(leftText, top - 22, full ? 8 : 6.5, false, doc.societyLine || 'Class & Group Management', PRINT_COLORS.mutedRgb);
-
-    const rightEdge = A4.width - MARGIN;
-    if (classId) image(classId, rightEdge - markSize, top - markSize + 2, markSize, markSize);
-    const rightText = rightEdge - (classId ? markSize + 10 : 0);
-    textRight(rightText, top - 10, full ? 10.5 : 8, true, clip(doc.className, 42), PRINT_COLORS.inkRgb);
-    textRight(rightText, top - 22, full ? 7.5 : 6.2, false, clip([doc.classCode, doc.institution].filter(Boolean).join(' · '), 54), PRINT_COLORS.mutedRgb);
-
-    rule(top - markSize - 6, PRINT_COLORS.emeraldRgb, 1.6);
-    return top - markSize - 22;
+    const markSize = full ? 38 : 24;
+    if (full) {
+      if (codeRxId) image(codeRxId, MARGIN, top - markSize, markSize, markSize);
+      if (classId) image(classId, A4.width - MARGIN - markSize, top - markSize, markSize, markSize);
+      const leftText = MARGIN + (codeRxId ? markSize + 12 : 0);
+      text(leftText, top - 12, 12, true, 'CODE Rx SOCIETY', PRINT_COLORS.deepRgb);
+      text(leftText, top - 26, 8.5, false, doc.societyLine || 'Class & Group Management', PRINT_COLORS.mutedRgb);
+      const rightText = A4.width - MARGIN - (classId ? markSize + 12 : 0);
+      textRight(rightText, top - 12, 10, true, clip(doc.className, 30), PRINT_COLORS.inkRgb);
+      textRight(rightText, top - 26, 8, false, clip([doc.classCode, doc.institution].filter(Boolean).join(' · '), 40), PRINT_COLORS.mutedRgb);
+    } else {
+      text(MARGIN, top - 10, 9, true, clip(doc.title, 56), PRINT_COLORS.mutedRgb);
+      textRight(A4.width - MARGIN, top - 10, 9, false, clip(doc.className, 40), PRINT_COLORS.mutedRgb);
+    }
+    rule(top - markSize - 10, PRINT_COLORS.emeraldRgb, 1.8);
+    return top - markSize - 26;
   };
 
+  // Where each page's real content starts (everything before it is the
+  // letterhead), so a page opened for nothing can be dropped at the end.
+  const contentStart: number[] = [];
   const startPage = (first: boolean) => {
     if (ops.length) pages.push(ops);
     ops = [];
+    whitePage();
     y = first ? letterhead(true) : letterhead(false);
-    if (!first) {
-      text(MARGIN, y, 7.5, false, `${clip(doc.title, 70)} (continued)`, PRINT_COLORS.mutedRgb);
-      y -= 14;
-    }
+    contentStart[pages.length] = ops.length;
   };
 
   startPage(true);
 
   // --- Title block -----------------------------------------------------------
-  rect(MARGIN, y - 4, textWidth(doc.kind.toUpperCase(), 7.5, true) + 12, 14, PRINT_COLORS.softRgb);
-  text(MARGIN + 6, y, 7.5, true, doc.kind.toUpperCase(), PRINT_COLORS.emeraldRgb);
-  y -= 24;
+  const pillWidth = textWidth(doc.kind.toUpperCase(), 8, true) + 16;
+  rect(MARGIN, y - 4, pillWidth, 16, PRINT_COLORS.softRgb);
+  text(MARGIN + 8, y + 1, 8, true, doc.kind.toUpperCase(), PRINT_COLORS.emeraldRgb);
+  y -= 28;
 
-  for (const line of wrapBy(clip(doc.title, 120), (candidate) => textWidth(candidate, 19, true) <= usable)) {
-    text(MARGIN, y, 19, true, line, PRINT_COLORS.inkRgb);
-    y -= 22;
+  for (const line of wrapBy(clip(doc.title, 120), (candidate) => textWidth(candidate, 23, true) <= usable)) {
+    text(MARGIN, y, 23, true, line, PRINT_COLORS.inkRgb);
+    y -= 27;
   }
   if (doc.subtitle) {
-    for (const line of wrapBy(clip(doc.subtitle, 200), (candidate) => textWidth(candidate, 9.5) <= usable)) {
-      text(MARGIN, y, 9.5, false, line, PRINT_COLORS.mutedRgb);
-      y -= 13;
+    for (const line of wrapBy(clip(doc.subtitle, 200), (candidate) => textWidth(candidate, 10.5) <= usable)) {
+      text(MARGIN, y, 10.5, false, line, PRINT_COLORS.mutedRgb);
+      y -= 14;
     }
   }
   if (doc.badges?.length) {
     y -= 2;
     let badgeX = MARGIN;
     for (const badge of doc.badges) {
-      const width = textWidth(badge.toUpperCase(), 6.8, true) + 14;
+      const width = textWidth(badge.toUpperCase(), 7.5, true) + 16;
       if (badgeX + width > A4.width - MARGIN) break;
-      rect(badgeX, y - 3, width, 13, PRINT_COLORS.softRgb);
-      text(badgeX + 7, y + 1, 6.8, true, badge.toUpperCase(), PRINT_COLORS.emeraldRgb);
+      rect(badgeX, y - 4, width, 15, PRINT_COLORS.softRgb);
+      text(badgeX + 8, y, 7.5, true, badge.toUpperCase(), PRINT_COLORS.emeraldRgb);
       badgeX += width + 6;
     }
-    y -= 20;
+    y -= 22;
   }
 
   y -= 2;
   rule(y);
-  y -= 14;
-  text(MARGIN, y, 8, false, `Issued ${printDate(doc.issuedAt)}`, PRINT_COLORS.mutedRgb);
-  textRight(A4.width - MARGIN, y, 8, false, `Organizer: ${clip(doc.organizer, 46)}`, PRINT_COLORS.mutedRgb);
-  y -= 20;
+  y -= 16;
+  text(MARGIN, y, 9, false, `Issued ${printDate(doc.issuedAt)}`, PRINT_COLORS.mutedRgb);
+  textRight(A4.width - MARGIN, y, 9, false, `Organizer: ${clip(doc.organizer, 40)}`, PRINT_COLORS.mutedRgb);
+  y -= 24;
 
-  // --- Headline numbers ------------------------------------------------------
+  // --- Headline numbers (three across, big) ----------------------------------
   if (doc.stats?.length) {
-    const perRow = doc.stats.length > 5 ? 3 : doc.stats.length;
+    const perRow = doc.stats.length > 3 ? Math.ceil(doc.stats.length / 2) : doc.stats.length;
     const gap = 8;
     const boxWidth = (usable - gap * (perRow - 1)) / perRow;
+    const boxHeight = 56;
     for (let index = 0; index < doc.stats.length; index += perRow) {
       const row = doc.stats.slice(index, index + perRow);
-      const boxHeight = 34;
-      if (y - boxHeight < FOOTER_TOP + 10) startPage(false);
+      if (y - boxHeight < pageFloor) startPage(false);
       row.forEach((stat, column) => {
         const x = MARGIN + column * (boxWidth + gap);
         rect(x, y - boxHeight, boxWidth, boxHeight, PRINT_COLORS.softRgb);
-        text(x + 8, y - 12, 6.5, true, clip(stat.label.toUpperCase(), Math.floor(boxWidth / 4.2)), PRINT_COLORS.emeraldRgb);
-        text(x + 8, y - 26, 14, true, clip(stat.value, Math.floor(boxWidth / 8)), PRINT_COLORS.deepRgb);
-        if (stat.hint) textRight(x + boxWidth - 8, y - 26, 6.5, false, clip(stat.hint, Math.floor(boxWidth / 4)), PRINT_COLORS.mutedRgb);
+        text(x + 12, y - 13, 7.5, true, clip(stat.label.toUpperCase(), Math.floor(boxWidth / 5)), PRINT_COLORS.emeraldRgb);
+        text(x + 12, y - 36, 19, true, clip(stat.value, Math.floor(boxWidth / 11)), PRINT_COLORS.deepRgb);
+        if (stat.hint) text(x + 12, y - 49, 7.5, false, clip(stat.hint, Math.floor(boxWidth / 4.2)), PRINT_COLORS.mutedRgb);
       });
-      y -= boxHeight + 8;
+      y -= boxHeight + 12;
     }
-    y -= 6;
+    y -= 4;
   }
 
   // --- Sections --------------------------------------------------------------
   const heading = (value: string) => {
-    if (y - 24 < FOOTER_TOP + 10) startPage(false);
-    text(MARGIN, y, 8, true, value.toUpperCase(), PRINT_COLORS.emeraldRgb);
-    rule(y - 5, PRINT_COLORS.emeraldRgb, 0.9);
-    y -= 16;
+    if (y - 34 < pageFloor) startPage(false);
+    y -= 8;
+    text(MARGIN, y, 9.5, true, value.toUpperCase(), PRINT_COLORS.emeraldRgb);
+    rule(y - 6, PRINT_COLORS.emeraldRgb, 1);
+    y -= 22;
   };
 
   for (const section of doc.sections) {
+    if (section.kind === 'hero') {
+      if (section.heading) heading(section.heading);
+      const valueLines = wrapBy(clip(section.value, 90), (candidate) => textWidth(candidate, 21, true) <= usable - 28);
+      const height = 44 + valueLines.length * 24 + (section.detail ? 18 : 0);
+      if (y - height < pageFloor) startPage(false);
+      rect(MARGIN, y - height, usable, height, section.tone === 'warn' ? PRINT_COLORS.goldSoftRgb : PRINT_COLORS.softRgb);
+      rect(MARGIN, y - height, 6, height, section.tone === 'warn' ? '0.706 0.325 0.035' : PRINT_COLORS.emeraldRgb);
+      text(MARGIN + 18, y - 18, 8.5, true, section.label.toUpperCase(), section.tone === 'warn' ? '0.545 0.251 0.067' : PRINT_COLORS.emeraldRgb);
+      let lineY = y - 46;
+      for (const line of valueLines) {
+        text(MARGIN + 18, lineY, 21, true, line, PRINT_COLORS.deepRgb);
+        lineY -= 24;
+      }
+      if (section.detail) text(MARGIN + 18, lineY + 4, 10.5, false, clip(section.detail, 90), PRINT_COLORS.mutedRgb);
+      y -= height + 14;
+      continue;
+    }
+
+    if (section.kind === 'bars') {
+      heading(section.heading);
+      section.rows.forEach((row) => {
+        if (y - 40 < pageFloor) startPage(false);
+        text(MARGIN, y, 11, true, clip(row.label, 52), PRINT_COLORS.inkRgb);
+        textRight(A4.width - MARGIN, y, 11, true, clip(`${row.value}${row.share ? `  ${row.share}` : ''}`, 24), PRINT_COLORS.deepRgb);
+        if (row.note) text(MARGIN, y - 12, 8, false, clip(row.note, 70), PRINT_COLORS.mutedRgb);
+        const trackY = y - 20;
+        rect(MARGIN, trackY, usable, 7, '0.941 0.965 0.949');
+        const filled = Math.max(0, Math.min(1, Number(row.ratio) || 0));
+        if (filled > 0) rect(MARGIN, trackY, Math.max(3, usable * filled), 7, PRINT_COLORS.emeraldRgb);
+        y -= 34;
+      });
+      if (section.note) {
+        y -= 2;
+        for (const line of wrapBy(clip(section.note, 220), (candidate) => textWidth(candidate, 8.5) <= usable)) {
+          text(MARGIN, y, 8.5, false, line, PRINT_COLORS.mutedRgb);
+          y -= 12;
+        }
+      }
+      y -= 10;
+      continue;
+    }
+
     if (section.kind === 'table') {
-      const widths = tableWidths(section.columns, usable, 22);
+      const widths = tableWidths(section.columns, usable, 24);
       const align = section.align || [];
       heading(section.heading);
       const head = () => {
-        rect(MARGIN, y - 16, usable, 16, PRINT_COLORS.emeraldRgb);
+        rect(MARGIN, y - 20, usable, 20, PRINT_COLORS.emeraldRgb);
         let x = MARGIN;
         section.columns.forEach((column, index) => {
-          const label = clip(column, Math.floor(widths[index] / 4.6));
-          if (align[index] === 'right') textRight(x + widths[index] - 6, y - 11, 7.2, true, label, PRINT_COLORS.whiteRgb);
-          else text(x + 6, y - 11, 7.2, true, label, PRINT_COLORS.whiteRgb);
+          const label = clip(column, Math.floor(widths[index] / 5));
+          if (align[index] === 'right') textRight(x + widths[index] - 7, y - 14, 8.5, true, label, PRINT_COLORS.whiteRgb);
+          else text(x + 7, y - 14, 8.5, true, label, PRINT_COLORS.whiteRgb);
           x += widths[index];
         });
-        y -= 16;
+        y -= 20;
       };
       head();
       section.rows.forEach((row, rowIndex) => {
-        if (y - 15 < FOOTER_TOP + 10) { startPage(false); head(); }
-        if (rowIndex % 2 === 1) rect(MARGIN, y - 15, usable, 15, '0.968 0.976 0.984');
+        if (y - 20 < pageFloor) { startPage(false); head(); }
+        if (rowIndex % 2 === 1) rect(MARGIN, y - 20, usable, 20, '0.968 0.976 0.984');
         let x = MARGIN;
         row.forEach((cell, index) => {
-          const label = clip(cell, Math.floor(widths[index] / 4.6));
-          if (align[index] === 'right') textRight(x + widths[index] - 6, y - 10.5, 8, index === 0, label, PRINT_COLORS.inkRgb);
-          else text(x + 6, y - 10.5, 8, index === 0, label, PRINT_COLORS.inkRgb);
+          const label = clip(cell, Math.floor(widths[index] / 5));
+          if (align[index] === 'right') textRight(x + widths[index] - 7, y - 14, 9.5, index === 0, label, PRINT_COLORS.inkRgb);
+          else text(x + 7, y - 14, 9.5, index === 0, label, PRINT_COLORS.inkRgb);
           x += widths[index];
         });
-        y -= 15;
+        y -= 20;
       });
-      if (section.note) { y -= 4; text(MARGIN, y, 7, false, clip(section.note, 130), PRINT_COLORS.mutedRgb); y -= 10; }
-      y -= 10;
+      if (section.note) {
+        y -= 4;
+        for (const line of wrapBy(clip(section.note, 200), (candidate) => textWidth(candidate, 8.5) <= usable)) {
+          text(MARGIN, y, 8.5, false, line, PRINT_COLORS.mutedRgb);
+          y -= 12;
+        }
+      }
+      y -= 12;
       continue;
     }
 
     if (section.kind === 'keyvalues') {
       heading(section.heading);
-      const half = usable / 2;
+      const half = usable * 0.42;
       section.rows.forEach(([label, value], index) => {
-        if (y - 16 < FOOTER_TOP + 10) startPage(false);
-        if (index % 2 === 0) rect(MARGIN, y - 16, usable, 16, '0.973 0.976 0.984');
-        text(MARGIN + 6, y - 11, 7.4, true, clip(label, Math.floor(half / 4.4)), PRINT_COLORS.mutedRgb);
-        const valueLines = wrapBy(clip(value, 160), (candidate) => textWidth(candidate, 8) <= half - 20);
-        text(MARGIN + half, y - 11, 8, false, valueLines[0], PRINT_COLORS.inkRgb);
-        y -= 16;
+        if (y - 22 < pageFloor) startPage(false);
+        if (index % 2 === 0) rect(MARGIN, y - 22, usable, 22, '0.973 0.976 0.984');
+        text(MARGIN + 8, y - 15, 9, true, clip(label, Math.floor(half / 5)), PRINT_COLORS.mutedRgb);
+        const valueLines = wrapBy(clip(value, 160), (candidate) => textWidth(candidate, 10) <= usable - half - 16);
+        text(MARGIN + half, y - 15, 10, false, valueLines[0], PRINT_COLORS.inkRgb);
+        y -= 22;
       });
-      y -= 10;
+      y -= 12;
       continue;
     }
 
     if (section.kind === 'lines') {
       heading(section.heading);
-      const tone = section.tone === 'warn' ? PRINT_COLORS.gold : section.tone === 'good' ? PRINT_COLORS.emerald : PRINT_COLORS.ink;
       const toneRgb = section.tone === 'warn' ? '0.706 0.325 0.035' : section.tone === 'good' ? PRINT_COLORS.emeraldRgb : PRINT_COLORS.inkRgb;
       for (const line of section.lines) {
-        const lines = wrapBy(clip(line, 240), (candidate) => textWidth(candidate, 8) <= usable - 14);
-        if (y - 12 * lines.length < FOOTER_TOP + 10) startPage(false);
-        rect(MARGIN + 1, y - 3, 3, 3, tone === PRINT_COLORS.ink ? PRINT_COLORS.mutedRgb : toneRgb);
-        lines.forEach((part, partIndex) => {
-          text(MARGIN + 10, y - partIndex * 11.5, 8, false, part, toneRgb);
-        });
-        y -= 11.5 * lines.length + 3;
+        const lines = wrapBy(clip(line, 240), (candidate) => textWidth(candidate, 10) <= usable - 16);
+        if (y - 13 * lines.length < pageFloor) startPage(false);
+        rect(MARGIN + 1, y - 4, 4, 4, toneRgb);
+        lines.forEach((part, partIndex) => text(MARGIN + 12, y - partIndex * 14, 10, false, part, toneRgb));
+        y -= 14 * lines.length + 6;
       }
       y -= 8;
       continue;
     }
 
     // callout
-    const bodyLines = wrapBy(clip(section.body, 320), (candidate) => textWidth(candidate, 8) <= usable - 24);
-    const height = 22 + bodyLines.length * 11.5 + 8;
-    if (y - height < FOOTER_TOP + 10) startPage(false);
+    const bodyLines = wrapBy(clip(section.body, 320), (candidate) => textWidth(candidate, 10) <= usable - 28);
+    const height = 30 + bodyLines.length * 14 + 10;
+    if (y - height < pageFloor) startPage(false);
     rect(MARGIN, y - height, usable, height, PRINT_COLORS.goldSoftRgb);
-    text(MARGIN + 10, y - 14, 7.4, true, section.heading.toUpperCase(), '0.545 0.251 0.067');
-    bodyLines.forEach((line, index) => text(MARGIN + 10, y - 27 - index * 11.5, 8, false, line, PRINT_COLORS.inkRgb));
-    y -= height + 10;
+    text(MARGIN + 12, y - 17, 8.5, true, section.heading.toUpperCase(), '0.545 0.251 0.067');
+    bodyLines.forEach((line, index) => text(MARGIN + 12, y - 34 - index * 14, 10, false, line, PRINT_COLORS.inkRgb));
+    y -= height + 12;
   }
 
   // --- Links (the group link and the date live here) -------------------------
   if (doc.links?.length) {
-    heading('Links in this record');
+    heading(doc.linksTitle || 'Links in this record');
     doc.links.forEach((link) => {
-      if (y - 30 < FOOTER_TOP + 10) startPage(false);
-      text(MARGIN + 6, y - 10, 7.4, true, clip(link.label, 60), PRINT_COLORS.mutedRgb);
-      text(MARGIN + 6, y - 21, 8, false, clip(link.url, 110), PRINT_COLORS.emeraldRgb);
-      if (link.hint) textRight(A4.width - MARGIN, y - 10, 6.8, false, clip(link.hint, 40), PRINT_COLORS.mutedRgb);
-      rule(y - 27, PRINT_COLORS.lineRgb, 0.4);
-      y -= 30;
+      if (y - 46 < pageFloor) startPage(false);
+      text(MARGIN + 8, y - 8, 8.5, true, clip(link.label, 60), PRINT_COLORS.mutedRgb);
+      if (link.hint) textRight(A4.width - MARGIN, y - 8, 8, false, clip(link.hint, 44), PRINT_COLORS.mutedRgb);
+      let urlY = y - 24;
+      for (const line of wrapBy(clip(link.url, 150), (candidate) => textWidth(candidate, 10.5) <= usable - 16)) {
+        text(MARGIN + 8, urlY, 10.5, false, line, PRINT_COLORS.emeraldRgb);
+        urlY -= 14;
+      }
+      rule(urlY - 2, PRINT_COLORS.lineRgb, 0.4);
+      y = urlY - 16;
     });
-    y -= 4;
   }
 
   // --- Notes -----------------------------------------------------------------
+  // A closing note belongs to the sheet it closes: it sits in the band just
+  // above the footer rule instead of opening a nearly empty page of its own.
+  // The test is on the last line's DESCENDER, not on its baseline, so a note
+  // that visibly clears the rule is not pushed away by a phantom margin.
   if (doc.notes?.length) {
     y -= 4;
     doc.notes.forEach((note) => {
-      wrapBy(clip(note, 260), (candidate) => textWidth(candidate, 6.8) <= usable).forEach((line) => {
-        if (y - 10 < FOOTER_TOP + 10) startPage(false);
-        text(MARGIN, y, 6.8, false, line, PRINT_COLORS.mutedRgb);
-        y -= 9.5;
+      const lines = wrapBy(clip(note, 260), (candidate) => textWidth(candidate, 8.5) <= usable);
+      const bottom = y - (lines.length - 1) * 12 - 2;
+      if (bottom < FOOTER_TOP + 6) startPage(false);
+      lines.forEach((line) => {
+        text(MARGIN, y, 8.5, false, line, PRINT_COLORS.mutedRgb);
+        y -= 12;
       });
     });
   }
 
   if (ops.length) pages.push(ops);
 
+  // A page that received no content (layout opened it, then everything already
+  // fitted) would print as an empty sheet — never leave one behind.
+  while (pages.length > 1) {
+    const last = pages.length - 1;
+    if (pages[last].length > (contentStart[last] ?? 0)) break;
+    pages.pop();
+  }
+
   // --- Footers, once the page count is known ---------------------------------
   const pageCount = Math.max(1, pages.length);
   pages.forEach((pageOps, index) => {
     const [left, right] = footerLines(doc, index + 1, pageCount);
-    pageOps.push(`${PRINT_COLORS.emeraldRgb} rg ${MARGIN} ${FOOTER_TOP} ${usable} 1 re f`);
-    pageOps.push(`BT ${PRINT_COLORS.mutedRgb} rg /F1 7 Tf ${MARGIN} ${FOOTER_TOP - 12} Td (${escapePdf(clip(left, 118))}) Tj ET`);
-    pageOps.push(`BT ${PRINT_COLORS.mutedRgb} rg /F1 6.5 Tf ${MARGIN} ${FOOTER_TOP - 23} Td (${escapePdf(clip(right, 128))}) Tj ET`);
+    pageOps.push(`${PRINT_COLORS.emeraldRgb} rg ${MARGIN} ${FOOTER_TOP} ${usable} 1.4 re f`);
+    pageOps.push(`BT ${PRINT_COLORS.mutedRgb} rg /F1 8 Tf ${MARGIN} ${FOOTER_TOP - 14} Td (${escapePdf(clip(left, 116))}) Tj ET`);
+    pageOps.push(`BT ${PRINT_COLORS.mutedRgb} rg /F1 7.5 Tf ${MARGIN} ${FOOTER_TOP - 26} Td (${escapePdf(clip(right, 124))}) Tj ET`);
   });
 
   // --- Assemble --------------------------------------------------------------
   const resources = `<< /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R /F3 ${fontItalic} 0 R >>`
-    + `${codeRxId ? ` /XObject << /Im${codeRxId} ${codeRxId} 0 R >>` : ''} >>`;
+    + `${codeRxId ? ` /XObject << /Im${codeRxId} ${codeRxId} 0 R${classId ? ` /Im${classId} ${classId} 0 R` : ''} >>` : ''} >>`;
   const contentIds: number[] = [];
   const pageIds: number[] = [];
   pages.forEach((pageOps) => {
@@ -614,6 +709,11 @@ export const buildPrintPdf = (doc: PrintDoc, brand?: PrintBrand | null): Uint8Ar
 
 // ---------------------------------------------------------------------------
 // PNG — canvas, one tall sheet
+//
+// This is the copy that travels through WhatsApp, so it is drawn for a phone
+// screen: fewer blocks, much larger type and generous spacing. A 1400px sheet
+// is shown at roughly a third of its width on a handset, which is why nothing
+// here is smaller than 13px.
 // ---------------------------------------------------------------------------
 
 interface CanvasSurface {
@@ -662,15 +762,19 @@ const paint = (surface: CanvasSurface, width: number, doc: PrintDoc, brand: Prin
     return ctx.measureText(String(value ?? '')).width;
   };
 
+  // A printed sheet is white paper: paint the whole surface before anything else
+  // so a PNG never arrives with a transparent background.
+  rect(0, 0, width, 30000, '#ffffff');
+
   let y = 0;
-  const markSize = 56;
+  const markSize = 62;
 
   // Letterhead.
   const topY = 44;
   if (surface.draw && brandRef.codeRx) ctx.drawImage(brandRef.codeRx, margin, topY, markSize, markSize);
   const leftText = margin + (brandRef.codeRx ? markSize + 20 : 0);
-  text('CODE Rx SOCIETY', leftText, topY + 26, 21, true, PRINT_COLORS.deep);
-  text(docRef.societyLine || 'Class & Group Management', leftText, topY + 46, 12, false, PRINT_COLORS.muted);
+  text('CODE Rx SOCIETY', leftText, topY + 30, 26, true, PRINT_COLORS.deep);
+  text(docRef.societyLine || 'Class & Group Management', leftText, topY + 54, 15, false, PRINT_COLORS.muted);
 
   const rightEdge = width - margin;
   if (surface.draw && brandRef.classGroups) {
@@ -689,119 +793,151 @@ const paint = (surface: CanvasSurface, width: number, doc: PrintDoc, brand: Prin
     ctx.restore();
   }
   const rightText = rightEdge - (brandRef.classGroups ? markSize + 20 : 0);
-  text(clip(docRef.className, 46), rightText, topY + 26, 16, true, PRINT_COLORS.ink, 'right');
-  text([docRef.classCode, docRef.institution].filter(Boolean).join(' · '), rightText, topY + 46, 11, false, PRINT_COLORS.muted, 'right');
+  text(clip(docRef.className, 40), rightText, topY + 30, 20, true, PRINT_COLORS.ink, 'right');
+  text(clip([docRef.classCode, docRef.institution].filter(Boolean).join(' · '), 44), rightText, topY + 54, 14, false, PRINT_COLORS.muted, 'right');
 
-  y = topY + markSize + 18;
-  rect(margin, y, width - margin * 2, 3, PRINT_COLORS.emerald);
-  rect(margin, y, 120, 3, PRINT_COLORS.gold);
-  y += 30;
+  y = topY + markSize + 24;
+  rect(margin, y, width - margin * 2, 4, PRINT_COLORS.emerald);
+  rect(margin, y, 150, 4, PRINT_COLORS.gold);
+  y += 42;
 
   // Title block.
-  const kindWidth = measure(docRef.kind.toUpperCase(), 11, true) + 22;
-  rect(margin, y - 16, kindWidth, 24, PRINT_COLORS.soft, 12);
-  text(docRef.kind.toUpperCase(), margin + 11, y, 11, true, PRINT_COLORS.emerald);
-  y += 34;
-  for (const line of wrapWidth(docRef.title, 31, true, width - margin * 2)) {
-    text(line, margin, y, 31, true, PRINT_COLORS.ink);
-    y += 36;
+  const kindWidth = measure(docRef.kind.toUpperCase(), 14, true) + 28;
+  rect(margin, y - 22, kindWidth, 32, PRINT_COLORS.soft, 16);
+  text(docRef.kind.toUpperCase(), margin + 14, y, 14, true, PRINT_COLORS.emerald);
+  y += 46;
+  for (const line of wrapWidth(docRef.title, 42, true, width - margin * 2)) {
+    text(line, margin, y, 42, true, PRINT_COLORS.ink);
+    y += 48;
   }
   if (docRef.subtitle) {
-    for (const line of wrapWidth(docRef.subtitle, 14, false, width - margin * 2)) {
-      text(line, margin, y, 14, false, PRINT_COLORS.muted);
-      y += 19;
+    for (const line of wrapWidth(docRef.subtitle, 19, false, width - margin * 2)) {
+      text(line, margin, y, 19, false, PRINT_COLORS.muted);
+      y += 26;
     }
   }
   if (docRef.badges?.length) {
-    y += 4;
+    y += 8;
     let badgeX = margin;
     for (const badge of docRef.badges) {
       const badgeText = badge.toUpperCase();
-      const badgeWidth = measure(badgeText, 10, true) + 22;
-      rect(badgeX, y - 14, badgeWidth, 22, PRINT_COLORS.soft, 11);
-      text(badgeText, badgeX + 11, y, 10, true, PRINT_COLORS.emerald);
-      badgeX += badgeWidth + 8;
+      const badgeWidth = measure(badgeText, 13, true) + 28;
+      rect(badgeX, y - 19, badgeWidth, 30, PRINT_COLORS.soft, 15);
+      text(badgeText, badgeX + 14, y, 13, true, PRINT_COLORS.emerald);
+      badgeX += badgeWidth + 10;
     }
-    y += 22;
+    y += 30;
   }
 
-  y += 8;
-  rect(margin, y, width - margin * 2, 1, PRINT_COLORS.line);
-  y += 22;
-  text(`Issued ${printDate(docRef.issuedAt)}`, margin, y, 12, false, PRINT_COLORS.muted);
-  text(`Organizer: ${docRef.organizer}`, rightEdge, y, 12, false, PRINT_COLORS.muted, 'right');
-  y += 26;
+  y += 12;
+  rect(margin, y, width - margin * 2, 1.5, PRINT_COLORS.line);
+  y += 30;
+  text(`Issued ${printDate(docRef.issuedAt)}`, margin, y, 15, false, PRINT_COLORS.muted);
+  text(`Organizer: ${clip(docRef.organizer, 30)}`, rightEdge, y, 15, false, PRINT_COLORS.muted, 'right');
+  y += 34;
 
-  // Stats.
+  // Stats — three across, then a second row only if there are more.
   if (docRef.stats?.length) {
-    const perRow = docRef.stats.length > 4 ? Math.ceil(docRef.stats.length / 2) : docRef.stats.length;
-    const gap = 12;
+    const perRow = docRef.stats.length > 3 ? Math.ceil(docRef.stats.length / Math.ceil(docRef.stats.length / 3)) : docRef.stats.length;
+    const gap = 14;
     const boxWidth = (width - margin * 2 - gap * (perRow - 1)) / perRow;
     for (let index = 0; index < docRef.stats.length; index += perRow) {
       const row = docRef.stats.slice(index, index + perRow);
       row.forEach((stat, column) => {
         const x = margin + column * (boxWidth + gap);
-        rect(x, y - 6, boxWidth, 62, PRINT_COLORS.soft, 10);
-        text(stat.label.toUpperCase(), x + 14, y + 14, 9.5, true, PRINT_COLORS.emerald);
-        text(stat.value, x + 14, y + 42, 22, true, PRINT_COLORS.deep);
-        if (stat.hint) text(stat.hint, x + boxWidth - 14, y + 42, 10, false, PRINT_COLORS.muted, 'right');
+        rect(x, y - 10, boxWidth, 96, PRINT_COLORS.soft, 14);
+        text(stat.label.toUpperCase(), x + 18, y + 18, 13, true, PRINT_COLORS.emerald);
+        text(stat.value, x + 18, y + 58, 36, true, PRINT_COLORS.deep);
+        if (stat.hint) text(stat.hint, x + 18, y + 78, 13, false, PRINT_COLORS.muted);
       });
-      y += 74;
+      y += 110;
     }
-    y += 8;
+    y += 6;
   }
 
   // Sections.
   const heading = (value: string) => {
-    y += 8;
-    text(value.toUpperCase(), margin, y, 11, true, PRINT_COLORS.emerald);
-    y += 6;
-    rect(margin, y, width - margin * 2, 1.5, PRINT_COLORS.emerald, 1);
-    y += 20;
+    y += 16;
+    text(value.toUpperCase(), margin, y, 15, true, PRINT_COLORS.emerald);
+    y += 10;
+    rect(margin, y, width - margin * 2, 2, PRINT_COLORS.emerald, 1);
+    y += 30;
   };
 
   for (const section of docRef.sections) {
+    if (section.kind === 'hero') {
+      if (section.heading) heading(section.heading);
+      const valueLines = wrapWidth(section.value, 38, true, width - margin * 2 - 48);
+      const height = 62 + valueLines.length * 44 + (section.detail ? 28 : 0);
+      const warn = section.tone === 'warn';
+      rect(margin, y - 18, width - margin * 2, height, warn ? PRINT_COLORS.goldSoft : PRINT_COLORS.soft, 18);
+      rect(margin, y - 18, 8, height, warn ? PRINT_COLORS.gold : PRINT_COLORS.emerald);
+      text(section.label.toUpperCase(), margin + 30, y + 8, 14, true, warn ? PRINT_COLORS.gold : PRINT_COLORS.emerald);
+      let lineY = y + 50;
+      for (const line of valueLines) { text(line, margin + 30, lineY, 38, true, PRINT_COLORS.deep); lineY += 44; }
+      if (section.detail) text(section.detail, margin + 30, lineY - 6, 17, false, PRINT_COLORS.muted);
+      y += height + 18;
+      continue;
+    }
+
+    if (section.kind === 'bars') {
+      heading(section.heading);
+      section.rows.forEach((row) => {
+        text(clip(row.label, 42), margin, y, 21, true, PRINT_COLORS.ink);
+        text(`${row.value}${row.share ? `  ·  ${row.share}` : ''}`, rightEdge, y, 21, true, PRINT_COLORS.deep, 'right');
+        const trackY = y + 20;
+        rect(margin, trackY, width - margin * 2, 16, '#eef2f6', 8);
+        const filled = Math.max(0, Math.min(1, Number(row.ratio) || 0));
+        if (filled > 0) rect(margin, trackY, Math.max(10, (width - margin * 2) * filled), 16, PRINT_COLORS.emerald, 8);
+        y = trackY + 44;
+        if (row.note) { text(clip(row.note, 60), margin, y - 8, 13, false, PRINT_COLORS.muted); y += 16; }
+      });
+      if (section.note) { y += 4; for (const line of wrapWidth(section.note, 14, false, width - margin * 2)) { text(line, margin, y, 14, false, PRINT_COLORS.muted); y += 20; } }
+      y += 14;
+      continue;
+    }
+
     if (section.kind === 'table') {
       heading(section.heading);
-      const widths = tableWidths(section.columns, width - margin * 2, 56);
+      const widths = tableWidths(section.columns, width - margin * 2, 74);
       const align = section.align || [];
       const drawHead = () => {
-        rect(margin, y - 14, width - margin * 2, 26, PRINT_COLORS.emerald, 6);
+        rect(margin, y - 20, width - margin * 2, 38, PRINT_COLORS.emerald, 8);
         let x = margin;
         section.columns.forEach((column, columnIndex) => {
-          if (align[columnIndex] === 'right') text(column, x + widths[columnIndex] - 12, y + 3, 10, true, '#ffffff', 'right');
-          else text(column, x + 12, y + 3, 10, true, '#ffffff');
+          if (align[columnIndex] === 'right') text(clip(column, Math.floor(widths[columnIndex] / 11)), x + widths[columnIndex] - 14, y + 6, 14, true, '#ffffff', 'right');
+          else text(clip(column, Math.floor(widths[columnIndex] / 11)), x + 14, y + 6, 14, true, '#ffffff');
           x += widths[columnIndex];
         });
-        y += 32;
+        y += 46;
       };
       drawHead();
       section.rows.forEach((row, rowIndex) => {
-        if (rowIndex % 2 === 1) rect(margin, y - 16, width - margin * 2, 26, '#f8fafc');
+        if (rowIndex % 2 === 1) rect(margin, y - 24, width - margin * 2, 40, '#f8fafc');
         let x = margin;
         row.forEach((cell, columnIndex) => {
           const isFirst = columnIndex === 0;
-          if (align[columnIndex] === 'right') text(cell, x + widths[columnIndex] - 12, y + 2, 11, isFirst, PRINT_COLORS.ink, 'right');
-          else text(clip(cell, Math.floor(widths[columnIndex] / 7)), x + 12, y + 2, 11, isFirst, PRINT_COLORS.ink);
+          if (align[columnIndex] === 'right') text(cell, x + widths[columnIndex] - 14, y + 6, 17, isFirst, PRINT_COLORS.ink, 'right');
+          else text(clip(cell, Math.floor(widths[columnIndex] / 10)), x + 14, y + 6, 17, isFirst, PRINT_COLORS.ink);
           x += widths[columnIndex];
         });
-        y += 26;
+        y += 40;
       });
-      if (section.note) { y += 2; text(section.note, margin, y, 10, false, PRINT_COLORS.muted); y += 12; }
-      y += 10;
+      if (section.note) { y += 6; for (const line of wrapWidth(section.note, 14, false, width - margin * 2)) { text(line, margin, y, 14, false, PRINT_COLORS.muted); y += 20; } }
+      y += 18;
       continue;
     }
 
     if (section.kind === 'keyvalues') {
       heading(section.heading);
-      const half = (width - margin * 2) / 2;
+      const half = (width - margin * 2) * 0.44;
       section.rows.forEach(([label, value], index) => {
-        if (index % 2 === 0) rect(margin, y - 16, width - margin * 2, 30, '#f8fafc', 6);
-        text(label, margin + 12, y + 3, 10.5, true, PRINT_COLORS.muted);
-        text(clip(value, 78), margin + half + 12, y + 3, 11.5, false, PRINT_COLORS.ink);
-        y += 30;
+        if (index % 2 === 0) rect(margin, y - 24, width - margin * 2, 44, '#f8fafc', 8);
+        text(clip(label, 26), margin + 16, y + 4, 15, true, PRINT_COLORS.muted);
+        text(clip(value, 60), margin + half + 16, y + 4, 17, false, PRINT_COLORS.ink);
+        y += 44;
       });
-      y += 8;
+      y += 14;
       continue;
     }
 
@@ -809,58 +945,60 @@ const paint = (surface: CanvasSurface, width: number, doc: PrintDoc, brand: Prin
       heading(section.heading);
       const tone = section.tone === 'warn' ? PRINT_COLORS.gold : section.tone === 'good' ? PRINT_COLORS.emerald : PRINT_COLORS.ink;
       for (const line of section.lines) {
-        const lines = wrapWidth(line, 12, false, width - margin * 2 - 20);
-        rect(margin + 2, y + 2, 5, 5, tone, 2.5);
-        lines.forEach((part, partIndex) => text(part, margin + 18, y + 5 + partIndex * 17, 12, false, tone));
-        y += lines.length * 17 + 6;
+        const lines = wrapWidth(line, 17, false, width - margin * 2 - 30);
+        rect(margin + 4, y - 6, 7, 7, tone === PRINT_COLORS.ink ? PRINT_COLORS.muted : tone, 3.5);
+        lines.forEach((part, partIndex) => text(part, margin + 26, y + 2 + partIndex * 26, 17, false, tone));
+        y += lines.length * 26 + 10;
       }
-      y += 6;
+      y += 10;
       continue;
     }
 
-    const bodyLines = wrapWidth(section.body, 12, false, width - margin * 2 - 36);
-    const height = 30 + bodyLines.length * 17 + 12;
-    rect(margin, y - 14, width - margin * 2, height, PRINT_COLORS.goldSoft, 10);
-    text(section.heading.toUpperCase(), margin + 16, y + 2, 10, true, PRINT_COLORS.gold);
-    bodyLines.forEach((line, index) => text(line, margin + 16, y + 22 + index * 17, 12, false, PRINT_COLORS.ink));
-    y += height + 4;
+    // callout
+    const bodyLines = wrapWidth(section.body, 17, false, width - margin * 2 - 52);
+    const height = 48 + bodyLines.length * 26 + 18;
+    rect(margin, y - 20, width - margin * 2, height, PRINT_COLORS.goldSoft, 16);
+    text(section.heading.toUpperCase(), margin + 24, y + 4, 14, true, PRINT_COLORS.gold);
+    bodyLines.forEach((line, index) => text(line, margin + 24, y + 34 + index * 26, 17, false, PRINT_COLORS.ink));
+    y += height + 16;
   }
 
   // Links.
   if (docRef.links?.length) {
-    heading('Links in this record');
+    heading(docRef.linksTitle || 'Links in this record');
     docRef.links.forEach((link) => {
-      rect(margin, y - 16, width - margin * 2, 46, '#f8fafc', 8);
-      text(link.label, margin + 14, y + 1, 10.5, true, PRINT_COLORS.muted);
-      ctx.font = `700 12px "SFMono-Regular", Menlo, monospace`;
-      text(clip(link.url, 110), margin + 14, y + 20, 12, false, PRINT_COLORS.emerald);
-      if (link.hint) text(link.hint, rightEdge - 14, y + 1, 10, false, PRINT_COLORS.muted, 'right');
-      y += 54;
+      rect(margin, y - 20, width - margin * 2, 84, '#f8fafc', 12);
+      text(link.label, margin + 20, y + 4, 14, true, PRINT_COLORS.muted);
+      if (link.hint) text(link.hint, rightEdge - 20, y + 4, 13, false, PRINT_COLORS.muted, 'right');
+      ctx.font = `700 18px "SFMono-Regular", Menlo, monospace`;
+      text(clip(link.url, 62), margin + 20, y + 34, 18, false, PRINT_COLORS.emerald);
+      y += 96;
     });
     y += 6;
   }
 
   // Notes.
   if (docRef.notes?.length) {
-    y += 6;
+    y += 10;
     for (const note of docRef.notes) {
-      for (const line of wrapWidth(note, 10.5, false, width - margin * 2)) {
-        text(line, margin, y, 10.5, false, PRINT_COLORS.muted);
-        y += 15;
+      for (const line of wrapWidth(note, 14, false, width - margin * 2)) {
+        text(line, margin, y, 14, false, PRINT_COLORS.muted);
+        y += 20;
       }
     }
   }
 
-  // Footer.
-  y += 18;
-  rect(margin, y, width - margin * 2, 1.5, PRINT_COLORS.emerald);
-  y += 20;
+  // Footer — organizer, PHANTOM, class and the date.
+  y += 22;
+  rect(margin, y, width - margin * 2, 2.5, PRINT_COLORS.emerald);
+  y += 30;
   const [footerLeft, footerRight] = footerLines(docRef, 1, 1);
-  text(footerLeft, margin, y, 10.5, true, PRINT_COLORS.muted);
-  text(footerRight, rightEdge, y, 10, false, PRINT_COLORS.muted, 'right');
-  y += 18;
+  text(footerLeft, margin, y, 14, true, PRINT_COLORS.muted);
+  y += 24;
+  text(footerRight, margin, y, 13, false, PRINT_COLORS.muted);
+  y += 26;
 
-  return Math.ceil(y + 16);
+  return Math.ceil(y + 20);
 };
 
 export const renderPrintCanvas = (doc: PrintDoc, brand?: PrintBrand | null): HTMLCanvasElement => {
@@ -868,17 +1006,22 @@ export const renderPrintCanvas = (doc: PrintDoc, brand?: PrintBrand | null): HTM
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('This browser cannot draw the printable sheet.');
-  // Pass 1 measures every line without painting (draw = false).
+  // Pass 1 measures every line without painting (draw = false). The measuring
+  // context still needs the full surface so the white page fill is counted.
   const height = paint({ ctx, draw: false }, width, doc, brand || {});
   canvas.width = width;
   canvas.height = Math.max(600, height);
   const real = canvas.getContext('2d')!;
+  // The measured pass assumed a huge page; the real sheet is exactly this tall.
   paint({ ctx: real, draw: true }, width, doc, brand || {});
   return canvas;
 };
 
 // ---------------------------------------------------------------------------
 // HTML — the print sheet
+//
+// Same document, on real paper: A4, white, and the type is set for a sheet
+// photographed on a phone rather than for a desktop reading pane.
 // ---------------------------------------------------------------------------
 
 export const buildPrintHtml = (doc: PrintDoc): string => {
@@ -890,6 +1033,16 @@ export const buildPrintHtml = (doc: PrintDoc): string => {
     ? `<div class="badges">${doc.badges.map((badge) => `<span>${escapeHtml(badge)}</span>`).join('')}</div>`
     : '';
   const sections = doc.sections.map((section) => {
+    if (section.kind === 'hero') {
+      return `<section class="hero ${section.tone === 'warn' ? 'warn' : ''}">
+${section.heading ? `<h2>${escapeHtml(section.heading)}</h2>` : ''}
+<div class="result"><span class="l">${escapeHtml(section.label)}</span><strong>${escapeHtml(section.value)}</strong>${section.detail ? `<span class="d">${escapeHtml(section.detail)}</span>` : ''}</div></section>`;
+    }
+    if (section.kind === 'bars') {
+      return `<section><h2>${escapeHtml(section.heading)}</h2>
+<ul class="bars">${section.rows.map((row) => `<li><div class="row"><strong>${escapeHtml(row.label)}</strong><span class="v">${escapeHtml(row.value)}${row.share ? `<em>${escapeHtml(row.share)}</em>` : ''}</span></div>${row.note ? `<span class="n">${escapeHtml(row.note)}</span>` : ''}<div class="track"><i style="width:${Math.round(Math.max(0, Math.min(1, Number(row.ratio) || 0)) * 100)}%"></i></div></li>`).join('')}</ul>
+${section.note ? `<p class="note">${escapeHtml(section.note)}</p>` : ''}</section>`;
+    }
     if (section.kind === 'table') {
       const align = section.align || [];
       return `<section><h2>${escapeHtml(section.heading)}</h2>
@@ -906,63 +1059,83 @@ ${section.note ? `<p class="note">${escapeHtml(section.note)}</p>` : ''}</sectio
     return `<section><div class="callout"><h3>${escapeHtml(section.heading)}</h3><p>${escapeHtml(section.body)}</p></div></section>`;
   }).join('');
   const links = doc.links?.length
-    ? `<section><h2>Links in this record</h2><ul class="links">${doc.links.map((link) => `<li><span>${escapeHtml(link.label)}</span><code>${escapeHtml(link.url)}</code>${link.hint ? `<em>${escapeHtml(link.hint)}</em>` : ''}</li>`).join('')}</ul></section>`
+    ? `<section><h2>${escapeHtml(doc.linksTitle || 'Links in this record')}</h2><ul class="links">${doc.links.map((link) => `<li><span>${escapeHtml(link.label)}</span><code>${escapeHtml(link.url)}</code>${link.hint ? `<em>${escapeHtml(link.hint)}</em>` : ''}</li>`).join('')}</ul></section>`
     : '';
   const notes = doc.notes?.length ? `<div class="notes">${doc.notes.map((note) => `<p>${escapeHtml(note)}</p>`).join('')}</div>` : '';
   const [footerLeft, footerRight] = footerLines(doc, 1, 1);
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(doc.title)} — CODE Rx Society</title>
 <style>
-  @page { size: A4; margin: 14mm 12mm 20mm; }
+  @page { size: A4; margin: 12mm 11mm 14mm; }
   * { box-sizing: border-box; }
-  body { font-family: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; color: ${PRINT_COLORS.ink}; margin: 0; font-size: 10pt; }
+  html, body { background: #ffffff; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; color: ${PRINT_COLORS.ink}; margin: 0; font-size: 11.5pt; line-height: 1.35;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
   .head .left, .head .right { display: flex; gap: 10px; align-items: center; min-width: 0; }
-  .head img { height: 44px; width: 44px; object-fit: contain; border-radius: ${PRINT_COLORS.ink}0d; }
+  .head img { height: 42px; width: 42px; object-fit: contain; }
   .head .right img { object-fit: cover; border-radius: 10px; }
-  .head strong { display: block; font-size: 13pt; letter-spacing: -0.01em; color: ${PRINT_COLORS.deep}; }
-  .head small { display: block; font-size: 8pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
+  .head strong { display: block; font-size: 14pt; letter-spacing: -0.01em; color: ${PRINT_COLORS.deep}; }
+  .head small { display: block; font-size: 9pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
   .head .right { text-align: right; }
-  .rule { height: 3px; background: ${PRINT_COLORS.emerald}; margin: 10px 0 0; border-radius: 2px; position: relative; }
-  .rule::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 70px; background: ${PRINT_COLORS.gold}; border-radius: 2px; }
-  .kind { display: inline-block; margin: 16px 0 6px; padding: 4px 12px; border-radius: 999px; background: ${PRINT_COLORS.soft}; color: ${PRINT_COLORS.emerald}; font-size: 7.5pt; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-  h1 { font-size: 22pt; margin: 0 0 4px; letter-spacing: -0.02em; }
-  .sub { margin: 0; color: ${PRINT_COLORS.muted}; font-size: 9.5pt; font-weight: 600; }
+  .rule { height: 3px; background: ${PRINT_COLORS.emerald}; margin: 9px 0 0; border-radius: 2px; position: relative; }
+  .rule::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 74px; background: ${PRINT_COLORS.gold}; border-radius: 2px; }
+  .kind { display: inline-block; margin: 14px 0 5px; padding: 4px 12px; border-radius: 999px; background: ${PRINT_COLORS.soft}; color: ${PRINT_COLORS.emerald}; font-size: 8pt; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+  h1 { font-size: 25pt; margin: 0 0 4px; letter-spacing: -0.02em; line-height: 1.1; }
+  .sub { margin: 0; color: ${PRINT_COLORS.muted}; font-size: 11pt; font-weight: 600; }
   .badges { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .badges span { background: ${PRINT_COLORS.soft}; color: ${PRINT_COLORS.emerald}; font-size: 7pt; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; }
-  .meta { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid ${PRINT_COLORS.line}; border-bottom: 1px solid ${PRINT_COLORS.line}; padding: 7px 0; margin: 12px 0 0; font-size: 8pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; margin: 12px 0 4px; }
-  .stat { background: ${PRINT_COLORS.soft}; border-radius: 8px; padding: 8px 10px; }
-  .stat .k { display: block; font-size: 6.5pt; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: ${PRINT_COLORS.emerald}; }
-  .stat .v { display: block; font-size: 15pt; font-weight: 800; color: ${PRINT_COLORS.deep}; line-height: 1.15; }
-  .stat .h { display: block; font-size: 6.5pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
-  section { margin-top: 14px; break-inside: avoid; }
-  h2 { font-size: 8pt; letter-spacing: .12em; text-transform: uppercase; color: ${PRINT_COLORS.emerald}; margin: 0 0 6px; border-bottom: 1.5px solid ${PRINT_COLORS.emerald}; padding-bottom: 4px; }
-  table { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
-  th { background: ${PRINT_COLORS.emerald}; color: #fff; text-align: left; padding: 6px 8px; font-size: 7.5pt; letter-spacing: .04em; }
-  td { padding: 5px 8px; border-bottom: 1px solid ${PRINT_COLORS.line}; }
+  .badges span { background: ${PRINT_COLORS.soft}; color: ${PRINT_COLORS.emerald}; font-size: 8pt; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; }
+  .meta { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid ${PRINT_COLORS.line}; border-bottom: 1px solid ${PRINT_COLORS.line}; padding: 8px 0; margin: 12px 0 0; font-size: 9.5pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 9px; margin: 13px 0 4px; }
+  .stat { background: ${PRINT_COLORS.soft}; border-radius: 9px; padding: 9px 11px; }
+  .stat .k { display: block; font-size: 8pt; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: ${PRINT_COLORS.emerald}; }
+  .stat .v { display: block; font-size: 20pt; font-weight: 800; color: ${PRINT_COLORS.deep}; line-height: 1.1; }
+  .stat .h { display: block; font-size: 8pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
+  section { margin-top: 15px; break-inside: avoid; }
+  h2 { font-size: 9pt; letter-spacing: .12em; text-transform: uppercase; color: ${PRINT_COLORS.emerald}; margin: 0 0 7px; border-bottom: 1.5px solid ${PRINT_COLORS.emerald}; padding-bottom: 4px; }
+  .result { background: ${PRINT_COLORS.soft}; border-left: 6px solid ${PRINT_COLORS.emerald}; border-radius: 10px; padding: 12px 14px; }
+  .hero.warn .result { background: ${PRINT_COLORS.goldSoft}; border-left-color: ${PRINT_COLORS.gold}; }
+  .result .l { display: block; font-size: 8pt; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: ${PRINT_COLORS.emerald}; margin-bottom: 4px; }
+  .hero.warn .result .l { color: ${PRINT_COLORS.gold}; }
+  .result strong { display: block; font-size: 21pt; line-height: 1.15; color: ${PRINT_COLORS.deep}; letter-spacing: -0.01em; }
+  .result .d { display: block; margin-top: 5px; font-size: 10.5pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
+  ul.bars { list-style: none; padding: 0; margin: 0; }
+  ul.bars li { margin-bottom: 12px; }
+  ul.bars .row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  ul.bars strong { font-size: 11.5pt; }
+  ul.bars .v { font-size: 11.5pt; font-weight: 800; color: ${PRINT_COLORS.deep}; white-space: nowrap; }
+  ul.bars .v em { font-style: normal; font-weight: 700; color: ${PRINT_COLORS.muted}; margin-left: 8px; }
+  ul.bars .n { display: block; font-size: 9pt; color: ${PRINT_COLORS.muted}; }
+  ul.bars .track { height: 7px; border-radius: 4px; background: #e8f0ec; margin-top: 5px; overflow: hidden; }
+  ul.bars .track i { display: block; height: 100%; background: ${PRINT_COLORS.emerald}; border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 10pt; }
+  th { background: ${PRINT_COLORS.emerald}; color: #fff; text-align: left; padding: 7px 8px; font-size: 8.5pt; letter-spacing: .04em; }
+  td { padding: 6px 8px; border-bottom: 1px solid ${PRINT_COLORS.line}; }
   td.b { font-weight: 700; }
   th.r, td.r { text-align: right; }
   tbody tr:nth-child(even) td { background: #f8fafc; }
   dl { margin: 0; }
-  dl div { display: grid; grid-template-columns: 40% 1fr; gap: 8px; padding: 5px 8px; border-radius: 6px; }
+  dl div { display: grid; grid-template-columns: 42% 1fr; gap: 8px; padding: 6px 8px; border-radius: 6px; }
   dl div:nth-child(odd) { background: #f8fafc; }
-  dt { font-size: 8pt; font-weight: 700; color: ${PRINT_COLORS.muted}; }
-  dd { margin: 0; font-size: 8.5pt; }
-  ul { margin: 0; padding-left: 16px; font-size: 8.5pt; }
-  ul li { margin-bottom: 4px; }
+  dt { font-size: 9pt; font-weight: 700; color: ${PRINT_COLORS.muted}; }
+  dd { margin: 0; font-size: 10pt; }
+  ul { margin: 0; padding-left: 18px; font-size: 10pt; }
+  ul li { margin-bottom: 5px; }
   ul.warn li { color: ${PRINT_COLORS.gold}; }
   ul.good li { color: ${PRINT_COLORS.emerald}; }
-  .callout { background: ${PRINT_COLORS.goldSoft}; border-radius: 8px; padding: 10px 12px; }
-  .callout h3 { margin: 0 0 4px; font-size: 7.5pt; letter-spacing: .1em; text-transform: uppercase; color: ${PRINT_COLORS.gold}; }
-  .callout p { margin: 0; font-size: 8.5pt; }
-  .links { list-style: none; padding: 0; }
-  .links li { background: #f8fafc; border-radius: 8px; padding: 7px 10px; margin-bottom: 5px; }
-  .links span { display: block; font-size: 7pt; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: ${PRINT_COLORS.muted}; }
-  .links code { font-size: 8pt; color: ${PRINT_COLORS.emerald}; word-break: break-all; }
-  .links em { display: block; font-size: 7pt; color: ${PRINT_COLORS.muted}; font-style: normal; }
-  .notes p { margin: 2px 0 0; font-size: 7pt; color: ${PRINT_COLORS.muted}; }
-  .foot { position: fixed; bottom: 0; left: 0; right: 0; border-top: 1.5px solid ${PRINT_COLORS.emerald}; padding-top: 5px; display: flex; justify-content: space-between; gap: 12px; font-size: 7pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
+  .callout { background: ${PRINT_COLORS.goldSoft}; border-radius: 9px; padding: 11px 13px; }
+  .callout h3 { margin: 0 0 4px; font-size: 8.5pt; letter-spacing: .1em; text-transform: uppercase; color: ${PRINT_COLORS.gold}; }
+  .callout p { margin: 0; font-size: 10pt; }
+  .note { margin: 6px 0 0; font-size: 9pt; color: ${PRINT_COLORS.muted}; }
+  .links { list-style: none; padding: 0; margin: 0; }
+  .links li { background: #f8fafc; border-radius: 9px; padding: 8px 11px; margin-bottom: 6px; }
+  .links span { display: block; font-size: 8pt; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: ${PRINT_COLORS.muted}; }
+  .links code { font-size: 10pt; color: ${PRINT_COLORS.emerald}; word-break: break-all; }
+  .links em { display: block; font-size: 8pt; color: ${PRINT_COLORS.muted}; font-style: normal; }
+  .notes p { margin: 3px 0 0; font-size: 8.5pt; color: ${PRINT_COLORS.muted}; }
+  /* The footer sits in the flow, not pinned to the window: a fixed element
+     repeats on every printed page in Chrome and lands on top of the notes. */
+  .foot { margin-top: 14px; background: #ffffff; border-top: 1.5px solid ${PRINT_COLORS.emerald}; padding-top: 6px; display: flex; justify-content: space-between; gap: 12px; font-size: 8pt; color: ${PRINT_COLORS.muted}; font-weight: 600; }
   .foot .l { font-weight: 800; }
 </style></head><body>
 <header class="head">

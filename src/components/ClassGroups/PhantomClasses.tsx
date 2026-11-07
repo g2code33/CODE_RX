@@ -184,7 +184,18 @@ export const PhantomClassGroups = ({ onExit, embedded, onAttentionChange }: {
   /** Told when a section is opened, so the control-center badge can follow. */
   onAttentionChange?: () => void;
 }) => {
-  const [tab, setTab] = useState<Tab>('overview');
+  // The open section lives in the address, so a reload (or a phone reclaiming
+  // the tab) reopens the same section instead of the overview.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const key = String(typeof window === 'undefined' ? '' : window.location.hash).replace('#class-groups/phantom', '').replace(/^\//, '').trim();
+    return (TABS.some(([value]) => value === key) ? key : 'overview') as Tab;
+  });
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    if (typeof window !== 'undefined' && window.history?.replaceState) {
+      try { window.history.replaceState(null, '', `#class-groups/phantom/${next}`); } catch { /* a blocked history is not fatal */ }
+    }
+  };
   const [overview, setOverview] = useState<any>(null);
   const [rows, setRows] = useState<PhantomRows>({} as PhantomRows);
   const [message, setMessage] = useState<string | null>(null);
@@ -238,6 +249,16 @@ export const PhantomClassGroups = ({ onExit, embedded, onAttentionChange }: {
     const data = await load().catch(() => null);
     setRows((current) => ({ ...current, [which]: (Array.isArray(data) ? data : data?.data || []) as any[] }));
   }, []);
+
+  // Refresh says it is working instead of looking dead on a slow phone. It
+  // reloads the section that is open — never switches back to the overview.
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTab = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([loadOverview(), loadTab(tab), loadAttention()]);
+    } finally { setRefreshing(false); }
+  }, [loadOverview, loadTab, loadAttention, tab]);
 
   useEffect(() => { void loadOverview(); void loadAttention(); }, [loadOverview, loadAttention]);
   useEffect(() => {
@@ -852,7 +873,18 @@ export const PhantomClassGroups = ({ onExit, embedded, onAttentionChange }: {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" className="mini-button" onClick={() => { void loadOverview(); void loadTab(tab); void loadAttention(); }} aria-label="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
+          <button
+            type="button"
+            className="mini-button"
+            data-testid="cgm-phantom-refresh"
+            onClick={() => { void refreshTab(); }}
+            disabled={refreshing}
+            aria-busy={refreshing}
+            aria-label={refreshing ? 'Refreshing' : 'Refresh this section'}
+            title="Refresh this section — you stay where you are"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
           <button type="button" className="mini-button" onClick={onExit}>Exit</button>
         </div>
       </header>

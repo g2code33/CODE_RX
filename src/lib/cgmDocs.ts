@@ -107,89 +107,98 @@ export const buildElectionRecordDoc = (input: ElectionRecordInput): PrintDoc => 
   const onlyVoted = Boolean(input.onlyVotedCandidates);
   const printed = onlyVoted ? withVotes : ranked;
   const leftOut = rows.length - printed.length;
-  const ballotRows = printed.map((row, index) => [
-    String(index + 1),
-    clean(row.fullName, 'Candidate'),
-    titleCase(row.status || 'nominated'),
-    String(Number(row.votes || 0)),
-    share(Number(row.votes || 0)),
-  ]);
-  const ballotHeading = onlyVoted
-    ? `Ballot — ${printed.length} of ${rows.length} candidate${rows.length === 1 ? '' : 's'} with a vote`
-    : `Ballot — ${rows.length} candidate${rows.length === 1 ? '' : 's'}`;
   const ballotNote = [
-    `Votes counted: ${cast}. ${anonymity === 'public' ? 'This is a public roll — every vote is attributable.' : 'This is an anonymous ballot — no vote is linked back to a voter.'}`,
+    `Votes counted: ${cast}. ${anonymity === 'public' ? 'This is a public roll — every vote is attributable.' : 'Anonymous ballot — no vote is linked back to a voter.'}`,
     onlyVoted
       ? (rows.length === printed.length
         ? 'Every candidate on this ballot received at least one vote, so none were left out.'
         : `${leftOut} candidate${leftOut === 1 ? '' : 's'} with no vote ${leftOut === 1 ? 'is' : 'are'} not printed here. The full ballot has ${rows.length}.`)
       : null,
   ].filter(Boolean).join(' ');
-  const emptyBallot: string[][] = onlyVoted
-    ? [['—', 'No candidate has a vote yet — this print leaves out the whole ballot', '—', '0', '0%']]
-    : [['—', 'No candidates stood in this election', '—', '0', '0%']];
+
+  // ---- The result, said plainly -------------------------------------------
+  // This is why anyone opens the sheet, so it is the first block after the
+  // numbers and it names one thing: who won, or what is happening instead.
+  const announced = Boolean(election?.results?.outcome?.announced);
+  const outcomeTie = Boolean(election?.results?.outcome?.tie) && !election?.results?.outcome?.resolved;
+  const resultBlock = (() => {
+    if (status === 'cancelled') {
+      return { label: 'Election cancelled', value: 'No result', detail: election?.cancelledReason ? clean(election.cancelledReason) : 'Cancelled by the organizer.', tone: 'warn' as const };
+    }
+    if (outcomeTie) {
+      const names = ranked.filter((row) => tied.includes(Number(row.id))).map((row) => clean(row.fullName));
+      return {
+        label: 'Tie — not yet resolved',
+        value: names.length ? names.join(' · ') : `${tied.length} candidates tied`,
+        detail: `Settled by ${titleCase(election?.tieBreak || 'random')} — the tie-break is recorded on the election.`,
+        tone: 'warn' as const,
+      };
+    }
+    if (status === 'closed' && winner) {
+      const votes = Number(winner.votes || 0);
+      return {
+        label: announced ? 'Winner — announced' : 'Winner',
+        value: clean(winner.fullName),
+        detail: `${votes} of ${cast} vote${cast === 1 ? '' : 's'} · ${share(votes)} of the votes cast`,
+        tone: 'good' as const,
+      };
+    }
+    if (status === 'closed') {
+      return { label: 'Closed', value: 'No winner recorded', detail: `${cast} vote(s) were counted.`, tone: 'warn' as const };
+    }
+    const leader = ranked[0];
+    if (leader && Number(leader.votes || 0) > 0) {
+      return {
+        label: `${titleCase(status)} — counted so far`,
+        value: clean(leader.fullName),
+        detail: `Leading with ${Number(leader.votes || 0)} of ${cast} vote${cast === 1 ? '' : 's'} · ${share(Number(leader.votes || 0))}`,
+        tone: 'plain' as const,
+      };
+    }
+    return { label: titleCase(status), value: 'No votes counted yet', detail: 'The result appears here as soon as the first vote is cast.', tone: 'plain' as const };
+  })();
+
+  // A candidate's status is only worth printing when it is unusual — "Active"
+  // under every name is noise on a phone.
+  const statusNote = (row: any): string | undefined => {
+    const text = String(row.status || '').trim().toLowerCase();
+    if (!text || ['active', 'nominated', 'standing', 'approved'].includes(text)) return undefined;
+    return titleCase(text);
+  };
+  const ballotBars = printed.map((row) => {
+    const votes = Number(row.votes || 0);
+    return {
+      label: clean(row.fullName, 'Candidate'),
+      value: `${votes} vote${votes === 1 ? '' : 's'}`,
+      share: share(votes),
+      ratio: cast > 0 ? votes / cast : 0,
+      note: statusNote(row),
+    };
+  });
 
   const sections: PrintSection[] = [
     {
-      kind: 'keyvalues',
-      heading: 'The ballot',
-      rows: [
-        ['Group', clean(election?.groupName)],
-        ['Role', titleCase(election?.role)],
-        ['Ballot type', anonymity === 'public' ? 'Public roll (votes are visible)' : 'Anonymous ballot (counts only)'],
-        ['Who may vote', election?.eligibleMode === 'custom'
-          ? `${(election?.eligibleStudentIds || []).length} hand-picked member(s)`
-          : 'Every member of this group'],
-        ['Nominations', windowLabel(election?.nominationOpenAt, election?.nominationCloseAt, 'immediately', 'no deadline set')],
-        ['Voting', windowLabel(election?.votingOpenAt, election?.votingCloseAt, 'as soon as it opens', 'closed by the organizer')],
-        ['Tie-break', titleCase(election?.tieBreak || 'random')],
-        ['Vote changes', election?.allowVoteChange ? 'Allowed until voting closes' : 'Locked once a vote is cast'],
-        ['Results visible to', titleCase(election?.visibility || 'organizers')],
-      ],
+      kind: 'hero',
+      label: resultBlock.label,
+      value: resultBlock.value,
+      detail: resultBlock.detail,
+      tone: resultBlock.tone,
     },
     {
-      kind: 'table',
-      heading: ballotHeading,
-      columns: ['#', 'Candidate', 'Status', 'Votes', 'Share'],
-      rows: ballotRows.length ? ballotRows : emptyBallot,
-      align: ['right', 'left', 'left', 'right', 'right'],
+      kind: 'bars',
+      heading: onlyVoted ? `Ballot — ${printed.length} of ${rows.length} with a vote` : `Ballot — ${rows.length} candidate${rows.length === 1 ? '' : 's'}`,
+      rows: ballotBars.length ? ballotBars : [{ label: 'No candidates stood', value: '0 votes', share: '', ratio: 0 }],
       note: ballotNote,
     },
     {
       kind: 'keyvalues',
-      heading: 'Turnout — voted and not voted',
+      heading: 'How it was run',
       rows: [
-        ['Voted', `${voted} of ${eligible || '—'} member(s)`],
-        ['Not voted', `${notVoted} member(s)`],
-        ['Turnout', `${turnout}%`],
-        ['Ballots on the paper', `${cast} vote(s) counted across ${rows.length} candidate(s)`],
-      ],
-    },
-    {
-      kind: 'keyvalues',
-      heading: 'Result',
-      rows: [
-        ['Outcome', status === 'closed'
-          ? (election?.results?.outcome?.tie && !election?.results?.outcome?.resolved
-            ? `Tie between ${tied.length} candidate(s) — not yet resolved`
-            : winner ? `${clean(winner.fullName)} won` : 'Closed with no winner recorded')
-          : status === 'cancelled' ? 'Election cancelled' : `Not decided yet (${status})`],
-        ['Winner', winner ? `${clean(winner.fullName)} — ${Number(winner.votes || 0)} vote(s)` : '—'],
-        ['Announced', election?.results?.outcome?.announced ? 'Yes, announced to the group' : 'Not announced'],
+        ['Group', clean(election?.groupName)],
+        ['Ballot', `${anonymity === 'public' ? 'Public roll (votes are visible)' : 'Anonymous (counts only)'} · ${election?.eligibleMode === 'custom' ? `${(election?.eligibleStudentIds || []).length} hand-picked voters` : 'every member may vote'}`],
+        ['Voting', windowLabel(election?.votingOpenAt, election?.votingCloseAt, 'as soon as it opens', 'closed by the organizer')],
+        ['Tie-break', `${titleCase(election?.tieBreak || 'random')} · ${election?.allowVoteChange ? 'votes may be changed' : 'votes lock on cast'}`],
         ...(election?.cancelledReason ? [['Cancellation reason', clean(election.cancelledReason)] as [string, string]] : []),
-      ],
-    },
-    {
-      kind: 'lines',
-      heading: 'How this election was run',
-      lines: [
-        'Every voter signed in with their own system-generated passkey — no one can cast another member’s vote.',
-        `The ballot is ${anonymity === 'public' ? 'public: each vote is recorded against the voter' : 'anonymous: the count is kept, the voter is not'}.`,
-        `Ties are settled by ${titleCase(election?.tieBreak || 'random')}, and the tie-break is recorded on the election.`,
-        onlyVoted
-          ? `This print lists only candidates with at least one vote; ${leftOut} with no vote ${leftOut === 1 ? 'is' : 'are'} left out.`
-          : 'This print lists every candidate on the ballot.',
-        'This sheet was printed from the organizer’s own record — the numbers here are the numbers on screen.',
       ],
     },
   ];
@@ -208,26 +217,23 @@ export const buildElectionRecordDoc = (input: ElectionRecordInput): PrintDoc => 
       clean(election?.groupName, 'Group'),
       election?.activityName ? String(election.activityName) : null,
       titleCase(election?.role),
-      anonymity === 'public' ? 'Public roll' : 'Anonymous ballot',
-      election?.tieBreak ? `tie → ${election.tieBreak}` : null,
     ].filter(Boolean).join(' · '),
-    badges: [status, election?.eligibleMode === 'custom' ? 'Hand-picked voters' : 'All members', election?.results?.outcome?.announced ? 'Announced' : null]
-      .filter(Boolean) as string[],
+    badges: [status, anonymity === 'public' ? 'Public roll' : 'Anonymous ballot'],
+
     ...contextHeader(input),
+    // Three numbers only: on a phone, six boxes are a wall. Eligible rides
+    // along as the hint of Voted, and the ballot heading carries the candidate
+    // count, so nothing is lost.
     stats: [
-      { label: 'Eligible', value: String(eligible || '—'), hint: 'group members' },
-      { label: 'Voted', value: String(voted), hint: `of ${eligible || '—'}` },
+      { label: 'Voted', value: String(voted), hint: `of ${eligible || '—'} members` },
       { label: 'Not voted', value: String(notVoted), hint: 'members' },
-      { label: 'Turnout', value: `${turnout}%`, hint: 'voted ÷ eligible' },
-      { label: 'Votes cast', value: String(cast), hint: 'on the paper' },
-      onlyVoted
-        ? { label: 'With a vote', value: String(printed.length), hint: `of ${rows.length} on the ballot` }
-        : { label: 'Candidates', value: String(rows.length), hint: 'on the ballot' },
+      { label: 'Turnout', value: `${turnout}%`, hint: `${cast} vote${cast === 1 ? '' : 's'} counted` },
     ],
     sections,
     links,
+    linksTitle: 'Group links',
     notes: [
-      `Issued ${printDate(input.issuedAt || new Date())} from the Class & Group Management record. The server record is the record of truth; this sheet is a print of it.`,
+      'The server record is the record of truth; this sheet is a print of it.',
     ],
     fileName: `election-${election?.id || 'record'}-${slug(election?.title || 'election')}`,
   };

@@ -1031,7 +1031,7 @@ check('the panel asks the server for its attention board and reloads it on refre
   /cgm\.phantomAttention\(\)/.test(phantomPanel)
   && /const loadAttention = useCallback/.test(phantomPanel)
   && /void loadOverview\(\); void loadAttention\(\);/.test(phantomPanel)
-  && /void loadOverview\(\); void loadTab\(tab\); void loadAttention\(\);/.test(phantomPanel));
+  && /await Promise\.all\(\[loadOverview\(\), loadTab\(tab\), loadAttention\(\)\]\)/.test(phantomPanel));
 check('opening a section marks it seen, so its number clears',
   /cgm\.phantomAttentionSeen\(which\)/.test(phantomPanel)
   && /void markSeen\(tab\);/.test(phantomPanel)
@@ -1607,9 +1607,9 @@ check('the letters are issued with a real date and a document reference',
   /printDate\(doc\.issuedAt\)/.test(printEngine) && /Document ref/.test(printEngine)
   && /documentFileName/.test(printEngine));
 
-check('an election record prints VOTED and NOT VOTED, the ballot, the result and the links',
+check('an election record prints VOTED and NOT VOTED, the result first, the ballot bars and the links',
   /'Not voted'/.test(docBuilders) && /'Voted'/.test(docBuilders)
-  && /Turnout — voted and not voted/.test(docBuilders)
+  && /kind: 'hero'/.test(docBuilders) && /kind: 'bars'/.test(docBuilders)
   && /Ballot — \$\{rows\.length\}/.test(docBuilders)
   && /student-vote\/\$\{election\?\.id\}/.test(docBuilders)
   && /leader-apply\/\$\{election\?\.id\}/.test(docBuilders));
@@ -1624,9 +1624,13 @@ check('the organizer and the class are real values, never placeholders',
   && /className: String\(activeClass\.name/.test(workspace)
   && /classCode: activeClass\.code/.test(workspace));
 
-check('the print sheet is a real A4 document with a page footer on every page',
+check('the print sheet is a real A4 document on white paper, with the footer in the flow',
   /@page \{ size: A4/.test(printEngine) && /class="foot"/.test(printEngine)
-  && /position: fixed/.test(printEngine));
+  && /html, body \{ background: #ffffff; \}/.test(printEngine)
+  // A fixed footer repeats on every printed page in Chrome and lands on top of
+  // the closing notes; the sheet closes with its footer instead.
+  && !/position: fixed/.test(printEngine)
+  && /\.foot \{ margin-top/.test(printEngine));
 
 // ---------------------------------------------------------------------------
 // 38. "Leave out candidates with no votes" — an option, off by default
@@ -1659,6 +1663,55 @@ check('with no votes cast the option is disabled rather than printing an empty b
 check('the export note reports the ballot scope it just printed',
   /Ballot: \$\{votedCandidates\} of \$\{rows\.length\}/.test(workspace)
   && /left out and counted/.test(workspace));
+
+// ---------------------------------------------------------------------------
+// 39. Refresh refreshes (and keeps the tab); the tab survives a reload
+// ---------------------------------------------------------------------------
+section('39. Refresh reloads the open tab, and reloading reopens it');
+
+check('the address carries the tab, the class and the activity',
+  /parseWorkspaceNav/.test(workspace) && /rememberWorkspaceNav/.test(workspace)
+  && /buildWorkspaceHash/.test(workspace) === false // it goes through rememberWorkspaceNav
+  && /rememberWorkspaceNav\(\{ area, classId: activeClassId, activityId \}\)/.test(workspace));
+
+check('a browser reload reopens the tab instead of the overview',
+  /useState\(\(\) => parseWorkspaceNav/.test(workspace)
+  && /const \[area, setAreaState\] = useState<Area>/.test(workspace)
+  && /window\.addEventListener\('hashchange', onHashChange\)/.test(workspace));
+
+check('changing tab writes the new tab down (and drops the old activity)',
+  /const setArea = \(next: Area\) => \{[\s\S]{0,220}?rememberWorkspaceNav\(\{ area: next, classId: activeClassId, activityId: null \}\)/.test(workspace));
+
+check('picking an activity writes it down too, so the tab reopens on it',
+  /const pickActivity = \(next: number \| null\) => \{/.test(workspace)
+  && /rememberWorkspaceNav\(\{ area, classId: activeClassId, activityId: next \}\)/.test(workspace)
+  && /initialActivityId\?: number \| null; onActivityChange\?: \(id: number \| null\) => void/.test(workspace));
+
+check('switching class drops the activity of the class you left',
+  /if \(previousClass\.current !== activeClassId\) \{[\s\S]{0,200}?setActivityId\(null\)/.test(workspace));
+
+check('Refresh re-reads the workspace AND makes the open tab re-read its data',
+  /const refreshEverything = useCallback\(async \(\) => \{/.test(workspace)
+  && /await refresh\(\); \} finally \{\s*setRefreshNonce\(\(value\) => value \+ 1\)/.test(workspace)
+  && /<div key=\{\`\$\{area\}-\$\{activeClassId \?\? 0\}-\$\{refreshNonce\}\`\}/.test(workspace));
+
+check('Refresh never changes the tab, the class or the activity',
+  /onClick=\{\(\) => \{ void refreshEverything\(\); \}\}/.test(workspace)
+  && !/onClick=\{\(\) => \{ void refreshEverything\(\); \}\}[\s\S]{0,120}?setArea\(/.test(workspace));
+
+check('the PHANTOM oversight section is in the address too, so a reload keeps it',
+  /window\.location\.hash\)\.replace\('#class-groups\/phantom'/.test(phantom)
+  && /window\.history\.replaceState\(null, '', `#class-groups\/phantom\/\$\{next\}`\)/.test(phantom));
+
+check('the PHANTOM Refresh reloads the open section (never the overview) and shows it is working',
+  /const refreshTab = useCallback\(async \(\) => \{/.test(phantom)
+  && /await Promise\.all\(\[loadOverview\(\), loadTab\(tab\), loadAttention\(\)\]\)/.test(phantom)
+  && /data-testid="cgm-phantom-refresh"/.test(phantom)
+  && /aria-busy=\{refreshing\}/.test(phantom));
+
+check('Refresh shows it is working (disabled + spinning) instead of looking dead',
+  /data-testid="cgm-refresh"/.test(workspace) && /aria-busy=\{refreshing\}/.test(workspace)
+  && /animate-spin/.test(workspace) && /disabled=\{refreshing\}/.test(workspace));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

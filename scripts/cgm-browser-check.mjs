@@ -1971,10 +1971,12 @@ let ballotGroupSize = 0;
     Boolean(pdfBlob) && Object.values(pdfParts).every(Boolean),
     `bytes=${pdfBlob?.size || 0} ${JSON.stringify(pdfParts)} dct=${pdfText.includes('DCTDecode')} ${canvasProbe}`);
   check('the PDF carries voted and not voted, and the group voting link',
-    pdfText.includes('Not voted') && pdfText.includes('Turnout')
+    pdfText.includes('NOT VOTED') && pdfText.includes('TURNOUT')
     && pdfText.includes(`#student-vote/${ballotElectionId}`)
-    && new RegExp(`\\(${voted}\\)`).test(pdfText),
-    `voted=${voted}`);
+    // The three numbers, each under its own label (stats are label/value/hint).
+    && new RegExp(`VOTED[\\s\\S]{0,220}?\\(${voted}\\)`).test(pdfText)
+    && new RegExp(`NOT VOTED[\\s\\S]{0,220}?\\(${groupSize - voted}\\)`).test(pdfText),
+    `voted=${voted} notVoted=${groupSize - voted}`);
 
   // --- PNG -----------------------------------------------------------------
   await click(`cgm-election-png-${ballotElectionId}`);
@@ -2021,7 +2023,7 @@ let ballotGroupSize = 0;
     && zeroVoteCandidates.every((name) => !filteredSheet.includes(name)),
     `voted=${votedCandidateNames.length} zero=${zeroVoteCandidates.length} sheet=${filteredSheet.slice(0, 120)}`);
   check('the filtered paper says how many candidates it left out (it never silently shrinks)',
-    new RegExp(`Ballot — ${votedCandidateNames.length} of ${(printed.candidates || []).length} candidates? with a vote`).test(filteredSheet)
+    new RegExp(`Ballot — ${votedCandidateNames.length} of ${(printed.candidates || []).length} with a vote`).test(filteredSheet)
     && new RegExp(`${zeroVoteCandidates.length} candidates? with no vote (is|are) not printed here`).test(filteredSheet),
     filteredSheet.slice(0, 200));
   check('voted and not-voted numbers are unchanged by the filter',
@@ -2057,12 +2059,82 @@ let ballotGroupSize = 0;
     return element && element.checked === false ? true : null;
   }, 10_000);
   await click(`cgm-election-print-${ballotElectionId}`);
+  // The full ballot is back when the zero-vote candidates are back on the paper.
   const restoredSheet = await page.waitForElement(
-    () => { const sheet = lastFrameSheet(); return /every candidate on the ballot/.test(sheet) ? sheet : null; }, 25_000)
+    () => { const sheet = lastFrameSheet(); return sheet.includes(zeroVoteCandidates[0]) ? sheet : null; }, 25_000)
     .then((value) => String(value || ''));
   check('unticking it restores the full ballot (the choice is never sticky)',
     Boolean(restoredSheet) && zeroVoteCandidates.every((name) => restoredSheet.includes(name)),
     `unticked=${Boolean(unticked)} hadToggle=${Boolean(currentToggle)} sheet=${restoredSheet.slice(0, 160)}`);
+}
+
+// ---------------------------------------------------------------------------
+// 8f. Refresh refreshes; a reload reopens the tab you were on
+// ---------------------------------------------------------------------------
+{
+  const page = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('Class & Group Management', 20_000);
+  await switchClass(page, ballotClassId);
+  const electionsNav = await page.waitForElement(() => page.buttonByText('Elections'));
+  electionsNav && electionsNav.click();
+  await chooseActivity(page, ballotActivityId);
+  const recordRow = await page.waitForElement(
+    () => page.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 25_000);
+  check('opening a tab puts the organizer position in the address',
+    Boolean(recordRow)
+    && page.window.location.hash === `#class-groups/w/elections?class=${ballotClassId}&activity=${ballotActivityId}`,
+    page.window.location.hash);
+
+  // --- Refresh stays exactly where the organizer is ------------------------
+  const before = page.body();
+  const refreshButton = page.window.document.querySelector('[data-testid="cgm-refresh"]');
+  check('the workspace has a Refresh control in the top bar', Boolean(refreshButton));
+  refreshButton && refreshButton.click();
+  const refreshed = await page.waitForElement(
+    () => (page.window.document.querySelector('[data-testid="cgm-area-body"]')?.getAttribute('data-refresh-nonce') === '1' ? true : null),
+    20_000);
+  check('Refresh re-reads the open tab in place (the tab itself is remounted, not reset)',
+    Boolean(refreshed), page.window.location.hash);
+  const afterRefreshRow = await page.waitForElement(
+    () => page.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 20_000);
+  check('after Refresh the organizer is still on Elections, with the same activity and records',
+    Boolean(afterRefreshRow)
+    && /Elections/.test(page.body())
+    && page.window.location.hash === `#class-groups/w/elections?class=${ballotClassId}&activity=${ballotActivityId}`
+    && page.body().length > 100,
+    `hash=${page.window.location.hash} same=${before.length > 0}`);
+  check('Refresh no longer bounces to the overview',
+    !/tap a card to open it/.test(page.body()) || Boolean(afterRefreshRow),
+    page.body().slice(0, 160));
+
+  // --- A reload (fresh page at that address) reopens the same place --------
+  const reloaded = await boot(page.window.location.hash, { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  const reloadedRow = await reloaded.waitForElement(
+    () => reloaded.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 30_000);
+  check('a browser reload reopens the SAME tab, not the overview',
+    Boolean(reloadedRow) && /Choose an activity/.test(reloaded.body())
+    && !/tap a card to open it/.test(reloaded.body()),
+    reloaded.body().slice(0, 200));
+  const reloadedPicker = reloaded.window.document.querySelector('select[aria-label="Choose activity"]');
+  check('the reload also reopens the same class and the same activity',
+    Number(reloadedPicker?.value || 0) === Number(ballotActivityId)
+    && reloaded.window.location.hash.startsWith('#class-groups/w/elections'),
+    `picker=${reloadedPicker?.value} hash=${reloaded.window.location.hash}`);
+  check('the reload did not lose the record either — the row is the same record',
+    Boolean(reloadedRow) && /Ballot page/.test(reloadedRow.textContent || ''),
+    String(reloadedRow?.textContent || '').slice(0, 120));
+
+  // --- Navigating tabs keeps writing the position down --------------------
+  const studentsNav = await reloaded.waitForElement(() => reloaded.buttonByText('Students'));
+  studentsNav && studentsNav.click();
+  await reloaded.waitForFor('Roster', 20_000);
+  check('switching tab writes the new tab down (and is not confused with the student portal)',
+    reloaded.window.location.hash.startsWith('#class-groups/w/students'),
+    reloaded.window.location.hash);
+  const studentsReload = await boot(reloaded.window.location.hash, { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  check('the Students tab survives a reload too',
+    await studentsReload.waitForFor('Roster', 25_000) && !/tap a card to open it/.test(studentsReload.body()),
+    studentsReload.body().slice(0, 160));
 }
 
 // Restore the spec-default policies so the local database stays clean.
