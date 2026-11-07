@@ -1574,6 +1574,60 @@ check('on a short screen the result panel is scrolled into view when the draw la
   && /if \(panelBox\.top < surfaceBox\.top \|\| panelBox\.bottom > surfaceBox\.bottom\)/.test(reveal)
   && /panel\.scrollIntoView\(\{ block: 'center'/.test(reveal));
 
+// ---------------------------------------------------------------------------
+// 37. Printed records: one letterhead for Print, PDF and PNG
+// ---------------------------------------------------------------------------
+section('37. Every printed record carries the CODE Rx letterhead');
+
+const printEngine = src('src/lib/cgmPrint.ts');
+const docBuilders = src('src/lib/cgmDocs.ts');
+const groupSheetLib = src('src/lib/groupSheet.ts');
+
+check('the election record offers Print, PDF and PNG from the record itself',
+  /cgm-election-export-/.test(workspace) && /cgm-election-print-/.test(workspace)
+  && /cgm-election-pdf-/.test(workspace) && /cgm-election-png-/.test(workspace)
+  && /downloadPrintPdf/.test(workspace) && /downloadPrintPng/.test(workspace) && /printPrintDoc/.test(workspace));
+
+check('the letterhead is the society mark on the LEFT and the class & grouping mark on the RIGHT',
+  /PRINT_MARKS = \{\s*codeRx: '\/CODE%20RX11\.png',\s*classGroups: '\/CGP\.jpg'/.test(printEngine)
+  && /CODE Rx SOCIETY/.test(printEngine) && /Class & Group Management/.test(printEngine)
+  && printEngine.indexOf('PRINT_MARKS.codeRx') < printEngine.indexOf('PRINT_MARKS.classGroups'));
+
+check('the marks are real embedded images in the PDF, not coloured rectangles',
+  /\/Subtype \/Image/.test(printEngine) && /\/Filter \/DCTDecode/.test(printEngine)
+  && /codeRxJpeg/.test(printEngine) && /classGroupsJpeg/.test(printEngine) && /embedJpeg/.test(printEngine));
+
+check('the footer always names the organizer AND PHANTOM, with class, date and page',
+  /export const preparedBy/.test(printEngine) && /PHANTOM oversight \(Code Rx Society\)/.test(printEngine)
+  && /Code Rx Society oversight/.test(printEngine)
+  && /Page \$\{page\} of \$\{pages\}/.test(printEngine)
+  && /footerLines/.test(printEngine) && /doc\.classCode/.test(printEngine));
+
+check('the letters are issued with a real date and a document reference',
+  /printDate\(doc\.issuedAt\)/.test(printEngine) && /Document ref/.test(printEngine)
+  && /documentFileName/.test(printEngine));
+
+check('an election record prints VOTED and NOT VOTED, the ballot, the result and the links',
+  /'Not voted'/.test(docBuilders) && /'Voted'/.test(docBuilders)
+  && /Turnout — voted and not voted/.test(docBuilders)
+  && /Ballot — \$\{rows\.length\}/.test(docBuilders)
+  && /student-vote\/\$\{election\?\.id\}/.test(docBuilders)
+  && /leader-apply\/\$\{election\?\.id\}/.test(docBuilders));
+
+check('the group sheet uses the same letterhead and footer (class mark, organizer, group link)',
+  /loadPrintBrand/.test(groupSheetLib) && /PRINT_MARKS\.codeRx/.test(groupSheetLib)
+  && /PRINT_MARKS\.classGroups/.test(groupSheetLib) && /sheetFooter/.test(groupSheetLib)
+  && /preparedBy/.test(groupSheetLib) && /GROUP LINK/.test(groupSheetLib));
+
+check('the organizer and the class are real values, never placeholders',
+  /getUser\(\)\?\.name \|\| memberAuth\.getUser\(\)\?\.email/.test(workspace)
+  && /className: String\(activeClass\.name/.test(workspace)
+  && /classCode: activeClass\.code/.test(workspace));
+
+check('the print sheet is a real A4 document with a page footer on every page',
+  /@page \{ size: A4/.test(printEngine) && /class="foot"/.test(printEngine)
+  && /position: fixed/.test(printEngine));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');

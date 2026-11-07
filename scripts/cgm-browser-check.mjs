@@ -1363,6 +1363,12 @@ let wsClass = null;
 // ---------------------------------------------------------------------------
 let ballotElectionId = null;
 let ballotStudent = null;
+// Hoisted so the printed-record journey (8e) reuses this exact fixture rather
+// than inventing a second, weaker one.
+let ballotClassId = null;
+let ballotActivityId = null;
+let ballotTokens = [];
+let ballotGroupSize = 0;
 {
   const ballotClass = await makeClass(`Browser Check Zballot ${stamp}`);
   await api('POST', `/api/cgm/classes/${ballotClass.classId}/entry-password`, { entryPassword: 'ballot-entry' }, phantomToken);
@@ -1376,7 +1382,8 @@ let ballotStudent = null;
     name: `Browser Check Ballot Pods ${stamp}`, type: 'tutorial',
     config: { method: 'random', groupCount: 1, capacity: 200, genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'waitlist', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all' },
   }, phantomToken);
-  const ballotActivityId = ballotActivity.json?.data?.activityId ?? ballotActivity.json?.data?.id;
+  ballotActivityId = ballotActivity.json?.data?.activityId ?? ballotActivity.json?.data?.id;
+  ballotClassId = Number(ballotClass.classId);
   await api('POST', `/api/cgm/activities/${ballotActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
   await api('POST', `/api/cgm/activities/${ballotActivityId}/groups`, { count: 1, capacity: 200 }, phantomToken);
 
@@ -1390,12 +1397,14 @@ let ballotStudent = null;
     });
     const payload = await registered.json().catch(() => ({}));
     if (payload?.data?.session?.token) ballotStudentTokens.push(payload.data.session.token);
+    if (payload?.data?.session?.token) ballotTokens.push(payload.data.session.token);
   }
   const ballotActivityData = (await api('GET', `/api/cgm/activities/${ballotActivityId}`, undefined, phantomToken)).json?.data || {};
   const ballotGroupId = Number((ballotActivityData.groups || [])[0]?.id || 0);
   for (const row of (ballotActivityData.unassigned || [])) {
     await api('POST', `/api/cgm/activities/${ballotActivityId}/assign-student`, { studentId: Number(row.id), groupId: ballotGroupId }, phantomToken);
   }
+  ballotGroupSize = Number((ballotActivityData.groups || [])[0]?.size || 0) || (ballotActivityData.unassigned || []).length;
   const electionCreated = await api('POST', `/api/cgm/groups/${ballotGroupId}/elections`, {
     title: `Ballot page ${stamp}`, role: 'leader', anonymity: 'anonymous', visibility: 'group',
     allowVoteChange: false, tieBreak: 'random', eligibleMode: 'all',
@@ -1796,6 +1805,167 @@ let ballotStudent = null;
   check('Continue closes the overlay and hands the page back with scrolling restored',
     Boolean(closed) && portal.window.document.body.style.overflow !== 'hidden',
     `overflow=${portal.window.document.body.style.overflow || 'empty'}`);
+}
+
+// ---------------------------------------------------------------------------
+// 8e. Printed records: Print, PDF and PNG of the real ballot election —
+//     letterhead, the organizer, PHANTOM, the group link, the date, voted and
+//     not voted
+// ---------------------------------------------------------------------------
+{
+  const detail = (await api('GET', `/api/cgm/elections/${ballotElectionId}`, undefined, phantomToken)).json?.data || {};
+  const candidateIds = (detail.candidates || []).map((row) => Number(row.id)).filter(Boolean);
+  for (let index = 0; index < 2 && index < candidateIds.length && ballotTokens[index]; index += 1) {
+    await fetch(`${BASE}/api/cgm/student/elections/${ballotElectionId}/vote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Code-Rx-Student-Session': ballotTokens[index] },
+      body: JSON.stringify({ candidateId: candidateIds[index] }),
+    });
+  }
+  const printed = (await api('GET', `/api/cgm/elections/${ballotElectionId}`, undefined, phantomToken)).json?.data || {};
+  const voted = Number(printed?.participation?.voted || 0);
+  const groupSize = Number(printed?.participation?.groupSize || ballotGroupSize || 0);
+  check('the printed-record fixture is a real election with votes cast and members who did not vote',
+    ballotElectionId > 0 && voted >= 1 && groupSize > voted,
+    `voted=${voted} size=${groupSize}`);
+
+  const page = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await page.waitForFor('Class & Group Management', 20_000);
+  // jsdom has no canvas engine: give the page a measuring 2D context so the PNG
+  // path runs exactly the code a real browser runs.
+  // The app bundle is imported into NODE, so its globals are the shared ones:
+  // patch URL/Image/print on globalThis (and the page mirror) or the download
+  // never happens at all.
+  const blobs = [];
+  for (const host of [globalThis, page.window]) {
+    // Never delegate to the host's own createObjectURL: the browser build hands
+    // it a page-realm Blob and a strict host rejects the cross-realm object.
+    host.URL.createObjectURL = (blob) => { blobs.push(blob); return `blob:captured/${blobs.length}`; };
+    host.URL.revokeObjectURL = () => {};
+  }
+  page.window.print = () => {};
+  globalThis.print = () => {};
+  const fakeContext = () => ({
+    font: '', fillStyle: '', strokeStyle: '', textAlign: 'left', textBaseline: 'alphabetic',
+    measureText: (text) => ({ width: String(text ?? '').length * 7 }),
+    fillRect() {}, strokeRect() {}, fillText() {}, beginPath() {}, moveTo() {}, lineTo() {},
+    arcTo() {}, closePath() {}, fill() {}, stroke() {}, save() {}, restore() {}, clip() {}, drawImage() {},
+  });
+  page.window.HTMLCanvasElement.prototype.getContext = function getContext() { return fakeContext(); };
+  page.window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ==';
+  page.window.HTMLCanvasElement.prototype.toBlob = function toBlob(callback) {
+    callback(new page.window.Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' }));
+  };
+  // A stand-in mark that loads instantly: the letterhead must reach the PDF as a
+  // real embedded image, and jsdom never fetches image resources.
+  class FakeImage {
+    constructor() {
+      this.naturalWidth = 64; this.naturalHeight = 64; this.width = 64; this.height = 64; this.complete = true;
+    }
+    set src(value) {
+      this._src = value;
+      setTimeout(() => { if (this.onload) this.onload(); }, 0);
+    }
+    get src() { return this._src; }
+  }
+  globalThis.Image = FakeImage;
+  page.window.Image = FakeImage;
+
+  const switcher = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Switch class"]'));
+  if (switcher) {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(switcher, String(ballotClassId));
+    switcher.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  const electionsNav = await page.waitForElement(() => page.buttonByText('Elections'));
+  electionsNav && electionsNav.click();
+  const chooser = await page.waitForElement(() => page.window.document.querySelector('select[aria-label="Choose activity"]'));
+  if (chooser) {
+    const setter = Object.getOwnPropertyDescriptor(page.window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(chooser, String(ballotActivityId));
+    chooser.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+  }
+  const recordRow = await page.waitForElement(
+    () => page.window.document.querySelector(`[data-testid="cgm-election-record-${ballotElectionId}"]`), 25_000);
+  recordRow && recordRow.click();
+  const exportCard = await page.waitForElement(
+    () => page.window.document.querySelector(`[data-testid="cgm-election-export-${ballotElectionId}"]`), 20_000);
+  check('the election record offers Print, PDF and PNG',
+    Boolean(exportCard)
+    && Boolean(page.window.document.querySelector(`[data-testid="cgm-election-print-${ballotElectionId}"]`))
+    && Boolean(page.window.document.querySelector(`[data-testid="cgm-election-pdf-${ballotElectionId}"]`))
+    && Boolean(page.window.document.querySelector(`[data-testid="cgm-election-png-${ballotElectionId}"]`)),
+    page.body().slice(0, 200));
+
+  const click = async (testid) => {
+    const button = await page.waitForElement(() => page.window.document.querySelector(`[data-testid="${testid}"]`), 15_000);
+    button && button.click();
+    return Boolean(button);
+  };
+
+  // --- Print ---------------------------------------------------------------
+  await click(`cgm-election-print-${ballotElectionId}`);
+  const frame = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-print-frame"]'), 20_000);
+  const sheet = String(frame?.srcdoc || '');
+  check('Print opens a real A4 sheet for this record',
+    Boolean(frame) && /@page \{ size: A4/.test(sheet) && new RegExp(`Ballot page ${stamp}`).test(sheet),
+    sheet.slice(0, 160));
+  check('the sheet carries the CODE Rx mark on the left and the class & grouping mark on the right',
+    /class="left"/.test(sheet) && /class="right"/.test(sheet)
+    && sheet.indexOf('CODE%20RX11.png') > 0 && sheet.indexOf('CGP.jpg') > 0
+    && sheet.indexOf('CODE%20RX11.png') < sheet.indexOf('CGP.jpg'));
+  check('the sheet names the class, the organizer and PHANTOM in the footer',
+    new RegExp(`Browser Check Zballot ${stamp}`).test(sheet)
+    && /Prepared by PHANTOM · Code Rx Society oversight/.test(sheet)
+    && /Document ref/.test(sheet));
+  check('the sheet prints VOTED and NOT VOTED with the real numbers',
+    /Not voted/.test(sheet) && /Turnout/.test(sheet)
+    && new RegExp(`<span class="v">${voted}</span>`).test(sheet)
+    && new RegExp(`<span class="v">${groupSize - voted}</span>`).test(sheet),
+    `voted=${voted} notVoted=${groupSize - voted}`);
+  check('the sheet carries the group voting link and the issue date',
+    new RegExp(`#student-vote/${ballotElectionId}`).test(sheet)
+    && /Issued \d+ [A-Z][a-z]{2} \d{4}/.test(sheet));
+
+  // --- PDF -----------------------------------------------------------------
+  await click(`cgm-election-pdf-${ballotElectionId}`);
+  const pdfBlob = await page.waitForElement(
+    () => blobs.find((blob) => blob.type === 'application/pdf') || null, 25_000);
+  const pdfText = pdfBlob ? Buffer.from(await pdfBlob.arrayBuffer()).toString('latin1') : '';
+  const pdfParts = {
+    header: pdfText.startsWith('%PDF-1.4'),
+    wordmark: pdfText.includes('CODE Rx SOCIETY'),
+    organizer: pdfText.includes('Prepared by PHANTOM'),
+    phantom: pdfText.includes('Code Rx Society oversight'),
+    images: pdfText.includes('/Subtype /Image'),
+  };
+  const canvasProbe = (() => {
+    try {
+      const probe = page.window.document.createElement('canvas');
+      return `ctx=${Boolean(probe.getContext('2d'))} dataUrl=${String(probe.toDataURL('image/jpeg')).slice(0, 30)} img=${globalThis.Image === FakeImage}`;
+    } catch (error) { return `probe-failed ${String(error?.message || error)}`; }
+  })();
+  check('PDF saves a genuine document with the letterhead, the organizer and PHANTOM',
+    Boolean(pdfBlob) && Object.values(pdfParts).every(Boolean),
+    `bytes=${pdfBlob?.size || 0} ${JSON.stringify(pdfParts)} dct=${pdfText.includes('DCTDecode')} ${canvasProbe}`);
+  check('the PDF carries voted and not voted, and the group voting link',
+    pdfText.includes('Not voted') && pdfText.includes('Turnout')
+    && pdfText.includes(`#student-vote/${ballotElectionId}`)
+    && new RegExp(`\\(${voted}\\)`).test(pdfText),
+    `voted=${voted}`);
+
+  // --- PNG -----------------------------------------------------------------
+  await click(`cgm-election-png-${ballotElectionId}`);
+  const pngBlob = await page.waitForElement(
+    () => blobs.find((blob) => blob.type === 'image/png') || null, 25_000);
+  check('PNG saves a drawable sheet in one tap', Boolean(pngBlob) && pngBlob.size > 0, `bytes=${pngBlob?.size || 0}`);
+  const exportStatus = () => {
+    const card = page.window.document.querySelector(`[data-testid="cgm-election-export-${ballotElectionId}"]`);
+    return (card?.querySelector('[role="status"]')?.textContent || 'none').trim();
+  };
+  const noted = await page.waitForFor('Saved election-', 15_000);
+  check('the record reports each export instead of failing silently', noted,
+    `status=${exportStatus()} jsdom=${page.jsdomErrors.join(' | ').slice(0, 200)}`);
 }
 
 // Restore the spec-default policies so the local database stays clean.

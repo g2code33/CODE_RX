@@ -61,7 +61,7 @@ const formatWhen = (value: unknown) => {
 // Shared print helpers for student-facing member sheets
 // ---------------------------------------------------------------------------
 
-const buildClassmatesSheet = (className: string, classmates: any[]): GroupSheet => {
+const buildClassmatesSheet = (className: string, classmates: any[], classCode = ''): GroupSheet => {
   const dateLabel = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   const hasPhone = classmates.some((m: any) => m.phone);
   const hasEmail = classmates.some((m: any) => m.email);
@@ -77,6 +77,7 @@ const buildClassmatesSheet = (className: string, classmates: any[]): GroupSheet 
   return {
     groupName: `${className} — Classmates`,
     className,
+    classCode: classCode || undefined,
     activityName: className,
     dateLabel,
     columns,
@@ -85,7 +86,7 @@ const buildClassmatesSheet = (className: string, classmates: any[]): GroupSheet 
   };
 };
 
-const buildGroupMembersSheet = (groupName: string, className: string, activityName: string, members: any[]): GroupSheet => {
+const buildGroupMembersSheet = (groupName: string, className: string, activityName: string, members: any[], classCode = ''): GroupSheet => {
   const dateLabel = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   const hasPhone = members.some((m: any) => m.phone);
   const hasEmail = members.some((m: any) => m.email);
@@ -105,6 +106,7 @@ const buildGroupMembersSheet = (groupName: string, className: string, activityNa
     topic: '',
     includeTopic: false,
     className,
+    classCode: classCode || undefined,
     activityName,
     dateLabel,
     columns,
@@ -113,8 +115,8 @@ const buildGroupMembersSheet = (groupName: string, className: string, activityNa
   };
 };
 
-const ClassmatesFullPage = ({ className, classmates, onBack }: { className: string; classmates: any[]; onBack: () => void }) => {
-  const sheet = buildClassmatesSheet(className, classmates);
+const ClassmatesFullPage = ({ className, classmates, classCode = '', onBack }: { className: string; classmates: any[]; classCode?: string; onBack: () => void }) => {
+  const sheet = buildClassmatesSheet(className, classmates, classCode);
   return (
     <div className="space-y-5" data-testid="cgm-classmates-full-page">
       <button type="button" onClick={onBack} className="mini-button" data-testid="cgm-classmates-back">
@@ -153,8 +155,8 @@ const ClassmatesFullPage = ({ className, classmates, onBack }: { className: stri
   );
 };
 
-const GroupMembersFullPage = ({ groupName, className, activityName, members, currentStudentId, onBack }: { groupName: string; className: string; activityName: string; members: any[]; currentStudentId: number; onBack: () => void }) => {
-  const sheet = buildGroupMembersSheet(groupName, className, activityName, members);
+const GroupMembersFullPage = ({ groupName, className, activityName, members, classCode = '', currentStudentId, onBack }: { groupName: string; className: string; activityName: string; members: any[]; classCode?: string; currentStudentId: number; onBack: () => void }) => {
+  const sheet = buildGroupMembersSheet(groupName, className, activityName, members, classCode);
   return (
     <div className="space-y-5" data-testid="cgm-group-members-full-page">
       <button type="button" onClick={onBack} className="mini-button" data-testid="cgm-group-members-back">
@@ -1135,7 +1137,14 @@ const ClassDetailView = ({ classId, onBack, onOpenActivity, me, onGenderSet }: {
   };
 
   if (showClassmatesPage && data) {
-    return <ClassmatesFullPage className={String(data.class.name || 'Class')} classmates={(data.classmates || []) as any[]} onBack={() => setShowClassmatesPage(false)} />;
+    return (
+      <ClassmatesFullPage
+        className={String(data.class.name || 'Class')}
+        classmates={(data.classmates || []) as any[]}
+        classCode={String(data.class.code || '')}
+        onBack={() => setShowClassmatesPage(false)}
+      />
+    );
   }
 
   return (
@@ -1472,6 +1481,7 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
       <GroupMembersFullPage
         groupName={String(myGroup.group_name || `Group ${myGroup.position}`)}
         className={String(data.class.name || '')}
+        classCode={String(data.class.code || '')}
         activityName={String(data.activity.name || '')}
         members={groupMembers}
         currentStudentId={Number(me.student.id)}

@@ -3737,13 +3737,15 @@ const sheetLib = readFileSync(path.join(ROOT, 'src/lib/groupSheet.ts'), 'utf8');
 check('the member sheet panel offers field customization, the topic toggle, AOB and all three outputs',
   /cgm-member-sheet-panel/.test(wsSheet) && /cgm-sheet-topic-toggle/.test(wsSheet) && /cgm-aob/.test(wsSheet)
   && /Download PNG/.test(wsSheet) && /Download PDF/.test(wsSheet) && />Print</.test(wsSheet));
+const printLib = readFileSync(path.join(ROOT, 'src/lib/cgmPrint.ts'), 'utf8');
 check('the sheet renderer draws header, title, featured GROUP TOPIC block (toggleable), table and AOB — agenda is gone from the sheet',
   !/AGENDA/.test(sheetLib) && /GROUP TOPIC/.test(sheetLib) && /includeTopic/.test(sheetLib)
   && /AOB \/ OTHER BUSINESS/.test(sheetLib)
-  && /CODE Rx SOCIETY — Class & Group Management/.test(sheetLib)
-  && /renderGroupSheetCanvas/.test(sheetLib) && /buildGroupSheetPdf/.test(sheetLib) && /printGroupSheet/.test(sheetLib));
+  && /renderGroupSheetCanvas/.test(sheetLib) && /buildGroupSheetPdf/.test(sheetLib) && /printGroupSheet/.test(sheetLib)
+  && /loadPrintBrand/.test(sheetLib) && /PRINT_MARKS\.codeRx/.test(sheetLib) && /PRINT_MARKS\.classGroups/.test(sheetLib));
 check('the PDF is a genuine multi-page document with the preamble on page one',
-  /%PDF-1\.4/.test(sheetLib) && /newPage = \(continuation = false\)/.test(sheetLib) && /member sheet \(continued\)/.test(sheetLib));
+  /newPage = \(continuation = false\)/.test(sheetLib) && /member sheet \(continued\)/.test(sheetLib)
+  && /%PDF-1\.4/.test(printLib) && /class PdfFile/.test(printLib) && /embedJpeg/.test(printLib));
 check('sensitive columns are stripped from the sheet source unless the viewer holds the permission',
   /canSeeSensitive \? ', s\.phone, s\.email, s\.gender' : ''/.test(readFileSync(path.join(ROOT, 'functions/lib/cgm/routes-activities.ts'), 'utf8')));
 
@@ -5874,6 +5876,150 @@ check('49.21 — the desk history names the real person and the real action',
   (await memberCall('GET', `/api/cgm/classes/${classAId}/passkeys`, undefined, amaToken)).json?.data?.history
     ?.some((row) => /link_redeemed|rotated_by_organizer|link_created/.test(row.action) && row.fullName),
   'history has no named passkey change');
+
+// ---------------------------------------------------------------------------
+// 50. Printed records: one letterhead, every output, organiser + PHANTOM
+// ---------------------------------------------------------------------------
+section('50. Printed records carry the letterhead, the organizer and PHANTOM');
+await build({
+  entryPoints: [path.join(ROOT, 'src/lib/cgmDocs.ts')],
+  outfile: path.join(CACHE, 'cgmDocs.mjs'), bundle: true, format: 'esm', logLevel: 'silent',
+});
+const docLib = await import(path.join(CACHE, 'cgmDocs.mjs'));
+const printLib2 = await import(path.join(CACHE, 'groupSheet.mjs')).then(() => null).catch(() => null);
+const printSource = readFileSync(path.join(ROOT, 'src/lib/cgmPrint.ts'), 'utf8');
+
+const sampleElection = {
+  id: 77, title: 'Group leadership election', role: 'leader', status: 'voting',
+  anonymity: 'anonymous', visibility: 'organizers', tieBreak: 'random', allowVoteChange: false,
+  eligibleMode: 'all', groupName: 'Group 6',
+  nominationOpenAt: '2026-11-05 09:00:00', nominationCloseAt: '2026-11-06 09:00:00',
+  votingOpenAt: '2026-11-06 10:00:00', votingCloseAt: null,
+  results: null,
+};
+const sampleCandidates = [
+  { id: 1, fullName: 'Bonsu, Emmanuel Nana Asare', status: 'active', votes: 2 },
+  { id: 2, fullName: 'Oppong, Emmanuella', status: 'active', votes: 1 },
+  { id: 3, fullName: 'Bonney, Benjamin Abeka', status: 'active', votes: 1 },
+];
+const electionDoc = docLib.buildElectionRecordDoc({
+  election: sampleElection, candidates: sampleCandidates,
+  participation: { voted: 4, groupSize: 13, turnout: 31 },
+  className: 'RX 30 CLASS B', classCode: 'CRX-CLS-0002', institution: 'KNUST',
+  organizer: 'PHANTOM', origin: 'https://coderxsociety.pages.dev',
+});
+check('50.1 — the election document is titled by the record and letterheaded by the class',
+  electionDoc.title === 'Group leadership election' && electionDoc.className === 'RX 30 CLASS B'
+  && electionDoc.classCode === 'CRX-CLS-0002' && electionDoc.kind === 'Election record');
+check('50.2 — VOTED and NOT VOTED are both headline numbers (never a turnout without its halves)',
+  electionDoc.stats.some((stat) => stat.label === 'Voted' && stat.value === '4')
+  && electionDoc.stats.some((stat) => stat.label === 'Not voted' && stat.value === '9')
+  && electionDoc.stats.some((stat) => stat.label === 'Turnout' && stat.value === '31%')
+  && electionDoc.stats.some((stat) => stat.label === 'Eligible' && stat.value === '13'),
+  JSON.stringify(electionDoc.stats));
+const turnoutSection = electionDoc.sections.find((section) => section.heading === 'Turnout — voted and not voted');
+check('50.3 — the turnout block spells out voted, not voted and the counted ballots',
+  Boolean(turnoutSection) && turnoutSection.rows.some((row) => row[0] === 'Voted' && /4 of 13/.test(row[1]))
+  && turnoutSection.rows.some((row) => row[0] === 'Not voted' && /9/.test(row[1])));
+const ballotSection = electionDoc.sections.find((section) => section.kind === 'table');
+check('50.4 — the ballot prints every candidate with votes and share, highest first',
+  ballotSection.rows.length === 3 && ballotSection.rows[0][1] === 'Bonsu, Emmanuel Nana Asare'
+  && ballotSection.rows[0][3] === '2' && ballotSection.rows[0][4] === '50%',
+  JSON.stringify(ballotSection.rows[0]));
+check('50.5 — the voting link and the date travel with the paper',
+  electionDoc.links.some((link) => link.url === 'https://coderxsociety.pages.dev/#student-vote/77')
+  && docLib.buildElectionRecordDoc({ election: sampleElection, candidates: [], participation: {}, className: 'C', organizer: 'PHANTOM' })
+    .fileName.startsWith('election-77-'));
+
+// The footer is the one place both the organizer and PHANTOM are always named.
+const { footerLines } = await import(path.join(CACHE, 'cgmPrint.mjs')).catch(() => ({}));
+let printModule = null;
+try {
+  await build({ entryPoints: [path.join(ROOT, 'src/lib/cgmPrint.ts')], outfile: path.join(CACHE, 'cgmPrint.mjs'), bundle: true, format: 'esm', logLevel: 'silent' });
+  printModule = await import(path.join(CACHE, 'cgmPrint.mjs'));
+} catch (failure) { printModule = null; }
+check('50.6 — the print engine builds (it is imported by every printable record)', Boolean(printModule), 'bundling cgmPrint.ts failed');
+if (printModule) {
+  const [footerLeft, footerRight] = printModule.footerLines(electionDoc, 2, 3);
+  check('50.7 — the footer names the organizer AND PHANTOM, with the date and the page',
+    /Prepared by PHANTOM/.test(footerLeft) && /Code Rx Society oversight|PHANTOM oversight/.test(footerLeft)
+    && /Nov/.test(footerLeft)
+    && /Page 2 of 3/.test(footerRight) && /CRX-CLS-0002/.test(footerRight),
+    `${footerLeft} || ${footerRight}`);
+  const pdf = Buffer.from(printModule.buildPrintPdf(electionDoc, null)).toString('latin1');
+  check('50.8 — the PDF is a real file: header, trailer, letterhead text, the organizer and PHANTOM',
+    pdf.startsWith('%PDF-1.4') && pdf.trimEnd().endsWith('%%EOF')
+    && pdf.includes('CODE Rx SOCIETY') && pdf.includes('RX 30 CLASS B')
+    && pdf.includes('Prepared by PHANTOM') && pdf.includes('Code Rx Society oversight')
+    && (pdf.match(/\/Type \/Page[^s]/g) || []).length >= 1,
+    `pages ${(pdf.match(/\/Type \/Page[^s]/g) || []).length}`);
+  check('50.7b — another organizer still credits PHANTOM oversight, and never prints PHANTOM twice',
+    printModule.preparedBy('Ama Mensah') === 'Prepared by Ama Mensah · PHANTOM oversight (Code Rx Society)'
+    && printModule.preparedBy('PHANTOM') === 'Prepared by PHANTOM · Code Rx Society oversight'
+    && printModule.preparedBy('') === 'Prepared by the class organizer · PHANTOM oversight (Code Rx Society)',
+    printModule.preparedBy('Ama Mensah'));
+  const pdfPageCount = (pdf.match(/\/Type \/Page[^s]/g) || []).length;
+  check('50.9 — every page carries the footer, and the page count is honest',
+    (pdf.match(/Prepared by PHANTOM/g) || []).length === pdfPageCount
+    && Array.from({ length: pdfPageCount }, (_, i) => `Page ${i + 1} of ${pdfPageCount}`).every((label) => pdf.includes(label)),
+    `footers ${(pdf.match(/Prepared by PHANTOM/g) || []).length} pages ${pdfPageCount}`);
+  const manyPages = printModule.buildPrintPdf({
+    ...electionDoc,
+    sections: [{ kind: 'table', heading: 'Ballot', columns: ['#', 'Candidate', 'Votes'], rows: Array.from({ length: 140 }, (_, i) => [String(i + 1), `Candidate ${i + 1}`, String(140 - i)]) }],
+  }, null);
+  const manyText = Buffer.from(manyPages).toString('latin1');
+  check('50.10 — a long ballot paginates and every page still carries the letterhead and the footer',
+    (manyText.match(/\/Type \/Page[^s]/g) || []).length >= 2
+    && (manyText.match(/Prepared by PHANTOM/g) || []).length >= 2
+    && /Page \d+ of \d+/.test(manyText),
+    `pages ${(manyText.match(/\/Type \/Page[^s]/g) || []).length}`);
+  const html = printModule.buildPrintHtml(electionDoc);
+  check('50.11 — the print sheet puts the CODE Rx mark on the left and the class & grouping mark on the right',
+    /class="head"/.test(html) && html.indexOf('CODE%20RX11.png') > 0 && html.indexOf('CGP.jpg') > 0
+    && html.indexOf('CODE%20RX11.png') < html.indexOf('CGP.jpg')
+    && /RX 30 CLASS B/.test(html) && /CRX-CLS-0002/.test(html));
+  check('50.12 — the print sheet carries the title, the numbers, the ballot and the footer',
+    /Group leadership election/.test(html) && /Not voted/.test(html)
+    && /Bonsu, Emmanuel Nana Asare/.test(html) && /Prepared by PHANTOM/.test(html)
+    && /student-vote\/77/.test(html));
+  check('50.13 — the letterhead is a real embedded image in the PDF, not a drawn rectangle',
+    /\/Subtype \/Image/.test(printSource) && /\/Filter \/DCTDecode/.test(printSource) && /embedJpeg/.test(printSource));
+}
+
+// The group sheet uses the same engine, so its footer names the organizer too.
+const { buildGroupSheetDoc } = docLib;
+const groupDoc = buildGroupSheetDoc({
+  groupName: 'Group 6', activityName: 'Spectroscopic drug presentation', className: 'RX 30 CLASS B',
+  classCode: 'CRX-CLS-0002', organizer: 'PHANTOM', columns: ['Full name', 'Index number'],
+  rows: [['Bonsu, Emmanuel', 'PH/24/0135']], groupLink: 'https://chat.whatsapp.com/ABC123',
+});
+check('50.14 — a group sheet is the same official paper: letterhead context, group link, organizer footer',
+  groupDoc.className === 'RX 30 CLASS B'
+  && groupDoc.sections.some((section) => section.kind === 'table' && section.rows[0][0] === 'Bonsu, Emmanuel')
+  && groupDoc.links.some((link) => /chat\.whatsapp\.com/.test(link.url)));
+
+// The PNG path must survive a canvas that only measures and paints — the sheet
+// gets its height from a measuring pass, and a throw there would break export.
+if (printModule) {
+  const drawn = [];
+  const makeContext = () => ({
+    font: '', fillStyle: '', strokeStyle: '', textAlign: 'left', textBaseline: 'alphabetic',
+    measureText: (text) => ({ width: String(text ?? '').length * 7 }),
+    fillRect: () => drawn.push('rect'), strokeRect: () => {}, fillText: (text) => drawn.push(String(text)),
+    beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, arcTo: () => {}, closePath: () => {},
+    fill: () => {}, stroke: () => {}, save: () => {}, restore: () => {}, clip: () => {}, drawImage: () => {},
+  });
+  const nodeDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: makeContext, toBlob: () => {}, toDataURL: () => 'data:image/jpeg;base64,' }) };
+  try {
+    const canvas = printModule.renderPrintCanvas(electionDoc, {});
+    check('50.15 — the PNG sheet is measured and drawn (a tall sheet, not a blank box)',
+      canvas.height > 900 && canvas.width === 1400
+      && drawn.some((entry) => entry === 'CODE Rx SOCIETY') && drawn.some((entry) => entry === 'RX 30 CLASS B')
+      && drawn.some((entry) => /Prepared by PHANTOM/.test(entry)),
+      `height ${canvas.height} marks ${drawn.filter((entry) => entry === 'CODE Rx SOCIETY').length}`);
+  } finally { globalThis.document = nodeDocument; }
+}
 
 // ---------------------------------------------------------------------------
 

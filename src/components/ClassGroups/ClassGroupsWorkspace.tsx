@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, Link2, ListChecks,
   Megaphone, Plus, Recycle, RefreshCw, Search, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
+  Printer, FileDown, ImageDown,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
   cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
+import { downloadPrintPdf, downloadPrintPng, printPrintDoc } from '../../lib/cgmPrint';
+import { buildElectionRecordDoc, type DocContext } from '../../lib/cgmDocs';
 import { useCgmNoZoom } from './noZoom';
 import { appDialog } from '../AppDialog';
 import { RecentItems } from '../RecentItems';
@@ -240,7 +243,19 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'invitations' && can('manage_invitations') && <InvitationsArea classId={Number(activeClass.id)} className={String(activeClass.name || 'Class')} classCode={activeClass.code ? String(activeClass.code) : null} />}
           {activeClass && area === 'activities' && <ActivitiesArea classId={activeClass.id} onChanged={() => void refresh()} openActivityId={editActivityRequest} onEditConsumed={() => setEditActivityRequest(null)} />}
           {activeClass && area === 'groups' && <GroupsArea classId={Number(activeClass.id)} canGenerate={can('generate_groups')} canMove={can('move_students')} canRemove={can('remove_students')} canManageWhatsapp={can('manage_whatsapp')} canAppoint={can('appoint_leaders')} canAnnounce={can('manage_announcements')} canManage={can('manage_activities')} onChanged={() => void refresh()} onEditActivity={(id) => { setEditActivityRequest(id); setArea('activities'); }} onGroupFocus={(open) => setNavCollapsed(open)} />}
-          {activeClass && area === 'elections' && can('manage_elections') && <ElectionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
+          {activeClass && area === 'elections' && can('manage_elections') && (
+            <ElectionsArea
+              classId={activeClass.id}
+              docContext={{
+                className: String(activeClass.name || 'Class'),
+                classCode: activeClass.code ? String(activeClass.code) : null,
+                institution: activeClass.institution ? String(activeClass.institution) : null,
+                organizer: memberAuth.getUser()?.name || memberAuth.getUser()?.email || 'the class organizer',
+                origin: typeof window !== 'undefined' ? window.location.origin : '',
+              }}
+              onChanged={() => void refresh()}
+            />
+          )}
           {activeClass && area === 'leadership' && <LeadershipArea classId={activeClass.id} canAppoint={can('appoint_leaders')} onChanged={() => void refresh()} />}
           {activeClass && area === 'attendance' && can('manage_attendance') && <AttendanceArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'calendar' && <CalendarArea classId={activeClass.id} />}
@@ -1720,10 +1735,16 @@ const GroupDetail = ({ groupId, activityId, classId, allGroups, canMove, canRemo
         position: Math.min(Math.max(1, band.position || memberCount + 1), memberCount + 1),
         count: Math.max(1, band.count || 1),
       }));
+    const groupLink = group.whatsapp_link || group.whatsappLink || null;
     return {
       groupName: String(group.name), topic: group.topic || '', includeTopic: sheetIncludeTopic, aob: sheetAob,
       className: String(activity?.className || ''), activityName: String(activity?.name || ''), dateLabel,
       columns: sheetColumns, rows: sheetRows, blankRows: blankRowBands,
+      // The letterhead and footer of every output: who prepared it, the class
+      // it belongs to, the date and the group's own link.
+      organizer: memberAuth.getUser()?.name || memberAuth.getUser()?.email || 'the class organizer',
+      classCode: activity?.classCode ? String(activity.classCode) : undefined,
+      groupLink: groupLink ? String(groupLink) : undefined,
       footer: `Generated from CODE Rx on ${dateLabel} · ${activity?.className || ''} · ${activity?.name || ''} · ${group.name}`,
     };
   };
@@ -2643,7 +2664,7 @@ const GroupsArea = ({ classId, canGenerate, canMove, canRemove, canManageWhatsap
   );
 };
 
-const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () => void }) => {
+const ElectionsArea = ({ classId, onChanged, docContext }: { classId: number; onChanged: () => void; docContext: Omit<DocContext, 'issuedAt'> }) => {
   const [activities, setActivities] = useState<any[]>([]);
   const [activityId, setActivityId] = useState<number | null>(null);
   const [detail, setDetail] = useState<any>(null);
@@ -2747,6 +2768,8 @@ const ElectionsArea = ({ classId, onChanged }: { classId: number; onChanged: () 
         <ElectionDossier
           entry={openEntry}
           busy={busy}
+          docContext={docContext}
+          activityName={String((detail as any)?.name || '')}
           onAction={(action, extra) => runAction(openEntry, action, extra)}
           onPrefillOpenVoting={() => setPendingOpen(openEntry)}
         />
@@ -2986,13 +3009,39 @@ const OpenVotingForm = ({ entry, busy, onCancel, onConfirm }: { entry: any; busy
  * instead of being dumped inline into the list. Built for a phone: one column,
  * full-width tap targets, nothing that needs a horizontal scroll.
  */
-const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting }: {
+const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContext, activityName }: {
   entry: any;
   busy: boolean;
   onAction: (action: string, extra?: any) => Promise<void>;
   onPrefillOpenVoting?: () => void;
+  docContext: Omit<DocContext, 'issuedAt'>;
+  activityName?: string;
 }) => {
   const { election, candidates, participation } = entry;
+  // One document model feeds all three outputs, so Print, PDF and PNG of a
+  // record can never say different things.
+  const [exporting, setExporting] = useState<'print' | 'pdf' | 'png' | null>(null);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const buildDoc = () => buildElectionRecordDoc({
+    ...docContext,
+    issuedAt: new Date(),
+    election: { ...election, activityName: activityName || undefined },
+    candidates, participation,
+  });
+  const runExport = async (mode: 'print' | 'pdf' | 'png') => {
+    setExporting(mode); setExportNote(null);
+    try {
+      const document_ = buildDoc();
+      if (mode === 'print') printPrintDoc(document_);
+      else if (mode === 'pdf') await downloadPrintPdf(document_);
+      else await downloadPrintPng(document_);
+      setExportNote(mode === 'print'
+        ? 'The print sheet is open — choose your printer or Save as PDF.'
+        : `Saved ${document_.fileName}.${mode} with the CODE Rx letterhead.`);
+    } catch (failure: any) {
+      setExportNote(failure?.message || 'That document could not be produced.');
+    } finally { setExporting(null); }
+  };
   const hasTie = Boolean(election.results?.outcome?.tie) && !election.results?.outcome?.resolved;
   const tiedIds: number[] = election.results?.outcome?.tiedCandidateIds || [];
   const [showVotingLink, setShowVotingLink] = useState(false);
@@ -3092,6 +3141,26 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting }: {
             Delete
           </button>
         </div>
+      </div>
+
+      <div className={card} data-testid={`cgm-election-export-${election.id}`}>
+        <p className={label}>Print this record</p>
+        <p className="mt-1 text-[11px] font-medium text-slate-500">
+          The paper carries the CODE Rx letterhead, the class &amp; grouping mark, this group’s voting link, the date,
+          voted and not-voted numbers, and a footer naming you and PHANTOM.
+        </p>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <button type="button" disabled={Boolean(exporting)} className="cgm-primary-button w-full" data-testid={`cgm-election-print-${election.id}`} onClick={() => void runExport('print')}>
+            <Printer className="mr-1 inline h-4 w-4" /> {exporting === 'print' ? 'Opening…' : 'Print'}
+          </button>
+          <button type="button" disabled={Boolean(exporting)} className="mini-button w-full" data-testid={`cgm-election-pdf-${election.id}`} onClick={() => void runExport('pdf')}>
+            <FileDown className="mr-1 inline h-4 w-4" /> {exporting === 'pdf' ? 'Building…' : 'PDF'}
+          </button>
+          <button type="button" disabled={Boolean(exporting)} className="mini-button w-full" data-testid={`cgm-election-png-${election.id}`} onClick={() => void runExport('png')}>
+            <ImageDown className="mr-1 inline h-4 w-4" /> {exporting === 'png' ? 'Drawing…' : 'PNG'}
+          </button>
+        </div>
+        {exportNote && <p role="status" className="mt-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-700">{exportNote}</p>}
       </div>
 
       <div className={card}>

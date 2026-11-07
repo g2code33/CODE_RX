@@ -1,15 +1,28 @@
 /**
- * CODE Rx — group member sheet rendering (dependency-free).
+ * CODE Rx — group member sheet (dependency-free).
  *
  * One sheet definition renders three ways the organizer chooses from:
- *   • a downloadable PNG (canvas),  • a genuine multi-page PDF (built here,
- * Helvetica, A4 portrait, with the agenda + AOB preamble on page one),
+ *   • a downloadable PNG (canvas),
+ *   • a genuine multi-page PDF (A4 portrait, built in `cgmPrint`'s byte writer),
  *   • a browser print of the same document.
- * The header (society · class · activity), the group title, the featured
- * GROUP TOPIC block (organizer can toggle it off), the chosen member
- * columns and an AOB block appear — the printout is a real working
- * document for the group.
+ *
+ * Every output carries the shared CODE Rx letterhead — the society mark on the
+ * left, the class & grouping mark on the right, the class and activity line, the
+ * group title, the GROUP TOPIC block (toggleable), the chosen member columns,
+ * the AOB block, and a footer that names the organizer and PHANTOM, with the
+ * issue date and the group link.
  */
+
+import {
+  PRINT_COLORS,
+  PRINT_MARKS,
+  PdfFile,
+  loadPrintBrand,
+  preparedBy,
+  printDate,
+  pdfText,
+  type PrintBrand,
+} from './cgmPrint';
 
 export interface GroupSheet {
   groupName: string;
@@ -25,14 +38,19 @@ export interface GroupSheet {
   /** Blank write-in rows at 1-based member-row positions (handwriting space). */
   blankRows?: Array<{ position: number; count: number }>;
   footer: string;
+  /** Who produced the sheet — printed in the footer beside PHANTOM. */
+  organizer?: string;
+  classCode?: string;
+  /** The group's own link, printed with the issue date. */
+  groupLink?: string;
 }
 
-const EMERALD = '#047857';
-const EMERALD_SOFT = '#ecfdf5';
-const AMBER_SOFT = '#fffbeb';
-const INK = '#0f172a';
-const MUTED = '#64748b';
-const LINE = '#e2e8f0';
+const EMERALD = PRINT_COLORS.emerald;
+const EMERALD_SOFT = PRINT_COLORS.soft;
+const AMBER_SOFT = PRINT_COLORS.goldSoft;
+const INK = PRINT_COLORS.ink;
+const MUTED = PRINT_COLORS.muted;
+const LINE = PRINT_COLORS.line;
 
 const wrap = (text: string, maxChars: number): string[] => {
   const out: string[] = [];
@@ -61,6 +79,13 @@ const download = (blob: Blob, name: string) => {
 
 const safeName = (value: string) => String(value || 'group').replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 60) || 'group';
 
+/** The footer of every sheet: organizer, PHANTOM, class, date, group link. */
+export const sheetFooter = (sheet: GroupSheet): [string, string] => [
+  `${preparedBy(sheet.organizer || sheet.footer)} · ${sheet.dateLabel}`,
+  [sheet.className, sheet.classCode ? `(${sheet.classCode})` : null, sheet.groupLink ? `Group link ${sheet.groupLink}` : null]
+    .filter(Boolean).join(' · '),
+];
+
 // ---------------------------------------------------------------------------
 // Blank write-in rows — the organizer can add ruled empty rows at chosen
 // positions (for signatures, late additions, marks). They render in every
@@ -85,7 +110,7 @@ const buildRenderRows = (sheet: GroupSheet): SheetRow[] => {
 // ---------------------------------------------------------------------------
 // PNG — canvas rendering
 // ---------------------------------------------------------------------------
-export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => {
+export const renderGroupSheetCanvas = (sheet: GroupSheet, brand?: PrintBrand | null): HTMLCanvasElement => {
   const width = 1240;
   const margin = 48;
   const canvas = document.createElement('canvas');
@@ -103,40 +128,70 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
   // Pass 1: measure total height.
   ctx.font = '16px system-ui, sans-serif';
   let y = 0;
-  const headerH = 96;
+  const headerH = 132;                     // letterhead band (marks + rule)
   y += headerH + 40;                       // band + title area
   y += topicLines.length ? 52 + topicLines.length * 24 + 14 : 0;
   y += 46;                                  // table head
   y += tableRows.length * rowH;
   y += aobLines.length ? 52 + aobLines.length * 24 + 14 : 0;
-  y += 72;                                  // footer
+  y += sheet.groupLink ? 60 : 0;
+  y += 96;                                  // footer
   const height = Math.round(y);
 
   canvas.width = width;
   canvas.height = height;
   const g = canvas.getContext('2d')!;
 
-  // Header band.
-  g.fillStyle = EMERALD;
-  g.fillRect(0, 0, width, headerH);
-  g.fillStyle = '#ffffff';
-  g.font = '700 22px system-ui, sans-serif';
-  g.fillText('CODE Rx SOCIETY — Class & Group Management', margin, 38);
-  g.font = '15px system-ui, sans-serif';
-  g.fillText(`${sheet.className}  ·  ${sheet.activityName}`, margin, 64);
+  // --- Letterhead: society mark left, class & grouping mark right ----------
+  const markSize = 54;
+  if (brand?.codeRx) g.drawImage(brand.codeRx, margin, 26, markSize, markSize);
+  const leftText = margin + (brand?.codeRx ? markSize + 16 : 0);
+  g.fillStyle = PRINT_COLORS.deep;
+  g.font = '700 21px system-ui, sans-serif';
+  g.fillText('CODE Rx SOCIETY', leftText, 52);
+  g.fillStyle = MUTED;
+  g.font = '13px system-ui, sans-serif';
+  g.fillText('Class & Group Management', leftText, 71);
+
+  if (brand?.classGroups) {
+    const mx = width - margin - markSize;
+    g.save();
+    g.beginPath();
+    const r = 12;
+    g.moveTo(mx + r, 26);
+    g.arcTo(mx + markSize, 26, mx + markSize, 26 + markSize, r);
+    g.arcTo(mx + markSize, 26 + markSize, mx, 26 + markSize, r);
+    g.arcTo(mx, 26 + markSize, mx, 26, r);
+    g.arcTo(mx, 26, mx + markSize, 26, r);
+    g.closePath();
+    g.clip();
+    g.drawImage(brand.classGroups, mx, 26, markSize, markSize);
+    g.restore();
+  }
+  const rightText = width - margin - (brand?.classGroups ? markSize + 16 : 0);
   g.textAlign = 'right';
-  g.fillText(sheet.dateLabel, width - margin, 38);
+  g.fillStyle = INK;
+  g.font = '700 16px system-ui, sans-serif';
+  g.fillText(sheet.className, rightText, 52);
+  g.fillStyle = MUTED;
+  g.font = '12px system-ui, sans-serif';
+  g.fillText([sheet.classCode, sheet.activityName].filter(Boolean).join(' · '), rightText, 71);
   g.textAlign = 'left';
 
-  // Title + topic.
-  let cursor = headerH + 52;
+  g.fillStyle = EMERALD;
+  g.fillRect(margin, 100, width - margin * 2, 3);
+  g.fillStyle = PRINT_COLORS.gold;
+  g.fillRect(margin, 100, 110, 3);
+
+  // --- Title + topic --------------------------------------------------------
+  let cursor = headerH + 44;
   g.fillStyle = INK;
   g.font = '800 34px system-ui, sans-serif';
   g.fillText(sheet.groupName, margin, cursor);
-  g.font = '400 16px system-ui, sans-serif';
+  g.font = '400 15px system-ui, sans-serif';
   g.fillStyle = MUTED;
   g.textAlign = 'right';
-  g.fillText(`${sheet.rows.length} member(s)`, width - margin, cursor);
+  g.fillText(`${sheet.rows.length} member(s) · ${sheet.dateLabel}`, width - margin, cursor);
   g.textAlign = 'left';
   cursor += 14;
 
@@ -201,31 +256,58 @@ export const renderGroupSheetCanvas = (sheet: GroupSheet): HTMLCanvasElement => 
     cursor += 40 + aobLines.length * 24 + 14;
   }
 
-  // Footer.
+  // Group link.
+  if (sheet.groupLink) {
+    cursor += 18;
+    g.fillStyle = '#f8fafc';
+    g.fillRect(margin, cursor, width - margin * 2, 40);
+    g.fillStyle = MUTED;
+    g.font = '800 11px system-ui, sans-serif';
+    g.fillText('GROUP LINK', margin + 14, cursor + 17);
+    g.fillStyle = EMERALD;
+    g.font = '700 13px "SFMono-Regular", Menlo, monospace';
+    g.fillText(sheet.groupLink, margin + 14, cursor + 33);
+    cursor += 46;
+  }
+
+  // Footer: organizer + PHANTOM on the left, class + date on the right.
+  const [footerLeft, footerRight] = sheetFooter(sheet);
+  g.fillStyle = EMERALD;
+  g.fillRect(margin, height - 62, width - margin * 2, 2);
   g.fillStyle = MUTED;
-  g.font = '12px system-ui, sans-serif';
-  g.fillText(sheet.footer, margin, height - 24);
+  g.font = '700 11.5px system-ui, sans-serif';
+  g.fillText(footerLeft, margin, height - 40);
+  g.font = '400 11px system-ui, sans-serif';
+  g.textAlign = 'right';
+  g.fillText(footerRight, width - margin, height - 24);
+  g.textAlign = 'left';
   return canvas;
 };
 
 export const downloadGroupSheetPng = (sheet: GroupSheet): void => {
-  const canvas = renderGroupSheetCanvas(sheet);
-  canvas.toBlob((blob) => { if (blob) download(blob, `${safeName(sheet.groupName)}-members.png`); }, 'image/png');
+  void loadPrintBrand().then((brand) => {
+    const canvas = renderGroupSheetCanvas(sheet, brand);
+    canvas.toBlob((blob) => { if (blob) download(blob, `${safeName(sheet.groupName)}-members.png`); }, 'image/png');
+  });
 };
 
 // ---------------------------------------------------------------------------
-// PDF — genuine multi-page A4 document
+// PDF — genuine multi-page A4 document, shared letterhead + footer
 // ---------------------------------------------------------------------------
-const PDF_W = 595; const PDF_H = 842; const PDF_MARGIN = 42;
-const pdfEscape = (value: string) => String(value ?? '')
-  .replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
-  .replace(/[^\x20-\x7E\u00A0-\u00FF]/g, '?');
+const PDF_W = 595.28; const PDF_H = 841.89; const PDF_MARGIN = 42;
+const pdfEscape = (value: string) => pdfText(value);
 const pdfClip = (value: string, maxChars: number) => {
   const text = String(value ?? '');
-  return text.length > maxChars ? `${text.slice(0, Math.max(3, maxChars - 1))}…` : text;
+  return text.length > maxChars ? `${text.slice(0, Math.max(3, maxChars - 1))}...` : text;
 };
 
-export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
+export const buildGroupSheetPdf = (sheet: GroupSheet, brand?: PrintBrand | null): Uint8Array => {
+  const file = new PdfFile();
+  const fontRegular = file.add(['<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>']);
+  const fontBold = file.add(['<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>']);
+  const codeRxId = file.embedJpeg(brand?.codeRxJpeg);
+  const classId = file.embedJpeg(brand?.classGroupsJpeg);
+
   const usable = PDF_W - PDF_MARGIN * 2;
   const colWidth = usable / Math.max(1, sheet.columns.length);
   const colChars = Math.floor(colWidth / 4.8);
@@ -234,105 +316,129 @@ export const buildGroupSheetPdf = (sheet: GroupSheet): Uint8Array => {
   const aobLines = sheet.aob ? wrap(sheet.aob, 92) : [];
   const tableRows = buildRenderRows(sheet);
 
-  type Op = string;
-  const pages: Op[][] = [];
-  let ops: Op[] = [];
+  const pages: string[][] = [];
+  let ops: string[] = [];
   let cursor = PDF_H - PDF_MARGIN;
   const text = (x: number, y: number, size: number, bold: boolean, value: string, gray = 0) =>
-    ops.push(`BT /F${bold ? 2 : 1} ${size} Tf ${gray} g ${x} ${y} Td (${pdfEscape(value)}) Tj ET`);
+    ops.push(`BT ${gray} g /F${bold ? 2 : 1} ${size} Tf ${x} ${y} Td (${pdfEscape(value)}) Tj ET`);
+  const rect = (x: number, y: number, w: number, h: number, r: number, g: number, b: number) =>
+    ops.push(`${r} ${g} ${b} rg ${x} ${y} ${w} ${h} re f`);
+
+  const letterhead = () => {
+    const top = PDF_H - PDF_MARGIN;
+    const markSize = 34;
+    if (codeRxId) ops.push(`q ${markSize} 0 0 ${markSize} ${PDF_MARGIN} ${top - markSize + 2} cm /Im${codeRxId} Do Q`);
+    const leftText = PDF_MARGIN + (codeRxId ? markSize + 10 : 0);
+    text(leftText, top - 10, 12.5, true, 'CODE Rx SOCIETY', 1);
+    text(leftText, top - 22, 8, false, 'Class & Group Management', 0.55);
+    if (classId) ops.push(`q ${markSize} 0 0 ${markSize} ${PDF_W - PDF_MARGIN - markSize} ${top - markSize + 2} cm /Im${classId} Do Q`);
+    const rightText = PDF_W - PDF_MARGIN - (classId ? markSize + 10 : 0);
+    const className = pdfClip(sheet.className, 34);
+    text(rightText - className.length * 5.4, top - 10, 10.5, true, className, 0.05);
+    const sub = pdfClip([sheet.classCode, sheet.activityName].filter(Boolean).join(' - '), 44);
+    text(rightText - sub.length * 3.6, top - 22, 7.5, false, sub, 0.45);
+    rect(PDF_MARGIN, top - markSize - 6, usable, 1.6, 0.016, 0.471, 0.341);
+    return top - markSize - 22;
+  };
+
+  const footer = (pageOps: string[], page: number, pagesCount: number) => {
+    const [left, right] = sheetFooter(sheet);
+    pageOps.push(`0.016 0.471 0.341 rg ${PDF_MARGIN} 52 ${usable} 1 re f`);
+    pageOps.push(`BT 0.392 0.455 0.545 rg /F1 7 Tf ${PDF_MARGIN} 40 Td (${pdfEscape(pdfClip(left, 120))}) Tj ET`);
+    pageOps.push(`BT 0.392 0.455 0.545 rg /F1 6.5 Tf ${PDF_MARGIN} 29 Td (${pdfEscape(pdfClip(right, 120))}) Tj ET`);
+    pageOps.push(`BT 0.392 0.455 0.545 rg /F1 6.5 Tf ${PDF_W - PDF_MARGIN - 40} 40 Td (${pdfEscape(`Page ${page} of ${pagesCount}`)}) Tj ET`);
+  };
+
   const newPage = (continuation = false) => {
     pages.push(ops);
     ops = [];
-    cursor = PDF_H - PDF_MARGIN;
+    cursor = letterhead();
     if (continuation) {
       text(PDF_MARGIN, cursor - 8, 9, false, `${sheet.groupName} — member sheet (continued)`, 0.45);
       cursor -= 26;
     }
   };
 
-  // Page 1 header.
-  ops.push(`0.016 0.471 0.341 rg ${PDF_MARGIN} ${cursor - 54} ${usable} 58 re f`);
-  text(PDF_MARGIN + 12, cursor - 20, 13, true, 'CODE Rx SOCIETY — Class & Group Management', 1);
-  text(PDF_MARGIN + 12, cursor - 38, 9, false, `${pdfClip(`${sheet.className}  ·  ${sheet.activityName}`, 90)}   (${sheet.dateLabel})`, 1);
-  cursor -= 76;
+  // Page 1 — letterhead, then the group title.
+  cursor = letterhead();
   text(PDF_MARGIN, cursor, 17, true, pdfClip(sheet.groupName, 44));
   const countLabel = `${sheet.rows.length} member(s)`;
   text(PDF_W - PDF_MARGIN - countLabel.length * 4.6, cursor, 10, false, countLabel, 0.35);
   cursor -= 8;
 
-  const block = (heading: string, body: string[], fill: string, headingColor: number) => {
+  const block = (heading: string, body: string[], fill: [number, number, number], headingGray: number) => {
     if (!body.length) return;
     const height = 34 + body.length * 14 + 8;
-    if (cursor - height < PDF_MARGIN + 40) newPage();
-    ops.push(`${fill} rg ${PDF_MARGIN} ${cursor - height} ${usable} ${height} re f`);
-    text(PDF_MARGIN + 10, cursor - 16, 8.5, true, heading, headingColor);
+    if (cursor - height < 76) newPage();
+    rect(PDF_MARGIN, cursor - height, usable, height, fill[0], fill[1], fill[2]);
+    text(PDF_MARGIN + 10, cursor - 16, 8.5, true, heading, headingGray);
     body.forEach((line, index) => text(PDF_MARGIN + 10, cursor - 32 - index * 14, 9.5, false, line));
     cursor -= height + 14;
   };
-  block('GROUP TOPIC', topicLines, '1 0.972 0.921', 0.09);
+  block('GROUP TOPIC', topicLines, [1, 0.972, 0.921], 0.09);
 
   // Table with page breaks + repeated header.
   const drawTableHead = () => {
-    ops.push(`0.016 0.471 0.341 rg ${PDF_MARGIN} ${cursor - 20} ${usable} 20 re f`);
+    rect(PDF_MARGIN, cursor - 20, usable, 20, 0.016, 0.471, 0.341);
     sheet.columns.forEach((column, index) => text(PDF_MARGIN + index * colWidth + 5, cursor - 14, 8.5, true, pdfClip(column, colChars), 1));
     cursor -= 20;
   };
-  if (cursor - 40 < PDF_MARGIN) newPage();
+  if (cursor - 40 < 76) newPage();
   drawTableHead();
   tableRows.forEach((row, rowIndex) => {
-    if (cursor - 18 < PDF_MARGIN + 30) { newPage(true); drawTableHead(); }
-    if (rowIndex % 2 === 0) ops.push(`0.972 0.980 0.988 rg ${PDF_MARGIN} ${cursor - 18} ${usable} 18 re f`);
+    if (cursor - 18 < 76) { newPage(true); drawTableHead(); }
+    if (rowIndex % 2 === 0) rect(PDF_MARGIN, cursor - 18, usable, 18, 0.972, 0.980, 0.988);
     if (row.blank) {
       // Ruled write-in line per cell, so handwriting stays inside its column.
-      sheet.columns.forEach((_, index) => ops.push(`0.62 0.66 0.72 rg ${PDF_MARGIN + index * colWidth + 5} ${cursor - 4} ${colWidth - 10} 0.7 re f`));
+      sheet.columns.forEach((_, index) => op0(PDF_MARGIN + index * colWidth + 5, cursor - 4, colWidth - 10));
     } else {
       row.cells.forEach((cell, index) => text(PDF_MARGIN + index * colWidth + 5, cursor - 13, 9, false, pdfClip(cell, colChars)));
     }
     cursor -= 18;
   });
+  function op0(x: number, y: number, w: number) {
+    ops.push(`0.62 0.66 0.72 rg ${x} ${y} ${w} 0.7 re f`);
+  }
 
-  block('AOB / OTHER BUSINESS', aobLines, '0.925 0.992 0.960', 0.2);
+  block('AOB / OTHER BUSINESS', aobLines, [0.925, 0.992, 0.960], 0.2);
 
-  if (cursor - 20 < PDF_MARGIN) newPage();
-  text(PDF_MARGIN, cursor - 6, 7.5, false, pdfClip(sheet.footer, 130), 0.5);
+  if (sheet.groupLink) {
+    const height = 34;
+    if (cursor - height < 76) newPage();
+    rect(PDF_MARGIN, cursor - height, usable, height, 0.973, 0.976, 0.984);
+    text(PDF_MARGIN + 10, cursor - 14, 8, true, 'GROUP LINK', 0.35);
+    text(PDF_MARGIN + 10, cursor - 26, 9.5, false, pdfClip(sheet.groupLink, 90), 0.2);
+    cursor -= height + 12;
+  }
+
+  if (cursor - 20 < 76) newPage();
   pages.push(ops);
 
-  // Assemble the PDF file.
-  const objects: string[] = [];
-  const pageIds: number[] = [];
-  const contentIds: number[] = [];
-  const fontRegularId = 1; const fontBoldId = 2;
-  let nextId = 3;
-  for (const pageOps of pages) {
-    const contentId = nextId++; const pageId = nextId++;
-    contentIds.push(contentId); pageIds.push(pageId);
-    objects[contentId] = `<< /Length ${pageOps.join('\n').length} >>\nstream\n${pageOps.join('\n')}\nendstream`;
-    objects[pageId] = `<< /Type /Page /Parent PAGES /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Contents ${contentId} 0 R /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >> >> >>`;
-  }
-  const pagesId = nextId++;
-  objects[pagesId] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`;
-  objects[fontRegularId] = `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`;
-  objects[fontBoldId] = `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>`;
-  const catalogId = nextId++;
-  objects[catalogId] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
+  const pageCount = Math.max(1, pages.length);
+  pages.forEach((pageOps, index) => footer(pageOps, index + 1, pageCount));
 
-  let pdf = '%PDF-1.4\n';
-  const offsets: number[] = [];
-  for (let id = 1; id < nextId; id += 1) {
-    if (!objects[id]) continue;
-    offsets[id] = pdf.length;
-    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
-  }
-  const xrefAt = pdf.length;
-  pdf += `xref\n0 ${nextId}\n0000000000 65535 f \n`;
-  for (let id = 1; id < nextId; id += 1) pdf += `${String(offsets[id] || 0).padStart(10, '0')} 00000 n \n`;
-  pdf += `trailer\n<< /Size ${nextId} /Root ${catalogId} 0 R >>\nstartxref\n${xrefAt}\n%%EOF`;
-  return new TextEncoder().encode(pdf);
+  const resources = `<< /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R >>`
+    + `${codeRxId ? ` /XObject << /Im${codeRxId} ${codeRxId} 0 R /Im${classId} ${classId} 0 R >>` : ''} >>`;
+  const contentIds: number[] = [];
+  const pageIds: number[] = [];
+  pages.forEach((pageOps) => {
+    const stream = pageOps.join('\n');
+    contentIds.push(file.add([`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`]));
+  });
+  const pagesId = file.reserve();
+  pages.forEach((_, index) => {
+    pageIds.push(file.add([`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Contents ${contentIds[index]} 0 R /Resources ${resources} >>`]));
+  });
+  file.set(pagesId, [`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`]);
+  const catalogId = file.add([`<< /Type /Catalog /Pages ${pagesId} 0 R >>`]);
+  return file.build(catalogId);
 };
 
 export const downloadGroupSheetPdf = (sheet: GroupSheet): void => {
-  const bytes = buildGroupSheetPdf(sheet);
-  download(new Blob([bytes as BlobPart], { type: 'application/pdf' }), `${safeName(sheet.groupName)}-members.pdf`);
+  void loadPrintBrand().then((brand) => {
+    const bytes = buildGroupSheetPdf(sheet, brand);
+    download(new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' }), `${safeName(sheet.groupName)}-members.pdf`);
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -343,14 +449,22 @@ export const printGroupSheet = (sheet: GroupSheet): void => {
   const aobRows = sheet.aob ? wrap(sheet.aob, 110) : [];
   const tableRows = buildRenderRows(sheet);
   const escapeHtml = (value: string) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  const [footerLeft, footerRight] = sheetFooter(sheet);
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(sheet.groupName)} — member sheet</title>
 <style>
-  @page { size: A4; margin: 16mm; }
-  body { font-family: system-ui, sans-serif; color: #0f172a; margin: 0; }
-  .band { background: ${EMERALD}; color: #fff; padding: 14px 18px; }
-  .band h1 { font-size: 15px; margin: 0 0 4px; }
-  .band p { font-size: 11px; margin: 0; opacity: .9; }
-  h2 { font-size: 22px; margin: 16px 0 2px; }
+  @page { size: A4; margin: 14mm 12mm 20mm; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; color: ${INK}; margin: 0; font-size: 10pt; }
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .head .left, .head .right { display: flex; gap: 10px; align-items: center; min-width: 0; }
+  .head img { height: 44px; width: 44px; object-fit: contain; }
+  .head .right img { object-fit: cover; border-radius: 10px; }
+  .head strong { display: block; font-size: 13pt; color: ${PRINT_COLORS.deep}; }
+  .head small { display: block; font-size: 8pt; color: ${MUTED}; font-weight: 600; }
+  .head .right { text-align: right; }
+  .rule { height: 3px; background: ${EMERALD}; margin-top: 10px; position: relative; border-radius: 2px; }
+  .rule::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 70px; background: ${PRINT_COLORS.gold}; border-radius: 2px; }
+  h2 { font-size: 20pt; margin: 16px 0 2px; }
   .topic { color: ${EMERALD}; font-weight: 700; font-size: 12px; }
   .count { color: ${MUTED}; font-size: 11px; }
   .block { background: ${AMBER_SOFT}; border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
@@ -358,24 +472,30 @@ export const printGroupSheet = (sheet: GroupSheet): void => {
   .block h3 { margin: 0 0 6px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #92400e; }
   .block.green h3 { color: ${EMERALD}; }
   .block p { margin: 0; font-size: 12px; white-space: pre-wrap; }
+  .link { background: #f8fafc; border-radius: 8px; padding: 8px 12px; font-size: 11px; color: ${EMERALD}; word-break: break-all; }
   table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 11px; }
   th { background: ${EMERALD}; color: #fff; text-align: left; padding: 6px 8px; }
   td { border-bottom: 1px solid ${LINE}; padding: 6px 8px; }
   tr:nth-child(even) td { background: #f8fafc; }
   tr.blank td { height: 22px; }
   tr.blank td.fill { background: linear-gradient(#ffffff, #ffffff) bottom / 100% 1px no-repeat; }
-  footer { color: ${MUTED}; font-size: 9px; margin-top: 18px; }
+  .foot { position: fixed; bottom: 0; left: 0; right: 0; border-top: 1.5px solid ${EMERALD}; padding-top: 5px; display: flex; justify-content: space-between; gap: 12px; font-size: 7pt; color: ${MUTED}; font-weight: 600; }
 </style></head><body>
-<div class="band"><h1>CODE Rx SOCIETY — Class &amp; Group Management</h1><p>${escapeHtml(sheet.className)} · ${escapeHtml(sheet.activityName)} · ${escapeHtml(sheet.dateLabel)}</p></div>
+<header class="head">
+  <div class="left"><img src="${origin}${PRINT_MARKS.codeRx}" alt="CODE Rx Society"><span><strong>CODE Rx SOCIETY</strong><small>Class &amp; Group Management</small></span></div>
+  <div class="right"><span><strong>${escapeHtml(sheet.className)}</strong><small>${escapeHtml([sheet.classCode, sheet.activityName].filter(Boolean).join(' · '))}</small></span><img src="${origin}${PRINT_MARKS.classGroups}" alt="Class &amp; Groups"></div>
+</header>
+<div class="rule"></div>
 <h2>${escapeHtml(sheet.groupName)}</h2>
-<p class="count">${sheet.rows.length} member(s)</p>
+<p class="count">${sheet.rows.length} member(s) · ${escapeHtml(sheet.dateLabel)}</p>
 ${showTopic ? `<div class="block"><h3>Group topic</h3><p>${escapeHtml(sheet.topic ?? '')}</p></div>` : ''}
 <table><thead><tr>${sheet.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>
 <tbody>${tableRows.map((row) => row.blank
   ? `<tr class="blank">${sheet.columns.map(() => `<td class="fill"></td>`).join('')}</tr>`
   : `<tr>${row.cells.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>
 ${aobRows.length ? `<div class="block green"><h3>AOB / Other business</h3><p>${escapeHtml(sheet.aob ?? '')}</p></div>` : ''}
-<footer>${escapeHtml(sheet.footer)}</footer>
+${sheet.groupLink ? `<p class="link">Group link — ${escapeHtml(sheet.groupLink)}</p>` : ''}
+<footer class="foot"><span>${escapeHtml(footerLeft)}</span><span>${escapeHtml(footerRight)}</span></footer>
 </body></html>`;
   const frame = document.createElement('iframe');
   frame.setAttribute('aria-hidden', 'true');
@@ -387,3 +507,5 @@ ${aobRows.length ? `<div class="block green"><h3>AOB / Other business</h3><p>${e
     finally { window.setTimeout(() => frame.remove(), 60_000); }
   };
 };
+
+export { printDate };
