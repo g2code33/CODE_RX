@@ -783,8 +783,11 @@ const main = async () => {
   // organizer action keeps the rows it removed, so it can be reversed.
   // 2026-11-06 adds cgm_passkey_links (52nd CGM table): one row per one-time
   // passkey link, storing only the code's hash, never the code itself.
+  // 2026-10-31 adds the Sampling game tables (games, teams, draws, events): the
+  // multi-team number-drawing game, additive and prefixed `sampling_`.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 52, `${allTables.length} user tables (63 base + 11 client + 3 inbox + 52 CGM)`);
+    allTables.length === 63 + 11 + 3 + 52 + 4,
+    `${allTables.length} user tables (63 base + 11 client + 3 inbox + 52 CGM + 4 sampling)`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',
@@ -798,10 +801,17 @@ const main = async () => {
       db.query("SELECT sql FROM sqlite_master WHERE name = 'client_document_reviews'")[0].sql));
 
   const preExistingIndexes = db.query(
-    `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'idx_client%' AND name NOT LIKE 'idx_cgm%' AND name NOT LIKE 'sqlite_%'`,
+    `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name NOT LIKE 'idx_client%' AND name NOT LIKE 'idx_cgm%' AND name NOT LIKE 'idx_sampling%' AND name NOT LIKE 'sqlite_%'`,
   )[0].c;
   check('the 38 pre-existing indexes are preserved beside the new audit index',
     Number(preExistingIndexes) === 39 + 4, `${preExistingIndexes} non-portal indexes`);
+  // Sampling brings its own nine: the per-game uniqueness that makes a repeat
+  // draw impossible, and the lookup paths the board uses.
+  const samplingIndexes = db.query(
+    `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sampling%'`,
+  )[0].c;
+  check('Sampling indexes enforce one number and one turn per game',
+    Number(samplingIndexes) === 9, `${samplingIndexes} sampling indexes`);
 
   const portalDark = await request('GET', '/api/client/me', {});
   check('portal is dark until PHANTOM enables it (404)', portalDark.status === 404, `got ${portalDark.status}`);

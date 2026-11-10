@@ -11,6 +11,9 @@ import { ClientPortal } from './components/ClientPortal';
 import { StudentPortal } from './components/ClassGroups/StudentPortal';
 import { PasskeyLinkPage } from './components/ClassGroups/PasskeyLinkPage';
 import { ClassGroupsWorkspace } from './components/ClassGroups/ClassGroupsWorkspace';
+import { SamplingWorkspace } from './components/Sampling/SamplingWorkspace';
+import { SamplingTeam } from './components/Sampling/SamplingTeam';
+import { parseSamplingHash, type SamplingRoute } from './lib/sampling';
 import { PhantomClassGroups } from './components/ClassGroups/PhantomClasses';
 import { ResetPassword } from './components/ResetPassword';
 import { ActivateAccount } from './components/ActivateAccount';
@@ -72,6 +75,10 @@ function App() {
     if (!hash.startsWith('#passkey-link/')) return null;
     return decodeURIComponent(hash.replace('#passkey-link/', '').trim()) || null;
   });
+  // Sampling is its own workspace with its own three addresses:
+  //   #sampling | #sampling/game/<id> | #sampling/team/<token>
+  // A team link needs no account at all, so it is resolved before anything else.
+  const [samplingRoute, setSamplingRoute] = useState<SamplingRoute | null>(() => parseSamplingHash(window.location.hash));
   const [classGroupsView, setClassGroupsView] = useState<null | 'workspace' | 'student' | 'phantom'>(() => {
     const hash = window.location.hash;
     if (hash.startsWith('#class-groups/phantom')) return 'phantom';
@@ -189,6 +196,21 @@ function App() {
   useEffect(() => {
     const idFromHash = () => window.location.hash.replace(/^#\/?/, '').trim() || 'home';
     const applyHash = () => {
+      // One place decides where Sampling is: every hash change re-resolves it,
+      // so leaving the workspace clears it and a reload restores it.
+      setSamplingRoute(parseSamplingHash(window.location.hash));
+      if (window.location.hash.startsWith('#sampling')) {
+        setIsCommunityWorkspace(false);
+        setIsCodenameBallotView(false);
+        setIsSharedVaultView(false);
+        setIsClientPortalView(false);
+        setIsActivationView(false);
+        setIsResetView(false);
+        setIsMemberVault(false);
+        setActiveTab('home');
+        setClassGroupsView(null);
+        return;
+      }
       if (window.location.hash.startsWith('#phantom') || window.location.hash.startsWith('#phantom-applications')) {
         setIsCommunityWorkspace(false);
         setIsCodenameBallotView(false);
@@ -518,6 +540,20 @@ function App() {
   // A one-time passkey link stands alone: no member shell, no sign-in.
   if (passkeyLinkCode) {
     return withDialogs(<PasskeyLinkPage code={passkeyLinkCode} onExit={() => { window.location.hash = ''; setPasskeyLinkCode(null); }} />);
+  }
+
+  // Sampling — its own workspace, and each team's own stage. A team link
+  // carries its whole credential, so it opens without any member session.
+  if (samplingRoute?.page === 'team') {
+    return withDialogs(<SamplingTeam token={samplingRoute.token} onExit={() => { window.location.hash = ''; setSamplingRoute(null); }} />);
+  }
+  if (samplingRoute) {
+    return withDialogs(
+      <SamplingWorkspace
+        route={samplingRoute}
+        onExit={() => { window.location.hash = '#class-groups'; }}
+      />,
+    );
   }
 
   // Class & Group Management workspaces: standalone, like the client portal.

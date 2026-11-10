@@ -14,7 +14,11 @@
     "test:client-portal-all": "npm run test:client-portal && npm run test:client-portal-ui",
     "test:cgm": "node --experimental-sqlite scripts/cgm-tests.mjs",
     "test:cgm-ui": "node scripts/cgm-ui-tests.mjs",
-    "test:cgm-browser": "node scripts/cgm-browser-check.mjs"
+    "test:cgm-browser": "node scripts/cgm-browser-check.mjs",
+    "test:sampling": "node --experimental-sqlite scripts/sampling-tests.mjs",
+    "test:sampling-ui": "node scripts/sampling-ui-tests.mjs",
+    "test:sampling-browser": "node scripts/sampling-browser-check.mjs",
+    "test:sampling-all": "npm run test:sampling && npm run test:sampling-ui"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",
