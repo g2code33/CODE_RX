@@ -36,6 +36,9 @@ dist-ssr
 build
 .cache
 
+# Transpiled Worker bundle cached by scripts/sampling-tests.mjs
+.sampling-cache
+
 # Cloudflare / Wrangler local state
 .wrangler
 

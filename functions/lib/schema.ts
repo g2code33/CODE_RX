@@ -7,8 +7,9 @@ import { hashPassword } from './auth';
 import { allocateMemberCode, FOUNDING_CODENAMES, VAULT_SECTION_SEEDS } from './vault';
 import { DEFAULT_CAL_LEVELS, SCORE_RULE_SEEDS, readCalLevels, resolveCalcitoninLevel } from './score';
 import { CGM_INDEXES, CGM_SCHEMA } from './cgm/schema';
+import { SAMPLING_INDEXES, SAMPLING_SCHEMA } from './sampling/schema';
 
-const SCHEMA = `${CGM_SCHEMA}
+const SCHEMA = `${CGM_SCHEMA}${SAMPLING_SCHEMA}
 CREATE TABLE IF NOT EXISTS applications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -1162,6 +1163,7 @@ CREATE INDEX IF NOT EXISTS idx_client_sessions_link ON client_sessions(client_li
 -- supports both the PHANTOM audit view and the client activity view.
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action, created_at DESC);
 ${CGM_INDEXES}
+${SAMPLING_INDEXES}
 `;
 
 // These are intentionally separate from CREATE TABLE so live D1 databases

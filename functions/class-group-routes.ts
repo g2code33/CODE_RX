@@ -17,6 +17,7 @@ import { registerCgmStudentRoutes } from './lib/cgm/routes-student';
 import { registerCgmOrganizerRoutes } from './lib/cgm/routes-organizer';
 import { registerCgmActivityRoutes } from './lib/cgm/routes-activities';
 import { registerCgmPasskeyRoutes } from './lib/cgm/routes-passkeys';
+import { registerSamplingRoutes } from './lib/sampling/routes';
 
 export const registerClassGroupRoutes = (app: Hono<any>) => {
   registerCgmStudentRoutes(app);
@@ -24,6 +25,9 @@ export const registerClassGroupRoutes = (app: Hono<any>) => {
   registerCgmActivityRoutes(app);
   // The passkey desk (organizer) and the one-time self-service links (public).
   registerCgmPasskeyRoutes(app);
+  // Sampling — the multi-team, turn-based number drawing game. Its own module,
+  // its own tables, its own routes: it shares the member session and nothing else.
+  registerSamplingRoutes(app);
 };
 
 // Operational reuse + suite access: the idempotent invitation-seal backfill

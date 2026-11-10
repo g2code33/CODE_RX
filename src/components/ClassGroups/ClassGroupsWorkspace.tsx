@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, Link2, ListChecks,
-  Megaphone, Plus, Recycle, RefreshCw, Search, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
+  Dices, Megaphone, Plus, Recycle, RefreshCw, Search, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
   Printer, FileDown, ImageDown,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
@@ -246,6 +246,18 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
               {classes.map((entry) => <option key={entry.id} value={Number(entry.id)}>{entry.name}</option>)}
             </select>
           )}
+          {/* Sampling is its own workspace, reached from here. It keeps the
+              Class & Groups console exactly as it was and comes straight back. */}
+          <button
+            type="button"
+            className="sampling-entry-button"
+            data-testid="cgm-sampling-open"
+            onClick={() => { window.location.hash = '#sampling'; }}
+            title="Sampling — the multi-team number drawing game"
+          >
+            <Dices className="h-3.5 w-3.5" />
+            <span>Sampling</span>
+          </button>
           <button
             type="button"
             className="mini-button"
@@ -289,6 +301,16 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
               )}
             </button>
           ))}
+          <button
+            type="button"
+            className="cgm-side-link mt-2 border-t border-emerald-100 pt-3"
+            onClick={() => { window.location.hash = '#sampling'; setNavOpen(false); }}
+            data-testid="cgm-sampling-nav"
+          >
+            <Dices className="h-4 w-4 text-amber-500" />
+            <span className="flex-1 text-left">Sampling</span>
+            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-amber-700">New</span>
+          </button>
           {!application || application.status !== 'approved' ? (
             <button type="button" onClick={() => setApplyOpen(true)} className="cgm-side-link mt-2 border-t border-emerald-100 pt-3">
               <UserCheck className="h-4 w-4" />

@@ -2591,3 +2591,758 @@ h3.vault-rich-text {
     padding-bottom: calc(0.7rem + env(safe-area-inset-bottom));
   }
 }
+
+/* ===========================================================================
+   SAMPLING — the multi-team, turn-based number drawing game
+   A game-show surface on the CODE Rx palette: deep emerald, white, gold.
+   Designed phone-first (360–430px), then widened.
+   =========================================================================== */
+
+:root {
+  --sampling-emerald: #047857;
+  --sampling-emerald-deep: #04372b;
+  --sampling-emerald-bright: #10b981;
+  --sampling-gold: #b45309;
+  --sampling-gold-bright: #f59e0b;
+  --sampling-gold-soft: #fef3c7;
+  --sampling-ink: #0f172a;
+  --sampling-muted: #64748b;
+  --sampling-line: #e2e8f0;
+}
+
+.sampling-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 400px at 12% -8%, #d1fae5 0%, transparent 62%),
+    linear-gradient(180deg, #f2fbf6 0%, #f8fafc 260px);
+  display: flex;
+  flex-direction: column;
+}
+
+.sampling-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 1rem;
+  background: #ffffff;
+  border-bottom: 1px solid #d1fae5;
+}
+
+.sampling-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.sampling-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.95rem;
+  color: #ffffff;
+  background: linear-gradient(140deg, #065f46 0%, #047857 48%, #b45309 130%);
+  box-shadow: 0 8px 18px rgb(4 120 87 / 0.32), inset 0 0 0 1px rgb(255 255 255 / 0.18);
+  flex-shrink: 0;
+}
+
+.sampling-brand-text {
+  min-width: 0;
+}
+
+.sampling-brand-text strong {
+  display: block;
+  font-size: 0.98rem;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #04372b;
+  line-height: 1.1;
+}
+
+.sampling-brand-text span {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sampling-main {
+  width: 100%;
+  max-width: 74rem;
+  margin: 0 auto;
+  padding: 1.1rem 0.9rem 4rem;
+  flex: 1;
+}
+
+.sampling-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.6rem;
+  border-radius: 9999px;
+  border: 1px solid #d1fae5;
+  background: #ffffff;
+  padding: 0.5rem 1rem;
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: #047857;
+  transition: background 140ms ease, border-color 140ms ease, transform 90ms ease, box-shadow 140ms ease;
+  -webkit-tap-highlight-color: transparent;
+  white-space: nowrap;
+}
+
+.sampling-button:hover:not(:disabled) { background: #ecfdf5; border-color: #a7f3d0; }
+.sampling-button:active:not(:disabled) { transform: scale(0.98); }
+.sampling-button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.sampling-button--primary {
+  border-color: transparent;
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgb(4 120 87 / 0.28);
+}
+.sampling-button--primary:hover:not(:disabled) { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
+
+.sampling-button--gold {
+  border-color: transparent;
+  background: linear-gradient(140deg, #fbbf24 0%, #f59e0b 55%, #b45309 130%);
+  color: #3b2404;
+  box-shadow: 0 10px 22px rgb(180 83 9 / 0.28);
+}
+.sampling-button--gold:hover:not(:disabled) { background: linear-gradient(140deg, #fcd34d 0%, #fbbf24 60%, #d97706 130%); }
+
+.sampling-button--danger { border-color: #fecaca; background: #fff1f2; color: #b91c1c; }
+.sampling-button--danger:hover:not(:disabled) { background: #ffe4e6; }
+
+.sampling-button--ghost { border-color: transparent; background: transparent; color: #475569; }
+.sampling-button--ghost:hover:not(:disabled) { background: #f1f5f9; }
+
+.sampling-card {
+  border-radius: 1.35rem;
+  border: 1px solid #d1fae5;
+  background: #ffffff;
+  padding: 1.05rem;
+  box-shadow: 0 12px 30px rgb(6 78 59 / 0.06);
+}
+
+.sampling-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 1.6rem;
+  padding: 1.4rem 1.25rem 1.5rem;
+  color: #ffffff;
+  background:
+    radial-gradient(700px 260px at 88% -30%, rgb(245 158 11 / 0.42) 0%, transparent 60%),
+    radial-gradient(520px 240px at 6% 120%, rgb(16 185 129 / 0.5) 0%, transparent 62%),
+    linear-gradient(140deg, #04372b 0%, #065f46 48%, #047857 100%);
+  box-shadow: 0 20px 44px rgb(4 55 43 / 0.3);
+}
+
+.sampling-hero h1 {
+  margin: 0.35rem 0 0.3rem;
+  font-size: clamp(1.5rem, 5vw, 2.35rem);
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+}
+
+.sampling-hero p {
+  margin: 0;
+  max-width: 34rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: rgb(236 253 245 / 0.9);
+}
+
+.sampling-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 0.14);
+  padding: 0.28rem 0.7rem;
+  font-size: 0.63rem;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #fde68a;
+}
+
+.sampling-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.5rem 0 0.65rem;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #047857;
+}
+
+.sampling-grid { display: grid; gap: 0.7rem; }
+@media (min-width: 700px) {
+  .sampling-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sampling-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+.sampling-game-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border-radius: 1.2rem;
+  border: 1px solid #d1fae5;
+  background: #ffffff;
+  padding: 0.95rem 1rem;
+  box-shadow: 0 8px 22px rgb(6 78 59 / 0.05);
+  transition: border-color 140ms ease, transform 90ms ease, box-shadow 140ms ease;
+}
+.sampling-game-card:hover { border-color: #6ee7b7; box-shadow: 0 14px 30px rgb(6 78 59 / 0.1); }
+.sampling-game-card:active { transform: scale(0.995); }
+
+.sampling-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
+
+.sampling-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 9999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: #ecfdf5;
+  color: #047857;
+}
+.sampling-pill--active { background: #d1fae5; color: #065f46; }
+.sampling-pill--paused { background: #fef3c7; color: #92400e; }
+.sampling-pill--completed, .sampling-pill--ended { background: #e2e8f0; color: #475569; }
+.sampling-pill--draft { background: #ecfdf5; color: #047857; }
+
+.sampling-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+@media (min-width: 640px) { .sampling-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+.sampling-stat {
+  border-radius: 1rem;
+  background: #f0fdf4;
+  border: 1px solid #d1fae5;
+  padding: 0.65rem 0.75rem;
+}
+.sampling-stat span {
+  display: block;
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #059669;
+}
+.sampling-stat strong {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 1.35rem;
+  font-weight: 900;
+  color: #04372b;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.sampling-progress {
+  position: relative;
+  height: 0.6rem;
+  border-radius: 9999px;
+  background: #e8f0ec;
+  overflow: hidden;
+}
+.sampling-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, #059669 0%, #10b981 60%, #fbbf24 130%);
+  transition: width 420ms ease;
+}
+
+.sampling-team-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  border-radius: 1rem;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  padding: 0.8rem 0.85rem;
+}
+.sampling-team-row--active { border-color: #6ee7b7; background: #f0fdf4; box-shadow: 0 0 0 3px rgb(16 185 129 / 0.1); }
+.sampling-team-row--revoked { opacity: 0.62; }
+
+.sampling-avatar {
+  display: grid;
+  place-items: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 0.8rem;
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  font-weight: 900;
+  color: #ffffff;
+  background: linear-gradient(140deg, #065f46, #10b981);
+}
+.sampling-avatar--gold { background: linear-gradient(140deg, #b45309, #fbbf24); color: #3b2404; }
+
+.sampling-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  border-radius: 0.65rem;
+  background: #ecfdf5;
+  border: 1px solid #bbf7d0;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #065f46;
+  font-variant-numeric: tabular-nums;
+}
+.sampling-chip--gold { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+
+.sampling-link-row {
+  border-radius: 1rem;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  padding: 0.7rem 0.8rem;
+}
+.sampling-link-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  color: #047857;
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.sampling-input, .sampling-textarea, .sampling-select {
+  width: 100%;
+  border-radius: 0.9rem;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  padding: 0.65rem 0.8rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+.sampling-input:focus, .sampling-textarea:focus, .sampling-select:focus {
+  outline: none;
+  border-color: #34d399;
+  box-shadow: 0 0 0 3px rgb(16 185 129 / 0.18);
+}
+.sampling-label {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.63rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.sampling-event {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px dashed #e2e8f0;
+  font-size: 0.76rem;
+}
+.sampling-event:last-child { border-bottom: 0; }
+.sampling-event strong { font-weight: 800; color: #0f172a; }
+.sampling-event span { color: #64748b; }
+
+.sampling-toast {
+  position: sticky;
+  bottom: 0.75rem;
+  margin-top: 0.75rem;
+  border-radius: 0.9rem;
+  background: #04372b;
+  color: #ecfdf5;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  box-shadow: 0 12px 26px rgb(4 55 43 / 0.3);
+}
+
+/* ---------------------------------------------------------------------------
+   The team stage — one phone, one team, one turn
+   --------------------------------------------------------------------------- */
+
+.sampling-stage {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  color: #f8fafc;
+  background:
+    radial-gradient(680px 320px at 84% -12%, rgb(245 158 11 / 0.3) 0%, transparent 62%),
+    radial-gradient(560px 300px at 8% 8%, rgb(16 185 129 / 0.28) 0%, transparent 60%),
+    linear-gradient(165deg, #022c22 0%, #04372b 42%, #064e3b 100%);
+}
+
+.sampling-stage-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 0.2rem;
+}
+
+/* The platform's global copy rule (`p, h1 … h6 { color: var(--brand-text) }`)
+   is unlayered, so it outranks Tailwind's text-* utilities — on the light
+   pages that is exactly right. The stage is the one dark surface, so its copy
+   is declared here, in the emerald family, instead of with utilities. */
+.sampling-stage p { color: rgb(236 253 245 / 0.8); }
+.sampling-stage h1,
+.sampling-stage h2,
+.sampling-stage h3 { color: #ffffff; }
+.sampling-stage p.sampling-stage-instructions {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(236 253 245 / 0.72);
+}
+.sampling-stage p.sampling-stage-note {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: rgb(236 253 245 / 0.78);
+}
+.sampling-stage p.sampling-waiting-title {
+  margin-top: 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+}
+.sampling-stage p.sampling-reveal-title {
+  font-size: 0.95rem;
+  font-weight: 900;
+  color: #fde68a;
+}
+.sampling-stage .sampling-stage-empty {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: rgb(236 253 245 / 0.6);
+}
+.sampling-stage .sampling-stage-active-team {
+  font-weight: 900;
+  color: #fde68a;
+}
+.sampling-stage .sampling-button--on-dark {
+  background: rgb(255 255 255 / 0.1);
+  color: #ecfdf5;
+  border-color: rgb(255 255 255 / 0.18);
+}
+
+/* The organizer hero is the other dark surface: its title and copy are set
+   here for the same reason as the stage's. */
+.sampling-hero h1,
+.sampling-hero h2 { color: #ffffff; }
+.sampling-hero p { color: rgb(236 253 245 / 0.9); }
+
+.sampling-stage-body {
+  width: 100%;
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 0.4rem 1rem 2.5rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.sampling-stage-team {
+  font-size: 0.66rem;
+  font-weight: 900;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #fcd34d;
+}
+
+.sampling-stage-title {
+  margin: 0;
+  font-size: clamp(1.15rem, 5vw, 1.5rem);
+  font-weight: 900;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  color: #ffffff;
+  overflow-wrap: anywhere;
+}
+
+.sampling-turn-banner {
+  border-radius: 1.15rem;
+  padding: 0.85rem 1rem;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 800;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  background: rgb(255 255 255 / 0.06);
+  color: rgb(236 253 245 / 0.92);
+}
+
+.sampling-turn-banner strong {
+  display: block;
+  font-size: 1.02rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #ffffff;
+}
+
+.sampling-turn-banner--mine {
+  border-color: rgb(252 211 77 / 0.5);
+  background: linear-gradient(140deg, rgb(180 83 9 / 0.4) 0%, rgb(245 158 11 / 0.24) 100%);
+  box-shadow: 0 0 0 3px rgb(251 191 36 / 0.12), 0 16px 34px rgb(0 0 0 / 0.22);
+  animation: samplingGlow 2.4s ease-in-out infinite;
+}
+.sampling-turn-banner--mine strong { color: #fde68a; }
+.sampling-turn-banner--waiting strong { color: #a7f3d0; }
+
+@keyframes samplingGlow {
+  0%, 100% { box-shadow: 0 0 0 3px rgb(251 191 36 / 0.1), 0 16px 34px rgb(0 0 0 / 0.2); }
+  50% { box-shadow: 0 0 0 5px rgb(251 191 36 / 0.2), 0 18px 40px rgb(0 0 0 / 0.26); }
+}
+
+.sampling-reel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 1.6rem;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  background:
+    radial-gradient(420px 220px at 50% 0%, rgb(16 185 129 / 0.24) 0%, transparent 70%),
+    linear-gradient(180deg, rgb(255 255 255 / 0.08) 0%, rgb(255 255 255 / 0.03) 100%);
+  padding: 1.15rem 1rem 1.3rem;
+  text-align: center;
+  box-shadow: inset 0 0 60px rgb(0 0 0 / 0.28);
+}
+
+.sampling-reel-label {
+  font-size: 0.6rem;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #a7f3d0;
+}
+
+.sampling-reel-number {
+  display: block;
+  margin: 0.35rem auto 0.15rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: clamp(4.4rem, 22vw, 7rem);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 26px rgb(16 185 129 / 0.5);
+  transition: color 240ms ease, text-shadow 240ms ease, transform 200ms ease;
+}
+
+.sampling-reel-number--idle {
+  font-size: clamp(2.6rem, 13vw, 3.6rem);
+  opacity: 0.45;
+  text-shadow: none;
+}
+
+.sampling-reel-number--rolling {
+  color: #d1fae5;
+  text-shadow: 0 0 30px rgb(52 211 153 / 0.6);
+}
+
+.sampling-reel-number--won {
+  color: #fde68a;
+  text-shadow: 0 0 18px rgb(251 191 36 / 0.85), 0 0 60px rgb(245 158 11 / 0.55), 0 4px 0 rgb(120 53 15 / 0.35);
+  animation: samplingPop 460ms cubic-bezier(0.22, 1.2, 0.36, 1);
+}
+
+@keyframes samplingPop {
+  0% { transform: scale(0.72); opacity: 0.4; }
+  58% { transform: scale(1.09); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.sampling-reel-hint {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: rgb(236 253 245 / 0.72);
+  min-height: 1.1rem;
+}
+
+.sampling-spin {
+  width: 100%;
+  min-height: 4.4rem;
+  border-radius: 1.35rem;
+  border: 0;
+  font-size: 1.05rem;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #3b2404;
+  background: linear-gradient(140deg, #fde68a 0%, #fbbf24 42%, #f59e0b 100%);
+  box-shadow: 0 18px 40px rgb(180 83 9 / 0.42), inset 0 -3px 0 rgb(120 53 15 / 0.28);
+  transition: transform 90ms ease, filter 140ms ease, opacity 140ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.sampling-spin:active:not(:disabled) { transform: translateY(2px) scale(0.995); }
+.sampling-spin:disabled { filter: grayscale(0.25); opacity: 0.6; }
+.sampling-spin--quiet {
+  min-height: 3rem;
+  font-size: 0.8rem;
+  color: #ecfdf5;
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid rgb(255 255 255 / 0.18);
+  box-shadow: none;
+}
+
+.sampling-mine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sampling-stage-card {
+  border-radius: 1.2rem;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(255 255 255 / 0.05);
+  padding: 0.85rem 0.95rem;
+}
+.sampling-stage-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #a7f3d0;
+}
+
+.sampling-stage-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: rgb(236 253 245 / 0.82);
+  padding: 0.18rem 0;
+}
+.sampling-stage-stat b { color: #ffffff; font-variant-numeric: tabular-nums; }
+
+.sampling-confetti {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 40;
+}
+.sampling-confetti i {
+  position: absolute;
+  top: -12px;
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+  opacity: 0;
+  animation: samplingFall 2.6s cubic-bezier(0.3, 0.7, 0.4, 1) forwards;
+}
+@keyframes samplingFall {
+  0% { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 0; }
+  10% { opacity: 1; }
+  100% { transform: translate3d(var(--drift, 0px), 108vh, 0) rotate(720deg); opacity: 0.95; }
+}
+
+.sampling-sound {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 9999px;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  background: rgb(255 255 255 / 0.06);
+  padding: 0.32rem 0.7rem;
+  font-size: 0.66rem;
+  font-weight: 800;
+  color: rgb(236 253 245 / 0.9);
+}
+
+.sampling-complete {
+  border-radius: 1.6rem;
+  padding: 1.6rem 1.1rem;
+  text-align: center;
+  color: #3b2404;
+  background:
+    radial-gradient(520px 240px at 50% -10%, rgb(255 255 255 / 0.7) 0%, transparent 60%),
+    linear-gradient(150deg, #fde68a 0%, #fbbf24 55%, #f59e0b 100%);
+  box-shadow: 0 22px 50px rgb(180 83 9 / 0.35);
+}
+.sampling-complete h2 {
+  margin: 0.2rem 0 0.4rem;
+  font-size: clamp(1.5rem, 7vw, 2.1rem);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  color: #3b2404;
+}
+.sampling-complete p { margin: 0; font-size: 0.82rem; font-weight: 700; color: rgb(59 36 4 / 0.78); }
+/* The panel is gold end to end, so its own kicker is set for that ground
+   rather than inheriting the stage's light-on-dark gold. */
+.sampling-complete .sampling-kicker {
+  background: rgb(255 255 255 / 0.55);
+  color: #7c2d12;
+  border: 1px solid rgb(124 45 18 / 0.18);
+}
+
+@media (max-width: 420px) {
+  .sampling-main { padding: 0.9rem 0.75rem 3.5rem; }
+  .sampling-hero { border-radius: 1.3rem; padding: 1.15rem 1rem 1.25rem; }
+  .sampling-card { border-radius: 1.1rem; padding: 0.9rem; }
+  .sampling-reel { border-radius: 1.3rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sampling-turn-banner--mine { animation: none; }
+  .sampling-reel-number--won { animation: none; }
+  .sampling-confetti { display: none; }
+  .sampling-progress > i { transition: none; }
+}
+
+/* The Sampling entry point on the Class & Groups console: prominent, gold,
+   unmistakably a different workspace — without disturbing the controls it
+   sits beside. */
+.sampling-entry-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 9999px;
+  border: 1px solid rgb(180 83 9 / 0.18);
+  background: linear-gradient(140deg, #fbbf24 0%, #f59e0b 60%, #d97706 130%);
+  padding: 0.42rem 0.85rem;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  color: #3b2404;
+  box-shadow: 0 8px 18px rgb(180 83 9 / 0.26);
+  transition: filter 140ms ease, transform 90ms ease;
+  -webkit-tap-highlight-color: transparent;
+  white-space: nowrap;
+}
+.sampling-entry-button:hover { filter: brightness(1.05); }
+.sampling-entry-button:active { transform: scale(0.97); }
+
+@media (max-width: 480px) {
+  .sampling-entry-button span { display: none; }
+  .sampling-entry-button { padding: 0.42rem 0.55rem; }
+}
