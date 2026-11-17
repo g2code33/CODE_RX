@@ -205,11 +205,15 @@ const memberHash = (password) => {
 section('0. Boot & member identities');
 const health = await call('GET', '/api/health');
 check('the worker boots and answers', health.status === 200 || health.status === 404, `status ${health.status}`);
-// 52 = the 51 tables the module shipped with plus cgm_passkey_links (the
-// organizer-issued one-time passkey links). Pinned so a dropped table is loud.
+// 54 = the 51 tables the module shipped with, plus cgm_passkey_links (the
+// organizer-issued one-time passkey links) and the leader console's two tables
+// (cgm_group_meetings, cgm_group_leader_requests). Pinned so a dropped table is
+// loud, and the two leader tables are asserted BY NAME below.
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 52,
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 54,
   `${q("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'")[0]?.c} tables`);
+check('the leader console tables exist by name',
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cgm_group_meetings','cgm_group_leader_requests')").length === 2);
 
 const phantomLogin = await call('POST', '/api/auth/login', { identifier: PHANTOM_EMAIL, password: PHANTOM_PASSWORD });
 const phantomToken = phantomLogin.json?.token || phantomLogin.json?.data?.token;
@@ -1635,6 +1639,372 @@ check('every passkey step is audited without any passkey value in the context',
     .every((action) => passkeyChangeAudit.some((row) => row.action === action))
   && passkeyChangeAudit.every((row) => !(row.context_json || '').includes(generatedPasskey)),
   `actions=${passkeyChangeAudit.map((row) => row.action).join(',')}`);
+
+// ===========================================================================
+// 20b. THE GROUP LEADER CONSOLE — appointing a leader hands them real tools
+//      for THEIR group, every one of them capability-gated server-side.
+// ===========================================================================
+section('20b. Group leader console');
+
+// A dedicated activity so the leader fixtures never disturb earlier sections.
+const leaderActivity = await memberCall('POST', `/api/cgm/classes/${classAId}/activities`, {
+  name: 'Tutorial Leader Console', type: 'tutorial',
+  config: {
+    method: 'automatic', groupCount: 2, capacity: 100, genderRule: 'none', repeatRule: 'random',
+    leaderMethod: 'appointment', overflow: 'block', announcementMode: 'direct',
+    whatsappEnabled: true, attendanceEnabled: true, electionAnonymity: 'anonymous',
+    allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
+    leaderPermissions: ['view_members', 'edit_topic', 'assist_attendance', 'report_issues'],
+  },
+}, amaToken);
+const leaderActivityId = Number(leaderActivity.json?.data?.activityId ?? leaderActivity.json?.data?.id);
+check('20b.1 — an activity carries its own leader-capability defaults', Boolean(leaderActivityId), leaderActivity.text?.slice(0, 160));
+await memberCall('POST', `/api/cgm/activities/${leaderActivityId}/lifecycle`, { action: 'publish' }, amaToken);
+await memberCall('POST', `/api/cgm/activities/${leaderActivityId}/generate`, {}, amaToken);
+const leaderDetail = await memberCall('GET', `/api/cgm/activities/${leaderActivityId}`, undefined, amaToken);
+const leaderGroups = (leaderDetail.json?.data?.groups || []).map((g) => Number(g.id));
+const leaderMembers = leaderDetail.json?.data?.members || [];
+const leaderGroupId = leaderGroups[0];
+const groupOneMembers = leaderMembers.filter((m) => Number(m.group_id) === leaderGroupId);
+// The activity detail lists each class member with `id` (their student id) and
+// their live `group_id` in this activity. Only students whose passkey this run
+// recorded can sign in, so the fixtures are chosen by a real login.
+const seatCandidates = [];
+for (const member of [...groupOneMembers, ...leaderMembers.filter((m) => Number(m.group_id) !== leaderGroupId)]) {
+  const studentId = Number(member?.id);
+  if (!studentId || seatCandidates.some((entry) => entry.studentId === studentId)) continue;
+  const login = await loginForStudent(studentId);
+  const session = login.json?.data?.session?.token;
+  if (!session) continue;
+  seatCandidates.push({ studentId, session, groupId: Number(member.group_id) });
+}
+const inGroupOne = seatCandidates.filter((entry) => entry.groupId === leaderGroupId);
+const leaderStudentId = inGroupOne[0]?.studentId;
+const leaderSession = inGroupOne[0]?.session;
+const peerStudentId = inGroupOne[1]?.studentId;
+const peerSession = inGroupOne[1]?.session;
+const outsiderStudentId = seatCandidates.find((entry) => entry.groupId !== leaderGroupId)?.studentId;
+const outsiderSessionLC = (await loginForStudent(outsiderStudentId)).json?.data?.session?.token;
+check('20b.2 — the leader fixtures signed in', Boolean(leaderSession && peerSession && outsiderSessionLC));
+
+const appointLeaderLC = await memberCall('POST', `/api/cgm/groups/${leaderGroupId}/leaders`, { studentId: leaderStudentId, role: 'leader' }, amaToken);
+check('20b.3 — the organizer appoints the leader with the activity defaults',
+  appointLeaderLC.status === 200, `status ${appointLeaderLC.status}`);
+const seatRow = q1("SELECT id, permissions_json FROM cgm_leadership_appointments WHERE group_id = ? AND student_id = ? AND status = 'active'", leaderGroupId, leaderStudentId);
+const seatPermissions = JSON.parse(seatRow?.permissions_json || '[]');
+check('20b.4 — the appointment stores exactly the configured capability set',
+  seatPermissions.length === 4 && seatPermissions.includes('edit_topic') && !seatPermissions.includes('add_members'),
+  seatRow?.permissions_json);
+
+// The student sees the seat, and nothing at all for a group they do not lead.
+const mySeats = await studentCall('GET', '/api/cgm/student/leadership', undefined, leaderSession);
+const mySeat = (mySeats.json?.data?.seats || []).find((seat) => Number(seat.groupId) === leaderGroupId);
+check('20b.5 — the leader sees their own seat (role, group, capability count)',
+  mySeats.status === 200 && Boolean(mySeat) && mySeat.role === 'leader' && mySeat.permissionCount === 4,
+  mySeats.text?.slice(0, 200));
+const peerSeats = await studentCall('GET', '/api/cgm/student/leadership', undefined, peerSession);
+check('20b.6 — an ordinary member has no leadership seats',
+  peerSeats.status === 200 && (peerSeats.json?.data?.seats || []).length === 0, peerSeats.text?.slice(0, 120));
+
+const leaderDossier = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}`, undefined, leaderSession);
+check('20b.7 — the leader opens a leaderDossier for their own group',
+  leaderDossier.status === 200 && Number(leaderDossier.json?.data?.group?.id) === leaderGroupId
+  && (leaderDossier.json?.data?.members || []).length === groupOneMembers.length,
+  leaderDossier.text?.slice(0, 200));
+check('20b.8 — the leaderDossier lists granted and withheld capabilities from the leaderCatalogueRes',
+  (leaderDossier.json?.data?.seat?.granted || []).includes('edit_topic')
+  && (leaderDossier.json?.data?.seat?.withheld || []).some((entry) => entry.key === 'add_members'));
+const peerDossier = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}`, undefined, peerSession);
+check('20b.9 — a non-leader is refused the leaderDossier', peerDossier.status === 403, `status ${peerDossier.status}`);
+const outsiderDossier = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroups[1]}`, undefined, leaderSession);
+check('20b.10 — a leader of one group cannot open another group’s leaderDossier (IDOR)',
+  outsiderDossier.status === 403, `status ${outsiderDossier.status}`);
+
+// Topic + agenda: granted → written; the group actually sees it.
+const saveTopic = await studentCall('PATCH', `/api/cgm/student/leader/groups/${leaderGroupId}`, {
+  topic: 'Titration curves', agenda: 'Prepare the burette\nRun three trials\nPool the results',
+}, leaderSession);
+check('20b.11 — the leader writes the group topic and agenda', saveTopic.status === 200, `status ${saveTopic.status} ${saveTopic.text?.slice(0, 140)}`);
+const groupTopicRow = q1('SELECT topic, agenda FROM cgm_groups WHERE id = ?', leaderGroupId);
+check('20b.12 — the stored topic and agenda are the leader’s own words',
+  groupTopicRow?.topic === 'Titration curves' && /Pool the results/.test(String(groupTopicRow?.agenda || '')),
+  JSON.stringify(groupTopicRow));
+const peerSeesTopic = await studentCall('GET', `/api/cgm/student/activities/${leaderActivityId}`, undefined, peerSession);
+check('20b.13 — every member of the group sees the leader’s topic and agenda',
+  peerSeesTopic.json?.data?.myAssignment?.topic === 'Titration curves'
+  && /Run three trials/.test(String(peerSeesTopic.json?.data?.myAssignment?.agenda || '')),
+  JSON.stringify(peerSeesTopic.json?.data?.myAssignment || {}).slice(0, 160));
+
+// ---------- The gate: capabilities the seat does NOT hold are refused ----------
+const noAnnounce = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/announcements`, { title: 'Hi', body: 'Anyone there?' }, leaderSession);
+check('20b.14 — a capability the seat does not hold is refused with the reason',
+  noAnnounce.status === 403 && /does not include/.test(String(noAnnounce.json?.error || '')), `status ${noAnnounce.status} ${noAnnounce.text?.slice(0, 160)}`);
+const noMeeting = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/meetings`, { title: 'Briefing', startsAt: new Date(Date.now() + 86400000).toISOString() }, leaderSession);
+check('20b.15 — scheduling meetings needs the coordinate capability', noMeeting.status === 403, `status ${noMeeting.status}`);
+const noAdd = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/members`, { studentId: outsiderStudentId }, leaderSession);
+check('20b.16 — adding a member needs add_members (or the request capability)',
+  noAdd.status === 403, `status ${noAdd.status}`);
+check('20b.17 — a refused capability wrote nothing',
+  q1("SELECT COUNT(*) c FROM cgm_announcements WHERE activity_id = ? AND group_id = ?", leaderActivityId, leaderGroupId).c === 0
+  && q1('SELECT COUNT(*) c FROM cgm_group_meetings WHERE group_id = ?', leaderGroupId).c === 0);
+
+// ---------- The organizer widens the seat: the SAME session now succeeds ----------
+const leaderCatalogueRes = await memberCall('GET', '/api/cgm/leadership/permissions', undefined, amaToken);
+check('20b.18 — the organizer reads the capability leaderCatalogueRes with labels and hints',
+  leaderCatalogueRes.status === 200 && (leaderCatalogueRes.json?.data?.permissions || []).length >= 13
+  && (leaderCatalogueRes.json?.data?.permissions || []).every((entry) => Boolean(entry.label && entry.hint)),
+  `count=${(leaderCatalogueRes.json?.data?.permissions || []).length}`);
+const grantLeaderCaps = await memberCall('PATCH', `/api/cgm/leadership/${Number(seatRow.id)}/permissions`, {
+  permissions: ['view_members', 'edit_topic', 'assist_attendance', 'report_issues', 'send_announcements', 'notify_members', 'coordinate', 'view_attendance', 'request_member_additions', 'request_member_removals'],
+}, amaToken);
+check('20b.19 — the organizer grants a wider capability set in one call',
+  grantLeaderCaps.status === 200 && (grantLeaderCaps.json?.data?.permissions || []).length === 10,
+  `status ${grantLeaderCaps.status} ${grantLeaderCaps.text?.slice(0, 160)}`);
+check('20b.20 — the response names what was granted and what was revoked',
+  (grantLeaderCaps.json?.data?.granted || []).includes('send_announcements')
+  && (grantLeaderCaps.json?.data?.revoked || []).length === 0,
+  JSON.stringify(grantLeaderCaps.json?.data || {}).slice(0, 200));
+
+const announceLC = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/announcements`, {
+  title: 'Bring goggles', body: 'Tomorrow we start at 8 sharp.',
+}, leaderSession);
+check('20b.21 — with send_announcements the leader posts to their own group',
+  announceLC.status === 200 && announceLC.json?.data?.status === 'published',
+  `status ${announceLC.status} ${announceLC.text?.slice(0, 160)}`);
+const leaderAnnouncementRow = q1('SELECT id, author_type, author_student_id, group_id, status FROM cgm_announcements WHERE id = ?', Number(announceLC.json?.data?.id));
+check('20b.22 — the announcement is attributed to the leader, to THIS group only',
+  leaderAnnouncementRow?.author_type === 'leader'
+  && Number(leaderAnnouncementRow?.author_student_id) === leaderStudentId
+  && Number(leaderAnnouncementRow?.group_id) === leaderGroupId
+  && leaderAnnouncementRow?.status === 'published',
+  JSON.stringify(leaderAnnouncementRow));
+const peerClassFeed = await studentCall('GET', `/api/cgm/student/classes/${classAId}`, undefined, peerSession);
+check('20b.23 — the group sees the leader’s announcement where announcements live',
+  (peerClassFeed.json?.data?.announcements || []).some((row) => Number(row.id) === Number(leaderAnnouncementRow?.id)),
+  `rows=${(peerClassFeed.json?.data?.announcements || []).length}`);
+
+const notifyLC = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/notify`, { message: 'Meet at the lab door at 10:15.' }, leaderSession);
+check('20b.24 — the leader messages every member (and is not counted themselves)',
+  notifyLC.status === 200 && Number(notifyLC.json?.data?.recipients) === groupOneMembers.length - 1,
+  `status ${notifyLC.status} ${notifyLC.text?.slice(0, 140)}`);
+const peerNotified = await studentCall('GET', '/api/cgm/student/notifications', undefined, peerSession);
+check('20b.25 — the message reached the peer as a real notification',
+  (peerNotified.json?.data || []).some((row) => /Meet at the lab door/.test(String(row.body || ''))));
+
+const meetingLC = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/meetings`, {
+  title: 'Pre-practical briefing', startsAt: new Date(Date.now() + 86400000).toISOString(), location: 'Lab 3', durationMinutes: 45,
+}, leaderSession);
+check('20b.26 — with coordinate the leader books a group meeting',
+  meetingLC.status === 200 && Boolean(meetingLC.json?.data?.id), `status ${meetingLC.status} ${meetingLC.text?.slice(0, 160)}`);
+const meetingRow = q1('SELECT title, group_id, class_id, duration_minutes, created_by_student_id FROM cgm_group_meetings WHERE id = ?', Number(meetingLC.json?.data?.id));
+check('20b.27 — the meeting is stored against the leader’s own group',
+  Number(meetingRow?.group_id) === leaderGroupId && Number(meetingRow?.class_id) === Number(classAId)
+  && Number(meetingRow?.created_by_student_id) === leaderStudentId && Number(meetingRow?.duration_minutes) === 45,
+  JSON.stringify(meetingRow));
+const peerCalendar = await studentCall('GET', '/api/cgm/student/calendar', undefined, peerSession);
+check('20b.27b — the meeting is on every group member’s calendar',
+  (peerCalendar.json?.data || []).some((row) => row.meetingId === Number(meetingLC.json?.data?.id) && row.type === 'meeting'),
+  JSON.stringify((peerCalendar.json?.data || []).filter((row) => row.type === 'meeting')).slice(0, 200));
+const cancelMeeting = await studentCall('POST', `/api/cgm/student/leader/meetings/${Number(meetingLC.json?.data?.id)}/cancel`, { reason: 'Lab closed' }, leaderSession);
+check('20b.28 — the leader can call the meeting off, with a reason kept',
+  cancelMeeting.status === 200
+  && q1('SELECT status, cancel_reason FROM cgm_group_meetings WHERE id = ?', Number(meetingLC.json?.data?.id))?.status === 'cancelled');
+const peerCalendarAfter = await studentCall('GET', '/api/cgm/student/calendar', undefined, peerSession);
+check('20b.28b — a cancelled meeting leaves the calendar (it does not linger)',
+  !(peerCalendarAfter.json?.data || []).some((row) => row.meetingId === Number(meetingLC.json?.data?.id)));
+
+// ---------- Attendance: own group only ----------
+const markLC = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/attendance`, {
+  title: 'Week 2 tutorial', sessionDate: '2026-11-20',
+  records: groupOneMembers.map((m, index) => ({ studentId: Number(m.id), status: index === 0 ? 'present' : 'late' })),
+}, leaderSession);
+check('20b.29 — the leader marks attendance for their group',
+  markLC.status === 200 && Number(markLC.json?.data?.saved) === groupOneMembers.length,
+  `status ${markLC.status} ${markLC.text?.slice(0, 160)}`);
+const leaderSessionRow = q1('SELECT group_id, activity_id, created_by_label FROM cgm_attendance_sessions WHERE id = ?', Number(markLC.json?.data?.sessionId));
+check('20b.30 — the session is scoped to the leader’s group, never the whole activity',
+  Number(leaderSessionRow?.group_id) === leaderGroupId, JSON.stringify(leaderSessionRow));
+const crossMark = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/attendance`, {
+  sessionId: Number(markLC.json?.data?.sessionId),
+  records: [{ studentId: outsiderStudentId, status: 'absent' }],
+}, leaderSession);
+check('20b.31 — a leader cannot mark a student who is not in their group',
+  crossMark.status === 403, `status ${crossMark.status}`);
+const readAttendance = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}/attendance`, undefined, leaderSession);
+check('20b.32 — the leader reads the attendance history for their own group',
+  readAttendance.status === 200 && (readAttendance.json?.data || []).length >= 1
+  && (readAttendance.json?.data || [])[0]?.students?.every((row) => groupOneMembers.some((m) => Number(m.id) === Number(row.studentId))),
+  readAttendance.text?.slice(0, 160));
+
+// ---------- Membership requests (the leader’s line to the organizer) ----------
+// Free a seat in group two first: a request about a classmate who already has a
+// group would be approved into a no-op, and the server refuses it up front.
+const freeClassmate = async (studentId) => {
+  const row = q1("SELECT id, group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", leaderActivityId, studentId);
+  if (!row) return null;
+  await memberCall('POST', `/api/cgm/assignments/${Number(row.id)}/remove`, { reason: 'Leader console fixture' }, amaToken);
+  return Number(row.group_id);
+};
+await freeClassmate(outsiderStudentId);
+const requestAdd = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/requests`, {
+  kind: 'add_member', studentId: outsiderStudentId, title: 'Please move this classmate in', reason: 'They are in our lab bench group.',
+}, leaderSession);
+check('20b.33 — without add_members the leader files a REQUEST instead',
+  requestAdd.status === 200 && requestAdd.json?.data?.status === 'pending', `status ${requestAdd.status} ${requestAdd.text?.slice(0, 160)}`);
+const requestRow = q1('SELECT kind, status, target_student_id, group_id FROM cgm_group_leader_requests WHERE id = ?', Number(requestAdd.json?.data?.id));
+check('20b.34 — the request is stored pending, about the right student and group',
+  requestRow?.kind === 'add_member' && requestRow?.status === 'pending'
+  && Number(requestRow?.target_student_id) === outsiderStudentId && Number(requestRow?.group_id) === leaderGroupId,
+  JSON.stringify(requestRow));
+const dupRequest = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/requests`, { kind: 'add_member', studentId: outsiderStudentId, title: 'Again' }, leaderSession);
+check('20b.35 — the same request never queues twice',
+  dupRequest.status === 200 && Number(dupRequest.json?.data?.id) === Number(requestRow ? Number(requestAdd.json?.data?.id) : 0),
+  `status ${dupRequest.status} ${dupRequest.text?.slice(0, 120)}`);
+
+const leadershipQueue = await memberCall('GET', `/api/cgm/activities/${leaderActivityId}/leadership`, undefined, amaToken);
+check('20b.36 — the organizer’s Leadership tab lists the leader’s request',
+  (leadershipQueue.json?.data?.leaderRequests || []).some((row) => Number(row.id) === Number(requestAdd.json?.data?.id) && row.status === 'pending'),
+  JSON.stringify((leadershipQueue.json?.data?.leaderRequests || []).slice(0, 1)));
+check('20b.37 — the Leadership tab returns the full capability leaderCatalogueRes for its editor',
+  (leadershipQueue.json?.data?.permissions || []).length >= 13
+  && (leadershipQueue.json?.data?.permissions || []).some((entry) => entry.key === 'remove_members' && entry.assistant === false));
+
+const approveLeaderRequest = await memberCall('POST', `/api/cgm/leader-requests/${Number(requestAdd.json?.data?.id)}/approve`, {}, amaToken);
+check('20b.38 — approving the request actually moves the student in',
+  approveLeaderRequest.status === 200
+  && q1("SELECT group_id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'", leaderActivityId, outsiderStudentId)?.group_id === leaderGroupId,
+  `status ${approveLeaderRequest.status} ${approveLeaderRequest.text?.slice(0, 160)}`);
+const doubleApprove = await memberCall('POST', `/api/cgm/leader-requests/${Number(requestAdd.json?.data?.id)}/approve`, {}, amaToken);
+check('20b.39 — a decided request can never be applied twice', doubleApprove.status === 409, `status ${doubleApprove.status}`);
+const leaderTold = await studentCall('GET', '/api/cgm/student/notifications', undefined, leaderSession);
+check('20b.40 — the leader is told the outcome of their request',
+  (leaderTold.json?.data || []).some((row) => /approved/i.test(String(row.title || ''))),
+  JSON.stringify((leaderTold.json?.data || []).slice(0, 2).map((r) => r.title)));
+
+// ---------- Direct add / remove, and the end of the seat ----------
+const addDirect = await memberCall('PATCH', `/api/cgm/leadership/${Number(seatRow.id)}/permissions`, {
+  permissions: ['view_members', 'edit_topic', 'report_issues', 'add_members', 'remove_members'],
+}, amaToken);
+check('20b.41 — the organizer can grantLeaderCaps the direct membership capabilities',
+  addDirect.status === 200 && (addDirect.json?.data?.permissions || []).includes('add_members'));
+
+const classPeerId = Number(leaderMembers.filter((m) => Number(m.group_id) === leaderGroups[1])[1]?.id);
+await freeClassmate(classPeerId);
+const leaderAdd = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/members`, { studentId: classPeerId }, leaderSession);
+check('20b.42 — with add_members the leader places an unassigned classmate directly',
+  leaderAdd.status === 200 && leaderAdd.json?.data?.status === 'added',
+  `status ${leaderAdd.status} ${leaderAdd.text?.slice(0, 160)}`);
+const leaderRemove = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/members/${classPeerId}/remove`, { reason: 'Never turned up' }, leaderSession);
+check('20b.43 — with remove_members the leader takes the member out, with the reason kept',
+  leaderRemove.status === 200
+  && q1("SELECT status, removal_reason FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? ORDER BY id DESC LIMIT 1", leaderActivityId, classPeerId)?.status === 'removed',
+  `status ${leaderRemove.status} ${leaderRemove.text?.slice(0, 160)}`);
+const selfRemove = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/members/${leaderStudentId}/remove`, {}, leaderSession);
+check('20b.44 — a leader can never remove themselves out of their own seat',
+  selfRemove.status === 409, `status ${selfRemove.status}`);
+
+// ---------- Assistants are capped to the assistant-safe subset ----------
+const assistantAdd = await memberCall('POST', `/api/cgm/groups/${leaderGroupId}/leaders`, { studentId: peerStudentId, role: 'assistant' }, amaToken);
+check('20b.45 — the organizer appoints an assistant', assistantAdd.status === 200, `status ${assistantAdd.status}`);
+const assistantSeat = q1("SELECT id, permissions_json FROM cgm_leadership_appointments WHERE group_id = ? AND student_id = ? AND role = 'assistant' AND status = 'active'", leaderGroupId, peerStudentId);
+const assistantGrant = await memberCall('PATCH', `/api/cgm/leadership/${Number(assistantSeat?.id)}/permissions`, {
+  permissions: ['view_members', 'remove_members', 'add_members', 'assist_attendance'],
+}, amaToken);
+const assistantKept = JSON.parse(q1('SELECT permissions_json FROM cgm_leadership_appointments WHERE id = ?', Number(assistantSeat?.id))?.permissions_json || '[]');
+check('20b.46 — an assistant can never hold the direct-membership capabilities',
+  assistantGrant.status === 200 && !assistantKept.includes('remove_members') && !assistantKept.includes('add_members')
+  && assistantKept.includes('assist_attendance'),
+  JSON.stringify(assistantKept));
+const assistantDossier = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}`, undefined, peerSession);
+check('20b.47 — the assistant opens the same console with only their own capabilities',
+  assistantDossier.status === 200 && assistantDossier.json?.data?.seat?.role === 'assistant'
+  && !(assistantDossier.json?.data?.seat?.permissions || []).includes('remove_members'),
+  assistantDossier.text?.slice(0, 160));
+
+// ---------- The organizer's permission change reaches the leader at once ----------
+const revokeAll = await memberCall('PATCH', `/api/cgm/leadership/${Number(seatRow.id)}/permissions`, { permissions: [] }, amaToken);
+check('20b.48 — the organizer can revoke every capability', revokeAll.status === 200 && (revokeAll.json?.data?.permissions || []).length === 0);
+const afterRevoke = await studentCall('PATCH', `/api/cgm/student/leader/groups/${leaderGroupId}`, { topic: 'Should not save' }, leaderSession);
+check('20b.49 — the revocation takes effect on the very next request',
+  afterRevoke.status === 403 && q1('SELECT topic FROM cgm_groups WHERE id = ?', leaderGroupId)?.topic === 'Titration curves',
+  `status ${afterRevoke.status}`);
+const seatStillOpen = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}`, undefined, leaderSession);
+check('20b.50 — the leader keeps a read-only dossier instead of a locked door',
+  seatStillOpen.status === 200 && (seatStillOpen.json?.data?.members || []).length === 0,
+  `status ${seatStillOpen.status}`);
+// ---------- Asking for a tool: the organizer's approval opens it ----------
+// The seat is at zero capabilities right now. The leader asks for a tool through
+// the same request door, the organizer approves, and that tool answers 200 on
+// the leader's very next call — nothing else has to be re-appointed.
+const askForTool = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/requests`, {
+  kind: 'access', permission: 'send_announcements', reason: 'We need to post our own lab reminders.',
+}, leaderSession);
+check('20b.53 — a leader with no tools can still ask for one',
+  askForTool.status === 200 && askForTool.json?.data?.status === 'pending'
+  && askForTool.json?.data?.permission === 'send_announcements',
+  `status ${askForTool.status} ${askForTool.text?.slice(0, 160)}`);
+check('20b.54 — the tool request is stored with the capability it asks for',
+  q1("SELECT kind, status, requested_permission FROM cgm_group_leader_requests WHERE id = ?", Number(askForTool.json?.data?.id))?.requested_permission === 'send_announcements',
+  JSON.stringify(q1("SELECT kind, status, requested_permission FROM cgm_group_leader_requests WHERE id = ?", Number(askForTool.json?.data?.id))));
+const askAgain = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/requests`, {
+  kind: 'access', permission: 'send_announcements',
+}, leaderSession);
+check('20b.55 — asking twice for the same tool never queues twice',
+  askAgain.status === 200 && Number(askAgain.json?.data?.id) === Number(askForTool.json?.data?.id),
+  `status ${askAgain.status}`);
+const toolQueue = await memberCall('GET', `/api/cgm/activities/${leaderActivityId}/leadership`, undefined, amaToken);
+const queuedTool = (toolQueue.json?.data?.leaderRequests || []).find((row) => Number(row.id) === Number(askForTool.json?.data?.id));
+check('20b.56 — the organizer’s queue names the tool in plain words',
+  queuedTool?.kind === 'access' && queuedTool?.requestedPermission === 'send_announcements'
+  && Boolean(queuedTool?.requestedPermissionLabel),
+  JSON.stringify(queuedTool || {}).slice(0, 200));
+const toolStillShut = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/announcements`,
+  { title: 'Should not post', body: 'Not yet.' }, leaderSession);
+check('20b.57 — before approval the tool stays shut', toolStillShut.status === 403, `status ${toolStillShut.status}`);
+const approveTool = await memberCall('POST', `/api/cgm/leader-requests/${Number(askForTool.json?.data?.id)}/approve`, {}, amaToken);
+check('20b.58 — approving the request simply switches that tool ON',
+  approveTool.status === 200 && approveTool.json?.data?.status === 'approved'
+  && approveTool.json?.data?.permission === 'send_announcements'
+  && (JSON.parse(q1('SELECT permissions_json FROM cgm_leadership_appointments WHERE id = ?', Number(seatRow.id))?.permissions_json || '[]') || []).includes('send_announcements'),
+  `status ${approveTool.status} ${approveTool.text?.slice(0, 160)}`);
+const toolNowWorks = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/announcements`,
+  { title: 'Bench 4 starts at 8', body: 'Bring your own goggles.' }, leaderSession);
+check('20b.59 — the approved tool works on the leader’s very next call, same session',
+  toolNowWorks.status === 200 && toolNowWorks.json?.data?.status === 'published',
+  `status ${toolNowWorks.status} ${toolNowWorks.text?.slice(0, 160)}`);
+const dossierAfterTool = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}`, undefined, leaderSession);
+check('20b.60 — the console stops listing that tool as withheld',
+  (dossierAfterTool.json?.data?.seat?.permissions || []).includes('send_announcements')
+  && !(dossierAfterTool.json?.data?.seat?.withheld || []).some((entry) => entry.key === 'send_announcements'),
+  JSON.stringify(dossierAfterTool.json?.data?.seat || {}).slice(0, 200));
+const toolLedgerTold = await studentCall('GET', '/api/cgm/student/notifications', undefined, leaderSession);
+check('20b.61 — the organizer’s approval is announced to the leader, not silent',
+  (toolLedgerTold.json?.data || []).some((row) => /opened a tool/i.test(String(row.title || ''))),
+  JSON.stringify((toolLedgerTold.json?.data || []).slice(0, 2).map((r) => r.title)));
+check('20b.62 — granting a tool on request is audited as its own event',
+  q1('SELECT COUNT(*) c FROM cgm_audit WHERE action = ?', 'cgm.leadership.permission_granted_on_request').c >= 1);
+const askHeldTool = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/requests`, {
+  kind: 'access', permission: 'send_announcements',
+}, leaderSession);
+check('20b.63 — asking for a tool already held is refused, not queued',
+  [409, 400].includes(askHeldTool.status), `status ${askHeldTool.status}`);
+const askBogusTool = await studentCall('POST', `/api/cgm/student/leader/groups/${leaderGroupId}/requests`, {
+  kind: 'access', permission: 'become_phantom',
+}, leaderSession);
+check('20b.64 — a capability outside the catalogue is refused outright',
+  [400, 403].includes(askBogusTool.status), `status ${askBogusTool.status}`);
+const endSeat = await memberCall('POST', `/api/cgm/leadership/${Number(seatRow.id)}/end`, { reason: 'Replaced' }, amaToken);
+void endSeat;
+const afterEnd = await studentCall('GET', `/api/cgm/student/leader/groups/${leaderGroupId}`, undefined, leaderSession);
+check('20b.65 — once the seat ends the console closes completely',
+  afterEnd.status === 403, `status ${afterEnd.status}`);
+const audits = ['cgm.leader.topic_updated', 'cgm.leader.announcement_created', 'cgm.leader.meeting_scheduled',
+  'cgm.leader.attendance_recorded', 'cgm.leader.request_add_member', 'cgm.leader.member_removed',
+  'cgm.leadership.permissions_changed', 'cgm.leader_request.approved',
+  'cgm.leadership.permission_granted_on_request'];
+check('20b.66 — every leader action lands in the audit trail',
+  audits.every((action) => q1('SELECT COUNT(*) c FROM cgm_audit WHERE action = ?', action).c >= 1),
+  audits.filter((action) => q1('SELECT COUNT(*) c FROM cgm_audit WHERE action = ?', action).c === 0).join(','));
 
 // ===========================================================================
 // 21. Governance (step 10, spec §5/§6/§30) — runs last: the transfer test

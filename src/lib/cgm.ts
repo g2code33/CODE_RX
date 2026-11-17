@@ -10,6 +10,22 @@ import { API_BASE } from './cloudflare';
 
 export const STUDENT_SESSION_HEADER = 'X-Code-Rx-Student-Session';
 const STUDENT_SESSION_KEY = 'codeRx_cgmStudentSession';
+// "Remember me" is always on for students too: the toggle starts ON and the
+// session lives in localStorage until the student presses Sign out. Turning it
+// off keeps the session only for the tab that created it.
+const STUDENT_REMEMBER_KEY = 'codeRx_cgmRememberMe';
+
+/** Remember me is ON unless the student deliberately switched it off. */
+export const isStudentRemembered = (): boolean => {
+  try { return localStorage.getItem(STUDENT_REMEMBER_KEY) !== 'off'; } catch { return true; }
+};
+
+export const setStudentRemembered = (remember: boolean) => {
+  try {
+    if (remember) localStorage.removeItem(STUDENT_REMEMBER_KEY);
+    else localStorage.setItem(STUDENT_REMEMBER_KEY, 'off');
+  } catch { /* private mode */ }
+};
 
 export interface CgmStudentSession {
   token: string;
@@ -43,8 +59,10 @@ export const studentSession = {
     } catch { return null; }
   },
   write(session: CgmStudentSession) {
+    const remember = isStudentRemembered();
     try {
-      localStorage.setItem(STUDENT_SESSION_KEY, JSON.stringify(session));
+      (remember ? localStorage : sessionStorage).setItem(STUDENT_SESSION_KEY, JSON.stringify(session));
+      (remember ? sessionStorage : localStorage).removeItem(STUDENT_SESSION_KEY);
     } catch {
       /* private mode: the session still works until reload */
     }
@@ -551,6 +569,13 @@ export const cgm = {
     memberCall(`/api/cgm/leadership/${appointmentId}/end`, { method: 'POST', body: { reason } }),
   updateLeaderPermissions: (appointmentId: number, permissions: string[]) =>
     memberCall(`/api/cgm/leadership/${appointmentId}/permissions`, { method: 'POST', body: { permissions } }),
+  /** Every capability a leader may be granted, with its label and hint. */
+  leaderPermissionCatalogue: () => memberCall('/api/cgm/leadership/permissions'),
+  /** Change one seat's capabilities — an explicit list, grant and revoke at once. */
+  setLeaderPermissions: (appointmentId: number, permissions: string[]) =>
+    memberCall(`/api/cgm/leadership/${appointmentId}/permissions`, { method: 'PATCH', body: { permissions } }),
+  decideLeaderRequest: (requestId: number, decision: 'approve' | 'reject', reason?: string) =>
+    memberCall(`/api/cgm/leader-requests/${requestId}/${decision}`, { method: 'POST', body: { reason } }),
   succession: (groupId: number) => memberCall(`/api/cgm/groups/${groupId}/succession`, { method: 'POST', body: {} }),
 
   // elections
@@ -760,6 +785,33 @@ export const cgmStudent = {
   notificationPrefs: () => studentCall('/api/cgm/student/notification-prefs'),
   saveNotificationPrefs: (prefs: Array<{ category: string; muted: boolean }>) =>
     studentCall('/api/cgm/student/notification-prefs', { method: 'PUT', body: { prefs } }),
+
+  // LEADER CONSOLE — a leader's tools for THEIR group. Every call is scoped by
+  // the seat the server resolves from this session; the permission list on the
+  // seat decides which of them answer 403.
+  myLeadership: () => studentCall('/api/cgm/student/leadership'),
+  leaderGroup: (groupId: number) => studentCall(`/api/cgm/student/leader/groups/${groupId}`),
+  leaderSaveTopic: (groupId: number, body: { topic?: string; agenda?: string }) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}`, { method: 'PATCH', body }),
+  leaderAnnounce: (groupId: number, body: { title: string; body: string }) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/announcements`, { method: 'POST', body }),
+  leaderNotify: (groupId: number, body: { title?: string; message: string }) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/notify`, { method: 'POST', body }),
+  leaderScheduleMeeting: (groupId: number, body: { title: string; startsAt: string; agenda?: string; location?: string; durationMinutes?: number }) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/meetings`, { method: 'POST', body }),
+  leaderCancelMeeting: (meetingId: number, reason?: string) =>
+    studentCall(`/api/cgm/student/leader/meetings/${meetingId}/cancel`, { method: 'POST', body: { reason } }),
+  leaderAttendance: (groupId: number) => studentCall(`/api/cgm/student/leader/groups/${groupId}/attendance`),
+  leaderMarkAttendance: (groupId: number, body: { sessionId?: number; title?: string; sessionDate?: string; records: Array<{ studentId: number; status: string; note?: string }> }) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/attendance`, { method: 'POST', body }),
+  leaderAddMember: (groupId: number, studentId: number, reason?: string) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/members`, { method: 'POST', body: { studentId, reason } }),
+  leaderRemoveMember: (groupId: number, studentId: number, reason?: string) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/members/${studentId}/remove`, { method: 'POST', body: { reason } }),
+  // 'access' = ask the organizer to OPEN a capability the seat does not hold.
+  // The organizer approves it and the tool is live on the leader's next request.
+  leaderRequest: (groupId: number, body: { kind: 'add_member' | 'remove_member' | 'issue' | 'access'; permission?: string; studentId?: number; title?: string; reason?: string }) =>
+    studentCall(`/api/cgm/student/leader/groups/${groupId}/requests`, { method: 'POST', body }),
 };
 
 /** §16 — a student downloads their own attendance, group and leadership records (CSV). */

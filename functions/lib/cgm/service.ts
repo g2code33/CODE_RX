@@ -252,6 +252,66 @@ export const ensurePasskeyResetSchema = async (db: D1Database) => {
   if (complete) passkeyResetSchemaChecked = true;
 };
 
+/**
+ * Leader-console tables (meetings + leader → organizer requests). They ship in
+ * the shared schema bootstrap, but a warm isolate that booted before this
+ * deploy must still open the leader console — so they are created once per
+ * isolate on first use, exactly like the Re-choose and passkey tables.
+ */
+let leaderSchemaChecked = false;
+export const ensureLeaderSchema = async (db: D1Database) => {
+  if (leaderSchemaChecked) return;
+  try {
+    await db.batch([
+      db.prepare(`CREATE TABLE IF NOT EXISTS cgm_group_meetings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        activity_id INTEGER NOT NULL,
+        group_id INTEGER NOT NULL,
+        class_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        agenda TEXT,
+        starts_at DATETIME NOT NULL,
+        duration_minutes INTEGER NOT NULL DEFAULT 60,
+        location TEXT,
+        status TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled','cancelled','done')),
+        created_by_appointment_id INTEGER,
+        created_by_student_id INTEGER,
+        created_by_label TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        cancelled_at DATETIME,
+        cancel_reason TEXT
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS cgm_group_leader_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        class_id INTEGER NOT NULL,
+        activity_id INTEGER NOT NULL,
+        group_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('add_member','remove_member','issue','access')),
+        requested_by_student_id INTEGER NOT NULL,
+        requested_permission TEXT,
+        requester_label TEXT,
+        appointment_id INTEGER,
+        target_student_id INTEGER,
+        title TEXT NOT NULL DEFAULT '',
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+        reviewed_by_profile_id INTEGER,
+        reviewer_label TEXT,
+        review_reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at DATETIME
+      )`),
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_group_meetings_group ON cgm_group_meetings(group_id, starts_at)'),
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_group_meetings_activity ON cgm_group_meetings(activity_id, starts_at)'),
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_group_leader_requests_group ON cgm_group_leader_requests(group_id, status)'),
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_cgm_group_leader_requests_activity ON cgm_group_leader_requests(activity_id, status)'),
+      db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_group_leader_requests_pending
+        ON cgm_group_leader_requests(group_id, kind, target_student_id) WHERE status = 'pending' AND target_student_id IS NOT NULL`),
+    ]);
+    leaderSchemaChecked = true;
+  } catch { /* already provisioned, or retried on the next request */ }
+};
+
 export const restoreAssignment = async (
   db: D1Database,
   assignmentId: number,
@@ -403,8 +463,12 @@ export const requireModuleEnabled = async (c: Context<{ Bindings: Env }>) => {
 
 export const STUDENT_SESSION_HEADER = 'X-Code-Rx-Student-Session';
 const STUDENT_SESSION_HASH_DOMAIN = 'code-rx:cgm-student-session:v1:';
-/** Student sessions last a school term's worth of comfortable use. */
-export const STUDENT_SESSION_TTL_HOURS = 72;
+/**
+ * A student stays signed in until they press Sign out. The browser keeps the
+ * session permanently ("remember me" is always on), so the database row lives
+ * a full year rather than a few days — sign out still revokes it instantly.
+ */
+export const STUDENT_SESSION_TTL_HOURS = 24 * 365;
 
 export const studentSessionHash = (token: string) => sha256Hex(`${STUDENT_SESSION_HASH_DOMAIN}${token}`);
 

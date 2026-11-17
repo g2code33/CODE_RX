@@ -152,6 +152,11 @@ const boot = async (address, { memberToken = null, memberUser = null, studentSes
   if (studentSession) window.localStorage.setItem('codeRx_cgmStudentSession', JSON.stringify(studentSession));
   globalThis.window = window;
   globalThis.document = window.document;
+  // Node 22 defines its own global `navigator` (no onLine), and React reads the
+  // GLOBAL one — so without this the portals would think they were offline while
+  // the window says otherwise. Point the global at the window's navigator, so
+  // `navigator.onLine` means the same thing everywhere the app reads it.
+  Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true, writable: true });
 
   await import(appFile);
 
@@ -579,6 +584,323 @@ let savedPasskey = '';
   check('the signed-in student sees their elections view from the portal navigation',
     (() => { const electionsNav = page.buttonByText('My Elections'); electionsNav && electionsNav.click(); return Boolean(electionsNav); })()
     && await page.waitForFor('My elections', 20_000), page.body().slice(0, 200));
+}
+
+// ---------------------------------------------------------------------------
+// 6b. The organizer's agenda reaches every student, and the sign-in is
+//     remembered until a manual sign out
+// ---------------------------------------------------------------------------
+{
+  const page = await boot(`#class-invite/${encodeURIComponent(inviteA)}`);
+  const signInTab = await page.waitForElement(() => page.buttonByText('Sign in'));
+  signInTab && signInTab.click();
+  page.setNativeValue(await page.waitForElement(() => page.inputByLabel('Index number')), studentIndex);
+  page.setNativeValue(page.inputByLabel('Permanent passkey'), savedPasskey);
+  const submit = await page.waitForElement(() => page.submitButtonByText('Sign in'));
+  submit && submit.click();
+  check('a returning student signs in before the agenda journey', await page.waitForFor('CODE Rx Student Portal', 30_000), page.body().slice(0, 160));
+  // The session is remembered: the token is in localStorage, not sessionStorage.
+  check('the student sign-in is remembered across visits (localStorage, not the tab)',
+    Boolean(page.window.localStorage.getItem('codeRx_cgmStudentSession'))
+    && !page.window.sessionStorage.getItem('codeRx_cgmStudentSession'));
+
+  const me = await fetch(`${BASE}/api/cgm/student/me`, {
+    headers: { 'X-Code-Rx-Student-Session': JSON.parse(page.window.localStorage.getItem('codeRx_cgmStudentSession')).token },
+  }).then((response) => response.json());
+  const agendaStudentId = Number(me?.data?.student?.id || 0);
+  check('the agenda fixture found the signed-in student', agendaStudentId > 0, JSON.stringify(me?.data?.student || {}).slice(0, 120));
+
+  // An agenda activity of its own, so this journey never leans on another block.
+  const agendaCreated = await api('POST', `/api/cgm/classes/${classA.classId}/activities`,
+    { name: `Browser Agenda ${stamp}`, type: 'groups', config: { method: 'self', groupCount: 2, capacity: 20, genderRule: 'none', eligibility: 'all', contactVisibility: 'class', whatsappEnabled: true } }, phantomToken);
+  const agendaActivityId = Number(agendaCreated.json?.data?.activityId || 0);
+  check('the agenda activity exists', agendaActivityId > 0, JSON.stringify(agendaCreated.json || {}).slice(0, 140));
+  const agendaPublished = await api('POST', `/api/cgm/activities/${agendaActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+  check('the agenda activity publishes (groups are defined at publish time)', agendaPublished.status === 200, JSON.stringify(agendaPublished.json || {}).slice(0, 140));
+  const agendaDetail = (await api('GET', `/api/cgm/activities/${agendaActivityId}`, undefined, phantomToken)).json?.data || {};
+  const agendaGroupId = Number((agendaDetail.groups || [])[0]?.id || 0);
+  check('the agenda activity carries a group', agendaGroupId > 0, JSON.stringify(agendaDetail).slice(0, 200));
+  const TOPIC = 'UV-Vis of aspirin';
+  const AGENDA = '1. Review titration data\n2. Draft the results table';
+  await api('PATCH', `/api/cgm/groups/${agendaGroupId}`, { topic: TOPIC, agenda: AGENDA }, phantomToken);
+  // The group's WhatsApp invite — the join page is what the student sees next.
+  await api('POST', `/api/cgm/groups/${agendaGroupId}/whatsapp`,
+    { url: `https://chat.whatsapp.com/AGENDA${stamp.replace(/[^A-Za-z0-9]/g, '')}` }, phantomToken);
+  await api('POST', `/api/cgm/activities/${agendaActivityId}/assign-student`, { studentId: agendaStudentId, groupId: agendaGroupId }, phantomToken);
+
+  const studentPage = await boot('#class-groups/student', { studentSession: JSON.parse(page.window.localStorage.getItem('codeRx_cgmStudentSession')) });
+  const groupsNav = await studentPage.waitForElement(() => studentPage.buttonByText('My Groups'));
+  groupsNav && groupsNav.click();
+  // The My Groups picker lists the activity by name; clicking it opens the
+  // activity page where the topic and the organizer agenda live.
+  const agendaCard = await studentPage.waitForElement(
+    () => studentPage.buttonByText(`Browser Agenda ${stamp}`), 25_000);
+  agendaCard && agendaCard.click();
+  const agendaDebug = () => {
+    const text = studentPage.body();
+    return `card=${Boolean(agendaCard)} body=${text.slice(Math.max(0, text.indexOf('Activities') - 20), 400)}`;
+  };
+  check('the student group page renders the organizer topic',
+    await studentPage.waitForFor(TOPIC, 25_000), agendaDebug());
+  const agendaBlock = studentPage.window.document.querySelector('[data-testid="cgm-student-topic-block"]');
+  check('the organizer agenda is shown to the student under the topic, as a plain numbered list',
+    Boolean(agendaBlock) && /Review titration data/.test(agendaBlock.textContent)
+    && /Draft the results table/.test(agendaBlock.textContent)
+    && Boolean(studentPage.window.document.querySelector('ol[data-testid="cgm-topic-agenda-lines"]')),
+    agendaBlock?.textContent?.slice(0, 160) || 'no agenda block');
+  // NO lightbulb, no toggle: the agenda is simply there, with zero clicks.
+  check('there is no idea button and no collapsed agenda anywhere on the page',
+    !studentPage.window.document.querySelector('[data-testid="cgm-topic-agenda-idea"]')
+    && !studentPage.window.document.querySelector('[data-testid="cgm-topic-agenda-idea-panel"]')
+    && !studentPage.window.document.querySelector('[data-testid="cgm-student-topic-card"]'));
+  // The plan comes before the membership: topic + agenda above "My group".
+  const topicBlockEl = studentPage.window.document.querySelector('[data-testid="cgm-student-topic-block"]');
+  const myGroupEl = studentPage.window.document.querySelector('[data-testid="cgm-student-my-group"]');
+  check('the topic + agenda block comes BEFORE the “My group” card',
+    Boolean(topicBlockEl) && Boolean(myGroupEl)
+    && Boolean(topicBlockEl.compareDocumentPosition(myGroupEl) & studentPage.window.Node.DOCUMENT_POSITION_FOLLOWING),
+    `topic=${Boolean(topicBlockEl)} group=${Boolean(myGroupEl)}`);
+
+  // The WhatsApp join page carries the very same plan at the top.
+  const waOpen = await studentPage.waitForElement(
+    () => studentPage.window.document.querySelector('[data-testid="cgm-student-whatsapp-open-page"]'), 10_000);
+  waOpen && waOpen.click();
+  const waTopic = await studentPage.waitForElement(
+    () => studentPage.window.document.querySelector('[data-testid="cgm-student-whatsapp-topic-block"]'), 10_000);
+  check('the WhatsApp join page opens with the topic + agenda, before the QR',
+    Boolean(waTopic) && /UV-Vis of aspirin/.test(waTopic.textContent)
+    && /Review titration data/.test(waTopic.textContent)
+    && !/[Bb]ulb/.test(waTopic.innerHTML), `waTopic=${waTopic?.textContent?.slice(0, 120) || 'none'}`);
+  const waPageEl = studentPage.window.document.querySelector('[data-testid="cgm-student-whatsapp-page"]');
+  const waQr = waPageEl?.querySelector('svg, img');
+  check('on the join page the plan sits above the QR, not below it',
+    Boolean(waTopic) && Boolean(waQr)
+    && Boolean(waTopic.compareDocumentPosition(waQr) & studentPage.window.Node.DOCUMENT_POSITION_FOLLOWING),
+    `topic=${Boolean(waTopic)} qr=${Boolean(waQr)}`);
+  // Back to the activity page so the next journey starts where it expects to.
+  const waBack = [...studentPage.window.document.querySelectorAll('button')]
+    .find((button) => /Back to my group/.test(button.textContent || ''));
+  waBack && waBack.click();
+}
+
+// ---------------------------------------------------------------------------
+// 6c. The leader console: appointing a leader gives them real tools for their
+//     group, and the organizer can change what those tools are
+// ---------------------------------------------------------------------------
+{
+  // A class of its own, so the leader journey never leans on another block.
+  const leaderClass = await makeClass(`Browser Check Leader ${stamp}`);
+  await api('POST', `/api/cgm/classes/${leaderClass.classId}/entry-password`, { entryPassword: 'leader-entry' }, phantomToken);
+  const leaderActivity = await api('POST', `/api/cgm/classes/${leaderClass.classId}/activities`, {
+    name: `Browser Leader Lab ${stamp}`, type: 'practical',
+    config: {
+      method: 'self', groupCount: 2, capacity: 20, genderRule: 'none', eligibility: 'all',
+      repeatRule: 'random', leaderMethod: 'appointment', overflow: 'block',
+      announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true,
+      electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random',
+      leaderPermissions: ['view_members', 'edit_topic', 'send_announcements', 'coordinate', 'assist_attendance', 'report_issues'],
+    },
+  }, phantomToken);
+  const leaderActivityId = Number(leaderActivity.json?.data?.activityId || 0);
+  await api('POST', `/api/cgm/activities/${leaderActivityId}/lifecycle`, { action: 'publish' }, phantomToken);
+  const leaderDetail = (await api('GET', `/api/cgm/activities/${leaderActivityId}`, undefined, phantomToken)).json?.data || {};
+  const leaderGroupId = Number((leaderDetail.groups || [])[0]?.id || 0);
+
+  // Two students join (registration is automatic under the fixture policy) and
+  // are placed in the first group; the first of them becomes the leader.
+  const joinLeaderActivity = async (index, name) => {
+    await api('POST', `/api/cgm/classes/${leaderClass.classId}/roster/entries`, { fullName: name, indexNumber: index, gender: 'female' }, phantomToken);
+    const registered = await api('POST', '/api/cgm/student/register', { classCode: leaderClass.code, indexNumber: index, entryPassword: 'leader-entry' });
+    const passkey = String(registered.json?.data?.passkey || '');
+    const login = await api('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: index, passkey });
+    const students = (await api('GET', `/api/cgm/classes/${leaderClass.classId}/members`, undefined, phantomToken)).json?.data || [];
+    const row = (Array.isArray(students) ? students : []).find((entry) => String(entry.indexNumber || '') === index);
+    return { session: login.json?.data?.session || null, studentId: Number(row?.studentId || 0), passkey };
+  };
+  const leaderFirst = await joinLeaderActivity(`LEAD-${stamp}-1`, `Leader One ${stamp}`);
+  const leaderSecond = await joinLeaderActivity(`LEAD-${stamp}-2`, `Leader Two ${stamp}`);
+  check('the leader journey has two registered students',
+    Boolean(leaderFirst.session?.token) && Boolean(leaderSecond.session?.token) && leaderFirst.studentId > 0,
+    `${leaderFirst.studentId}/${leaderSecond.studentId} statuses ok`);
+
+  for (const entry of [leaderFirst, leaderSecond]) {
+    await api('POST', `/api/cgm/activities/${leaderActivityId}/assign-student`, { studentId: entry.studentId, groupId: leaderGroupId }, phantomToken);
+  }
+  const appointed = await api('POST', `/api/cgm/groups/${leaderGroupId}/leaders`, { studentId: leaderFirst.studentId, role: 'leader' }, phantomToken);
+  check('the organizer appoints the group leader', appointed.status === 200, JSON.stringify(appointed.json || {}).slice(0, 140));
+
+  const page = await boot('#class-groups/student', { studentSession: leaderFirst.session });
+  check('the leader signs in and the portal opens', await page.waitForFor('CODE Rx Student Portal', 30_000), page.body().slice(0, 180));
+  const leaderNav = await page.waitForElement(() => page.buttonByText('My group (leader)'), 25_000);
+  check('a leader gets their own navigation entry', Boolean(leaderNav), page.body().slice(0, 240));
+  leaderNav && leaderNav.click();
+  const seatCard = await page.waitForElement(() => page.window.document.querySelector(`[data-testid="cgm-leader-seat-${leaderGroupId}"]`), 25_000);
+  check('the seat lists the group, the activity and the role',
+    Boolean(seatCard) && /leader/i.test(seatCard.textContent) && seatCard.textContent.includes(`Browser Leader Lab ${stamp}`),
+    seatCard?.textContent?.slice(0, 160) || page.body().slice(0, 240));
+  seatCard && seatCard.click();
+  check('the console opens on the leader’s own group',
+    Boolean(await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-leader-console"]'), 25_000)),
+    page.body().slice(0, 240));
+  const capabilities = await page.waitForElement(() => page.window.document.querySelector('[data-testid="cgm-leader-capabilities"]'), 20_000);
+  check('the console shows exactly the tools the organizer granted',
+    Boolean(capabilities) && /Set the group topic & agenda/.test(capabilities.textContent)
+    && /Record group attendance/.test(capabilities.textContent), capabilities?.textContent?.slice(0, 240) || 'missing');
+  check('the console names what was NOT granted instead of hiding the gap',
+    Boolean(page.window.document.querySelector('[data-testid="cgm-leader-withheld"]')));
+
+  // The topic and agenda, written through the console.
+  const topicInput = await page.waitForElement(() => page.inputByLabel('Topic'), 15_000);
+  page.setNativeValue(topicInput, 'Benedict’s test');
+  page.setNativeValue(page.window.document.querySelector('#cgm-leader-agenda'), '1. Label the tubes\n2. Heat the samples\n3. Record the colours');
+  const savePlan = await page.waitForElement(() => page.submitButtonByText('Save topic & agenda'));
+  savePlan && savePlan.click();
+  check('the leader saves the topic and agenda from the console',
+    await page.waitForFor('Saved — your group sees it straight away.', 25_000), page.body().slice(0, 240));
+  const storedGroup = (await api('GET', `/api/cgm/groups/${leaderGroupId}`, undefined, phantomToken)).json?.data?.group || {};
+  check('the saved topic and agenda are the leader’s own words',
+    storedGroup.topic === 'Benedict’s test' && /Record the colours/.test(String(storedGroup.agenda || '')),
+    JSON.stringify(storedGroup).slice(0, 200));
+
+  // The organizer's REAL permission editor: revoke one capability through the UI.
+  const organizerPage = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await organizerPage.waitForFor('My Classes', 30_000);
+  await switchClass(organizerPage, leaderClass.classId);
+  const leadershipNav = await organizerPage.waitForElement(() => organizerPage.buttonByText('Leadership'), 25_000);
+  leadershipNav && leadershipNav.click();
+  // The Leadership tab lists activities first; the appointments (and the
+  // permission editor) only render once one is chosen.
+  check('the organizer reaches the Leadership tab',
+    Boolean(await organizerPage.waitForElement(() => organizerPage.window.document.querySelector('select[aria-label="Choose activity"]'), 25_000))
+    && organizerPage.body().includes('Leadership'), organizerPage.body().slice(0, 240));
+  if (!(await chooseActivity(organizerPage, leaderActivityId, 25_000))) {
+    check('the Leadership tab accepts the activity choice', false, 'activity option never appeared');
+  }
+  check('choosing the activity loads its appointments', await organizerPage.waitForFor('Appointments', 30_000), organizerPage.body().slice(0, 300));
+  const editButton = await organizerPage.waitForElement(() => organizerPage.window.document.querySelector('[data-testid="cgm-leader-edit-permissions"]'), 30_000);
+  check('the appointment row offers a real permission editor',
+    Boolean(editButton) && /Permissions \(\d+\)/.test(editButton.textContent), editButton?.textContent || 'missing');
+  editButton && editButton.click();
+  const editorOpen = await organizerPage.waitForElement(() => organizerPage.window.document.querySelector('[data-testid="cgm-leader-permission-editor"]'), 20_000);
+  check('the editor explains every grantable capability',
+    Boolean(editorOpen) && /Set the group topic & agenda/.test(editorOpen.textContent)
+    && /Write the topic and the agenda/.test(editorOpen.textContent),
+    editorOpen?.textContent?.slice(0, 260) || 'missing');
+  const editTopicBox = organizerPage.window.document.querySelector('[data-testid="cgm-leader-permission-edit_topic"]');
+  check('the capability the leader holds is already ticked', Boolean(editTopicBox) && editTopicBox.checked === true);
+  editTopicBox && editTopicBox.click();
+  const savePermissions = await organizerPage.waitForElement(() => organizerPage.buttonByText('Save permissions'));
+  savePermissions && savePermissions.click();
+  check('saving reports the leader’s new tool count',
+    await organizerPage.waitForFor(/Permissions saved — \d+ tool/, 25_000), organizerPage.body().slice(0, 240));
+
+  // The revocation is enforced by the SERVER on the very next request.
+  const deniedWithSession = await fetch(`${BASE}/api/cgm/student/leader/groups/${leaderGroupId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-Code-Rx-Student-Session': leaderFirst.session.token },
+    body: JSON.stringify({ topic: 'Should never save' }),
+  }).then(async (response) => ({ status: response.status, json: await response.json().catch(() => null) }));
+  check('revoking a capability is enforced server-side on the very next request',
+    deniedWithSession.status === 403 && /does not include/.test(String(deniedWithSession.json?.error || '')),
+    `status ${deniedWithSession.status} ${JSON.stringify(deniedWithSession.json || {}).slice(0, 140)}`);
+  check('the refused write changed nothing',
+    ((await api('GET', `/api/cgm/groups/${leaderGroupId}`, undefined, phantomToken)).json?.data?.group?.topic) === 'Benedict’s test');
+
+  // --- Asking for a tool, from the leader's own console -------------------
+  // The seat no longer holds edit_topic. The leader opens "Ask the organizer",
+  // picks the tool, sends it; the organizer approves from the Leadership tab and
+  // the tool answers 200 for that same session. A fresh page re-reads the seat,
+  // exactly like reopening the portal does.
+  const leaderPage = await boot('#class-groups/student', { studentSession: leaderFirst.session });
+  await leaderPage.waitForFor('CODE Rx Student Portal', 30_000);
+  const askNav = await leaderPage.waitForElement(() => leaderPage.buttonByText('My group (leader)'), 25_000);
+  askNav && askNav.click();
+  const askSeat = await leaderPage.waitForElement(() => leaderPage.window.document.querySelector(`[data-testid="cgm-leader-seat-${leaderGroupId}"]`), 25_000);
+  askSeat && askSeat.click();
+  const askConsole = await leaderPage.waitForElement(() => leaderPage.window.document.querySelector('[data-testid="cgm-leader-console"]'), 25_000);
+  check('the console re-reads the seat on open (the revoked tool is gone)',
+    Boolean(askConsole) && askConsole.textContent.includes('Ask the organizer'), askConsole?.textContent?.slice(0, 160) || 'no console');
+  const askTab = await leaderPage.waitForElement(() => leaderPage.buttonByText('Ask the organizer'), 20_000);
+  check('a leader whose seat was narrowed can still reach the Ask-the-organizer tab',
+    Boolean(askTab), leaderPage.body().slice(0, 240));
+  askTab && askTab.click();
+  const kindSelect = await leaderPage.waitForElement(
+    () => leaderPage.window.document.querySelector('[data-testid="cgm-leader-request-kind"]'), 20_000);
+  check('the request form offers “ask for a tool to be opened” first',
+    Boolean(kindSelect)
+    && Boolean([...kindSelect.options].find((option) => option.value === 'access'))
+    && kindSelect.value === 'access', kindSelect?.value || 'no select');
+  const toolSelect = await leaderPage.waitForElement(
+    () => leaderPage.window.document.querySelector('[data-testid="cgm-leader-request-tool"] select'), 20_000);
+  const withheldList = await leaderPage.waitForElement(
+    () => leaderPage.window.document.querySelector('[data-testid="cgm-leader-withheld"]'), 20_000);
+  const withheldText = withheldList ? withheldList.textContent : '';
+  const heldCount = (leaderPage.window.document.querySelector('[data-testid="cgm-leader-capabilities"]')?.textContent || '').trim().length;
+  check('the console names the tools the seat does NOT hold',
+    Boolean(withheldList) && /Set the group topic & agenda/.test(withheldText),
+    `${withheldText.slice(0, 120)} | held=${heldCount} body=${leaderPage.body().slice(0, 200)}`);
+  const toolOptions = toolSelect ? [...toolSelect.options].map((option) => option.value) : [];
+  check('the tool picker offers the withheld tools',
+    Boolean(toolSelect) && toolOptions.includes('edit_topic') && !toolOptions.includes('view_members'),
+    `${toolOptions.join(',')} | ${leaderPage.body().slice(0, 200)}`);
+  if (toolSelect) {
+    toolSelect.value = 'edit_topic';
+    toolSelect.dispatchEvent(new leaderPage.window.Event('change', { bubbles: true }));
+  }
+  leaderPage.setNativeValue(leaderPage.window.document.querySelector('input[aria-label="Request title"]'), 'Please reopen the plan tool');
+  leaderPage.setNativeValue(leaderPage.window.document.querySelector('textarea[aria-label="Request detail"]'), 'We need to update the agenda before Friday.');
+  const sendRequest = await leaderPage.waitForElement(() => leaderPage.submitButtonByText('Send to organizer'));
+  sendRequest && sendRequest.click();
+  check('the leader sends the tool request and is told it went through',
+    await leaderPage.waitForFor(/Sent — your organizers have it/, 25_000), leaderPage.body().slice(0, 240));
+  // The request is real: it is in the leader's own list AND in the organizer queue.
+  const studentHeaders = { 'X-Code-Rx-Student-Session': leaderFirst.session.token };
+  const leaderDossierAfterAsk = await fetch(`${BASE}/api/cgm/student/leader/groups/${leaderGroupId}`, { headers: studentHeaders })
+    .then((response) => response.json()).catch(() => null);
+  const askedRequest = (leaderDossierAfterAsk?.data?.requests || [])[0] || null;
+  check('the leader’s console lists the request as pending, naming the tool',
+    Boolean(askedRequest) && askedRequest.status === 'pending' && askedRequest.kind === 'access'
+    && askedRequest.requestedPermission === 'edit_topic' && /topic/i.test(String(askedRequest.requestedPermissionLabel || '')),
+    JSON.stringify(askedRequest || {}).slice(0, 220));
+  const queueAfterAsk = (await api('GET', `/api/cgm/activities/${leaderActivityId}/leadership`, undefined, phantomToken)).json?.data?.leaderRequests || [];
+  const queuedToolRequest = queueAfterAsk.find((row) => Number(row.id) === Number(askedRequest?.id)) || null;
+  check('the same request is waiting in the organizer’s queue, with the tool spelled out',
+    Boolean(queuedToolRequest) && queuedToolRequest.kind === 'access'
+    && /Set the group topic & agenda/.test(String(queuedToolRequest.requestedPermissionLabel || '')),
+    JSON.stringify(queuedToolRequest || {}).slice(0, 220));
+
+  // The organizer comes back to the Leadership tab and approves it there.
+  const organizerAgain = await boot('#class-groups', { memberToken: phantomToken, memberUser: { name: 'PHANTOM', email: EMAIL } });
+  await organizerAgain.waitForFor('My Classes', 30_000);
+  await switchClass(organizerAgain, leaderClass.classId);
+  const leadershipAgain = await organizerAgain.waitForElement(() => organizerAgain.buttonByText('Leadership'), 25_000);
+  leadershipAgain && leadershipAgain.click();
+  await organizerAgain.waitForElement(() => organizerAgain.window.document.querySelector('select[aria-label="Choose activity"]'), 25_000);
+  await chooseActivity(organizerAgain, leaderActivityId, 25_000);
+  const requestsPanel = await organizerAgain.waitForElement(
+    () => organizerAgain.window.document.querySelector('[data-testid="cgm-leader-requests-panel"]'), 30_000);
+  check('the organizer’s Leadership tab lists the tool request', Boolean(requestsPanel),
+    organizerAgain.body().slice(0, 240));
+  const toolLabel = await organizerAgain.waitForElement(
+    () => organizerAgain.window.document.querySelector('[data-testid="cgm-leader-request-tool-label"]'), 20_000);
+  check('the queue says which tool the leader is asking for',
+    Boolean(toolLabel) && /Opens: Set the group topic & agenda/.test(toolLabel.textContent),
+    toolLabel?.textContent || `missing — ${(requestsPanel?.textContent || '').slice(0, 240)}`);
+  const openTool = await organizerAgain.waitForElement(() => organizerAgain.buttonByText('Open this tool'));
+  check('the approve action reads as opening the tool, not a vague Approve',
+    Boolean(openTool), (requestsPanel?.textContent || '').slice(0, 300));
+  openTool && openTool.click();
+  check('approving tells the organizer the tool is now open',
+    await organizerAgain.waitForFor(/is now open for/, 25_000), organizerAgain.body().slice(0, 240));
+
+  // The same leader session that was refused above now succeeds.
+  const reopened = await fetch(`${BASE}/api/cgm/student/leader/groups/${leaderGroupId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...studentHeaders },
+    body: JSON.stringify({ topic: 'Now I can plan again' }),
+  }).then(async (response) => ({ status: response.status, json: await response.json().catch(() => null) }));
+  check('the tool the organizer approved works for that leader straight away',
+    reopened.status === 200, `status ${reopened.status} ${JSON.stringify(reopened.json || {}).slice(0, 140)}`);
 }
 
 // ---------------------------------------------------------------------------

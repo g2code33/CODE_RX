@@ -3,7 +3,7 @@ import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, Compass, GraduationCap,
   KeyRound, LayoutDashboard, Lightbulb, LogOut, ShieldCheck, User as UserIcon, Users, Vote,
 } from 'lucide-react';
-import { cgmStudent, CgmError, downloadMyRecords, studentSession, type CgmStudentSession } from '../../lib/cgm';
+import { cgmStudent, CgmError, downloadMyRecords, setStudentRemembered, studentSession, type CgmStudentSession } from '../../lib/cgm';
 import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { QrBlock } from './ClassGroupsWorkspace';
@@ -11,6 +11,7 @@ import { useCgmNoZoom } from './noZoom';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet, type GroupSheet } from '../../lib/groupSheet';
 import { RecentItems } from '../RecentItems';
+import { LeaderConsole, LeaderSeatList } from './LeaderConsole';
 
 /**
  * CODE Rx — Student Portal.
@@ -22,12 +23,14 @@ import { RecentItems } from '../RecentItems';
  * organizer or PHANTOM controls.
  */
 
-type Section = 'home' | 'classes' | 'groups' | 'elections' | 'attendance' | 'calendar' | 'notifications' | 'profile' | 'history';
+type Section = 'home' | 'classes' | 'groups' | 'leader' | 'elections' | 'attendance' | 'calendar' | 'notifications' | 'profile' | 'history';
 
 const SECTIONS: Array<[Section, string, any]> = [
   ['home', 'Overview', LayoutDashboard],
   ['classes', 'My Classes', GraduationCap],
   ['groups', 'My Groups', Users],
+  // Only rendered when the student actually leads a group — see the sidebar.
+  ['leader', 'My group (leader)', ShieldCheck],
   ['elections', 'My Elections', Vote],
   ['attendance', 'My Attendance', ClipboardList],
   ['calendar', 'My Calendar', Calendar],
@@ -450,6 +453,8 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
   const [invite, setInvite] = useState<any>(null);
   const [inviteProblem, setInviteProblem] = useState<string | null>(null);
   const [pendingSession, setPendingSession] = useState<CgmStudentSession | null>(null);
+  // "Remember me" — always on: a student stays signed in until Sign out.
+  const [rememberMe, setRememberMeState] = useState(true);
   // Forgot-passkey: the reset runs from here, BEFORE any session exists.
   const [resetOpen, setResetOpen] = useState(false);
   const [savedReset, setSavedReset] = useState<SavedReset | null>(null);
@@ -624,6 +629,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             onSubmit={(event) => {
               event.preventDefault();
               void run(async () => {
+                setStudentRemembered(rememberMe);
                 const data = await cgmStudent.login({ identifierType, identifier, passkey });
                 onAuthenticated(data.session);
               });
@@ -653,6 +659,31 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             <div>
               <label className={label} htmlFor="cgm-passkey">Permanent passkey</label>
               <input id="cgm-passkey" required className={`${inputClass} mt-1 font-mono`} value={passkey} onChange={(event) => setPasskey(event.target.value)} placeholder="rx30a" autoComplete="current-password" />
+            </div>
+            <div
+              className="flex items-center justify-between gap-3 rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 py-2.5"
+              data-testid="cgm-student-remember-me"
+            >
+              <div className="min-w-0">
+                <label htmlFor="cgm-student-remember-me" className="block text-xs font-black text-emerald-900">Remember me</label>
+                <p className="mt-0.5 text-[11px] font-medium leading-snug text-emerald-700">
+                  {rememberMe ? 'You stay signed in until you sign out.' : 'You will be signed out when this tab closes.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                id="cgm-student-remember-me"
+                role="switch"
+                aria-checked={rememberMe}
+                aria-label="Remember me — keep me signed in on this device"
+                onClick={() => { setRememberMeState((on) => !on); setStudentRemembered(!rememberMe); }}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${rememberMe ? 'bg-emerald-600' : 'bg-slate-300'}`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${rememberMe ? 'translate-x-6' : 'translate-x-1'}`}
+                />
+              </button>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
               <button type="submit" disabled={busy} className="cgm-primary-button flex-1">
@@ -791,6 +822,9 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
   const [section, setSection] = useState<Section>('home');
   const [openClassId, setOpenClassId] = useState<number | null>(null);
   const [openActivityId, setOpenActivityId] = useState<number | null>(null);
+  // A leader's console is opened for ONE of their own groups.
+  const [openLeaderGroupId, setOpenLeaderGroupId] = useState<number | null>(null);
+  const [leaderSeatCount, setLeaderSeatCount] = useState<number | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   // Tapping/clicking anywhere off the navigation closes it; Escape closes too.
   useOutsideDismiss(navOpen, () => setNavOpen(false), '.cgm-sidenav, .cgm-nav-toggle');
@@ -813,6 +847,11 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
     try {
       const data = await cgmStudent.me();
       setMe(data);
+      // Does this student lead any group? The sidebar entry and the overview
+      // tile only exist when the answer is yes.
+      cgmStudent.myLeadership()
+        .then((result: any) => setLeaderSeatCount(Number(result?.total || 0)))
+        .catch(() => setLeaderSeatCount(0));
     } catch (failure: any) {
       if (failure?.status === 401) { studentSession.clear(); setSession(null); }
     } finally { setLoading(false); }
@@ -887,7 +926,7 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
 
       <div className="cgm-body">
         <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''}`} aria-label="Student navigation">
-          {SECTIONS.map(([key, text, Icon]) => (
+          {SECTIONS.filter(([key]) => key !== 'leader' || Number(leaderSeatCount || 0) > 0).map(([key, text, Icon]) => (
             <button
               key={key}
               type="button"
@@ -911,12 +950,20 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
               me={me}
               onOpenClass={(id) => { setOpenClassId(id); setSection('classes'); }}
               onOpenGroups={() => { setOpenActivityId(null); setSection('groups'); }}
+              onOpenLeader={Number(leaderSeatCount || 0) > 0 ? () => { setOpenLeaderGroupId(null); setSection('leader'); } : undefined}
             />
           )}
           {!loading && section === 'classes' && (openClassId
             ? <ClassDetailView classId={openClassId} onBack={() => setOpenClassId(null)} onOpenActivity={(id) => { setOpenActivityId(id); setSection('groups'); }} me={me} onGenderSet={refreshMe} />
             : <MyClassesView me={me} onOpen={(id) => setOpenClassId(id)} onRefresh={refreshMe} inviteCode={inviteCode} />)}
           {!loading && section === 'groups' && <MyGroupsView me={me} openActivityId={openActivityId} onOpenActivity={setOpenActivityId} onChanged={refreshMe} />}
+          {!loading && section === 'leader' && (openLeaderGroupId
+            ? <LeaderConsole
+                groupId={openLeaderGroupId}
+                onBack={() => { setOpenLeaderGroupId(null); void refreshMe(); }}
+                onChanged={() => { void refreshMe(); }}
+              />
+            : <LeaderSeatList onOpen={(groupId) => setOpenLeaderGroupId(groupId)} onChanged={refreshMe} />)}
           {!loading && section === 'elections' && (
             <MyElectionsView
               focusElectionId={effectiveVoteFocus}
@@ -996,7 +1043,7 @@ const ClassNavCard = ({ entry, onOpen, detail }: { entry: any; onOpen: () => voi
   );
 };
 
-const StudentHome = ({ me, onOpenClass, onOpenGroups }: { me: any; onOpenClass: (id: number) => void; onOpenGroups: () => void }) => {
+const StudentHome = ({ me, onOpenClass, onOpenGroups, onOpenLeader }: { me: any; onOpenClass: (id: number) => void; onOpenGroups: () => void; onOpenLeader?: () => void }) => {
   const classes: any[] = me?.classes || [];
   const pending = [...(me?.pendingMemberships || []), ...(me?.pendingRegistrations || [])];
   return (
@@ -1013,6 +1060,21 @@ const StudentHome = ({ me, onOpenClass, onOpenGroups }: { me: any; onOpenClass: 
           <div className="rounded-xl bg-amber-50 p-4"><p className={label}>Unread notices</p><p className="mt-1 text-2xl font-black text-amber-800">{Number(me?.unreadNotifications || 0)}</p></div>
         </div>
       </div>
+
+      {onOpenLeader && (
+        <button
+          type="button"
+          data-testid="cgm-continue-leader"
+          onClick={onOpenLeader}
+          className="flex w-full items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-left transition hover:border-emerald-300 hover:bg-emerald-100"
+        >
+          <span>
+            <span className="block text-sm font-black uppercase tracking-wider text-emerald-800">Open my leader console</span>
+            <span className="mt-0.5 block text-[11px] font-semibold text-emerald-700">Topic, agenda, announcements, meetings, attendance and member requests — for the group you lead.</span>
+          </span>
+          <ShieldCheck className="h-6 w-6 shrink-0 text-emerald-600" aria-hidden="true" />
+        </button>
+      )}
 
       {classes.length > 0 && (
         <button
@@ -1421,6 +1483,12 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
           <p className={label}>{data.class.name} · {data.activity.name}</p>
           <h2 className="mt-1 text-xl font-black text-emerald-900">{groupName}</h2>
           <p className="mt-1 text-xs font-bold uppercase tracking-wider text-emerald-600">You’re in — join the group’s WhatsApp</p>
+          {/* THE PLAN COMES FIRST: what this group is about and what it will do.
+              It is the most useful thing on the page, so it sits above the
+              scan, the link and the member list. */}
+          <div className="mt-4 border-t border-emerald-100 pt-3 text-left" data-testid="cgm-student-whatsapp-topic-block">
+            {topicAgendaBlock(String(myGroup.topic || ''), String(myGroup.agenda || ''), 'cgm-student-whatsapp-topic')}
+          </div>
           {data.whatsapp ? (
             <>
               <div className="mt-4 flex justify-center">
@@ -1501,10 +1569,20 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
         {message && <p role="status" className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">{message}</p>}
       </div>
 
+      {/* THE PLAN FIRST — the group's topic and agenda sit above "My group", so
+          the student reads what the group is for before who is in it. */}
+      {myGroup && (
+        <div className={`${card} border-amber-200 bg-amber-50/30`} data-testid="cgm-student-topic-block">
+          {topicAgendaBlock(String(myGroup.topic || ''), String(myGroup.agenda || ''), 'cgm-student-topic')}
+        </div>
+      )}
+
       {myGroup ? (
-        <div className={`${card} border-emerald-200 bg-emerald-50/40`}>
+        <div className={`${card} border-emerald-200 bg-emerald-50/40`} data-testid="cgm-student-my-group">
           <p className={label}>My group</p>
-          <h3 className="mt-1 text-lg font-black text-emerald-900">{myGroup.group_name || `Group ${myGroup.position}`}</h3>
+          <div className="mt-1 flex items-start justify-between gap-2">
+            <h3 className="text-lg font-black text-emerald-900">{myGroup.group_name || `Group ${myGroup.position}`}</h3>
+          </div>
           <div className="mt-3 space-y-1.5">
             {(data.members || []).filter((member: any) => Number(member.group_id) === Number(myGroup.group_id)).map((member: any) => (
               <div key={member.student_id} className="flex items-center justify-between rounded-xl bg-white px-4 py-2.5 text-sm">
@@ -1606,20 +1684,6 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
       )}
 
       {myGroup && (
-        <div className={`${card} border-emerald-100`} data-testid="cgm-student-topic-agenda">
-          <p className={label}>Our topic &amp; agenda</p>
-          <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3">
-            <p className="text-[10px] font-black uppercase tracking-wider text-amber-700">Group topic</p>
-            <p className="mt-1 text-sm font-bold text-slate-800">{String(myGroup.topic || '') || 'No topic yet — your organizer sets it in the group workspace.'}</p>
-          </div>
-          <div className="mt-2 rounded-xl bg-emerald-50 px-4 py-3">
-            <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Agenda</p>
-            <p className="mt-1 whitespace-pre-wrap text-sm font-semibold text-slate-700">{String(myGroup.agenda || '') || 'No agenda yet — it will appear here once your organizer saves one.'}</p>
-          </div>
-        </div>
-      )}
-
-      {myGroup && (
         <div className={card} data-testid="cgm-view-group-members-card">
           <button
             type="button"
@@ -1658,6 +1722,58 @@ const MyGroupsView = ({ me, openActivityId, onOpenActivity, onChanged }: { me: a
     </div>
   );
 };
+
+/**
+ * The organizer's agenda for THIS group, shown to every member of the group.
+ *
+ * Simple on purpose: the topic is written above it, and this is just the list
+ * of steps that was set for the group. No toggle, no idea button, no second
+ * copy — the agenda is simply there, and it is the same component everywhere
+ * it appears so the pages can never drift apart.
+ */
+const GroupAgendaPanel = ({ agenda, topic }: { agenda: string; topic?: string }) => {
+  const lines = String(agenda || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-*•]\s*/, ''))
+    .filter(Boolean);
+  return (
+    <div
+      className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3"
+      data-testid="cgm-topic-agenda-panel"
+    >
+      <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Agenda</p>
+      {lines.length ? (
+        <ol className="mt-2 space-y-1.5" data-testid="cgm-topic-agenda-lines">
+          {lines.map((line, index) => (
+            <li key={`${index}-${line.slice(0, 12)}`} className="flex gap-2 text-sm font-semibold text-slate-700">
+              <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-emerald-600 text-[9px] font-black text-white">{index + 1}</span>
+              <span className="whitespace-pre-wrap">{line}</span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-1 text-sm font-semibold text-slate-600" data-testid="cgm-topic-agenda-empty">
+          No agenda yet — it appears here the moment {topic ? 'your organizer or group leader' : 'one'} is saved.
+        </p>
+      )}
+    </div>
+  );
+};
+
+/**
+ * The topic and the agenda beneath it — topic FIRST (it is what the group is
+ * about), then the numbered plan. Both the group card and the WhatsApp page
+ * render through this one function, so the two can never drift apart.
+ */
+const topicAgendaBlock = (topic: string, agenda: string, topicTestId: string) => (
+  <div data-testid={`${topicTestId}-wrap`}>
+    <p className="text-[10px] font-black uppercase tracking-wider text-amber-700">Group topic</p>
+    <p className="mt-1 text-sm font-bold text-slate-800" data-testid={topicTestId}>
+      {topic || 'No topic yet — your organizer or group leader sets it.'}
+    </p>
+    <GroupAgendaPanel agenda={agenda} topic={topic} />
+  </div>
+);
 
 /**
  * The small idea icon on the Request-a-group-change card. Pressing it reveals

@@ -1346,7 +1346,16 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
     genderRule: 'none', repeatRule: 'random', leaderMethod: 'appointment', overflow: 'block',
     selfDeadline: '', announcementMode: 'direct', whatsappEnabled: true, attendanceEnabled: true,
     electionAnonymity: 'anonymous', allowVoteChange: false, tieBreak: 'random', eligibility: 'all',
+    // What a leader appointed into THIS activity may do from day one. The
+    // organizer can still change any single seat afterwards.
+    leaderPermissions: [
+      'view_members', 'send_announcements', 'edit_topic', 'notify_members',
+      'coordinate', 'view_attendance', 'assist_attendance', 'report_issues',
+    ] as string[],
   });
+  // The capability catalogue comes from the server — the same list the leader
+  // routes enforce, so the form can never offer something that does not exist.
+  const [leaderCatalogue, setLeaderCatalogue] = useState<Array<{ key: string; label: string; hint: string }>>([]);
 
   // The TOTAL ROSTER decides the sizes: the organizer only ever types the
   // number of groups — the per-group math (base share, surplus split across
@@ -1356,6 +1365,9 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
 
   const load = useCallback(async () => {
     setRows(await cgm.activities(classId).catch(() => []));
+    cgm.leaderPermissionCatalogue()
+      .then((result: any) => setLeaderCatalogue(result?.permissions || []))
+      .catch(() => setLeaderCatalogue([]));
     setTemplates(await cgm.templates(classId).catch(() => []));
     const rosterData = await cgm.roster(classId).catch(() => null);
     const memberData = await cgm.members(classId).catch(() => null);
@@ -1463,6 +1475,12 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
       allowVoteChange: config.allowVoteChange === true,
       tieBreak: String(config.tieBreak || 'random'),
       eligibility: String(config.eligibility || 'all'),
+      leaderPermissions: Array.isArray(config.leaderPermissions) && config.leaderPermissions.length
+        ? config.leaderPermissions.map((entry: unknown) => String(entry))
+        : [
+          'view_members', 'send_announcements', 'edit_topic', 'notify_members',
+          'coordinate', 'view_attendance', 'assist_attendance', 'report_issues',
+        ],
     });
     setOpen(true);
   };
@@ -1503,6 +1521,7 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
                 if (names.length) config.groupNames = names;
               }
               if (form.selfDeadline) config.selfDeadline = new Date(form.selfDeadline).toISOString();
+              config.leaderPermissions = form.leaderPermissions;
               if (editing) {
                 const saved = await cgm.updateActivity(Number(editing.id), { name: form.name, type: form.type, description: form.description, config });
                 const created = Number((saved as any)?.data?.groupsCreated || 0);
@@ -1603,6 +1622,37 @@ const ActivitiesArea = ({ classId, onChanged, openActivityId, onEditConsumed }: 
             {form.method !== 'automatic' && (
               <div><label className={label} htmlFor="cgm-act-deadline">Self-assignment deadline</label><input id="cgm-act-deadline" type="datetime-local" className={`${inputClass} mt-1`} value={form.selfDeadline} onChange={(event) => setForm({ ...form, selfDeadline: event.target.value })} /></div>
             )}
+            <div className="sm:col-span-2" data-testid="cgm-act-leader-permissions">
+              <p className={label}>What a leader can do — defaults for this activity</p>
+              <p className="mt-0.5 text-[11px] font-medium text-slate-500">Appointing a leader hands them a console for their own group. Choose what it starts with; every seat can be tuned again later in the Leadership tab.</p>
+              <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                {(leaderCatalogue.length ? leaderCatalogue : [
+                  { key: 'view_members', label: 'View the group members', hint: '' },
+                  { key: 'send_announcements', label: 'Send group announcements', hint: '' },
+                  { key: 'edit_topic', label: 'Set the group topic & agenda', hint: '' },
+                  { key: 'notify_members', label: 'Message every member', hint: '' },
+                  { key: 'coordinate', label: 'Schedule group meetings', hint: '' },
+                  { key: 'view_attendance', label: 'View the group attendance', hint: '' },
+                  { key: 'assist_attendance', label: 'Record group attendance', hint: '' },
+                  { key: 'report_issues', label: 'Report an issue to the organizer', hint: '' },
+                ]).map((entry) => (
+                  <label key={entry.key} className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-100 px-2.5 py-1.5" title={entry.hint || undefined}>
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 accent-emerald-600"
+                      checked={form.leaderPermissions.includes(entry.key)}
+                      onChange={() => setForm({
+                        ...form,
+                        leaderPermissions: form.leaderPermissions.includes(entry.key)
+                          ? form.leaderPermissions.filter((value) => value !== entry.key)
+                          : [...form.leaderPermissions, entry.key],
+                      })}
+                    />
+                    <span className="text-[11px] font-bold text-slate-700">{entry.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
             <div><label className={label} htmlFor="cgm-act-anon">Election voting</label>
               <select id="cgm-act-anon" className={`${inputClass} mt-1`} value={form.electionAnonymity} onChange={(event) => setForm({ ...form, electionAnonymity: event.target.value })}>
                 <option value="anonymous">Anonymous</option>
@@ -3405,6 +3455,61 @@ const ElectionDossier = ({ entry, busy, onAction, onPrefillOpenVoting, docContex
   );
 };
 
+/**
+ * The organizer's REAL permission editor for one leader seat. Every capability
+ * a leader may hold is listed with its human label and a one-line explanation
+ * of what granting it actually lets them do — no “Narrow permissions” guesswork.
+ * The list is served by the server from the same catalogue it enforces, and an
+ * assistant may only hold the assistant-capable subset.
+ */
+const LeaderPermissionsEditor = ({
+  appointment, catalogue, busy, onSave, onClose,
+}: {
+  appointment: any;
+  catalogue: Array<{ key: string; label: string; hint: string; assistant: boolean }>;
+  busy: boolean;
+  onSave: (permissions: string[]) => void;
+  onClose: () => void;
+}) => {
+  const [selected, setSelected] = useState<string[]>(Array.isArray(appointment.permissions) ? appointment.permissions : []);
+  const available = catalogue.filter((entry) => appointment.role !== 'assistant' || entry.assistant);
+  const toggle = (key: string) => setSelected((current) => (current.includes(key) ? current.filter((value) => value !== key) : [...current, key]));
+  return (
+    <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3" data-testid="cgm-leader-permission-editor">
+      <p className="text-[10px] font-black uppercase tracking-[0.16em] text-emerald-800">
+        What {appointment.fullName} may do in {appointment.groupName}
+      </p>
+      <ul className="mt-2 space-y-1.5">
+        {available.map((entry) => (
+          <li key={entry.key}>
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg bg-white/70 px-2.5 py-2 ring-1 ring-emerald-100">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-emerald-600"
+                checked={selected.includes(entry.key)}
+                onChange={() => toggle(entry.key)}
+                data-testid={`cgm-leader-permission-${entry.key}`}
+              />
+              <span>
+                <span className="block text-xs font-black text-slate-800">{entry.label}</span>
+                <span className="block text-[11px] font-medium text-slate-500">{entry.hint}</span>
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <button type="button" className="mini-button" disabled={busy} onClick={() => setSelected(available.map((entry) => entry.key))}>Grant all</button>
+        <button type="button" className="mini-button" disabled={busy} onClick={() => setSelected(available.filter((entry) => ['view_members', 'view_attendance', 'report_issues'].includes(entry.key)).map((entry) => entry.key))}>Minimal</button>
+        <button type="button" className="mini-button" disabled={busy} onClick={() => setSelected([])}>Clear</button>
+        <button type="button" className="cgm-primary-button" disabled={busy} onClick={() => onSave(selected)}>{busy ? 'Saving…' : 'Save permissions'}</button>
+        <button type="button" className="mini-button" disabled={busy} onClick={onClose}>Close</button>
+      </div>
+      <p className="mt-2 text-[11px] font-medium text-slate-500">Saved changes apply immediately and the leader is told what changed. Assistants only ever hold the assistant-safe subset.</p>
+    </div>
+  );
+};
+
 const LeadershipArea = ({ classId, canAppoint, onChanged, initialActivityId, onActivityChange }: { classId: number; canAppoint: boolean; onChanged: () => void; initialActivityId?: number | null; onActivityChange?: (id: number | null) => void }) => {
   const [activities, setActivities] = useState<any[]>([]);
   const [activityId, setActivityIdState] = useState<number | null>(initialActivityId ?? null);
@@ -3413,6 +3518,8 @@ const LeadershipArea = ({ classId, canAppoint, onChanged, initialActivityId, onA
   const [detail, setDetail] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Which seat's permission editor is open (one at a time, by appointment id).
+  const [permissionSeat, setPermissionSeat] = useState<number | null>(null);
 
   useEffect(() => { void cgm.activities(classId).then((rows) => setActivities(rows as any[])).catch(() => setActivities([])); }, [classId]);
   const load = useCallback(async (id: number) => {
@@ -3489,20 +3596,96 @@ const LeadershipArea = ({ classId, canAppoint, onChanged, initialActivityId, onA
             <p className={label}>Appointments</p>
             <ul className="mt-3 divide-y divide-slate-100">
               {(data.appointments || []).map((appointment: any) => (
-                <li key={appointment.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
+                <li key={appointment.id} className="py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-sm font-bold text-slate-800">{appointment.fullName} <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${appointment.role === 'leader' ? 'bg-emerald-100 text-emerald-700' : 'bg-sky-100 text-sky-700'}`}>{appointment.role}</span></p>
                     <p className="text-[11px] font-semibold text-slate-400">{appointment.groupName} · {appointment.method} · {appointment.status}{appointment.endReason ? ` (${appointment.endReason})` : ''}</p>
                   </div>
                   {canAppoint && appointment.status === 'active' && (
-                    <div className="flex gap-2">
-                      <button type="button" className="mini-button" onClick={async () => { await cgm.updateLeaderPermissions(Number(appointment.id), ['view_members', 'coordinate']); setMessage('Permissions narrowed.'); }}>Narrow permissions</button>
-                      <button type="button" className="mini-button text-red-600" onClick={async () => { await cgm.endLeadership(Number(appointment.id), 'Ended by organizer'); await load(Number(activityId)); }}>End</button>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" className="mini-button" data-testid="cgm-leader-edit-permissions" onClick={() => setPermissionSeat(permissionSeat === Number(appointment.id) ? null : Number(appointment.id))}>
+                        {permissionSeat === Number(appointment.id) ? 'Close permissions' : `Permissions (${(appointment.permissions || []).length})`}
+                      </button>
+                      <button type="button" className="mini-button text-red-600" onClick={async () => { setBusy(true); try { await cgm.endLeadership(Number(appointment.id), 'Ended by organizer'); await load(Number(activityId)); onChanged(); } finally { setBusy(false); } }}>End</button>
                     </div>
+                  )}
+                  </div>
+                  {canAppoint && appointment.status === 'active' && permissionSeat === Number(appointment.id) && (
+                    <LeaderPermissionsEditor
+                      appointment={appointment}
+                      catalogue={data.permissions || []}
+                      busy={busy}
+                      onSave={async (permissions) => {
+                        setBusy(true);
+                        try {
+                          const result: any = await cgm.setLeaderPermissions(Number(appointment.id), permissions);
+                          const granted = (result?.granted || []).length;
+                          const revoked = (result?.revoked || []).length;
+                          setMessage(`Permissions saved — ${permissions.length} tool(s)${granted || revoked ? ` (${granted} added, ${revoked} removed)` : ''}. The leader was told.`);
+                          await load(Number(activityId));
+                          onChanged();
+                        } catch (failure: any) { setMessage(failure?.message || 'Those permissions could not be saved.'); }
+                        finally { setBusy(false); }
+                      }}
+                      onClose={() => setPermissionSeat(null)}
+                    />
                   )}
                 </li>
               ))}
               {!(data.appointments || []).length && <li className="py-4 text-center text-xs font-medium text-slate-400">No appointments yet.</li>}
+            </ul>
+          </div>
+          {/* LEADER REQUESTS — what the leaders asked for. Approving an add or a
+              removal applies exactly the same rules as doing it here. A tool
+              request approves by turning the capability ON for that seat. */}
+          <div className={card} data-testid="cgm-leader-requests-panel">
+            <p className={label}>Requests from leaders</p>
+            <p className="mt-1 text-[11px] font-medium text-slate-500">A leader never moves a member on their own unless you granted that capability — a request waits here until you decide, and the leader is told the outcome.</p>
+            <ul className="mt-2 divide-y divide-slate-100">
+              {(data.leaderRequests || []).map((request: any) => (
+                <li key={request.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">
+                      {request.title}
+                      <span className={`ml-2 rounded px-1.5 py-0.5 text-[9px] font-black uppercase ${request.status === 'pending' ? 'bg-amber-100 text-amber-700' : request.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{request.status}</span>
+                    </p>
+                    <p className="text-[11px] font-semibold text-slate-400">
+                      {request.requesterLabel} · {request.groupName} · {request.kind === 'access' ? 'tool request' : request.kind.replace('_', ' ')}{request.targetName ? ` · ${request.targetName}` : ''}
+                    </p>
+                    {request.kind === 'access' && request.requestedPermissionLabel && (
+                      <p className="mt-1 inline-flex items-center gap-1 rounded-lg bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-800" data-testid="cgm-leader-request-tool-label">
+                        <KeyRound className="h-3.5 w-3.5" /> Opens: {request.requestedPermissionLabel}
+                      </p>
+                    )}
+                    {request.reason && <p className="mt-0.5 text-[11px] font-medium text-slate-600">{request.reason}</p>}
+                    {request.reviewReason && <p className="mt-0.5 text-[11px] font-semibold text-slate-500">{request.reviewerLabel}: {request.reviewReason}</p>}
+                  </div>
+                  {canAppoint && request.status === 'pending' && (
+                    <div className="flex gap-2">
+                      <button type="button" className="mini-button" disabled={busy} onClick={async () => {
+                        setBusy(true);
+                        try {
+                          const decided: any = await cgm.decideLeaderRequest(Number(request.id), 'approve');
+                          setMessage(request.kind === 'access'
+                            ? `${decided?.permission || 'The tool'} is now open for ${request.requesterLabel} — they can use it right away.`
+                            : 'Approved — the change was applied and everyone involved was told.');
+                          await load(Number(activityId)); onChanged();
+                        }
+                        catch (failure: any) { setMessage(failure?.message || 'That request could not be approved.'); }
+                        finally { setBusy(false); }
+                      }}>{request.kind === 'access' ? 'Open this tool' : 'Approve'}</button>
+                      <button type="button" className="mini-button text-red-600" disabled={busy} onClick={async () => {
+                        setBusy(true);
+                        try { await cgm.decideLeaderRequest(Number(request.id), 'reject', 'Not approved by the organizer'); setMessage('Declined — the leader was told.'); await load(Number(activityId)); onChanged(); }
+                        catch (failure: any) { setMessage(failure?.message || 'That request could not be declined.'); }
+                        finally { setBusy(false); }
+                      }}>Decline</button>
+                    </div>
+                  )}
+                </li>
+              ))}
+              {!(data.leaderRequests || []).length && <li className="py-3 text-center text-xs font-medium text-slate-400">No requests from leaders yet.</li>}
             </ul>
           </div>
         </>

@@ -30,6 +30,11 @@ import {
   sanitizeActivityConfig,
   sanitizeLeaderPermissions,
   sanitizeClassPermissions,
+  LEADER_PERMISSIONS,
+  LEADER_PERMISSION_LABELS,
+  LEADER_PERMISSION_HINTS,
+  ASSISTANT_LEADER_PERMISSIONS,
+  defaultActivityConfig,
   type AttendanceStatus,
   type ClassPermission,
 } from './core';
@@ -51,6 +56,7 @@ import {
 import {
   ensureMoveRequestSchema,
   ensureRechooseSchema,
+  ensureLeaderSchema,
   insertAssignmentGuarded,
   modulePolicy,
   requireCgmPhantom,
@@ -1930,6 +1936,81 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     return c.json({ success: true });
   });
 
+  /**
+   * The leader capability catalogue — what an organizer may GRANT a leader,
+   * with the human label and a one-line hint. Served from the same list the
+   * server enforces, so the permission editor can never offer a capability the
+   * routes do not understand.
+   */
+  app.get('/api/cgm/leadership/permissions', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    return c.json({
+      success: true,
+      data: {
+        permissions: LEADER_PERMISSIONS.map((permission) => ({
+          key: permission,
+          label: LEADER_PERMISSION_LABELS[permission],
+          hint: LEADER_PERMISSION_HINTS[permission],
+        })),
+        assistantDefaults: ASSISTANT_LEADER_PERMISSIONS,
+        activityDefaults: defaultActivityConfig().leaderPermissions,
+      },
+    });
+  });
+
+  /**
+   * CHANGE ONE SEAT'S CAPABILITIES — an explicit list (grant/revoke in one
+   * call). The activity's own defaults are untouched: this is about the person,
+   * and the leader is told what changed so a vanished button is never a
+   * mystery. Assistants can only hold the assistant-capable subset.
+   */
+  app.patch('/api/cgm/leadership/:id/permissions', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const appointmentId = Number(c.req.param('id'));
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT l.*, a.class_id, g.name AS group_name, g.position AS group_position, s.full_name
+       FROM cgm_leadership_appointments l
+       JOIN cgm_activities a ON a.id = l.activity_id
+       JOIN cgm_groups g ON g.id = l.group_id
+       JOIN cgm_students s ON s.id = l.student_id
+       WHERE l.id = ?`
+    ).bind(appointmentId));
+    const appointment = rows[0];
+    if (!appointment) return bad(c, 'Appointment not found.', 404);
+    const guard = await requireClassPermission(c, member, Number(appointment.class_id), 'appoint_leaders');
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    if (!Array.isArray(body.permissions)) return bad(c, 'Send the full list of permissions to keep.');
+    let permissions = sanitizeLeaderPermissions(body.permissions);
+    if (appointment.role === 'assistant') {
+      const allowed = new Set<string>(ASSISTANT_LEADER_PERMISSIONS);
+      permissions = permissions.filter((permission) => allowed.has(permission));
+    }
+    let before: string[] = [];
+    try { before = sanitizeLeaderPermissions(JSON.parse(appointment.permissions_json || '[]')); } catch { before = []; }
+    await c.env.DB.prepare(
+      'UPDATE cgm_leadership_appointments SET permissions_json = ? WHERE id = ?'
+    ).bind(JSON.stringify(permissions), appointmentId).run();
+    const granted = permissions.filter((permission) => !before.includes(permission));
+    const revoked = before.filter((permission) => !permissions.includes(permission));
+    const groupName = appointment.group_name || `Group ${appointment.group_position}`;
+    const label = (key: string) => LEADER_PERMISSION_LABELS[key as keyof typeof LEADER_PERMISSION_LABELS] || key;
+    if (granted.length || revoked.length) {
+      await notifyStudent(c.env.DB, Number(appointment.student_id), 'leadership', 'Your leadership tools changed',
+        `In ${groupName}: ${granted.length ? `you can now ${granted.map(label).join(', ')}. ` : ''}`
+        + `${revoked.length ? `You can no longer ${revoked.map(label).join(', ')}.` : ''}`.trim());
+    }
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: 'cgm.leadership.permissions_changed', entityType: 'leadership', entityId: appointmentId,
+      classId: Number(appointment.class_id), activityId: Number(appointment.activity_id),
+      context: { permissions, granted, revoked },
+    });
+    return c.json({ success: true, data: { permissions, granted, revoked } });
+  });
+
   app.get('/api/cgm/activities/:id/leadership', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
@@ -1961,8 +2042,223 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         groupsWithoutLeaders: groupsWithoutLeaders.map((row) => ({
           id: Number(row.id), name: row.name || `Group ${row.position}`,
         })),
+        // The capability catalogue + each active seat's live permission list is
+        // what the organizer's permission editor renders; the same list the
+        // server enforces.
+        permissions: LEADER_PERMISSIONS.map((permission) => ({
+          key: permission,
+          label: LEADER_PERMISSION_LABELS[permission],
+          hint: LEADER_PERMISSION_HINTS[permission],
+          assistant: ASSISTANT_LEADER_PERMISSIONS.includes(permission),
+        })),
+        // What the leaders have asked for — the organizer's queue.
+        leaderRequests: await (async () => {
+          await ensureLeaderSchema(c.env.DB);
+          const requests = await asRows<any>(c.env.DB.prepare(
+            `SELECT r.*, s.full_name AS target_name, g.name AS group_name, g.position AS group_position
+             FROM cgm_group_leader_requests r
+             LEFT JOIN cgm_students s ON s.id = r.target_student_id
+             LEFT JOIN cgm_groups g ON g.id = r.group_id
+             WHERE r.activity_id = ?
+             ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END, r.id DESC LIMIT 100`
+          ).bind(activityId));
+          return requests.map((row) => ({
+            id: Number(row.id), kind: row.kind, status: row.status,
+            groupId: Number(row.group_id), groupName: row.group_name || `Group ${row.group_position}`,
+            requesterLabel: row.requester_label, requesterStudentId: Number(row.requested_by_student_id),
+            targetStudentId: row.target_student_id === null || row.target_student_id === undefined ? null : Number(row.target_student_id),
+            targetName: row.target_name || null,
+            title: row.title, reason: row.reason, createdAt: row.created_at,
+            requestedPermission: row.requested_permission || null,
+            requestedPermissionLabel: row.requested_permission
+              ? (LEADER_PERMISSION_LABELS[row.requested_permission as keyof typeof LEADER_PERMISSION_LABELS] || row.requested_permission)
+              : null,
+            reviewerLabel: row.reviewer_label, reviewReason: row.review_reason, reviewedAt: row.reviewed_at,
+          }));
+        })(),
       },
     });
+  });
+
+  /**
+   * Decide a leader's request (add / remove a member, or acknowledge an issue).
+   * Approving an add/remove applies it with the SAME rules as the organizer's
+   * own membership routes — capacity, eligibility, succession, notifications,
+   * audit — because it calls the same guarded insert and the same removal path.
+   */
+  app.post('/api/cgm/leader-requests/:id/:decision', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    await ensureLeaderSchema(c.env.DB);
+    const requestId = Number(c.req.param('id'));
+    const decision = String(c.req.param('decision'));
+    if (!['approve', 'reject'].includes(decision)) return bad(c, 'Unknown decision.', 404);
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT r.*, g.name AS group_name, g.position AS group_position, a.name AS activity_name,
+              a.class_id, a.status AS activity_status, s.full_name AS target_name
+       FROM cgm_group_leader_requests r
+       JOIN cgm_groups g ON g.id = r.group_id
+       JOIN cgm_activities a ON a.id = r.activity_id
+       LEFT JOIN cgm_students s ON s.id = r.target_student_id
+       WHERE r.id = ?`
+    ).bind(requestId));
+    const request = rows[0];
+    if (!request) return bad(c, 'Request not found.', 404);
+    if (request.status !== 'pending') return bad(c, `This request is already ${request.status}.`, 409);
+    // An access request is answered by whoever may appoint leaders — the same
+    // permission that decides what a seat is allowed to do.
+    const required = request.kind === 'add_member' ? 'move_students'
+      : request.kind === 'remove_member' ? 'remove_students'
+      : request.kind === 'access' ? 'appoint_leaders'
+      : 'view_roster';
+    const guard = await requireClassPermission(c, member, Number(request.class_id), required as any);
+    if (!guard.ok) return guard.response;
+    const body = await readBody(c);
+    const note = cleanOrNull(body.reason, 500);
+    const groupName = request.group_name || `Group ${request.group_position}`;
+
+    // Claim the row first: two organizers (or a double click) must not both act.
+    const claimed = await c.env.DB.prepare(
+      `UPDATE cgm_group_leader_requests
+       SET status = ?, reviewed_by_profile_id = ?, reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'pending'`
+    ).bind(decision === 'approve' ? 'approved' : 'rejected', member.profileId, member.name, note, requestId).run();
+    if (!claimed.meta?.changes) return bad(c, 'Somebody already decided this request.', 409);
+
+    const restore = async () => {
+      await c.env.DB.prepare(
+        `UPDATE cgm_group_leader_requests SET status = 'pending', reviewed_by_profile_id = NULL,
+           reviewer_label = NULL, review_reason = NULL, reviewed_at = NULL WHERE id = ?`
+      ).bind(requestId).run();
+    };
+
+    // ---------- ACCESS: open the tool the leader asked for ----------
+    if (decision === 'approve' && request.kind === 'access') {
+      const wanted = String(request.requested_permission || '');
+      if (!(LEADER_PERMISSIONS as readonly string[]).includes(wanted)) {
+        await restore();
+        return bad(c, 'That request names a tool this module does not have.', 409);
+      }
+      const seats = await asRows<any>(c.env.DB.prepare(
+        `SELECT id, role, permissions_json FROM cgm_leadership_appointments WHERE id = ? AND status = 'active'`
+      ).bind(Number(request.appointment_id)));
+      const appointment = seats[0];
+      if (!appointment) {
+        await restore();
+        return bad(c, 'That leadership seat has ended — there is nobody left to open it for.', 409);
+      }
+      if (appointment.role === 'assistant' && !ASSISTANT_LEADER_PERMISSIONS.includes(wanted as any)) {
+        await restore();
+        return bad(c, 'An assistant leader cannot hold that tool.', 409);
+      }
+      let current: string[] = [];
+      try { current = sanitizeLeaderPermissions(JSON.parse(appointment.permissions_json || '[]')); } catch { current = []; }
+      if (!current.includes(wanted as any)) {
+        const next = [...current, wanted];
+        await c.env.DB.prepare(
+          'UPDATE cgm_leadership_appointments SET permissions_json = ? WHERE id = ?'
+        ).bind(JSON.stringify(next), Number(appointment.id)).run();
+      }
+      const label = LEADER_PERMISSION_LABELS[wanted as keyof typeof LEADER_PERMISSION_LABELS] || wanted;
+      await notifyStudent(c.env.DB, Number(request.requested_by_student_id), 'leadership',
+        'Your organizer opened a tool for you',
+        `“${label}” is now yours in ${groupName} of ${request.activity_name}. Open your leader console to use it.${note ? ` ${note}` : ''}`);
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.leadership.permission_granted_on_request', entityType: 'leadership',
+        entityId: Number(appointment.id),
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: { groupId: Number(request.group_id), permission: wanted, requestId },
+      });
+      await auditCgm(c.env.DB, {
+        actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+        action: 'cgm.leader_request.approved', entityType: 'leader_request', entityId: requestId,
+        classId: Number(request.class_id), activityId: Number(request.activity_id),
+        context: { kind: 'access', permission: wanted },
+      });
+      return c.json({ success: true, data: { status: 'approved', permission: wanted } });
+    }
+
+    if (decision === 'approve' && request.kind === 'add_member') {
+      if (!['open', 'published', 'active'].includes(String(request.activity_status))) {
+        await restore();
+        return bad(c, 'This activity no longer accepts new members.', 409);
+      }
+      const already = await asRows<{ id: number }>(c.env.DB.prepare(
+        `SELECT id FROM cgm_group_assignments WHERE activity_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(Number(request.activity_id), Number(request.target_student_id)));
+      if (already[0]) {
+        await restore();
+        return bad(c, 'That student already has a group in this activity.', 409);
+      }
+      const wrote = await insertAssignmentGuarded(c.env.DB, {
+        activityId: Number(request.activity_id), groupId: Number(request.group_id),
+        studentId: Number(request.target_student_id), via: 'organizer', label: member.name,
+      });
+      if (!wrote) {
+        await restore();
+        return bad(c, 'The group is full — raise its capacity first.', 409);
+      }
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_assignment_events (activity_id, student_id, to_group_id, action, actor_label, reason)
+         VALUES (?, ?, ?, 'assigned', ?, 'leader request approved')`
+      ).bind(Number(request.activity_id), Number(request.target_student_id), Number(request.group_id), member.name).run();
+      await notifyStudent(c.env.DB, Number(request.target_student_id), 'groups', 'You were added to a group',
+        `${request.target_name || 'You'} joined ${groupName} in ${request.activity_name} — approved by your organizer.`);
+    }
+
+    if (decision === 'approve' && request.kind === 'remove_member') {
+      const live = await asRows<any>(c.env.DB.prepare(
+        `SELECT ga.id, ga.group_id, ga.activity_id, ga.student_id, a.class_id
+         FROM cgm_group_assignments ga JOIN cgm_activities a ON a.id = ga.activity_id
+         WHERE ga.group_id = ? AND ga.student_id = ? AND ga.status = 'active'`
+      ).bind(Number(request.group_id), Number(request.target_student_id)));
+      if (!live[0]) {
+        await restore();
+        return bad(c, 'That member is no longer in the group.', 409);
+      }
+      const assignment = live[0];
+      await recordRecycle(c.env.DB, {
+        classId: Number(assignment.class_id), activityId: Number(assignment.activity_id), groupId: Number(assignment.group_id),
+        entityType: 'assignment', entityId: Number(assignment.id),
+        title: `Removed from ${groupName}`,
+        detail: note || request.reason || 'Leader request approved',
+        payload: await snapshotFromDb(c.env.DB, [
+          { table: 'cgm_group_assignments', where: 'id = ?', params: [Number(assignment.id)] },
+        ]),
+        actorLabel: member.name, actorProfileId: member.profileId,
+      });
+      await c.env.DB.prepare(
+        `UPDATE cgm_group_assignments SET status = 'removed', removed_at = CURRENT_TIMESTAMP, removal_reason = ? WHERE id = ?`
+      ).bind(note || 'leader request approved', Number(assignment.id)).run();
+      await c.env.DB.prepare(
+        `INSERT INTO cgm_assignment_events (activity_id, student_id, from_group_id, action, actor_label, reason)
+         VALUES (?, ?, ?, 'removed', ?, 'leader request approved')`
+      ).bind(Number(assignment.activity_id), Number(assignment.student_id), Number(assignment.group_id), member.name).run();
+      const seats = await asRows<{ id: number }>(c.env.DB.prepare(
+        `SELECT id FROM cgm_leadership_appointments WHERE group_id = ? AND student_id = ? AND status = 'active'`
+      ).bind(Number(assignment.group_id), Number(assignment.student_id)));
+      for (const seat of seats) {
+        await c.env.DB.prepare(
+          `UPDATE cgm_leadership_appointments SET status = 'ended', ended_at = CURRENT_TIMESTAMP, end_reason = 'member removed from activity' WHERE id = ?`
+        ).bind(Number(seat.id)).run();
+      }
+      await notifyStudent(c.env.DB, Number(assignment.student_id), 'groups', 'Removed from group',
+        `You were removed from ${groupName} in ${request.activity_name}. ${note || ''}`.trim());
+    }
+
+    // The leader hears the answer either way — a request with no visible
+    // outcome is how a leader stops asking and starts guessing.
+    await notifyStudent(c.env.DB, Number(request.requested_by_student_id), 'leadership',
+      decision === 'approve' ? 'Your request was approved' : 'Your request was not approved',
+      `${request.title}${decision === 'approve' ? ' — approved.' : ` — not approved.${note ? ` ${note}` : ''}`}`);
+    await auditCgm(c.env.DB, {
+      actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
+      action: `cgm.leader_request.${decision}d`, entityType: 'leader_request', entityId: requestId,
+      classId: Number(request.class_id), activityId: Number(request.activity_id),
+      context: { kind: request.kind, groupId: Number(request.group_id), targetStudentId: request.target_student_id, note },
+    });
+    return c.json({ success: true, data: { status: decision === 'approve' ? 'approved' : 'rejected' } });
   });
 
   app.post('/api/cgm/groups/:id/succession', async (c: any) => {

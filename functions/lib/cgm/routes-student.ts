@@ -56,6 +56,7 @@ import {
   notifyStudent,
   readBody,
   requireModuleEnabled,
+  ensureLeaderSchema,
   ensurePasskeyResetSchema,
   requireStudent,
   revokeStudentSessions,
@@ -1569,6 +1570,26 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       const base = { classId: Number(election.class_id), type: 'election', activityId: Number(election.activity_id), electionId: Number(election.id) };
       if (election.voting_open_at) events.push({ ...base, kind: 'election_open', title: `Voting opens — ${election.title}`, at: election.voting_open_at });
       if (election.voting_close_at) events.push({ ...base, kind: 'election_close', title: `Voting closes — ${election.title}`, at: election.voting_close_at });
+    }
+    // Group meetings booked by a group's own leader (or organizer) belong on the
+    // calendar of every member of that group — that is the promise the leader
+    // console makes when it books one.
+    await ensureLeaderSchema(c.env.DB);
+    const meetings = await asRows<any>(c.env.DB.prepare(
+      `SELECT m.id, m.title, m.starts_at, m.location, m.activity_id, m.class_id, m.group_id,
+              COALESCE(g.name, 'Group ' || g.position) AS group_name
+       FROM cgm_group_meetings m
+       JOIN cgm_groups g ON g.id = m.group_id
+       JOIN cgm_group_assignments ga ON ga.group_id = m.group_id AND ga.student_id = ? AND ga.status = 'active'
+       WHERE m.class_id IN (${classIds.map(() => '?').join(',')}) AND m.status = 'scheduled'`
+    ).bind(student.id, ...classIds));
+    for (const meeting of meetings) {
+      events.push({
+        classId: Number(meeting.class_id), type: 'meeting', activityId: Number(meeting.activity_id),
+        meetingId: Number(meeting.id), groupId: Number(meeting.group_id), kind: 'group_meeting',
+        title: `${meeting.group_name}: ${meeting.title}`, at: meeting.starts_at,
+        location: meeting.location || null,
+      });
     }
     const sessions = await asRows<any>(c.env.DB.prepare(
       `SELECT sess.id, sess.title, sess.session_date, sess.activity_id, a.class_id

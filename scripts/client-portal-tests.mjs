@@ -783,11 +783,14 @@ const main = async () => {
   // organizer action keeps the rows it removed, so it can be reversed.
   // 2026-11-06 adds cgm_passkey_links (52nd CGM table): one row per one-time
   // passkey link, storing only the code's hash, never the code itself.
+  // 2026-11-17 adds the two leader-console tables (cgm_group_meetings and
+  // cgm_group_leader_requests): a leader's own meetings, and the requests a
+  // leader raises with the organizer (54th and 55th CGM tables).
   // 2026-10-31 adds the Sampling game tables (games, teams, draws, events): the
   // multi-team number-drawing game, additive and prefixed `sampling_`.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 52 + 4,
-    `${allTables.length} user tables (63 base + 11 client + 3 inbox + 52 CGM + 4 sampling)`);
+    allTables.length === 63 + 11 + 3 + 54 + 4,
+    `${allTables.length} user tables (63 base + 11 client + 3 inbox + 54 CGM + 4 sampling)`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',

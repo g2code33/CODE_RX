@@ -27,6 +27,10 @@ const section = (title) => console.log(`\n== ${title}`);
 
 const workspace = src('src/components/ClassGroups/ClassGroupsWorkspace.tsx');
 const studentPortal = src('src/components/ClassGroups/StudentPortal.tsx');
+const leaderConsole = src('src/components/ClassGroups/LeaderConsole.tsx');
+const leaderRoutesSrc = src('functions/lib/cgm/routes-leader.ts');
+const leaderCoreSrc = src('functions/lib/cgm/leader.ts');
+const cgmCoreSrc = src('functions/lib/cgm/core.ts');
 const phantom = src('src/components/ClassGroups/PhantomClasses.tsx');
 const client = src('src/lib/cgm.ts');
 const app = src('src/App.tsx');
@@ -104,9 +108,14 @@ check('the Request-a-group-change card carries a SMALL idea icon that reveals th
   && studentPortal.includes("onClick={() => setOpen(false)}")
   && /!open && \(/.test(studentPortal));
 check('the student group page shows the group topic + agenda BEFORE Request a group change',
-  /cgm-student-topic-agenda/.test(studentPortal) && /Our topic &amp; agenda/.test(studentPortal)
-  && studentPortal.indexOf('cgm-student-topic-agenda') < studentPortal.indexOf('Request a group change')
+  /cgm-student-topic-block/.test(studentPortal) && /cgm-topic-agenda-lines/.test(studentPortal)
+  && studentPortal.indexOf('cgm-student-topic-block') < studentPortal.indexOf('Request a group change')
   && /myGroup\.topic/.test(studentPortal) && /myGroup\.agenda/.test(studentPortal));
+check('the topic + agenda come BEFORE the “My group” card, with no idea button anywhere',
+  studentPortal.indexOf('data-testid="cgm-student-topic-block"') < studentPortal.indexOf('data-testid="cgm-student-my-group"')
+  && !/cgm-topic-agenda-idea/.test(studentPortal)
+  && !/TopicAgendaIdea/.test(studentPortal)
+  && !/aria-expanded=\{open\}/.test(studentPortal.split('const GroupChangeTip')[1] || ''));
 check('the CGP logo replaces the icon everywhere: navbar door, organizer topbar, student header',
   /CGP\.jpg/.test(classGroupsEntry) && !/Users className/.test(classGroupsEntry)
   && (workspace.match(/CGP\.jpg/g) || []).length >= 1
@@ -136,8 +145,10 @@ check('organizers and PHANTOM call through the member bearer client',
   /Authorization.*Bearer/.test(client) && /memberCall/.test(client));
 check('students use their own session header, never the member token',
   client.includes("X-Code-Rx-Student-Session") && /studentCall/.test(client));
-check('the student session lives in sessionStorage and clears on 401',
-  /sessionStorage/.test(client) && /status === 401\) studentSession\.clear\(\)/.test(client));
+check('the student session is remembered in localStorage (an old sessionStorage copy is migrated) and clears on 401',
+  /localStorage\.setItem\(STUDENT_SESSION_KEY/.test(client)
+  && /parse\(sessionStorage\.getItem\(STUDENT_SESSION_KEY\)\)/.test(client)
+  && /status === 401\) studentSession\.clear\(\)/.test(client));
 check('roster import posts multipart form data', /FormData/.test(client));
 check('report downloads exist for the nine report kinds',
   ['roster', 'assignments', 'movements', 'leadership', 'elections', 'turnout', 'attendance', 'pending', 'organizer-actions']
@@ -1712,6 +1723,174 @@ check('the PHANTOM Refresh reloads the open section (never the overview) and sho
 check('Refresh shows it is working (disabled + spinning) instead of looking dead',
   /data-testid="cgm-refresh"/.test(workspace) && /aria-busy=\{refreshing\}/.test(workspace)
   && /animate-spin/.test(workspace) && /disabled=\{refreshing\}/.test(workspace));
+
+// ===========================================================================
+section('40. Sign-in is remembered, and the organizer agenda reaches every student');
+// ===========================================================================
+const authModal = src('src/components/AuthModal.tsx');
+const memberClient = src('src/lib/cloudflare.ts');
+const authLib = src('functions/lib/auth.ts');
+const cgmService = src('functions/lib/cgm/service.ts');
+
+check('a member stays signed in until they sign out: the browser keeps the session in localStorage and the toggle asks for exactly that',
+  /const TOKEN_KEY = 'codeRx_token'/.test(memberClient)
+  && /store\.setItem\(key, value\)/.test(memberClient)
+  && /codeRx_rememberMe/.test(memberClient)
+  && /export const isRememberMe = \(\): boolean => \{\s*try \{ return localStorage\.getItem\(REMEMBER_KEY\) !== 'off';/.test(memberClient));
+check('the member token lives a year on the server, not a week',
+  /TOKEN_TTL_SECONDS = 60 \* 60 \* 24 \* 365/.test(authLib));
+check('the student session lasts a year too — only Sign out ends it',
+  /STUDENT_SESSION_TTL_HOURS = 24 \* 365/.test(cgmService));
+check('the sign-in dialog carries a Remember me toggle that starts ON every time it opens',
+  /auth-remember-me/.test(authModal) && /role="switch"/.test(authModal)
+  && /const \[rememberMe, setRememberMeState\] = useState\(true\)/.test(authModal)
+  && /setRememberMeState\(true\);/.test(authModal)
+  && /auth\.login\(formData\.email, formData\.password, rememberMe\)/.test(authModal));
+check('the toggle says what it does in plain words',
+  /stay signed in on this device until you sign out/.test(authModal)
+  && /signed out when this tab closes/.test(authModal));
+check('a sign out still clears both stores, so nobody stays signed in by accident',
+  /logout: \(\) => \{\s*setToken\(null\);\s*setStoredUser\(null\);/.test(memberClient)
+  && /const writeStore = \(key: string, value: string \| null\) =>/.test(memberClient));
+
+// --- the agenda the organizer sets reaches every member of the group -------
+check('the topic + numbered agenda sit at the TOP of the activity page, before "My group"',
+  /data-testid="cgm-student-topic-block"/.test(studentPortal)
+  && /data-testid="cgm-student-my-group"/.test(studentPortal)
+  && studentPortal.indexOf('data-testid="cgm-student-topic-block"') < studentPortal.indexOf('data-testid="cgm-student-my-group"')
+  && /\{topicAgendaBlock\(String\(myGroup\.topic \|\| ''\), String\(myGroup\.agenda \|\| ''\), 'cgm-student-topic'\)\}/.test(studentPortal));
+check('the agenda is a plain numbered list through one shared panel — no toggle, nothing to click',
+  /const GroupAgendaPanel = \(\{ agenda, topic \}/.test(studentPortal)
+  && /const topicAgendaBlock = \(topic: string, agenda: string, topicTestId: string\)/.test(studentPortal)
+  && /<ol className="mt-2 space-y-1\.5" data-testid="cgm-topic-agenda-lines">/.test(studentPortal)
+  && /cgm-topic-agenda-empty/.test(studentPortal)
+  && !/<TopicAgendaIdea /.test(studentPortal)
+  && !/cgm-topic-agenda-idea-panel/.test(studentPortal));
+check('the agenda is visible with no click at all: no button, no aria-expanded, no collapsed state',
+  !/Lightbulb/.test(studentPortal.slice(studentPortal.indexOf('const GroupAgendaPanel'), studentPortal.indexOf('const GroupChangeTip')))
+  && !/<button[^>]*cgm-topic-agenda/.test(studentPortal)
+  && /the agenda is simply there/.test(studentPortal));
+check('the WhatsApp join page carries the same topic + agenda, above the QR and the members',
+  /cgm-student-whatsapp-topic-block/.test(studentPortal)
+  && studentPortal.indexOf('data-testid="cgm-student-whatsapp-page"') < studentPortal.indexOf('data-testid="cgm-student-whatsapp-topic-block"')
+  && studentPortal.indexOf('data-testid="cgm-student-whatsapp-topic-block"') < studentPortal.indexOf('<QrBlock', studentPortal.indexOf('data-testid="cgm-student-whatsapp-topic-block"'))
+  && !/cgm-student-topic-card/.test(studentPortal)
+  && !/Our topic &amp; agenda/.test(studentPortal));
+check('the student sign-in screen carries the same Remember me toggle, also starting ON',
+  /cgm-student-remember-me/.test(studentPortal) && /role="switch"/.test(studentPortal)
+  && /const \[rememberMe, setRememberMeState\] = useState\(true\)/.test(studentPortal)
+  && /setStudentRemembered\(rememberMe\)/.test(studentPortal)
+  && /isStudentRemembered/.test(client) && /STUDENT_REMEMBER_KEY/.test(client));
+check('the student session write honours the toggle and never leaves a copy in the other store',
+  /\(remember \? localStorage : sessionStorage\)\.setItem\(STUDENT_SESSION_KEY/.test(client)
+  && /\(remember \? sessionStorage : localStorage\)\.removeItem\(STUDENT_SESSION_KEY/.test(client));
+
+section('41. A leader gets a real console for their own group');
+
+// The catalogue is the contract: one list, enforced by the server.
+check('the leader capabilities cover the work a group actually needs doing',
+  ['view_members', 'send_announcements', 'edit_topic', 'notify_members', 'coordinate',
+    'assist_attendance', 'view_attendance', 'request_member_additions', 'add_members',
+    'request_member_removals', 'remove_members', 'manage_whatsapp', 'report_issues']
+    .every((key) => new RegExp(`'${key}'`).test(cgmCoreSrc)));
+check('every capability has a human label and a one-line hint for the organizer',
+  /LEADER_PERMISSION_LABELS/.test(cgmCoreSrc) && /LEADER_PERMISSION_HINTS/.test(cgmCoreSrc));
+check('a freshly appointed leader starts equipped, not empty-handed',
+  /leaderPermissions: \[[\s\S]{0,400}'edit_topic'[\s\S]{0,400}'notify_members'/.test(cgmCoreSrc));
+
+// Server-side enforcement, from the session — never from the request body.
+check('the seat is resolved from the student session and the group only',
+  /leaderSeatFor = async \(/.test(leaderCoreSrc)
+  && /l.student_id = \? AND l.group_id = \? AND l.status = 'active'/.test(leaderCoreSrc));
+check('every leader route re-reads the seat permissions on each request',
+  // One gate function per route, with the capability named at the call site.
+  /permissionOr403 = \(c: any, seat: any, permission: any\)/.test(leaderRoutesSrc)
+  && /if \(leaderHas\(seat, permission\)\) return null/.test(leaderRoutesSrc)
+  && /permissionOr403\(c, seat, 'edit_topic'\)/.test(leaderRoutesSrc)
+  && /permissionOr403\(c, seat, 'send_announcements'\)/.test(leaderRoutesSrc)
+  && /permissionOr403\(c, seat, 'notify_members'\)/.test(leaderRoutesSrc)
+  && /permissionOr403\(c, seat, 'coordinate'\)/.test(leaderRoutesSrc)
+  && /permissionOr403\(c, seat, 'assist_attendance'\)/.test(leaderRoutesSrc)
+  && /leaderHas\(seat, 'view_members'\)/.test(leaderRoutesSrc));
+check('a refused capability answers 403 with the reason, never a silent no-op',
+  /does not include/.test(leaderRoutesSrc) && /'You are not an active leader of this group/.test(leaderRoutesSrc));
+check('an assistant can never be granted the direct membership capabilities',
+  /ASSISTANT_LEADER_PERMISSIONS/.test(activityRoutesSrc)
+  && /appointment.role === 'assistant'/.test(activityRoutesSrc)
+  && /allowed.has\(permission\)/.test(activityRoutesSrc)
+  && /ASSISTANT_LEADER_PERMISSIONS: LeaderPermission\[\] = \[/.test(cgmCoreSrc));
+check('a leader can only mark attendance for their own group’s members',
+  /allowed.has\(studentId\)/.test(leaderRoutesSrc) && /belongs to another group/.test(leaderRoutesSrc));
+check('a leader can never remove themselves out of their own seat',
+  /cannot remove yourself/.test(leaderRoutesSrc));
+
+// The leader console UI.
+check('the portal carries a leader console section, gated on holding a seat',
+  /'My group \(leader\)'/.test(studentPortal) && /section === 'leader'/.test(studentPortal)
+  && /leaderSeatCount/.test(studentPortal) && /cgm-continue-leader/.test(studentPortal));
+check('the console renders one panel per capability and hides the rest',
+  /data-testid="cgm-leader-console"/.test(leaderConsole)
+  && /panels.filter\(\(entry\) => entry.allowed\)/.test(leaderConsole)
+  && /cgm-leader-tab-\$\{entry.key\}/.test(leaderConsole)
+  && /key: 'plan'/.test(leaderConsole) && /key: 'attendance'/.test(leaderConsole));
+check('the console explains what was NOT granted instead of hiding the gap',
+  /cgm-leader-withheld/.test(leaderConsole) && /Not granted to you/.test(leaderConsole));
+check('the leader edits the topic and agenda with the same shape students see',
+  /cgm-leader-plan-form/.test(leaderConsole) && /cgm-leader-agenda/.test(leaderConsole)
+  && /leaderSaveTopic/.test(client));
+check('the leader announces, messages, books meetings and raises requests',
+  /leaderAnnounce/.test(client) && /leaderNotify/.test(client)
+  && /leaderScheduleMeeting/.test(client) && /leaderRequest/.test(client)
+  && /cgm-leader-request-form/.test(leaderConsole));
+check('the console tells the leader when their organizer reviews announcements first',
+  /announcementMode === 'direct'/.test(leaderConsole) && /reviews group announcements first/.test(leaderConsole));
+
+// The organizer side: a REAL permission editor, not a one-click narrowing.
+check('the organizer edits every capability of one seat, with labels and hints',
+  /LeaderPermissionsEditor/.test(workspace) && /cgm-leader-permission-editor/.test(workspace)
+  && /cgm-leader-permission-\$\{entry.key\}/.test(workspace) && /Save permissions/.test(workspace));
+check('the old blind “Narrow permissions” shortcut is gone',
+  !/onClick=\{async \(\) => \{ await cgm\.updateLeaderPermissions/.test(workspace)
+  && !/\['view_members', 'coordinate'\]/.test(workspace));
+check('the editor reads its catalogue from the server, not a hard-coded list',
+  /cgm.leaderPermissionCatalogue\(\)/.test(workspace) && /setLeaderPermissions/.test(client)
+  && /data.permissions/.test(workspace));
+check('assistants only see the assistant-safe capabilities in the editor',
+  /appointment.role !== 'assistant' \|\| entry.assistant/.test(workspace));
+check('a leader can ask their organizer to OPEN a tool the seat does not hold',
+  /key: 'access'/.test(leaderConsole) === false // 'access' is a request kind, not a tab
+  && /value="access"/.test(leaderConsole) && /Ask for a tool to be opened/.test(leaderConsole)
+  && /cgm-leader-request-tool/.test(leaderConsole) && /data\.seat\.withheld/.test(leaderConsole)
+  && /kind: requestKind/.test(leaderConsole) && /permission: requestKind === 'access' \? requestTool : undefined/.test(leaderConsole)
+  && /permission\?: string/.test(client));
+check('the Ask-the-organizer tab is reachable even with no tool at all',
+  /key: 'requests', text: 'Ask the organizer', icon: MessageSquarePlus, allowed: true/.test(leaderConsole));
+check('the organizer sees which tool is being asked for, and approves by opening it',
+  /requestedPermissionLabel/.test(workspace) && /cgm-leader-request-tool-label/.test(workspace)
+  && /Opens: \{request\.requestedPermissionLabel\}/.test(workspace)
+  && /request\.kind === 'access' \? 'Open this tool' : 'Approve'/.test(workspace));
+check('approving a tool request grants it on the seat, not on a copy',
+  /permission_granted_on_request/.test(activityRoutesSrc)
+  && /permissions_json/.test(activityRoutesSrc) && /requested_permission/.test(activityRoutesSrc));
+check('the organizer decides leader requests from the Leadership tab',
+  /cgm-leader-requests-panel/.test(workspace) && /decideLeaderRequest/.test(client)
+  && /decideLeaderRequest\(Number\(request.id\)/.test(workspace));
+check('the activity form chooses the leader defaults for that activity',
+  /cgm-act-leader-permissions/.test(workspace) && /config.leaderPermissions = form.leaderPermissions/.test(workspace));
+
+// Backend routes the console depends on actually exist.
+for (const endpoint of [
+  '/api/cgm/student/leadership', '/api/cgm/student/leader/groups/:id',
+  '/api/cgm/student/leader/groups/:id/announcements', '/api/cgm/student/leader/groups/:id/notify',
+  '/api/cgm/student/leader/groups/:id/meetings', '/api/cgm/student/leader/groups/:id/attendance',
+  '/api/cgm/student/leader/groups/:id/members', '/api/cgm/student/leader/groups/:id/requests',
+  '/api/cgm/leadership/permissions',
+]) {
+  const haystack = `${leaderRoutesSrc}\n${activityRoutesSrc}`;
+  check(`${endpoint} is registered server-side`, haystack.includes(`'${endpoint}'`));
+}
+check('the leader routes are mounted in the module registration',
+  src('functions/class-group-routes.ts').includes('registerCgmLeaderRoutes(app)'));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

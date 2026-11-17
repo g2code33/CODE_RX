@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useModalBehaviour } from './AppDialog';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Mail, Lock, User, ArrowRight, Phone, Send, CheckCircle, ShieldAlert, AlertCircle, Eye, EyeOff, LoaderCircle } from 'lucide-react';
-import { db, auth, ApiError, AuthUser } from '../lib/cloudflare';
+import { db, auth, ApiError, AuthUser, setRememberMe } from '../lib/cloudflare';
 import { ClientPortalEntry } from './ClientPortalEntry';
 
 type Mode = 'join' | 'login' | 'forgot';
@@ -26,6 +26,9 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [forgotResult, setForgotResult] = useState<{ message: string } | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  // "Remember me" is ON always: the session survives closing the browser and
+  // only a manual sign out ends it. The toggle starts on every single time.
+  const [rememberMe, setRememberMeState] = useState(true);
 
   // Each time the modal opens, honour the mode requested by the caller.
   // Without this, a previously opened Join form could remain active when the
@@ -37,6 +40,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
     setError('');
     setForgotResult(null);
     setShowPassword(false);
+    setRememberMeState(true);
     setFormData({ name: '', email: '', phone: '', password: '' });
   }, [isOpen, defaultMode]);
 
@@ -57,7 +61,7 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
         const res = await auth.forgotPassword(formData.email);
         setForgotResult({ message: res.message });
       } else if (mode === 'login') {
-        const user = await auth.login(formData.email, formData.password);
+        const user = await auth.login(formData.email, formData.password, rememberMe);
         onLoginSuccess(user);
       } else {
         // Join: submit a pending membership application. It never creates an account.
@@ -216,6 +220,36 @@ export const AuthModal = ({ isOpen, onClose, onLoginSuccess, onGoToTerms, defaul
                       required
                     />
                     <button type="button" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? 'Hide password' : 'Show password'} className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-emerald-600">{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button>
+                  </div>
+                )}
+
+                {mode === 'login' && (
+                  <div
+                    className="flex items-center justify-between gap-3 rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3"
+                    data-testid="auth-remember-me"
+                  >
+                    <div className="min-w-0">
+                      <label htmlFor="remember-me" className="block text-sm font-black text-emerald-900">Remember me</label>
+                      <p className="mt-0.5 text-[11px] font-medium leading-snug text-emerald-700">
+                        {rememberMe
+                          ? 'You stay signed in on this device until you sign out.'
+                          : 'You will be signed out when this tab closes.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      id="remember-me"
+                      role="switch"
+                      aria-checked={rememberMe}
+                      aria-label="Remember me — keep me signed in on this device"
+                      onClick={() => { setRememberMeState((on) => !on); setRememberMe(!rememberMe); }}
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${rememberMe ? 'bg-emerald-600' : 'bg-slate-300'}`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${rememberMe ? 'translate-x-6' : 'translate-x-1'}`}
+                      />
+                    </button>
                   </div>
                 )}
 

@@ -6,6 +6,10 @@
 export const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 const TOKEN_KEY = 'codeRx_token';
 const USER_KEY = 'codeRx_user';
+// "Remember me" is always on. When it is off (only possible through the
+// toggle) the session lives in sessionStorage and disappears with the tab;
+// otherwise both stores are cleared so no half-session is left behind.
+const REMEMBER_KEY = 'codeRx_rememberMe';
 
 export class ApiError extends Error {
   status: number;
@@ -17,16 +21,44 @@ export class ApiError extends Error {
 }
 
 // ---------- session helpers ----------
+const readStore = (key: string): string | null => {
+  try {
+    const remembered = localStorage.getItem(key);
+    if (remembered !== null) return remembered;
+  } catch { /* private mode */ }
+  try { return sessionStorage.getItem(key); } catch { return null; }
+};
+
+/** Remember me is ON unless someone deliberately switched it off. */
+export const isRememberMe = (): boolean => {
+  try { return localStorage.getItem(REMEMBER_KEY) !== 'off'; } catch { return true; }
+};
+
+export const setRememberMe = (remember: boolean) => {
+  try {
+    if (remember) localStorage.removeItem(REMEMBER_KEY);
+    else localStorage.setItem(REMEMBER_KEY, 'off');
+  } catch { /* private mode */ }
+};
+
+const writeStore = (key: string, value: string | null) => {
+  const remember = isRememberMe();
+  const stores = [localStorage, sessionStorage];
+  for (const store of stores) {
+    try {
+      if (value !== null && store === (remember ? localStorage : sessionStorage)) store.setItem(key, value);
+      else store.removeItem(key);
+    } catch { /* private mode */ }
+  }
+};
+
 export const getToken = (): string | null => {
-  const token = localStorage.getItem(TOKEN_KEY);
+  const token = readStore(TOKEN_KEY);
   if (token) return token;
   if (import.meta.env.DEV) return 'dev-sandbox-phantom-token';
   return null;
 };
-export const setToken = (token: string | null) => {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
-};
+export const setToken = (token: string | null) => writeStore(TOKEN_KEY, token);
 
 export interface AuthUser {
   id: number | string;
@@ -58,7 +90,7 @@ export const DEV_PHANTOM_USER: AuthUser = {
 
 export const getStoredUser = (): AuthUser | null => {
   try {
-    const raw = localStorage.getItem(USER_KEY);
+    const raw = readStore(USER_KEY);
     if (raw) return JSON.parse(raw) as AuthUser;
     if (import.meta.env.DEV) {
       return DEV_PHANTOM_USER;
@@ -69,10 +101,8 @@ export const getStoredUser = (): AuthUser | null => {
   }
 };
 
-export const setStoredUser = (user: AuthUser | null) => {
-  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
-  else localStorage.removeItem(USER_KEY);
-};
+export const setStoredUser = (user: AuthUser | null) =>
+  writeStore(USER_KEY, user ? JSON.stringify(user) : null);
 
 // ---------- core request helper ----------
 async function apiCall<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -450,7 +480,12 @@ export const uploadFile = async (file: File, folder: string = 'uploads') => {
 
 // ---------- authentication ----------
 export const auth = {
-  login: async (identifier: string, password: string): Promise<AuthUser> => {
+  /**
+   * Signs in and keeps the session until a manual sign out. `remember` is the
+   * "Remember me" toggle — always on unless the user turns it off.
+   */
+  login: async (identifier: string, password: string, remember: boolean = true): Promise<AuthUser> => {
+    setRememberMe(remember);
     // In local development (Vite dev server without Cloudflare Pages Functions
     // backend), allow immediate dev-sandbox access with dev credentials.
     if (

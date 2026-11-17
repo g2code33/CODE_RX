@@ -337,38 +337,71 @@ export const CLASS_PERMISSION_LABELS: Record<ClassPermission, string> = {
   manage_class_settings: 'Manage class settings',
 };
 
-/** Group-leader permissions, independently configurable per activity. */
+/**
+ * Group-leader capabilities, independently configurable per activity.
+ *
+ * Appointing a leader is not a badge: it hands that student a real, bounded
+ * console for THEIR group — the topic and agenda, announcements, meetings,
+ * attendance, membership requests and issues. Every key below is enforced
+ * server-side on the leader routes (`routes-leader.ts`); nothing here is a
+ * frontend-only flag. The organizer grants the set at appointment time and can
+ * change it afterwards, and the group's own console shows exactly what it has.
+ */
 export const LEADER_PERMISSIONS = [
   'view_members',
   'send_announcements',
+  'edit_topic',
+  'notify_members',
+  'coordinate',
   'assist_attendance',
+  'view_attendance',
   'request_member_additions',
   'add_members',
   'request_member_removals',
   'remove_members',
-  'coordinate',
-  'report_issues',
   'manage_whatsapp',
+  'report_issues',
 ] as const;
 
 export type LeaderPermission = (typeof LEADER_PERMISSIONS)[number];
 
 export const LEADER_PERMISSION_LABELS: Record<LeaderPermission, string> = {
-  view_members: 'View group members',
-  send_announcements: 'Send announcements',
-  assist_attendance: 'Assist with attendance',
-  request_member_additions: 'Request member additions',
+  view_members: 'View the group members',
+  send_announcements: 'Send group announcements',
+  edit_topic: 'Set the group topic & agenda',
+  notify_members: 'Message every member',
+  coordinate: 'Schedule group meetings',
+  assist_attendance: 'Record group attendance',
+  view_attendance: 'View the group attendance',
+  request_member_additions: 'Ask the organizer to add a member',
   add_members: 'Add members directly',
-  request_member_removals: 'Request member removal',
+  request_member_removals: 'Ask the organizer to remove a member',
   remove_members: 'Remove members directly',
-  coordinate: 'Coordinate group activities',
-  report_issues: 'Report issues',
   manage_whatsapp: 'Manage the group WhatsApp link',
+  report_issues: 'Report an issue to the organizer',
+};
+
+/** One-line help under each capability, so the organizer grants on purpose. */
+export const LEADER_PERMISSION_HINTS: Record<LeaderPermission, string> = {
+  view_members: 'Who is in the group, and who leads it.',
+  send_announcements: 'Post a notice only this group sees (the activity may still require organizer approval).',
+  edit_topic: 'Write the topic and the agenda students see under it.',
+  notify_members: 'Push a short message to every member’s notifications.',
+  coordinate: 'Book meetings for the group; they appear on every member’s calendar.',
+  assist_attendance: 'Mark present / late / absent / excused for this group only.',
+  view_attendance: 'See the group’s attendance history without changing it.',
+  request_member_additions: 'Ask the organizer to place an unassigned classmate in this group.',
+  add_members: 'Place an unassigned classmate directly, within the group’s capacity.',
+  request_member_removals: 'Ask the organizer to take a member out.',
+  remove_members: 'Take a member out directly (reversible from the Recycle Bin).',
+  manage_whatsapp: 'Set, replace or disable the group’s WhatsApp invite link.',
+  report_issues: 'Raise a problem — it lands with the organizers and PHANTOM oversight.',
 };
 
 /** The leader permissions assistants may receive — never a copy by default. */
 export const ASSISTANT_LEADER_PERMISSIONS: LeaderPermission[] = [
   'view_members',
+  'view_attendance',
   'assist_attendance',
   'coordinate',
   'report_issues',
@@ -587,7 +620,12 @@ export const defaultActivityConfig = (): ActivityConfig => ({
   genderRule: 'none',
   repeatRule: 'random',
   leaderMethod: 'appointment',
-  leaderPermissions: ['view_members', 'send_announcements', 'coordinate', 'report_issues'],
+  // A newly appointed leader starts genuinely equipped for their own group —
+  // the organizer can narrow or widen this per activity and per appointment.
+  leaderPermissions: [
+    'view_members', 'send_announcements', 'edit_topic', 'notify_members',
+    'coordinate', 'view_attendance', 'assist_attendance', 'report_issues',
+  ],
   assistantsAllowed: true,
   maxAssistants: 2,
   assistantMethod: 'appointment',

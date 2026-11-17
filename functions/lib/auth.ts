@@ -96,7 +96,10 @@ const hmacSign = async (data: string, secret: string): Promise<Uint8Array> => {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(data)));
 };
 
-export const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+// A member stays signed in for a year of ordinary use. "Remember me" is
+// always on, so the browser keeps the token permanently and only a real sign
+// out (which clears it) or an expired/short-lived token ends the session.
+export const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 365; // 1 year
 
 export const signToken = async (payload: Omit<JwtPayload, 'iat' | 'exp'>, secret: string): Promise<string> => {
   const now = Math.floor(Date.now() / 1000);

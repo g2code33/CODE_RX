@@ -735,6 +735,63 @@ CREATE TABLE IF NOT EXISTS cgm_attendance_records (
   FOREIGN KEY(student_id) REFERENCES cgm_students(id)
 );
 
+-- GROUP LEADER CONSOLE ---------------------------------------------------
+-- A leader's meetings for their own group. Group-scoped events that need a
+-- name, a time and the reason the group exists that week — created from the
+-- leader console, shown on every member's calendar and to the organizer.
+CREATE TABLE IF NOT EXISTS cgm_group_meetings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  activity_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  class_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  agenda TEXT,
+  starts_at DATETIME NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 60,
+  location TEXT,
+  status TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled','cancelled','done')),
+  created_by_appointment_id INTEGER,
+  created_by_student_id INTEGER,
+  created_by_label TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  cancelled_at DATETIME,
+  cancel_reason TEXT,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+  FOREIGN KEY(group_id) REFERENCES cgm_groups(id),
+  FOREIGN KEY(created_by_student_id) REFERENCES cgm_students(id)
+);
+
+-- Leader → organizer requests (add / remove a member, report an issue). These
+-- NEVER move anybody on their own: a request is a request, reviewed by the
+-- organizers holding the matching class permission.
+CREATE TABLE IF NOT EXISTS cgm_group_leader_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER NOT NULL,
+  activity_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  -- 'access': the leader asks the organizer to OPEN a capability that was
+  -- withheld from their seat. Approving it grants the permission on the
+  -- appointment and the tool appears for the leader on their next request.
+  kind TEXT NOT NULL CHECK (kind IN ('add_member','remove_member','issue','access')),
+  requested_by_student_id INTEGER NOT NULL,
+  -- The single capability an 'access' request asks for (null for the others).
+  requested_permission TEXT,
+  requester_label TEXT,
+  appointment_id INTEGER,
+  target_student_id INTEGER,
+  title TEXT NOT NULL DEFAULT '',
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+  reviewed_by_profile_id INTEGER,
+  reviewer_label TEXT,
+  review_reason TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME,
+  FOREIGN KEY(activity_id) REFERENCES cgm_activities(id),
+  FOREIGN KEY(group_id) REFERENCES cgm_groups(id),
+  FOREIGN KEY(requested_by_student_id) REFERENCES cgm_students(id)
+);
+
 CREATE TABLE IF NOT EXISTS cgm_activity_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   activity_id INTEGER NOT NULL,
@@ -911,6 +968,12 @@ CREATE INDEX IF NOT EXISTS idx_cgm_assignments_student ON cgm_group_assignments(
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_assignments_one_active ON cgm_group_assignments(activity_id, student_id) WHERE status = 'active';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_leadership_one_leader ON cgm_leadership_appointments(group_id, role) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_cgm_leadership_student ON cgm_leadership_appointments(student_id);
+CREATE INDEX IF NOT EXISTS idx_cgm_group_meetings_group ON cgm_group_meetings(group_id, starts_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_group_meetings_activity ON cgm_group_meetings(activity_id, starts_at);
+CREATE INDEX IF NOT EXISTS idx_cgm_group_leader_requests_group ON cgm_group_leader_requests(group_id, status);
+CREATE INDEX IF NOT EXISTS idx_cgm_group_leader_requests_activity ON cgm_group_leader_requests(activity_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_group_leader_requests_pending
+  ON cgm_group_leader_requests(group_id, kind, target_student_id) WHERE status = 'pending' AND target_student_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cgm_elections_group ON cgm_elections(group_id);
 CREATE INDEX IF NOT EXISTS idx_cgm_candidates_election ON cgm_candidates(election_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cgm_participation_unique ON cgm_election_participation(election_id, student_id);
