@@ -524,7 +524,7 @@ check('the server validates the mark and audits every change',
   /sanitizePasskeyPrefix/.test(activityRoutesSrc) === false && /sanitizePasskeyPrefix/.test(src('functions/lib/cgm/core.ts'))
   && /cgm\.class\.passkey_prefix/.test(organizerRoutesSrc));
 check('login resolves the passkey by its stored mark plus letters (prefix-aware lookup)',
-  /passkey_prefix \|\| passkey_suffix = \?/.test(studentRoutes));
+  /s\.passkey_prefix \|\| s\.passkey_suffix = \?/.test(studentRoutes));
 
 section('17. Roster mass actions, row editing, no university ID, dependency-free QR');
 
@@ -1728,6 +1728,7 @@ check('Refresh shows it is working (disabled + spinning) instead of looking dead
 section('40. Sign-in is remembered, and the organizer agenda reaches every student');
 // ===========================================================================
 const authModal = src('src/components/AuthModal.tsx');
+const rememberedStore = src('src/lib/cgmRemember.ts');
 const memberClient = src('src/lib/cloudflare.ts');
 const authLib = src('functions/lib/auth.ts');
 const cgmService = src('functions/lib/cgm/service.ts');
@@ -1739,8 +1740,13 @@ check('a member stays signed in until they sign out: the browser keeps the sessi
   && /export const isRememberMe = \(\): boolean => \{\s*try \{ return localStorage\.getItem\(REMEMBER_KEY\) !== 'off';/.test(memberClient));
 check('the member token lives a year on the server, not a week',
   /TOKEN_TTL_SECONDS = 60 \* 60 \* 24 \* 365/.test(authLib));
-check('the student session lasts a year too — only Sign out ends it',
-  /STUDENT_SESSION_TTL_HOURS = 24 \* 365/.test(cgmService));
+check('a signed-in student is never logged out by a deadline — only Sign out ends it',
+  /STUDENT_SESSION_TTL_HOURS = 24 \* 365 \* 100/.test(cgmService)
+  // A sign-in also lifts any older, shorter deadline off the live sessions.
+  && /UPDATE cgm_student_sessions SET expires_at = \? WHERE student_id = \? AND revoked_at IS NULL/.test(cgmService));
+check('signing out still ends it immediately, whatever the deadline says',
+  /export const revokeStudentSessions/.test(cgmService)
+  && /SET revoked_at = CURRENT_TIMESTAMP/.test(cgmService));
 check('the sign-in dialog carries a Remember me toggle that starts ON every time it opens',
   /auth-remember-me/.test(authModal) && /role="switch"/.test(authModal)
   && /const \[rememberMe, setRememberMeState\] = useState\(true\)/.test(authModal)
@@ -1776,6 +1782,42 @@ check('the WhatsApp join page carries the same topic + agenda, above the QR and 
   && studentPortal.indexOf('data-testid="cgm-student-whatsapp-topic-block"') < studentPortal.indexOf('<QrBlock', studentPortal.indexOf('data-testid="cgm-student-whatsapp-topic-block"'))
   && !/cgm-student-topic-card/.test(studentPortal)
   && !/Our topic &amp; agenda/.test(studentPortal));
+// --- Remember me remembers the ACCOUNT, and the account is not a credential --
+check('the device keeps a list of the accounts that signed in, newest first',
+  /codeRx_cgmRememberedAccounts/.test(rememberedStore)
+  && /export const listRememberedAccounts/.test(rememberedStore)
+  && /export const lastRememberedAccount/.test(rememberedStore)
+  && /MAX_ACCOUNTS = 6/.test(rememberedStore));
+check('the remembered account is the identifier only — the passkey is never written down',
+  /identifier: string;/.test(rememberedStore)
+  && /label: string;/.test(rememberedStore)
+  // Only the two comments above may say the word; no field stores one.
+  && !/passkey\s*[:?]/.test(rememberedStore)
+  && !/verifier/i.test(rememberedStore)
+  && /Storing the passkey would make a stolen device a stolen account/.test(rememberedStore));
+check('signing out never forgets the account; only the toggle (or the forget button) does',
+  /forgetRememberedAccount/.test(rememberedStore) && /forgetAllRememberedAccounts/.test(rememberedStore)
+  && /Signing out does NOT erase the account list/.test(rememberedStore)
+  && !/studentSession\.clear\(\)[\s\S]{0,80}forgetAllRememberedAccounts/.test(studentPortal));
+check('the account is remembered only AFTER the server accepted the credentials',
+  (() => {
+    // The remember call must sit BELOW the login call, never above it, so a
+    // refused sign-in can never write an account down.
+    const loginAt = studentPortal.indexOf('const data = await cgmStudent.login(');
+    const rememberAt = studentPortal.indexOf('rememberAccount({', loginAt);
+    return loginAt > 0 && rememberAt > loginAt
+      && rememberAt - loginAt < 1400
+      && !/rememberAccount\(\{[\s\S]{0,200}?await cgmStudent\.login/.test(studentPortal);
+  })());
+check('a returning student lands on tiles that fill the identifier, not a search for it',
+  /cgm-remembered-accounts/.test(studentPortal)
+  && /cgm-remembered-account-\$\{account\.key\}/.test(studentPortal)
+  && /const \[identifier, setIdentifier\] = useState\(\(\) => lastRememberedAccount\(\)\?\.identifier \|\| ''\)/.test(studentPortal));
+check('the passkey field has an eye button, off by default, that only reveals what was typed',
+  /cgm-student-passkey-eye/.test(studentPortal)
+  && /type=\{showPasskey \? 'text' : 'password'\}/.test(studentPortal)
+  && /const \[showPasskey, setShowPasskey\] = useState\(false\)/.test(studentPortal)
+  && /aria-pressed=\{showPasskey\}/.test(studentPortal));
 check('the student sign-in screen carries the same Remember me toggle, also starting ON',
   /cgm-student-remember-me/.test(studentPortal) && /role="switch"/.test(studentPortal)
   && /const \[rememberMe, setRememberMeState\] = useState\(true\)/.test(studentPortal)

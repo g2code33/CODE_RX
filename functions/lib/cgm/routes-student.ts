@@ -93,6 +93,9 @@ const publicStudent = (student: CgmStudentRow) => ({
   id: student.id,
   fullName: student.full_name,
   indexNumber: student.index_number,
+  // The class this passkey registers into — used by the device's "sign in
+  // again" list so two index numbers from different classes stay distinct.
+  className: (student as any).class_name || null,
   institution: student.institution,
   phone: student.phone,
   email: student.email,
@@ -269,6 +272,7 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
           session,
           passkey: issuedPasskey,
           student: {
+            id: studentId,
             fullName: shown?.full_name ?? '',
             indexNumber: shown?.index_number ?? fullEntry.index_number,
             phone: shown?.phone ?? null,
@@ -324,8 +328,12 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     // same anonymous failure.
     const presented = passkey.trim().toLowerCase();
     const rows = await asRows<any>(c.env.DB.prepare(
-      `SELECT * FROM cgm_students
-       WHERE passkey_sequence IS NOT NULL AND passkey_prefix || passkey_suffix = ?`
+      `SELECT s.*, (SELECT cl.name FROM cgm_class_members cm
+                    JOIN cgm_classes cl ON cl.id = cm.class_id
+                    WHERE cm.student_id = s.id AND cm.status = 'active'
+                    ORDER BY cm.id LIMIT 1) AS class_name
+       FROM cgm_students s
+       WHERE s.passkey_sequence IS NOT NULL AND s.passkey_prefix || s.passkey_suffix = ?`
     ).bind(presented));
     const student = rows[0];
     // Unknown passkey and wrong identifier behave identically.

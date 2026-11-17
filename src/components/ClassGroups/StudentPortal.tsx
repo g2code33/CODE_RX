@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Bell, Calendar, CheckCircle2, ChevronRight, ClipboardList, Clock, Compass, GraduationCap,
-  KeyRound, LayoutDashboard, Lightbulb, LogOut, ShieldCheck, User as UserIcon, Users, Vote,
+  Eye, EyeOff, KeyRound, LayoutDashboard, Lightbulb, LogOut, ShieldCheck, User as UserIcon, Users, Vote,
 } from 'lucide-react';
 import { cgmStudent, CgmError, downloadMyRecords, setStudentRemembered, studentSession, type CgmStudentSession } from '../../lib/cgm';
+import {
+  forgetAllRememberedAccounts, forgetRememberedAccount, lastRememberedAccount,
+  listRememberedAccounts, rememberAccount, type RememberedAccount,
+} from '../../lib/cgmRemember';
 import { RandomGroupReveal } from './RandomGroupReveal';
 import { ConnectionBanner } from './ConnectionBanner';
 import { QrBlock } from './ClassGroupsWorkspace';
@@ -442,10 +446,18 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
   const [classCode, setClassCode] = useState('');
   const [indexNumber, setIndexNumber] = useState('');
   const [entryPassword, setEntryPassword] = useState('');
-  // login fields
-  const [identifierType, setIdentifierType] = useState('index_number');
-  const [identifier, setIdentifier] = useState('');
+  // login fields — prefilled from this device's remembered account, so a
+  // returning student only ever types the passkey (never the identifier).
+  const [identifierType, setIdentifierType] = useState<'index_number' | 'phone'>(
+    () => lastRememberedAccount()?.identifierType || 'index_number',
+  );
+  const [identifier, setIdentifier] = useState(() => lastRememberedAccount()?.identifier || '');
   const [passkey, setPasskey] = useState('');
+  // Every account this device signed in as; the last one is pre-selected.
+  const [accounts, setAccounts] = useState<RememberedAccount[]>(() => listRememberedAccounts());
+  const [activeAccountKey, setActiveAccountKey] = useState<string | null>(() => lastRememberedAccount()?.key || null);
+  // The eye button on the passkey field — opt-in, off by default.
+  const [showPasskey, setShowPasskey] = useState(false);
   // join fields
   const [joinCode, setJoinCode] = useState(inviteCode || '');
   // Invitation continuation: the class an open invitation points at, and a
@@ -623,6 +635,77 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
           />
         )}
 
+        {!resetOpen && mode === 'login' && accounts.length > 0 && (
+          <div className="mt-5" data-testid="cgm-remembered-accounts">
+            <p className={label}>Sign in again on this device</p>
+            <p className="mt-0.5 text-[11px] font-medium text-slate-400">
+              Tap your name — the {identifierLabels[identifierType].toLowerCase()} fills in and you only type the passkey.
+              Nobody's passkey is ever stored.
+            </p>
+            <ul className="mt-2 space-y-1.5">
+              {accounts.map((account) => {
+                const active = account.key === activeAccountKey;
+                return (
+                  <li key={account.key} className="flex items-stretch gap-1.5">
+                    <button
+                      type="button"
+                      data-testid={`cgm-remembered-account-${account.key}`}
+                      aria-pressed={active}
+                      onClick={() => {
+                        setActiveAccountKey(account.key);
+                        setIdentifierType(account.identifierType);
+                        setIdentifier(account.identifier);
+                        setPasskey('');
+                        setShowPasskey(false);
+                        setMode('login');
+                        setError(null);
+                        setMessage(null);
+                      }}
+                      className={`flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border px-3 py-2 text-left transition ${
+                        active ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200 bg-white hover:border-emerald-300'
+                      }`}
+                    >
+                      <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-black ${active ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                        {account.label.replace(/[^A-Za-z ]/g, '').trim().split(/\s+/).slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join('') || 'S'}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-bold text-slate-800">{account.label}</span>
+                        <span className="block truncate text-[11px] font-semibold text-slate-400">
+                          {account.identifierType === 'phone' ? 'Telephone' : 'Index'} {account.identifier}
+                          {account.className ? ` · ${account.className}` : ''}
+                        </span>
+                      </span>
+                      {active && <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Forget ${account.label} on this device`}
+                      title="Forget this account on this device"
+                      data-testid={`cgm-remembered-account-forget-${account.key}`}
+                      onClick={() => {
+                        const left = forgetRememberedAccount(account.key);
+                        setAccounts(left);
+                        if (active) {
+                          setActiveAccountKey(left[0]?.key || null);
+                          setIdentifier(left[0]?.identifier || '');
+                          setIdentifierType(left[0]?.identifierType || 'index_number');
+                          setPasskey('');
+                        }
+                      }}
+                      className="shrink-0 rounded-xl border border-slate-200 bg-white px-2 text-[11px] font-black text-slate-400 hover:border-red-200 hover:bg-red-50 hover:text-red-500"
+                    >
+                      Forget
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="mt-1.5 text-[10px] font-medium text-slate-400">
+              Signing out never forgets you — this list is what brings you straight back.
+            </p>
+          </div>
+        )}
+
         {!resetOpen && mode === 'login' && (
           <form
             className="mt-5 space-y-3"
@@ -631,13 +714,33 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               void run(async () => {
                 setStudentRemembered(rememberMe);
                 const data = await cgmStudent.login({ identifierType, identifier, passkey });
+                // Remember AFTER the server accepted the credentials — the
+                // account, never the passkey. Turning Remember me off forgets
+                // this device instead of adding to it.
+                if (rememberMe) {
+                  const student = (data as any)?.student || {};
+                  const stored = rememberAccount({
+                    key: String(student.id || identifier.trim().toLowerCase()),
+                    identifierType,
+                    identifier: identifier.trim(),
+                    label: String(student.fullName || identifier.trim()),
+                    className: student.className || null,
+                    indexNumber: student.indexNumber || null,
+                  });
+                  setAccounts(stored);
+                  setActiveAccountKey(stored[0]?.key || null);
+                } else {
+                  forgetAllRememberedAccounts();
+                  setAccounts([]);
+                  setActiveAccountKey(null);
+                }
                 onAuthenticated(data.session);
               });
             }}
           >
             <div>
               <label className={label} htmlFor="cgm-identifier-type">Sign in with</label>
-              <select id="cgm-identifier-type" className={`${inputClass} mt-1`} value={identifierType} onChange={(event) => setIdentifierType(event.target.value)}>
+              <select id="cgm-identifier-type" className={`${inputClass} mt-1`} value={identifierType} onChange={(event) => setIdentifierType(event.target.value === 'phone' ? 'phone' : 'index_number')}>
                 {Object.entries(identifierLabels).map(([key, text]) => <option key={key} value={key}>{text}</option>)}
               </select>
             </div>
@@ -658,7 +761,33 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
             </div>
             <div>
               <label className={label} htmlFor="cgm-passkey">Permanent passkey</label>
-              <input id="cgm-passkey" required className={`${inputClass} mt-1 font-mono`} value={passkey} onChange={(event) => setPasskey(event.target.value)} placeholder="rx30a" autoComplete="current-password" />
+              <div className="relative mt-1">
+                <input
+                  id="cgm-passkey"
+                  required
+                  className={`${inputClass} pr-11 font-mono`}
+                  type={showPasskey ? 'text' : 'password'}
+                  value={passkey}
+                  onChange={(event) => setPasskey(event.target.value)}
+                  placeholder="rx30a"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  data-testid="cgm-student-passkey-eye"
+                  aria-label={showPasskey ? 'Hide the passkey' : 'Show the passkey'}
+                  aria-pressed={showPasskey}
+                  title={showPasskey ? 'Hide the passkey' : 'Show the passkey'}
+                  onClick={() => setShowPasskey((shown) => !shown)}
+                  className="absolute inset-y-0 right-0 grid w-11 place-items-center rounded-r-xl text-slate-400 transition hover:text-emerald-700"
+                >
+                  {showPasskey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              <p className="mt-1 text-[11px] font-medium text-slate-400">
+                {showPasskey ? 'Showing your passkey — press the eye to hide it again.' : 'Hidden as you type. Press the eye to check what you typed.'}
+              </p>
             </div>
             <div
               className="flex items-center justify-between gap-3 rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 py-2.5"
@@ -667,7 +796,9 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
               <div className="min-w-0">
                 <label htmlFor="cgm-student-remember-me" className="block text-xs font-black text-emerald-900">Remember me</label>
                 <p className="mt-0.5 text-[11px] font-medium leading-snug text-emerald-700">
-                  {rememberMe ? 'You stay signed in until you sign out.' : 'You will be signed out when this tab closes.'}
+                  {rememberMe
+                    ? 'You stay signed in until you sign out — and after signing out, your account is still here to tap.'
+                    : 'You will be signed out when this tab closes, and this device forgets your account.'}
                 </p>
               </div>
               <button
@@ -723,6 +854,21 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
                   // just issued we stay here until the student confirms they
                   // saved it — it is never shown again.
                   const session = (data as any).session as CgmStudentSession;
+                  const registered = (data as any)?.student || {};
+                  // Registering IS a sign-in, so the device remembers them too —
+                  // that is how the next visit starts from their tile.
+                  if (rememberMe) {
+                    const stored = rememberAccount({
+                      key: String(registered.id || `index:${String(indexNumber).trim().toLowerCase()}`),
+                      identifierType: 'index_number',
+                      identifier: String(registered.indexNumber || indexNumber).trim(),
+                      label: String(registered.fullName || indexNumber),
+                      className: registered.className || null,
+                      indexNumber: registered.indexNumber || indexNumber,
+                    });
+                    setAccounts(stored);
+                    setActiveAccountKey(stored[0]?.key || null);
+                  }
                   if ((data as any)?.passkey) setPendingSession(session);
                   else onAuthenticated(session);
                   setMessage(String((data as any)?.message || 'You are in.'));

@@ -104,7 +104,7 @@ const inviteB = (await api('POST', `/api/cgm/classes/${classB.classId}/invitatio
 // ---------------------------------------------------------------------------
 // jsdom boot of the shipped bundle (same pattern as browser-dom-check.mjs).
 // ---------------------------------------------------------------------------
-const boot = async (address, { memberToken = null, memberUser = null, studentSession = null } = {}) => {
+const boot = async (address, { memberToken = null, memberUser = null, studentSession = null, seedStorage = null } = {}) => {
   const pageUrl = `${BASE}/${address}`;
   const html = await (await fetch(pageUrl)).text();
   const bundle = /<script type="module"[^>]*>([\s\S]*?)<\/script>/.exec(html);
@@ -147,6 +147,11 @@ const boot = async (address, { memberToken = null, memberUser = null, studentSes
   window.IntersectionObserver = window.IntersectionObserver || class { observe() {} unobserve() {} disconnect() {} };
   window.scrollTo = () => {};
   window.alert = () => {};
+  if (seedStorage) {
+    for (const [key, value] of Object.entries(seedStorage)) {
+      try { if (value !== null && value !== undefined) window.localStorage.setItem(key, String(value)); } catch { /* ignore */ }
+    }
+  }
   if (memberToken) window.localStorage.setItem('codeRx_token', memberToken);
   if (memberUser) window.localStorage.setItem('codeRx_user', JSON.stringify(memberUser));
   if (studentSession) window.localStorage.setItem('codeRx_cgmStudentSession', JSON.stringify(studentSession));
@@ -584,6 +589,97 @@ let savedPasskey = '';
   check('the signed-in student sees their elections view from the portal navigation',
     (() => { const electionsNav = page.buttonByText('My Elections'); electionsNav && electionsNav.click(); return Boolean(electionsNav); })()
     && await page.waitForFor('My elections', 20_000), page.body().slice(0, 200));
+}
+
+// ---------------------------------------------------------------------------
+// 5c. Remember me remembers the ACCOUNT: sign out, come back, sign straight in
+//     — without ever rewriting the rule that a signed-in student stays in.
+// ---------------------------------------------------------------------------
+{
+  // Sign in fresh so this block owns the whole lifecycle of the device.
+  const page = await boot('#class-groups/student');
+  const signInTab = await page.waitForElement(() => page.buttonByText('Sign in'));
+  signInTab && signInTab.click();
+  page.setNativeValue(await page.waitForElement(() => page.inputByLabel('Index number')), studentIndex);
+  const passkeyField = page.inputByLabel('Permanent passkey');
+  check('the passkey field is masked until the eye is pressed',
+    Boolean(passkeyField) && passkeyField.getAttribute('type') === 'password',
+    passkeyField?.getAttribute('type') || 'no field');
+  const eye = page.window.document.querySelector('[data-testid="cgm-student-passkey-eye"]');
+  check('the passkey field carries an eye button that starts off', Boolean(eye) && eye.getAttribute('aria-pressed') === 'false');
+  eye && eye.click();
+  const revealed = await page.waitForElement(() => {
+    const field = page.window.document.querySelector('#cgm-passkey');
+    return field && field.getAttribute('type') === 'text' ? field : null;
+  }, 5_000);
+  check('pressing the eye shows what was typed (masked again on a second press)',
+    Boolean(revealed)
+    && page.window.document.querySelector('[data-testid="cgm-student-passkey-eye"]')?.getAttribute('aria-pressed') === 'true',
+    revealed ? 'still masked' : 'never revealed');
+  page.window.document.querySelector('[data-testid="cgm-student-passkey-eye"]')?.click();
+  check('pressing it again hides the passkey',
+    Boolean(await page.waitForElement(
+      () => (page.window.document.querySelector('#cgm-passkey')?.getAttribute('type') === 'password' ? true : null), 5_000)));
+
+  page.setNativeValue(page.inputByLabel('Permanent passkey'), savedPasskey);
+  const submit = await page.waitForElement(() => page.submitButtonByText('Sign in'));
+  submit && submit.click();
+  check('the remembered-device journey signs in', await page.waitForFor('CODE Rx Student Portal', 30_000), page.body().slice(0, 180));
+
+  const storedAccounts = () => {
+    try { return JSON.parse(page.window.localStorage.getItem('codeRx_cgmRememberedAccounts') || '[]'); } catch { return []; }
+  };
+  const afterLogin = storedAccounts();
+  check('a successful sign-in writes the account to this device',
+    afterLogin.length >= 1 && afterLogin[0].identifier === studentIndex && Boolean(afterLogin[0].label),
+    JSON.stringify(afterLogin).slice(0, 200));
+  check('the device never stores the passkey itself',
+    !/rx\d/i.test(page.window.localStorage.getItem('codeRx_cgmRememberedAccounts') || '')
+    && !(page.window.localStorage.getItem('codeRx_cgmRememberedAccounts') || '').includes(savedPasskey));
+  check('the signed-in student is still signed in by the session, not by the list',
+    Boolean(page.window.localStorage.getItem('codeRx_cgmStudentSession')));
+
+  // Sign out — the real button, in the portal navigation.
+  const signOutButton = await page.waitForElement(() => page.buttonByText('Sign out'), 20_000);
+  signOutButton && signOutButton.click();
+  check('signing out ends the session', await page.waitForElement(
+    () => (page.window.localStorage.getItem('codeRx_cgmStudentSession') ? null : true), 20_000),
+    String(page.window.localStorage.getItem('codeRx_cgmStudentSession') || 'cleared').slice(0, 60));
+  check('signing out does NOT forget the account — that is what remember me is for',
+    storedAccounts().length >= 1 && storedAccounts()[0].identifier === studentIndex,
+    JSON.stringify(storedAccounts()).slice(0, 160));
+
+  // Come back: a brand new page carrying only what the device had stored —
+  // exactly like reopening the site later.
+  const deviceStorage = {
+    codeRx_cgmRememberedAccounts: page.window.localStorage.getItem('codeRx_cgmRememberedAccounts'),
+  };
+  const back = await boot('#class-groups/student', { seedStorage: deviceStorage });
+  await back.waitForFor('Class & Group Management', 20_000);
+  const tile = await back.waitForElement(
+    () => back.window.document.querySelector(`[data-testid="cgm-remembered-account-${storedAccounts()[0].key}"]`), 20_000);
+  check('coming back shows the account as a tile to tap', Boolean(tile) && tile.textContent.includes('Index'),
+    tile?.textContent || back.body().slice(0, 200));
+  check('the identifier is already filled in — nothing to type but the passkey',
+    back.window.document.querySelector('#cgm-identifier')?.value === studentIndex,
+    back.window.document.querySelector('#cgm-identifier')?.value || 'empty');
+  tile && tile.click();
+  await back.waitForFor('Sign in', 5_000);
+  const signInAgain = await back.waitForElement(
+    () => back.window.document.querySelector('#cgm-identifier')?.value === studentIndex
+      && back.window.document.querySelector('#cgm-passkey'), 10_000);
+  back.setNativeValue(back.window.document.querySelector('#cgm-passkey'), savedPasskey);
+  const submitAgain = await back.waitForElement(() => back.submitButtonByText('Sign in'));
+  submitAgain && submitAgain.click();
+  check('typing only the passkey signs the returning student straight back in',
+    await back.waitForFor('CODE Rx Student Portal', 30_000), back.body().slice(0, 180));
+  const secondLogin = JSON.parse(back.window.localStorage.getItem('codeRx_cgmRememberedAccounts') || '[]');
+  check('the account is reused, not duplicated, and moves to the front',
+    secondLogin.length >= 1 && secondLogin[0].identifier === studentIndex
+    && secondLogin.filter((entry) => entry.identifier === studentIndex).length === 1,
+    JSON.stringify(secondLogin).slice(0, 200));
+  check('and they stay signed in again (the session is back in localStorage)',
+    Boolean(back.window.localStorage.getItem('codeRx_cgmStudentSession')));
 }
 
 // ---------------------------------------------------------------------------

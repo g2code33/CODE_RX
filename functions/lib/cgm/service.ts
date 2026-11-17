@@ -464,11 +464,15 @@ export const requireModuleEnabled = async (c: Context<{ Bindings: Env }>) => {
 export const STUDENT_SESSION_HEADER = 'X-Code-Rx-Student-Session';
 const STUDENT_SESSION_HASH_DOMAIN = 'code-rx:cgm-student-session:v1:';
 /**
- * A student stays signed in until they press Sign out. The browser keeps the
- * session permanently ("remember me" is always on), so the database row lives
- * a full year rather than a few days — sign out still revokes it instantly.
+ * A student stays signed in until they press Sign out — no deadline of its own.
+ *
+ * The session is written with an expiry a century away rather than "forever":
+ * the column stays a real date (indexes, comparisons and revocation all keep
+ * working) while the practical rule is the one students expect. Sign out, an
+ * organizer's suspension or a passkey reset still end it immediately, because
+ * those act on the row itself rather than on the clock.
  */
-export const STUDENT_SESSION_TTL_HOURS = 24 * 365;
+export const STUDENT_SESSION_TTL_HOURS = 24 * 365 * 100;
 
 export const studentSessionHash = (token: string) => sha256Hex(`${STUDENT_SESSION_HASH_DOMAIN}${token}`);
 
@@ -480,6 +484,12 @@ export const createStudentSession = async (
   const token = randomToken();
   const expiresAt = new Date(Date.now() + STUDENT_SESSION_TTL_HOURS * 3600 * 1000)
     .toISOString().replace('T', ' ').slice(0, 19);
+  // Any older session issued under the shorter lifetime is pulled forward the
+  // moment its student signs in again, so nobody is quietly logged out by the
+  // old deadline.
+  await db.prepare(
+    `UPDATE cgm_student_sessions SET expires_at = ? WHERE student_id = ? AND revoked_at IS NULL`
+  ).bind(expiresAt, studentId).run();
   await db.prepare(
     `INSERT INTO cgm_student_sessions (student_id, token_hash, expires_at, ip_hash, user_agent_hash)
      VALUES (?, ?, ?, ?, ?)`

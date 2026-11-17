@@ -529,6 +529,35 @@ const bio001Passkey = () => passkeyByIndex.get('bio-201-001');
 const loginOk = await studentCall('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: bio001Passkey() });
 const studentSessionA = loginOk.json?.data?.session?.token;
 check('sign-in works with passkey + index number', Boolean(studentSessionA), `status ${loginOk.status}`);
+const liveSessionRow = q1(
+  'SELECT expires_at FROM cgm_student_sessions WHERE student_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
+  Number(loginOk.json?.data?.student?.id),
+);
+check('the session has no practical deadline: a signed-in student is only ended by sign out',
+  Boolean(liveSessionRow?.expires_at)
+  && new Date(String(liveSessionRow.expires_at).replace(' ', 'T') + 'Z').getFullYear() - new Date().getFullYear() > 50,
+  liveSessionRow?.expires_at || 'no row');
+// Remember me needs the account's own label after sign-in: who they are and
+// which class this passkey belongs to. It must never carry a credential.
+{
+  const payload = loginOk.json?.data?.student || {};
+  // Exactly the fields the browser writes onto the device for "sign in again".
+  const rememberedLabel = {
+    key: String(payload.id || ''), identifierType: 'index_number',
+    identifier: String(payload.indexNumber || ''), label: String(payload.fullName || ''),
+    className: payload.className || null,
+  };
+  const reasons = [
+    !payload.id ? 'no id' : null,
+    !rememberedLabel.label ? 'no name' : null,
+    !rememberedLabel.identifier ? 'no index' : null,
+    !rememberedLabel.className ? 'no class' : null,
+    JSON.stringify(rememberedLabel).toLowerCase().includes(String(bio001Passkey() || 'zz-none').toLowerCase()) ? 'label leaks the passkey' : null,
+    /verifier/i.test(JSON.stringify(payload)) ? 'response leaks the verifier' : null,
+  ].filter(Boolean);
+  check('sign-in hands the browser a safe account label (name + class, never the passkey)',
+    reasons.length === 0, reasons.join(',') || 'ok');
+}
 const wrongId = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-002', passkey: bio001Passkey() });
 check('passkey + wrong index number is rejected with the generic failure', wrongId.status === 400, `status ${wrongId.status}`);
 const wrongPasskey = await call('POST', '/api/cgm/student/login', { identifierType: 'index_number', identifier: 'BIO-201-001', passkey: passkeyByIndex.get('bio-201-002') || 'rx30' + 'z'.repeat(4) });
@@ -4029,7 +4058,9 @@ section('37. Blank-page guard: no undefined icons or components in the workspace
     const imported = new Set();
     for (const match of source.matchAll(/import\s*{([^}]+)}\s*from\s*['"][^'"]+['"]/g)) {
       for (const name of match[1].split(',')) {
-        const clean = name.trim().split(/\s+as\s+/).pop().trim();
+        // `import { type RememberedAccount }` is still a real import — the
+        // keyword is TypeScript syntax, not part of the name.
+        const clean = name.trim().replace(/^type\s+/, '').split(/\s+as\s+/).pop().trim();
         if (clean) imported.add(clean);
       }
     }
@@ -4051,7 +4082,8 @@ section('37. Blank-page guard: no undefined icons or components in the workspace
       if (boundElsewhere) continue;
       const jsxUse = [...source.matchAll(new RegExp('<' + candidate + '(?=[^A-Za-z0-9])', 'g'))].some((match) => {
         const after = source.slice(match.index + candidate.length + 1, match.index + candidate.length + 3);
-        return !/^\s*[|;,)\]]/.test(after) && !/^>\s*\(/.test(after) && !/^</.test(after);
+        // `<RememberedAccount[]>` is a generic type argument, not an element.
+        return !/^\s*[|;,)\][]/.test(after) && !/^>\s*\(/.test(after) && !/^</.test(after);
       });
       if (jsxUse) real.add(candidate);
     }
