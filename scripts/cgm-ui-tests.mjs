@@ -758,9 +758,12 @@ const boardWs = src('src/components/ClassGroups/ClassGroupsWorkspace.tsx');
 // buttons looked broken (Re-choose, cancel election, resolve tie, PHANTOM).
 check('the standalone Class & Groups, Student and PHANTOM workspaces mount the dialog host themselves',
   /const withDialogs = \(node: React\.ReactNode\) => \(<>\{node\}<AppDialogHost \/><\/>\)/.test(appSrc)
-  && /return withDialogs\(<StudentPortal/.test(appSrc)
-  && /return withDialogs\(<PhantomClassGroups/.test(appSrc)
-  && /return withDialogs\(<ClassGroupsWorkspace/.test(appSrc));
+  // Each workspace is wrapped in its own error boundary INSIDE withDialogs, so a
+  // broken render in one module can never blank the site (and the dialog host
+  // still mounts around it).
+  && /return withDialogs\(\s*<ErrorBoundary label="The student portal"[\s\S]{0,220}?<StudentPortal/.test(appSrc)
+  && /return withDialogs\(\s*<ErrorBoundary label="PHANTOM class oversight"[\s\S]{0,220}?<PhantomClassGroups/.test(appSrc)
+  && /return withDialogs\(\s*<ErrorBoundary label="Class & Group Management"[\s\S]{0,220}?<ClassGroupsWorkspace/.test(appSrc));
 check('the PHANTOM Vault early return also carries the dialog host',
   /<AdminPanel siteContent=\{siteContent\}[^\n]*\/><AppDialogHost \/><\/>/.test(appSrc));
 check('Re-choose is driven by a real dialog, so it now resolves instead of hanging',

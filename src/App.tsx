@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { AdminPanel } from './components/AdminPanel';
 import { AppDialogHost } from './components/AppDialog';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Dashboard } from './components/Dashboard';
 import { CodenameBallot } from './components/CodenameBallot';
 import { Vault } from './components/Vault';
@@ -558,13 +559,25 @@ function App() {
 
   // Class & Group Management workspaces: standalone, like the client portal.
   if (classGroupsView === 'student') {
-    return withDialogs(<StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} leaderTarget={studentLeaderTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); setStudentLeaderTarget(null); }} />);
+    return withDialogs(
+      <ErrorBoundary label="The student portal" onReset={() => { window.location.hash = '#class-groups/student'; }}>
+        <StudentPortal inviteCode={classInviteCode} voteTarget={studentVoteTarget} leaderTarget={studentLeaderTarget} onExit={() => { window.location.hash = ''; setClassGroupsView(null); setClassInviteCode(null); setStudentVoteTarget(null); setStudentLeaderTarget(null); }} />
+      </ErrorBoundary>,
+    );
   }
   if (classGroupsView === 'phantom') {
-    return withDialogs(<PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />);
+    return withDialogs(
+      <ErrorBoundary label="PHANTOM class oversight">
+        <PhantomClassGroups onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />
+      </ErrorBoundary>,
+    );
   }
   if (classGroupsView === 'workspace' && user) {
-    return withDialogs(<ClassGroupsWorkspace onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />);
+    return withDialogs(
+      <ErrorBoundary label="Class & Group Management" onReset={() => { window.location.hash = '#class-groups'; }}>
+        <ClassGroupsWorkspace onExit={() => { window.location.hash = ''; setClassGroupsView(null); }} />
+      </ErrorBoundary>,
+    );
   }
 
   // The client portal is a standalone workspace: no public navbar, no member

@@ -52,7 +52,7 @@ import {
   cleanOrNull,
   insertAssignmentGuarded,
   modulePolicy,
-  createStudentSession,
+  createStudentSession, sweepStudentHousekeeping,
   notifyStudent,
   readBody,
   requireModuleEnabled,
@@ -392,6 +392,9 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
       action: 'cgm.student.login', entityType: 'student', entityId: student.id,
       context: { identifierType },
     });
+    // Dead sessions and stale notices are cleared where the traffic already is,
+    // rather than by a job nobody remembered to schedule.
+    await sweepStudentHousekeeping(c.env.DB);
     return c.json({
       success: true,
       data: { session, student: publicStudent(student) },

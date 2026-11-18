@@ -617,7 +617,7 @@ export const registerCgmLeaderRoutes = (app: CgmApp) => {
         `${student.full_name} (group leader)`).run();
       saved += 1;
       await notifyStudent(c.env.DB, studentId, 'attendance', 'Attendance recorded',
-        `${student.full_name} marked you ${status} for “${sessionTitle}” in ${seat.groupName}.`);
+        `${student.full_name} marked you ${status} for “${sessionTitle}” in ${seat.groupName}.`, `#class-groups/student/leader?group=${seat.groupId}`);
     }
     if (skipped && !saved) return bad(c, 'None of those members belong to your group.', 403);
     await auditCgm(c.env.DB, {
@@ -687,7 +687,8 @@ export const registerCgmLeaderRoutes = (app: CgmApp) => {
        VALUES (?, ?, ?, 'assigned', ?, 'added by group leader')`
     ).bind(seat.activityId, targetId, seat.groupId, `${student.full_name} (group leader)`).run();
     await notifyStudent(c.env.DB, targetId, 'groups', 'You were added to a group',
-      `${student.full_name} added you to ${seat.groupName} in ${seat.activityName}.`);
+      `${student.full_name} added you to ${seat.groupName} in ${seat.activityName}.`,
+      `#class-groups/student/activity/${seat.activityId}`);
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: String(student.full_name || 'Leader'), actorStudentId: Number(student.id),
       action: 'cgm.leader.member_added', entityType: 'group', entityId: seat.groupId,
@@ -752,7 +753,8 @@ export const registerCgmLeaderRoutes = (app: CgmApp) => {
       ).bind(Number(row.id)).run();
     }
     await notifyStudent(c.env.DB, targetId, 'groups', 'Removed from group',
-      `You were removed from ${seat.groupName} in ${seat.activityName}. ${reason || ''}`.trim());
+      `You were removed from ${seat.groupName} in ${seat.activityName}. ${reason || ''}`.trim(),
+      `#class-groups/student/activity/${seat.activityId}`);
     await auditCgm(c.env.DB, {
       actorType: 'student', actorLabel: String(student.full_name || 'Leader'), actorStudentId: Number(student.id),
       action: 'cgm.leader.member_removed', entityType: 'group', entityId: seat.groupId,
@@ -860,10 +862,16 @@ const notifyGroupMembers = async (
   const rows = await asRows<{ student_id: number }>(db.prepare(
     `SELECT student_id FROM cgm_group_assignments WHERE group_id = ? AND status = 'active'`
   ).bind(groupId));
+  // The notification opens the group's activity, so a tap is a landing, not a
+  // hunt through the portal.
+  const activity = await asRows<{ activity_id: number }>(db.prepare(
+    'SELECT activity_id FROM cgm_groups WHERE id = ?'
+  ).bind(groupId));
+  const link = activity[0]?.activity_id ? `#class-groups/student/activity/${Number(activity[0].activity_id)}` : null;
   let sent = 0;
   for (const row of rows) {
     if (Number(row.student_id) === Number(actorStudentId)) continue;
-    await notifyStudent(db, Number(row.student_id), 'groups', title, body);
+    await notifyStudent(db, Number(row.student_id), 'groups', title, body, link);
     sent += 1;
   }
   return sent;

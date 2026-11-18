@@ -503,6 +503,33 @@ export const createStudentSession = async (
   return { token, expiresAt: `${expiresAt} UTC` };
 };
 
+/**
+ * Housekeeping nobody should have to schedule.
+ *
+ * Every sign-in is a natural moment to tidy up: revoked and long-dead sessions
+ * are deleted, and student notices older than the retention window go with
+ * them. It is deliberately cheap (two bounded statements, both indexed) and
+ * best-effort — a failure here must never cost anyone their sign-in.
+ */
+export const STUDENT_NOTIFICATION_RETENTION_DAYS = 180;
+
+export const sweepStudentHousekeeping = async (db: D1Database): Promise<void> => {
+  try {
+    await db.prepare(
+      `DELETE FROM cgm_student_sessions
+       WHERE revoked_at IS NOT NULL OR expires_at < datetime('now', '-30 days')
+       LIMIT 200`
+    ).run();
+    await db.prepare(
+      `DELETE FROM cgm_student_notifications
+       WHERE created_at < datetime('now', '-${STUDENT_NOTIFICATION_RETENTION_DAYS} days')
+       LIMIT 200`
+    ).run();
+  } catch (error) {
+    console.warn('[code-rx] housekeeping skipped (non-fatal):', error);
+  }
+};
+
 export const revokeStudentSessions = async (db: D1Database, studentId: number) => {
   await db.prepare(
     'UPDATE cgm_student_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE student_id = ? AND revoked_at IS NULL'

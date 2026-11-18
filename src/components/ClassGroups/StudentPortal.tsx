@@ -961,6 +961,39 @@ const readContinuation = (): InviteContinuation | null => {
 };
 const clearContinuation = () => { try { sessionStorage.removeItem(INVITE_CONTINUATION_KEY); } catch { /* private mode */ } };
 
+/**
+ * A notification is only useful if tapping it lands where it happened. These
+ * are the addresses the server writes into student notifications:
+ *
+ *   #class-groups/student/activity/<activityId>
+ *   #class-groups/student/leader?group=<groupId>
+ *   #class-groups/student/notifications
+ *
+ * Anything else (or a link written by an older build) is simply ignored — the
+ * student lands on the overview, never on a dead page.
+ */
+type StudentDeepLink =
+  | { kind: 'activity'; activityId: number }
+  | { kind: 'leader'; groupId: number | null }
+  | { kind: 'notifications' }
+  | null;
+
+const parseStudentDeepLink = (hash: string): StudentDeepLink => {
+  const raw = String(hash || '').replace(/^#/, '');
+  if (!raw.startsWith('class-groups/student/')) return null;
+  const rest = raw.slice('class-groups/student/'.length);
+  const [pathPart, queryPart] = rest.split('?');
+  const query = new URLSearchParams(queryPart || '');
+  const activity = /^activity\/(\d+)$/.exec(pathPart);
+  if (activity) return { kind: 'activity', activityId: Number(activity[1]) };
+  if (pathPart === 'leader') {
+    const groupId = Number(query.get('group'));
+    return { kind: 'leader', groupId: Number.isInteger(groupId) && groupId > 0 ? groupId : null };
+  }
+  if (pathPart === 'notifications') return { kind: 'notifications' };
+  return null;
+};
+
 export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: { inviteCode: string | null; voteTarget?: number | null; leaderTarget?: number | null; onExit: () => void }) => {
   useCgmNoZoom();
   const [session, setSession] = useState<CgmStudentSession | null>(() => studentSession.read());
@@ -988,6 +1021,25 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
   }, [pendingInvite]);
 
 
+
+  // A notification tap (or a bookmark) carries the destination in the address.
+  // It is consumed once, then cleared from the hash so a refresh does not
+  // re-navigate over whatever the student is doing by then.
+  const consumeDeepLink = useCallback((hash: string) => {
+    const link = parseStudentDeepLink(hash);
+    if (!link) return;
+    if (link.kind === 'notifications') { setSection('notifications'); }
+    if (link.kind === 'activity') { setSection('groups'); setOpenActivityId(link.activityId); }
+    if (link.kind === 'leader') { setSection('leader'); setOpenLeaderGroupId(link.groupId); }
+    try { window.history.replaceState(null, '', '#class-groups/student'); } catch { /* older browsers */ }
+  }, []);
+
+  useEffect(() => {
+    consumeDeepLink(window.location.hash);
+    const onHash = () => consumeDeepLink(window.location.hash);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [consumeDeepLink]);
 
   const refreshMe = useCallback(async () => {
     try {
@@ -1056,6 +1108,17 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* A way home from inside the portal — Class & Groups is one address,
+              the society's website is another, and students should not have to
+              edit the address bar to get back to it. */}
+          <a
+            href="/"
+            data-testid="cgm-student-visit-website"
+            className="mini-button"
+            title="Open the CODE Rx website"
+          >
+            <Compass className="mr-1 inline h-3.5 w-3.5" /> Visit CODE Rx
+          </a>
           <button type="button" className="mini-button" onClick={() => { void cgmStudent.logout(); studentSession.clear(); clearContinuation(); setPendingInvite(null); setSession(null); setMe(null); }}>
             <LogOut className="mr-1 inline h-3.5 w-3.5" /> Sign out
           </button>
@@ -1120,7 +1183,7 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
           )}
           {!loading && section === 'attendance' && <AttendanceView />}
           {!loading && section === 'calendar' && <CalendarView />}
-          {!loading && section === 'notifications' && <NotificationsView onChanged={refreshMe} />}
+          {!loading && section === 'notifications' && <NotificationsView onChanged={refreshMe} onOpenLink={consumeDeepLink} />}
           {!loading && section === 'profile' && <ProfileView me={me} onChanged={refreshMe} />}
           {!loading && section === 'history' && <HistoryView me={me} />}
         </main>
@@ -2505,7 +2568,7 @@ const CalendarView = () => {
   );
 };
 
-const NotificationsView = ({ onChanged }: { onChanged: () => void }) => {
+const NotificationsView = ({ onChanged, onOpenLink }: { onChanged: () => void; onOpenLink: (link: string) => void }) => {
   const [rows, setRows] = useState<any[] | null>(null);
   const [prefs, setPrefs] = useState<any | null>(null);
   const [prefBusy, setPrefBusy] = useState<string | null>(null);
@@ -2562,12 +2625,27 @@ const NotificationsView = ({ onChanged }: { onChanged: () => void }) => {
       {rows && rows.length > 0 && (
         <ul className="space-y-2">
           {rows.map((row) => (
-            <li key={row.id} className={`${card} ${row.read_at ? 'opacity-70' : 'border-emerald-200'}`}>
+            <li key={row.id} className={`${card} ${row.read_at ? 'opacity-70' : 'border-emerald-200'}`} data-testid={`cgm-notification-${row.id}`}>
               <div className="flex items-start justify-between gap-3">
-                <div>
+                <div className="min-w-0">
                   <p className="text-sm font-black text-slate-800">{row.title}</p>
                   <p className="mt-1 text-sm text-slate-600">{row.body}</p>
                   <p className="mt-2 text-[11px] font-semibold text-slate-400">{formatWhen(row.created_at)}</p>
+                  {/* The whole point: a notice about your group opens your
+                      group. Tapping it marks it read and takes you there. */}
+                  {row.link && (
+                    <button
+                      type="button"
+                      data-testid={`cgm-notification-open-${row.id}`}
+                      className="mini-button mt-2"
+                      onClick={async () => {
+                        if (!row.read_at) { await cgmStudent.markRead({ ids: [Number(row.id)] }).catch(() => undefined); onChanged(); }
+                        onOpenLink(String(row.link));
+                      }}
+                    >
+                      Open <ChevronRight className="ml-0.5 inline h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
                 {!row.read_at && (
                   <button type="button" className="mini-button shrink-0" onClick={async () => { await cgmStudent.markRead({ ids: [Number(row.id)] }); await load(); onChanged(); }}>

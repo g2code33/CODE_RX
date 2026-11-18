@@ -414,7 +414,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       };
       const [title, message] = messages[action];
       for (const row of students) {
-        await notifyStudent(c.env.DB, Number(row.student_id), 'activity', title, message);
+        await notifyStudent(c.env.DB, Number(row.student_id), 'activity', title, message,
+          `#class-groups/student/activity/${activityId}`);
       }
     }
 
@@ -680,7 +681,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          VALUES (?, ?, ?, 'assigned', ?, 'force get designation')`
       ).bind(activityId, designation.studentId, designation.groupId, label).run();
       await notifyStudent(db, designation.studentId, 'groups', 'Placed in your approved group',
-        `Your organizer's approved placement for ${activity.name} has been applied.`);
+        `Your organizer's approved placement for ${activity.name} has been applied.`,
+        `#class-groups/student/activity/${activityId}`);
       await auditCgm(db, {
         actorType: 'organizer', actorLabel: label,
         action: 'cgm.force_get.applied', entityType: 'force_get_designation', entityId: designation.id,
@@ -968,7 +970,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
         `UPDATE cgm_activity_waitlist SET status = 'promoted', promoted_at = CURRENT_TIMESTAMP WHERE id = ?`
       ).bind(Number(row.id)).run();
       await notifyStudent(c.env.DB, Number(row.student_id), 'groups', 'A seat opened for you',
-        `A seat opened in ${activity.name} and you have been placed in a group.`);
+        `A seat opened in ${activity.name} and you have been placed in a group.`,
+        `#class-groups/student/activity/${activityId}`);
       promoted += 1;
     }
     await auditCgm(c.env.DB, {
@@ -1171,7 +1174,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       ).bind(activityId, studentId, groupId, member.name).run();
     }
     await notifyStudent(c.env.DB, studentId, 'groups', 'Your group changed',
-      current[0] ? `Your organizer moved you to a different group in ${activity.name}.` : `Your organizer placed you in a group in ${activity.name}.`);
+      current[0] ? `Your organizer moved you to a different group in ${activity.name}.` : `Your organizer placed you in a group in ${activity.name}.`,
+      `#class-groups/student/activity/${activityId}`);
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: current[0] ? 'cgm.assignment.moved' : 'cgm.assignment.placed',
@@ -1421,7 +1425,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     }
 
     await notifyStudent(c.env.DB, Number(assignment.student_id), 'groups', 'Removed from group',
-      `You were removed from your group in ${assignment.activity_name}. ${reason || ''}`);
+      `You were removed from your group in ${assignment.activity_name}. ${reason || ''}`.trim(),
+      `#class-groups/student/activity/${Number(assignment.activity_id)}`);
     await auditCgm(c.env.DB, {
       actorType: member.isPhantom ? 'phantom' : 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.assignment.removed', entityType: 'assignment', entityId: assignmentId,
@@ -1470,7 +1475,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       member.profileId, member.name).run();
     const requestId = Number(result.meta.last_row_id);
     await notifyStudent(c.env.DB, Number(assignment.student_id), 'groups', 'Your organizer asked you to re-choose',
-      `Your organizer has asked that you choose your group again in ${assignment.activity_name}. PHANTOM reviews the request first — you will be told when it is approved.`);
+      `Your organizer has asked that you choose your group again in ${assignment.activity_name}. PHANTOM reviews the request first — you will be told when it is approved.`,
+      `#class-groups/student/activity/${Number(assignment.activity_id)}`);
     // PHANTOM decides this one, so PHANTOM must be told the moment it arrives —
     // in the Community inbox (channel: Class & Groups) and in notifications.
     await recordPhantomInboxItem(c.env.DB, {
@@ -1570,10 +1576,12 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
          VALUES (?, ?, ?, ?, 'moved', ?, 'approved student request')`
       ).bind(activityId, Number(request.student_id), current[0]?.group_id || null, Number(request.to_group_id), member.name).run();
       await notifyStudent(c.env.DB, Number(request.student_id), 'groups', 'Group change approved',
-        `Your move to a new group in ${activity.name} was approved.`);
+        `Your move to a new group in ${activity.name} was approved.`,
+        `#class-groups/student/activity/${activityId}`);
     } else {
       await notifyStudent(c.env.DB, Number(request.student_id), 'groups', 'Group change declined',
-        reviewReason || 'Your group change request was declined.');
+        reviewReason || 'Your group change request was declined.',
+        `#class-groups/student/activity/${activityId}`);
     }
     await c.env.DB.prepare(
       `UPDATE cgm_group_change_requests SET status = ?, reviewed_by_profile_id = ?, reviewer_label = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`
@@ -1876,7 +1884,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
        VALUES (?, ?, ?, ?, 'appointment', ?, ?)`
     ).bind(Number(group.activity_id), groupId, studentId, role, JSON.stringify(permissions), member.name).run();
     await notifyStudent(c.env.DB, studentId, 'leadership', role === 'leader' ? 'You are now the group leader' : 'You are now an assistant leader',
-      `Your organizer appointed you as ${role === 'leader' ? 'the leader' : 'an assistant leader'} of your group in ${group.activity_name}.`);
+      `Your organizer appointed you as ${role === 'leader' ? 'the leader' : 'an assistant leader'} of your group in ${group.activity_name}.`,
+      `#class-groups/student/leader?group=${groupId}`);
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.leadership.appointed', entityType: 'group', entityId: groupId,
@@ -1902,7 +1911,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       `UPDATE cgm_leadership_appointments SET status = 'ended', ended_at = CURRENT_TIMESTAMP, end_reason = ? WHERE id = ?`
     ).bind(cleanOrNull(body.reason, 300) || 'ended by organizer', appointmentId).run();
     await notifyStudent(c.env.DB, Number(appointment.student_id), 'leadership', 'Leadership role ended',
-      `Your ${appointment.role === 'leader' ? 'leader' : 'assistant'} role ended. ${cleanOrNull(body.reason, 300) || ''}`);
+      `Your ${appointment.role === 'leader' ? 'leader' : 'assistant'} role ended. ${cleanOrNull(body.reason, 300) || ''}`.trim(),
+      '#class-groups/student/leader');
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
       action: 'cgm.leadership.ended', entityType: 'leadership', entityId: appointmentId,
@@ -2000,7 +2010,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     if (granted.length || revoked.length) {
       await notifyStudent(c.env.DB, Number(appointment.student_id), 'leadership', 'Your leadership tools changed',
         `In ${groupName}: ${granted.length ? `you can now ${granted.map(label).join(', ')}. ` : ''}`
-        + `${revoked.length ? `You can no longer ${revoked.map(label).join(', ')}.` : ''}`.trim());
+        + `${revoked.length ? `You can no longer ${revoked.map(label).join(', ')}.` : ''}`.trim(),
+        `#class-groups/student/leader?group=${Number(appointment.group_id)}`);
     }
     await auditCgm(c.env.DB, {
       actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
@@ -2162,7 +2173,8 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
       const label = LEADER_PERMISSION_LABELS[wanted as keyof typeof LEADER_PERMISSION_LABELS] || wanted;
       await notifyStudent(c.env.DB, Number(request.requested_by_student_id), 'leadership',
         'Your organizer opened a tool for you',
-        `“${label}” is now yours in ${groupName} of ${request.activity_name}. Open your leader console to use it.${note ? ` ${note}` : ''}`);
+        `“${label}” is now yours in ${groupName} of ${request.activity_name}. Open your leader console to use it.${note ? ` ${note}` : ''}`,
+        `#class-groups/student/leader?group=${Number(request.group_id)}`);
       await auditCgm(c.env.DB, {
         actorType: 'organizer', actorLabel: member.name, actorProfileId: member.profileId,
         action: 'cgm.leadership.permission_granted_on_request', entityType: 'leadership',

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Archive, ArrowLeft, Bell, CalendarDays, ChevronRight, ClipboardList, GraduationCap, KeyRound, Layers, Link2, ListChecks,
   Dices, Megaphone, Plus, Recycle, RefreshCw, Search, Settings, ShieldCheck, Target, UserCheck, Users, Vote, FileText, X, LogOut,
-  Printer, FileDown, ImageDown,
+  Printer, FileDown, ImageDown, Compass,
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
@@ -270,6 +270,11 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           >
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
+          {/* Home, without editing the address bar. Class & Groups is one
+              place in the society's site; this is the door back to the rest. */}
+          <a href="/" data-testid="cgm-visit-website" className="mini-button" title="Open the CODE Rx website — you stay signed in">
+            <Compass className="mr-1 inline h-3.5 w-3.5" /> Visit CODE Rx
+          </a>
           <button
             type="button"
             className="mini-button"
