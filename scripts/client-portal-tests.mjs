@@ -789,8 +789,8 @@ const main = async () => {
   // 2026-10-31 adds the Sampling game tables (games, teams, draws, events): the
   // multi-team number-drawing game, additive and prefixed `sampling_`.
   check('the 63 pre-existing tables are untouched and the later modules were added',
-    allTables.length === 63 + 11 + 3 + 54 + 4,
-    `${allTables.length} user tables (63 base + 11 client + 3 inbox + 54 CGM + 4 sampling)`);
+    allTables.length === 63 + 11 + 3 + 55 + 4,
+    `${allTables.length} user tables (63 base + 11 client + 3 inbox + 55 CGM + 4 sampling)`);
   check('the signature table hangs off the document, the client and the project',
     db.query('PRAGMA foreign_key_list(client_document_signatures)').length === 3);
   check('the message table hangs off the client, the project and (optionally) the document',

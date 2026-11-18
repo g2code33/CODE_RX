@@ -192,6 +192,60 @@ async function studentCall<T = any>(endpoint: string, options: { method?: string
   }
 }
 
+/**
+ * A student write that is safe to repeat, so an offline tap is never lost.
+ *
+ * The action is handed to the outbox FIRST (so a dead tab keeps it), then
+ * attempted immediately when a connection exists. If the request cannot reach
+ * the server the action stays queued and the student is told plainly that it
+ * will send itself — instead of watching a spinner fail.
+ */
+type OfflineSafeWrite = {
+  endpoint: string;
+  method: string;
+  body: unknown;
+  /** What the student did, in their own words. */
+  label: string;
+};
+
+async function studentWrite(
+  write: OfflineSafeWrite,
+  options: { alwaysAttempt?: boolean } = {},
+): Promise<any> {
+  const { queueAction, dropQueuedAction } = await import('./cgmOutbox');
+  const queued = queueAction(write);
+  const offlineNow = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (offlineNow && !options.alwaysAttempt) {
+    return { queued: true, id: queued.id, message: 'Saved on this device — it will send itself when you are back online.' };
+  }
+  try {
+    const data = await studentCall(write.endpoint, { method: write.method, body: write.body });
+    dropQueuedAction(queued.id);
+    // Anything else waiting behind this one goes out now that we know the
+    // connection is alive.
+    if (queuedCountSafe()) void flushOutboxNow();
+    return data;
+  } catch (failure: any) {
+    const offline = Number(failure?.status || 0) === 0 || failure?.code === 'offline' || failure?.code === 'timeout';
+    if (!offline) { dropQueuedAction(queued.id); throw failure; }
+    return { queued: true, id: queued.id, message: 'Saved on this device — it will send itself when you are back online.' };
+  }
+}
+
+const queuedCountSafe = (): boolean => {
+  try { return Number(localStorage.getItem('codeRx_cgmOutbox') ? JSON.parse(localStorage.getItem('codeRx_cgmOutbox') || '[]').length : 0) > 0; } catch { return false; }
+};
+
+/** Replay everything waiting, reporting what happened. */
+export const flushOfflineActions = async (): Promise<{ sent: number; refused: Array<{ label: string; reason: string }>; remaining: number }> => {
+  const { flushOutbox } = await import('./cgmOutbox');
+  return flushOutbox(async (action) => {
+    await studentCall(action.endpoint, { method: action.method, body: action.body });
+  });
+};
+
+const flushOutboxNow = async () => { try { await flushOfflineActions(); } catch { /* reported next time */ } };
+
 /** Multipart member call (attachments). */
 async function memberFormCall<T = any>(endpoint: string, form: FormData): Promise<T> {
   const release = guardDuplicate('POST', endpoint);
@@ -725,6 +779,12 @@ export const cgmStudent = {
     studentSession.write(data.session);
     return data;
   },
+  // ---------- system notifications on the phone (Web Push) ----------
+  pushPublicKey: () => studentCall<{ publicKey: string | null; enabled: boolean }>('/api/cgm/student/push/public-key'),
+  pushSubscribe: (subscription: any) =>
+    studentCall<{ subscribed: boolean }>('/api/cgm/student/push/subscribe', { method: 'POST', body: { subscription } }),
+  pushUnsubscribe: (endpoint?: string) =>
+    studentCall<{ subscribed: boolean }>('/api/cgm/student/push/unsubscribe', { method: 'POST', body: { endpoint } }),
   logout: async () => {
     try { await studentCall('/api/cgm/student/logout', { method: 'POST', body: {} }); } finally { studentSession.clear(); }
   },
@@ -791,12 +851,24 @@ export const cgmStudent = {
   // seat decides which of them answer 403.
   myLeadership: () => studentCall('/api/cgm/student/leadership'),
   leaderGroup: (groupId: number) => studentCall(`/api/cgm/student/leader/groups/${groupId}`),
+  // Offline-safe: a topic/agenda edit is repeatable, so a dropped connection
+  // queues it instead of losing the leader's typing.
   leaderSaveTopic: (groupId: number, body: { topic?: string; agenda?: string }) =>
-    studentCall(`/api/cgm/student/leader/groups/${groupId}`, { method: 'PATCH', body }),
+    studentWrite({
+      endpoint: `/api/cgm/student/leader/groups/${groupId}`, method: 'PATCH', body,
+      label: 'Update your group topic & agenda',
+    }),
   leaderAnnounce: (groupId: number, body: { title: string; body: string }) =>
     studentCall(`/api/cgm/student/leader/groups/${groupId}/announcements`, { method: 'POST', body }),
+  // Offline-safe: a message to the group is queued and sent on reconnect.
+  // Offline-safe: a message to the group is queued and sent on reconnect.
+  // (It is a plain announcement, so replaying it twice is harmless — and the
+  // outbox refuses to queue the same message twice anyway.)
   leaderNotify: (groupId: number, body: { title?: string; message: string }) =>
-    studentCall(`/api/cgm/student/leader/groups/${groupId}/notify`, { method: 'POST', body }),
+    studentWrite({
+      endpoint: `/api/cgm/student/leader/groups/${groupId}/notify`, method: 'POST', body,
+      label: `Message your group${body?.message ? `: “${String(body.message).slice(0, 60)}”` : ''}`,
+    }),
   leaderScheduleMeeting: (groupId: number, body: { title: string; startsAt: string; agenda?: string; location?: string; durationMinutes?: number }) =>
     studentCall(`/api/cgm/student/leader/groups/${groupId}/meetings`, { method: 'POST', body }),
   leaderCancelMeeting: (meetingId: number, reason?: string) =>

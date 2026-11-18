@@ -80,7 +80,13 @@ export const LeaderConsole = ({ groupId, onBack, onChanged }: { groupId: number;
   const run = async (work: () => Promise<unknown>, note: string) => {
     setBusy(true); setMessage(null);
     try {
-      await work();
+      const result: any = await work();
+      // An offline-safe write answers with `queued` instead of the server's
+      // reply: say so plainly, and do not reload (there is nothing new to read).
+      if (result && (result as any).queued) {
+        setMessage(String((result as any).message || 'Saved on this device — it will send itself when you are back online.'));
+        return;
+      }
       setMessage(note);
       await load();
       onChanged?.();
@@ -225,7 +231,7 @@ export const LeaderConsole = ({ groupId, onBack, onChanged }: { groupId: number;
         <form
           className={`${card} space-y-3`}
           data-testid="cgm-leader-notify-form"
-          onSubmit={(event) => { event.preventDefault(); void run(async () => { await cgmStudent.leaderNotify(groupId, { message: notifyBody }); setNotifyBody(''); }, 'Sent to every member.'); }}
+          onSubmit={(event) => { event.preventDefault(); void run(async () => { const result: any = await cgmStudent.leaderNotify(groupId, { message: notifyBody }); if (!result?.queued) setNotifyBody(''); return result; }, 'Sent to every member.'); }}
         >
           <p className={label}>Message every member</p>
           <p className="text-[11px] font-medium text-slate-500">A short push notification — for a reminder or a change of plan, not for a formal announcement.</p>

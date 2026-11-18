@@ -28,6 +28,14 @@ const section = (title) => console.log(`\n== ${title}`);
 const workspace = src('src/components/ClassGroups/ClassGroupsWorkspace.tsx');
 const studentPortal = src('src/components/ClassGroups/StudentPortal.tsx');
 const leaderConsole = src('src/components/ClassGroups/LeaderConsole.tsx');
+const notifyLib = src('src/lib/cgmNotify.ts');
+const outboxLib = src('src/lib/cgmOutbox.ts');
+const errorBoundary = src('src/components/ErrorBoundary.tsx');
+const pwaCards = src('src/components/ClassGroups/PwaCards.tsx');
+const offlineBanner = src('src/components/ClassGroups/OfflineBanner.tsx');
+const pushLib = src('functions/lib/cgm/push.ts');
+const manifestSrc = src('public/manifest.webmanifest');
+const serviceWorker = src('public/sw.js');
 const leaderRoutesSrc = src('functions/lib/cgm/routes-leader.ts');
 const leaderCoreSrc = src('functions/lib/cgm/leader.ts');
 const cgmCoreSrc = src('functions/lib/cgm/core.ts');
@@ -262,20 +270,20 @@ check('the worker mounts the class & group routes', src('functions/[[path]].ts')
 
 // ===========================================================================
 section('11. Step-5 additions: attachments, reads, reminders, succession, windows, WhatsApp, offline guard, file reports');
-const banner = src('src/components/ClassGroups/ConnectionBanner.tsx');
+const banner = src('src/components/ClassGroups/OfflineBanner.tsx');
 const schemaCgm = src('functions/lib/cgm/schema.ts');
 const schemaVault = src('functions/lib/schema.ts');
 const pdfWriter = src('functions/lib/cgm/pdf.ts');
 
 // Offline & connection state (spec §38)
 check('the connection banner exists with online/offline states and a status role',
-  /ConnectionBanner/.test(banner) && /role="status"/.test(banner) && /offline/i.test(banner));
+  /export const OfflineBanner/.test(banner) && /role="status"/.test(banner) && /offline/i.test(banner));
 check('every module request carries an abort deadline — a dead network shows an error, never an eternal spinner',
   /cgmFetch/.test(client) && /AbortController/.test(client) && /CGM_TIMEOUT_MS = 20_000/.test(client)
   && /The server took too long to answer/.test(client)
   && !/await fetch\(`\$\{API_BASE\}\$\{endpoint\}`/.test(client));
 check('every class & group shell renders the connection banner',
-  /<ConnectionBanner \/>/.test(workspace) && /<ConnectionBanner \/>/.test(studentPortal) && /<ConnectionBanner \/>/.test(phantom));
+  /<OfflineBanner \/>/.test(workspace) && /<OfflineBanner \/>/.test(studentPortal) && /<OfflineBanner \/>/.test(phantom));
 check('mutating calls are guarded against duplicate submissions (in-flight lock → 409)',
   /guardDuplicate/.test(client) && /'duplicate'/.test(client) && /409/.test(client));
 check('a failed fetch raises a real offline error instead of faking a result',
@@ -1936,6 +1944,96 @@ for (const endpoint of [
 }
 check('the leader routes are mounted in the module registration',
   src('functions/class-group-routes.ts').includes('registerCgmLeaderRoutes(app)'));
+
+// ===========================================================================
+section('42. A notice takes you there, a crash cannot blank the page, and the phone hears');
+// ===========================================================================
+check('notifications carry a destination, and the portal honours it',
+  /#class-groups\/student\/leader\?group=/.test(activityRoutesSrc)
+  && /#class-groups\/student\/activity\//.test(activityRoutesSrc)
+  && /#class-groups\/student\/activity\//.test(leaderRoutesSrc)
+  && /const parseStudentDeepLink = \(hash: string\)/.test(studentPortal)
+  && /kind: 'activity', activityId/.test(studentPortal) && /kind: 'leader', groupId/.test(studentPortal));
+check('a notification is opened by tapping it, and that marks it read',
+  /cgm-notification-open-\$\{row\.id\}/.test(studentPortal)
+  && /await cgmStudent\.markRead\(\{ ids: \[Number\(row\.id\)\] \}\)[\s\S]{0,120}onOpenLink/.test(studentPortal));
+check('a deep link is consumed once, so a refresh does not re-navigate over the student',
+  /window\.history\.replaceState\(null, '', '#class-groups\/student'\)/.test(studentPortal));
+check('a broken render cannot blank a module: the three workspaces sit behind a boundary',
+  /export class ErrorBoundary extends Component/.test(errorBoundary)
+  && /getDerivedStateFromError/.test(errorBoundary)
+  && /code-rx-error-reload/.test(errorBoundary)
+  && /<ErrorBoundary label="The student portal"/.test(src('src/App.tsx'))
+  && /<ErrorBoundary label="Class & Group Management"/.test(src('src/App.tsx')));
+check('dead sessions and stale notices are swept where the traffic already is',
+  /export const sweepStudentHousekeeping/.test(cgmService)
+  && /DELETE FROM cgm_student_sessions/.test(cgmService)
+  && /STUDENT_NOTIFICATION_RETENTION_DAYS/.test(cgmService)
+  && /await sweepStudentHousekeeping\(c\.env\.DB\)/.test(studentRoutes));
+check('there is a way back to the website from inside the module, without signing out',
+  /cgm-student-visit-website/.test(studentPortal) && /href="\/"/.test(studentPortal)
+  && /cgm-visit-website/.test(workspace) && /href="\/"/.test(workspace));
+
+// --- installable PWA -------------------------------------------------------
+check('the app is installable: a real manifest with shortcuts and a maskable icon',
+  /"display": "standalone"/.test(manifestSrc)
+  && /"shortcuts"/.test(manifestSrc)
+  && /class-groups\/student\/leader/.test(manifestSrc)
+  && (manifestSrc.match(/"purpose": "maskable"/) || []).length >= 1);
+check('the install card is honest: it uses the real prompt, and on iPhone it says Share → Add to Home Screen',
+  /beforeinstallprompt/.test(pwaCards) && /promptEvent\.prompt\(\)/.test(pwaCards)
+  && /Add to Home Screen/.test(pwaCards) && /isProbablyIos/.test(pwaCards)
+  && /isInstalledApp/.test(pwaCards));
+check('the service worker can draw a real system notification and open it on tap',
+  /self\.addEventListener\('push'/.test(serviceWorker)
+  && /showNotification\(/.test(serviceWorker)
+  && /self\.addEventListener\('notificationclick'/.test(serviceWorker)
+  && /clients\.openWindow/.test(serviceWorker)
+  && /link\.startsWith\('#'\)/.test(serviceWorker) // only in-app destinations
+  && /code-rx-v9/.test(serviceWorker));
+check('permission is asked on a press, never on load, and a denial is explained instead of hidden',
+  /requestNotificationPermission/.test(notifyLib) && /cgm-notify-enable/.test(pwaCards)
+  && /permission === 'denied'/.test(pwaCards) && /padlock by the address/.test(pwaCards));
+
+// --- real Web Push ---------------------------------------------------------
+check('Web Push is implemented without a dependency: VAPID + aes128gcm in WebCrypto',
+  /vapidAuthorization/.test(pushLib) && /ES256/.test(pushLib)
+  && /Content-Encoding: aes128gcm/.test(pushLib) && /WebPush: info/.test(pushLib)
+  && /export const pushToStudent/.test(pushLib));
+check('a dead subscription is deleted instead of retried forever',
+  /response\.status === 404 \|\| response\.status === 410/.test(pushLib)
+  && /DELETE FROM cgm_push_subscriptions/.test(pushLib));
+check('a push failure can never fail the action that caused it',
+  /const deliverToPhone = async \(/.test(cgmService)
+  && /if \(!env\?\.VAPID_PRIVATE_KEY/.test(cgmService)
+  && /await pushToStudent\(env, db, studentId/.test(cgmService));
+check('the device registers itself with the server, and unregisters when paused',
+  /student\/push\/subscribe/.test(studentRoutes) && /student\/push\/unsubscribe/.test(studentRoutes)
+  && /student\/push\/public-key/.test(studentRoutes)
+  && /cgm_push_subscriptions/.test(src('functions/lib/cgm/schema.ts'))
+  && /subscribeToPush/.test(notifyLib) && /pushSubscribe/.test(client));
+check('the VAPID private key is never shipped to the browser',
+  !/VAPID_PRIVATE_KEY/.test(src('src/lib/cgmNotify.ts'))
+  && !/VAPID_PRIVATE_KEY/.test(studentPortal)
+  && /VAPID_PRIVATE_KEY\?: string/.test(src('functions/env.d.ts')));
+
+// --- offline ---------------------------------------------------------------
+check('an offline write is kept on the device instead of lost, and replayed in order',
+  /codeRx_cgmOutbox/.test(outboxLib)
+  && /export const flushOutbox/.test(outboxLib)
+  && /networkDown = true/.test(outboxLib)   // stops at the first real outage
+  && /status >= 400 && status < 500/.test(outboxLib)); // a refusal is final, not retried
+check('the leader’s topic, agenda and group message survive a dropped connection',
+  /leaderSaveTopic: \(groupId: number, body: \{ topic\?: string; agenda\?: string \}\) =>\s*\n\s*studentWrite/.test(client)
+  && /leaderNotify: \(groupId: number, body: \{ title\?: string; message: string \}\) =>\s*\n\s*studentWrite/.test(client)
+  && /Saved on this device — it will send itself/.test(client));
+check('the banner says exactly what is waiting and sends it on reconnect',
+  /cgm-offline-banner/.test(offlineBanner) && /cgm-offline-send-now/.test(offlineBanner)
+  && /window\.addEventListener\('online', goOnline\)/.test(offlineBanner)
+  && /waiting to send: \{queue\.map/.test(offlineBanner)
+  && /saved on this device/.test(offlineBanner)
+  // Both shells mount it (the testid lives in the component itself).
+  && /<OfflineBanner \/>/.test(studentPortal) && /<OfflineBanner \/>/.test(workspace));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

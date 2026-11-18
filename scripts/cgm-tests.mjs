@@ -210,7 +210,7 @@ check('the worker boots and answers', health.status === 200 || health.status ===
 // (cgm_group_meetings, cgm_group_leader_requests). Pinned so a dropped table is
 // loud, and the two leader tables are asserted BY NAME below.
 check('the schema created every class & group table',
-  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 54,
+  q("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").length === 55,
   `${q("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'")[0]?.c} tables`);
 check('the leader console tables exist by name',
   q("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cgm_group_meetings','cgm_group_leader_requests')").length === 2);
@@ -2034,6 +2034,91 @@ const audits = ['cgm.leader.topic_updated', 'cgm.leader.announcement_created', '
 check('20b.66 — every leader action lands in the audit trail',
   audits.every((action) => q1('SELECT COUNT(*) c FROM cgm_audit WHERE action = ?', action).c >= 1),
   audits.filter((action) => q1('SELECT COUNT(*) c FROM cgm_audit WHERE action = ?', action).c === 0).join(','));
+
+// ---------------------------------------------------------------------------
+// 20c. System notifications on the phone (Web Push) + notice destinations
+// ---------------------------------------------------------------------------
+section('20c. Push subscriptions and notice destinations');
+
+const pushKey = await studentCall('GET', '/api/cgm/student/push/public-key', undefined, leaderSession);
+check('the push public key is served to a signed-in student, and says whether push is on',
+  pushKey.status === 200 && typeof pushKey.json?.data?.enabled === 'boolean'
+  && (pushKey.json?.data?.enabled === false || /^[A-Za-z0-9_-]{80,}$/.test(String(pushKey.json?.data?.publicKey || ''))),
+  JSON.stringify(pushKey.json?.data || {}).slice(0, 120));
+const pushKeyAnon = await call('GET', '/api/cgm/student/push/public-key');
+check('the public key is not a secret — it answers without a session too',
+  pushKeyAnon.status === 200 && 'publicKey' in (pushKeyAnon.json?.data || {}));
+
+const fakeSubscription = {
+  endpoint: `https://fcm.googleapis.com/fcm/send/TEST-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  keys: { p256dh: 'BM' + 'a'.repeat(85), auth: 'b'.repeat(22) },
+};
+const subscribe = await studentCall('POST', '/api/cgm/student/push/subscribe', { subscription: fakeSubscription }, leaderSession);
+check('a device registers its push subscription',
+  subscribe.status === 200 && subscribe.json?.data?.subscribed === true,
+  `status ${subscribe.status} ${subscribe.text?.slice(0, 140)}`);
+const storedSubscription = q1('SELECT student_id, endpoint, p256dh, auth FROM cgm_push_subscriptions WHERE endpoint = ?', fakeSubscription.endpoint);
+check('the subscription is stored against that student, with its own keys only',
+  Number(storedSubscription?.student_id) > 0 && storedSubscription?.p256dh === fakeSubscription.keys.p256dh
+  && storedSubscription?.auth === fakeSubscription.keys.auth,
+  JSON.stringify(storedSubscription || {}).slice(0, 160));
+const resubscribe = await studentCall('POST', '/api/cgm/student/push/subscribe', { subscription: fakeSubscription }, leaderSession);
+check('subscribing twice on the same device updates one row instead of duplicating it',
+  resubscribe.status === 200
+  && q1('SELECT COUNT(*) c FROM cgm_push_subscriptions WHERE endpoint = ?', fakeSubscription.endpoint).c === 1);
+const junkSubscription = await studentCall('POST', '/api/cgm/student/push/subscribe',
+  { subscription: { endpoint: 'not-a-url', keys: {} } }, leaderSession);
+check('a junk subscription is refused outright', junkSubscription.status === 400, `status ${junkSubscription.status}`);
+
+// A leader message must carry a destination the phone can open. Section 20b
+// ended its seat, so this block uses the activity's OTHER group and appoints
+// its own leader there — the peer, so "an ordinary member has no seats" above
+// stays true.
+const pushGroupId = Number(leaderGroups[1] || 0);
+// The group is emptied by earlier removals — make sure the peer is on it.
+await memberCall('POST', `/api/cgm/activities/${leaderActivityId}/assign-student`,
+  { studentId: peerStudentId, groupId: pushGroupId }, amaToken);
+// The reader of the notice: the other student, on the same group, not the actor.
+await memberCall('POST', `/api/cgm/activities/${leaderActivityId}/assign-student`,
+  { studentId: leaderStudentId, groupId: pushGroupId }, amaToken);
+const pushMemberRow = q1(
+  "SELECT ga.group_id FROM cgm_group_assignments ga WHERE ga.group_id = ? AND ga.student_id = ?",
+  pushGroupId, peerStudentId,
+) || q1(
+  "SELECT group_id FROM cgm_students WHERE id = ?", peerStudentId,
+);
+const pushSeatRes = await memberCall('POST', `/api/cgm/groups/${pushGroupId}/leaders`,
+  { studentId: peerStudentId, role: 'leader' }, amaToken);
+const pushSeat = q1(
+  "SELECT id FROM cgm_leadership_appointments WHERE group_id = ? AND student_id = ? AND status = 'active'",
+  pushGroupId, peerStudentId,
+);
+await memberCall('PATCH', `/api/cgm/leadership/${Number(pushSeat?.id)}/permissions`, {
+  permissions: ['view_members', 'notify_members', 'coordinate'],
+}, amaToken);
+check('20c.1 — a fresh leader seat exists for the push checks',
+  pushGroupId > 0 && Boolean(pushSeat?.id), `group=${pushGroupId} status=${pushSeatRes.status}`);
+const beforeNoticeIds = (await studentCall('GET', '/api/cgm/student/notifications', undefined, leaderSession)).json?.data || [];
+const notifyWithLink = await studentCall('POST', `/api/cgm/student/leader/groups/${pushGroupId}/notify`,
+  { message: 'Bring the datasheet tomorrow.' }, peerSession);
+check('the leader still messages the group with push configured', notifyWithLink.status === 200, `status ${notifyWithLink.status}`);
+const afterNotices = (await studentCall('GET', '/api/cgm/student/notifications', undefined, leaderSession)).json?.data || [];
+const newestNotice = afterNotices.find((row) => !beforeNoticeIds.some((old) => Number(old.id) === Number(row.id)));
+check('that notice carries the group activity as its destination',
+  Boolean(newestNotice?.link) && /^#class-groups\/student\/activity\/\d+$/.test(String(newestNotice.link)),
+  JSON.stringify(newestNotice || {}).slice(0, 200));
+check('an appointment notice points at the leader console for that group',
+  (afterNotices || []).some((row) => /^#class-groups\/student\/leader\?group=\d+$/.test(String(row.link || '')))
+  || Boolean(q1("SELECT COUNT(*) c FROM cgm_student_notifications WHERE link LIKE '#class-groups/student/leader?group=%'").c),
+  'no leader deep link found');
+
+const unsubscribe = await studentCall('POST', '/api/cgm/student/push/unsubscribe', { endpoint: fakeSubscription.endpoint }, leaderSession);
+check('a paused device is removed from the push list',
+  unsubscribe.status === 200
+  && q1('SELECT COUNT(*) c FROM cgm_push_subscriptions WHERE endpoint = ?', fakeSubscription.endpoint).c === 0);
+const sweepNotice = q1('SELECT COUNT(*) c FROM cgm_student_notifications WHERE created_at < datetime(\'now\', \'-180 days\')');
+check('the housekeeping sweep keeps recent notices and only removes genuinely old ones',
+  Number(sweepNotice?.c) === 0, `old notices left: ${sweepNotice?.c}`);
 
 // ===========================================================================
 // 21. Governance (step 10, spec §5/§6/§30) — runs last: the transfer test

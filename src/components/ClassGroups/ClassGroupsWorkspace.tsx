@@ -17,7 +17,7 @@ import { appDialog } from '../AppDialog';
 import { RecentItems } from '../RecentItems';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { auth as memberAuth } from '../../lib/cloudflare';
-import { ConnectionBanner } from './ConnectionBanner';
+import { OfflineBanner } from './OfflineBanner';
 import { ForceGetWorkspace } from './ForceGetWorkspace';
 
 /**
@@ -211,7 +211,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
 
   return (
     <div className="cgm-shell">
-      <ConnectionBanner />
+      <OfflineBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <button

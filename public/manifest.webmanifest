@@ -1,15 +1,18 @@
 {
-  "name": "CODE Rx SOCIETY — Coding the Future of Pharmacy",
+  "name": "CODE Rx — Classes & Groups",
   "short_name": "CODE Rx",
-  "description": "Where Pharmacy meets Technology, Innovation & Artificial Intelligence. Join the elite community of healthcare innovators.",
+  "description": "Class & Group Management by CODE Rx SOCIETY: your classes, groups, leader console, attendance and notices.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait-primary",
   "background_color": "#ffffff",
   "theme_color": "#059669",
   "categories": ["education", "health", "technology"],
+  "lang": "en",
+  "dir": "ltr",
   "icons": [
     {
       "src": "/CODE%20RX11.png",
@@ -22,6 +25,26 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "My classes",
+      "short_name": "Classes",
+      "url": "/#class-groups/student",
+      "description": "Open the student portal"
+    },
+    {
+      "name": "My group (leader)",
+      "short_name": "Leader",
+      "url": "/#class-groups/student/leader",
+      "description": "Open your leader console"
+    },
+    {
+      "name": "Notifications",
+      "short_name": "Notices",
+      "url": "/#class-groups/student/notifications",
+      "description": "See what changed"
     }
   ]
 }

@@ -9,7 +9,9 @@ import {
   listRememberedAccounts, rememberAccount, type RememberedAccount,
 } from '../../lib/cgmRemember';
 import { RandomGroupReveal } from './RandomGroupReveal';
-import { ConnectionBanner } from './ConnectionBanner';
+import { OfflineBanner } from './OfflineBanner';
+import { InstallAppCard, NotifyCard } from './PwaCards';
+import { isPushEnabled, showSystemNotification, subscribeToPush } from '../../lib/cgmNotify';
 import { QrBlock } from './ClassGroupsWorkspace';
 import { useCgmNoZoom } from './noZoom';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
@@ -1034,11 +1036,60 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
     try { window.history.replaceState(null, '', '#class-groups/student'); } catch { /* older browsers */ }
   }, []);
 
+  // System notices for things that happen while the portal is open.
+  //
+  // The portal already polls the student's own state; when the notice list
+  // grows, the newest unseen entries are mirrored to the phone's notification
+  // shade (through the service worker, so the app icon and tap-to-open are the
+  // real ones). The first read primes the list quietly — nobody gets a burst of
+  // old notices the moment they sign in.
+  const seenNoticeIds = useRef<Set<number> | null>(null);
+  useEffect(() => {
+    if (!session) { seenNoticeIds.current = null; return; }
+    let alive = true;
+    const checkNotices = async () => {
+      try {
+        const rows: any[] = await cgmStudent.notifications();
+        if (!alive || !Array.isArray(rows)) return;
+        const ids = new Set<number>(rows.map((row) => Number(row.id)));
+        if (seenNoticeIds.current === null) { seenNoticeIds.current = ids; return; }
+        const fresh = rows.filter((row) => !seenNoticeIds.current?.has(Number(row.id)) && !row.read_at);
+        seenNoticeIds.current = ids;
+        if (!isPushEnabled()) return;
+        for (const row of fresh.slice(0, 3)) {
+          await showSystemNotification(String(row.title || 'CODE Rx'), String(row.body || ''), row.link ? String(row.link) : null);
+        }
+      } catch { /* a missed ping must never break the portal */ }
+    };
+    void checkNotices();
+    // If this device already agreed to notifications, make sure the server
+    // still knows about it (a reinstall, a cleared cache, a new push key).
+    if (isPushEnabled() && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      void subscribeToPush(
+        () => cgmStudent.pushPublicKey(),
+        (subscription) => cgmStudent.pushSubscribe(subscription),
+      );
+    }
+    const timer = window.setInterval(() => { void checkNotices(); }, 60_000);
+    const onVisible = () => { if (!document.hidden) void checkNotices(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { alive = false; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [session]);
+
   useEffect(() => {
     consumeDeepLink(window.location.hash);
     const onHash = () => consumeDeepLink(window.location.hash);
+    // The service worker tells an open app where a tapped notification points.
+    const onWorkerMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (data && data.type === 'notification-opened' && typeof data.link === 'string') consumeDeepLink(data.link);
+    };
     window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
+    navigator.serviceWorker?.addEventListener?.('message', onWorkerMessage);
+    return () => {
+      window.removeEventListener('hashchange', onHash);
+      navigator.serviceWorker?.removeEventListener?.('message', onWorkerMessage);
+    };
   }, [consumeDeepLink]);
 
   const refreshMe = useCallback(async () => {
@@ -1095,7 +1146,7 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
 
   return (
     <div className="cgm-shell">
-      <ConnectionBanner />
+      <OfflineBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
@@ -2586,6 +2637,8 @@ const NotificationsView = ({ onChanged, onOpenLink }: { onChanged: () => void; o
   };
   return (
     <div className="space-y-4">
+      <InstallAppCard card={card} label={label} />
+      <NotifyCard card={card} label={label} />
       <div className="flex items-center justify-between">
         <div className={card + ' flex-1'}><p className={label}>Notifications</p></div>
         <button type="button" className="mini-button ml-3" onClick={async () => { await cgmStudent.markRead({ all: true }); await load(); onChanged(); }}>Mark all read</button>

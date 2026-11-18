@@ -898,6 +898,24 @@ CREATE TABLE IF NOT EXISTS cgm_notification_prefs (
 );
 
 
+-- One row per browser/device that agreed to receive system notifications.
+-- Only the push endpoint and its own keys are stored; nothing about the student
+-- beyond who owns the row, and the endpoint is unique so a re-subscribe updates
+-- instead of duplicating. Dead endpoints are deleted on the first 404/410.
+CREATE TABLE IF NOT EXISTS cgm_push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  user_agent TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(student_id) REFERENCES cgm_students(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cgm_push_student ON cgm_push_subscriptions(student_id);
+
 CREATE TABLE IF NOT EXISTS cgm_approval_delegations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   member_profile_id INTEGER NOT NULL,

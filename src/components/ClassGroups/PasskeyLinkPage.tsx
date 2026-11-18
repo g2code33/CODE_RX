@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, KeyRound, ShieldCheck, WifiOff } from 'lucide-react';
 import { cgmStudent } from '../../lib/cgm';
-import { ConnectionBanner } from './ConnectionBanner';
+import { OfflineBanner } from './OfflineBanner';
 import { useCgmNoZoom } from './noZoom';
 
 /**
@@ -80,7 +80,7 @@ export const PasskeyLinkPage = ({ code, onExit }: { code: string; onExit: () => 
 
   return (
     <div className="cgm-shell">
-      <ConnectionBanner />
+      <OfflineBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <img src="/CGP.jpg" alt="Classes & Groups" className="h-9 w-9 rounded-xl object-cover object-[50%_38%] shadow-sm ring-1 ring-emerald-900/20" loading="lazy" decoding="async" />

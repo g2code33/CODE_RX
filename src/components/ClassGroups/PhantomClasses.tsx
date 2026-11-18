@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ClipboardList, FileText, RefreshCw, ShieldCheck, Target, Users } from 'lucide-react';
 import { cgm, type ForceGetConflict } from '../../lib/cgm';
-import { ConnectionBanner } from './ConnectionBanner';
+import { OfflineBanner } from './OfflineBanner';
 import { appDialog } from '../AppDialog';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { RecentItems } from '../RecentItems';
@@ -853,7 +853,7 @@ export const PhantomClassGroups = ({ onExit, embedded, onAttentionChange }: {
 
   return (
     <div className="cgm-shell">
-      <ConnectionBanner />
+      <OfflineBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
           <button

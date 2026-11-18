@@ -27,6 +27,16 @@ export interface Env {
   /** Optional Telegram webhook secret token; configure only in Cloudflare. */
   TELEGRAM_WEBHOOK_SECRET?: string;
   SITE_URL?: string;
+  /**
+   * Web Push (system notifications on the phone). Optional: without these the
+   * portal still shows in-app notices and raises system notifications while it
+   * is open. Set all three to deliver notices while the app is closed.
+   *   node scripts/generate-vapid-keys.mjs
+   */
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  /** mailto: or https: contact required by the push spec. */
+  VAPID_SUBJECT?: string;
   ASSETS?: Fetcher;
   // EmailJS (optional — for email notifications)
   EMAILJS_PUBLIC_KEY?: string;

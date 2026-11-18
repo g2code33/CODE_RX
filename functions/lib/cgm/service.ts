@@ -330,6 +330,28 @@ export const restoreAssignment = async (
 // registration decisions are security-relevant and always delivered.
 const CRITICAL_NOTIFICATION_CATEGORIES = new Set(['security', 'registration']);
 
+/**
+ * The same notice, on the student's phone.
+ *
+ * The in-app list is the record and is always written first; this is the extra
+ * hop to the notification shade. It runs only when the deployment is given
+ * VAPID keys, and it can never fail the action that caused it.
+ */
+const deliverToPhone = async (
+  env: any,
+  db: D1Database,
+  studentId: number,
+  title: string,
+  body: string,
+  link?: string | null,
+) => {
+  if (!env?.VAPID_PRIVATE_KEY || !env?.VAPID_PUBLIC_KEY) return;
+  try {
+    const { pushToStudent } = await import('./push');
+    await pushToStudent(env, db, studentId, { title, body, link: link || null });
+  } catch { /* a missed push is not an error the student should ever see */ }
+};
+
 export const notifyStudent = async (
   db: D1Database,
   studentId: number | null | undefined,
@@ -338,6 +360,7 @@ export const notifyStudent = async (
   body: string,
   link?: string | null,
   dedupeKey?: string | null,
+  env?: any,
 ) => {
   if (!studentId) return;
   try {
@@ -360,11 +383,13 @@ export const notifyStudent = async (
       ).bind(studentId, category.slice(0, 60), title.slice(0, 180), body.slice(0, 2000),
         link ? String(link).slice(0, 320) : null, String(dedupeKey).slice(0, 160),
         studentId, String(dedupeKey).slice(0, 160)).run();
+      await deliverToPhone(env, db, studentId, title, body, link);
       return;
     }
     await db.prepare(
       'INSERT INTO cgm_student_notifications (student_id, category, title, body, link) VALUES (?, ?, ?, ?, ?)'
     ).bind(studentId, category.slice(0, 60), title.slice(0, 180), body.slice(0, 2000), link ? String(link).slice(0, 320) : null).run();
+    await deliverToPhone(env, db, studentId, title, body, link);
   } catch (error) {
     console.warn('[code-rx] student notification failed (non-fatal):', error);
   }
@@ -515,15 +540,23 @@ export const STUDENT_NOTIFICATION_RETENTION_DAYS = 180;
 
 export const sweepStudentHousekeeping = async (db: D1Database): Promise<void> => {
   try {
+    // SQLite has no DELETE … LIMIT in the form D1 accepts, so the cap is done
+    // by id: batch work, never a table-wide stall, and it runs again next time.
     await db.prepare(
       `DELETE FROM cgm_student_sessions
-       WHERE revoked_at IS NOT NULL OR expires_at < datetime('now', '-30 days')
-       LIMIT 200`
+       WHERE id IN (
+         SELECT id FROM cgm_student_sessions
+         WHERE revoked_at IS NOT NULL OR expires_at < datetime('now', '-30 days')
+         LIMIT 200
+       )`
     ).run();
     await db.prepare(
       `DELETE FROM cgm_student_notifications
-       WHERE created_at < datetime('now', '-${STUDENT_NOTIFICATION_RETENTION_DAYS} days')
-       LIMIT 200`
+       WHERE id IN (
+         SELECT id FROM cgm_student_notifications
+         WHERE created_at < datetime('now', '-${STUDENT_NOTIFICATION_RETENTION_DAYS} days')
+         LIMIT 200
+       )`
     ).run();
   } catch (error) {
     console.warn('[code-rx] housekeeping skipped (non-fatal):', error);

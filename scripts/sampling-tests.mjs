@@ -673,11 +673,11 @@ section('11. Existing surfaces are untouched');
 check('the Class & Group module still answers',
   (await memberCall('GET', '/api/cgm/organizer/status', undefined, ownerToken)).status === 200);
 check('site content still answers', (await call('GET', '/api/site-content')).status === 200 || (await call('GET', '/api/site-content')).status === 404);
-// 54 CGM tables: the module's original 51, plus cgm_passkey_links, plus the
+// 55 CGM tables: the module's original 51, plus cgm_passkey_links, cgm_push_subscriptions, plus the
 // leader console's cgm_group_meetings and cgm_group_leader_requests. Pinned so
 // a dropped table is loud, never silent.
 check('the CGM tables are still all present',
-  Number(q1("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").c) === 54);
+  Number(q1("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name LIKE 'cgm_%'").c) === 55);
 
 // ---------------------------------------------------------------------------
 console.log(`\nSAMPLING TESTS: ${passed} passed, ${failures.length} failed`);

@@ -1,16 +1,15 @@
-// CODE Rx SOCIETY - Service Worker (PWA)
-// Keeps the app shell available for an offline launch; API requests are never
-// cached.
+// CODE Rx SOCIETY — Service Worker (PWA + system notifications)
 //
-// The shell is served NETWORK FIRST. It used to be cache-first, which meant a
-// returning visitor kept the OLD build until the cache name was bumped by hand —
-// a deploy that shipped fixes and copy changes nobody could see. Now every
-// online launch takes the live build and only falls back to the cache when the
-// network is gone.
+// Two jobs:
+//   1. Keep the app shell available so the portal opens offline, and take the
+//      LIVE build whenever the network is there (cache-first used to keep an
+//      old build visible for days — that lesson is preserved below).
+//   2. Receive push messages and show them as real system notifications, with
+//      the phone's own notification shade, icon and tap-to-open behaviour.
 //
-// Still bump this on every release: an old worker installed with a different
-// cache name purges its stale shell on activate.
-const CACHE = 'code-rx-v8';
+// Bump CACHE on every release: an old worker with a different cache name
+// purges its stale shell on activate.
+const CACHE = 'code-rx-v9';
 const CORE = [
   '/',
   '/index.html',
@@ -18,7 +17,6 @@ const CORE = [
   '/CODE%20RX11.png',
   '/manifest.webmanifest',
 ];
-
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -44,6 +42,54 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'skip-waiting') self.skipWaiting();
 });
 
+// ---------------------------------------------------------------------------
+// Push: a real system notification, even when the app is closed.
+// ---------------------------------------------------------------------------
+self.addEventListener('push', (event) => {
+  let payload = {};
+  try { payload = event.data ? event.data.json() : {}; } catch { payload = { body: event.data ? event.data.text() : '' }; }
+  const title = payload.title || 'CODE Rx — Classes & Groups';
+  const body = payload.body || 'You have a new notice.';
+  // Where a tap lands. Only in-app addresses are honoured, so a push can never
+  // redirect a student somewhere the app does not own.
+  const link = typeof payload.link === 'string' && payload.link.startsWith('#') ? payload.link : '#class-groups/student/notifications';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      icon: '/CODE%20RX11.png',
+      badge: '/CODE%20RX11.png',
+      tag: payload.tag || 'code-rx-notice',
+      renotify: Boolean(payload.tag),
+      data: { link },
+      vibrate: [80, 40, 80],
+      requireInteraction: false,
+    })
+  );
+});
+
+// A tap focuses the app if it is open (and jumps to the right screen), or opens
+// it at that screen if it is not.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const link = (event.notification.data && event.notification.data.link) || '#class-groups/student/notifications';
+  const target = new URL(`/${link}`, self.location.origin).href;
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url.startsWith(self.location.origin) && 'focus' in client) {
+          client.postMessage({ type: 'notification-opened', link });
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(target);
+    })
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Fetch: shell network-first (a deploy is live on the next visit), content
+// cache-first with a background refresh. API traffic is never cached.
+// ---------------------------------------------------------------------------
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -52,9 +98,6 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
 
-  // A page load (and the shell itself) always tries the network first, so a
-  // deploy is live on the very next visit; the cached copy is the offline
-  // fallback, never the default answer.
   const isShell = request.mode === 'navigate'
     || url.pathname === '/' || url.pathname === '/index.html';
 
@@ -73,8 +116,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Other same-origin GETs (logos, manifest) are cache-first with a refresh in
-  // the background — they are content, not the app.
   event.respondWith(
     caches.match(request).then((cached) => {
       const fetched = fetch(request)

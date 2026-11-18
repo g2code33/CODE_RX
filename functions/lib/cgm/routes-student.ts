@@ -401,6 +401,71 @@ export const registerCgmStudentRoutes = (app: CgmApp) => {
     }, 200, sessionCookieFree);
   });
 
+  // -------------------------------------------------------------------------
+  // System notifications on the phone (Web Push)
+  // -------------------------------------------------------------------------
+  // The browser hands us its push endpoint and keys; we keep one row per
+  // device. The public VAPID key is served here so the client never hard-codes
+  // it, and push is simply "not configured" when the deployment has no keys —
+  // the in-app notices keep working exactly as before.
+  app.get('/api/cgm/student/push/public-key', async (c: any) => {
+    const publicKey = String((c.env as any).VAPID_PUBLIC_KEY || '').trim();
+    return c.json({
+      success: true,
+      data: { publicKey: publicKey || null, enabled: Boolean(publicKey && (c.env as any).VAPID_PRIVATE_KEY) },
+    });
+  });
+
+  app.post('/api/cgm/student/push/subscribe', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    if (!throttle(c, 20, 3600)) return bad(c, 'Too many attempts. Try again later.', 429);
+    const body = await readBody(c);
+    const subscription = body?.subscription || body || {};
+    const endpoint = String(subscription.endpoint || '').trim();
+    const p256dh = String(subscription.keys?.p256dh || subscription.p256dh || '').trim();
+    const auth = String(subscription.keys?.auth || subscription.auth || '').trim();
+    // The endpoint must be a real push service address; anything else is junk.
+    if (!/^https:\/\//i.test(endpoint) || endpoint.length > 900 || !p256dh || !auth) {
+      return bad(c, 'That notification subscription is not valid.');
+    }
+    await ensureLeaderSchema(c.env.DB).catch(() => undefined);
+    // One row per endpoint: re-subscribing on the same device updates it, and a
+    // different student signing in on that device takes ownership of it.
+    await c.env.DB.prepare(
+      `INSERT INTO cgm_push_subscriptions (student_id, endpoint, p256dh, auth, user_agent)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(endpoint) DO UPDATE SET
+         student_id = excluded.student_id, p256dh = excluded.p256dh,
+         auth = excluded.auth, user_agent = excluded.user_agent,
+         last_seen_at = CURRENT_TIMESTAMP`
+    ).bind(
+      Number(student.id), endpoint, p256dh.slice(0, 200), auth.slice(0, 200),
+      String(c.req.header('user-agent') || '').slice(0, 300) || null,
+    ).run();
+    await auditCgm(c.env.DB, {
+      actorType: 'student', actorLabel: student.full_name, actorStudentId: Number(student.id),
+      action: 'cgm.student.push_subscribed', entityType: 'student', entityId: Number(student.id),
+    });
+    return c.json({ success: true, data: { subscribed: true } });
+  });
+
+  app.post('/api/cgm/student/push/unsubscribe', async (c: any) => {
+    const student = await requireStudent(c);
+    if (!student) return c.json({ success: false, error: 'Student session required' }, 401);
+    const body = await readBody(c);
+    const endpoint = String(body?.endpoint || '').trim();
+    if (endpoint) {
+      await c.env.DB.prepare(
+        'DELETE FROM cgm_push_subscriptions WHERE endpoint = ? AND student_id = ?'
+      ).bind(endpoint, Number(student.id)).run();
+    } else {
+      await c.env.DB.prepare('DELETE FROM cgm_push_subscriptions WHERE student_id = ?')
+        .bind(Number(student.id)).run();
+    }
+    return c.json({ success: true, data: { subscribed: false } });
+  });
+
   app.post('/api/cgm/student/logout', async (c: any) => {
     const student = await requireStudent(c);
     if (student) {
