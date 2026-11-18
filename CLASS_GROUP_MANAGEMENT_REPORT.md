@@ -355,7 +355,7 @@ revoked; suspended classes still accepted student actions.
    invalidate the previous link.
 6. **Module flag:** enable via PHANTOM → Class & Groups (`class_groups_enabled = '1'`);
    routes 404 while disabled, so the site can ship dark.
-7. **PWA:** `public/sw.js` cache is `code-rx-v7` (bump on the next shell change);
+7. **PWA:** `public/sw.js` cache is `code-rx-v9` (bump on the next shell change);
    the SW caches the shell only and never `/api/*`; `manifest.webmanifest`
    unchanged.
 8. **CI/CD:** `.github/workflows/deploy.yml` runs `npm ci`, the TypeScript
@@ -474,3 +474,55 @@ edit the roster — whoever may delete may undo.
   (cache only as the offline fallback), the cache name moved to `code-rx-v8`
   (purging the old shell on activate), and `main.tsx` registers the worker with
   `updateViaCache: 'none'` and reloads once when a new worker takes control.
+
+### Phone notifications, installable app, honest offline, readable trail (2026-11-17)
+
+Four requests, one round. **Email was explicitly excluded** and no email path
+was added anywhere.
+
+- **Notices take you there.** Every student notification now stores a `link`
+  (`#class-groups/student/activity/<id>`, `…/leader?group=<id>`,
+  `…/notifications`) and the portal has an **Open** button per notice plus a
+  parser that consumes a deep link exactly once (the hash is rewritten to
+  `#class-groups/student` afterwards, so a refresh does not re-navigate over
+  whatever the student opened next). `sweepStudentHousekeeping` prunes dead
+  sessions (revoked, or expired 30+ days) and notices older than
+  `STUDENT_NOTIFICATION_RETENTION_DAYS`, batched by id because
+  `DELETE … LIMIT` is not valid SQLite.
+- **The phone itself rings.** Real Web Push, no dependency: VAPID ES256 JWTs and
+  aes128gcm payloads are built in `functions/lib/cgm/push.ts` on WebCrypto.
+  `deliverToPhone` is called from *both* `notifyStudent` branches and can never
+  fail the action that caused it — no keys means it silently no-ops and only the
+  in-app notice is written. Dead subscriptions are deleted on 404/410.
+  - `GET  /api/cgm/student/push/public-key` → `{ publicKey, enabled }`
+  - `POST /api/cgm/student/push/subscribe` (throttle 20/h, https endpoint only,
+    upsert on `endpoint`) and `…/unsubscribe`
+  - **Production setup:** `node scripts/generate-vapid-keys.mjs`, then set
+    `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` as Pages secrets.
+    The pair in the local `.dev.vars` is for development only.
+- **Installable, on both phones.** `public/manifest.webmanifest` (standalone,
+  one logo, maskable, shortcuts into the portal / leader console / notifications)
+  and an `InstallAppCard` that uses the real `beforeinstallprompt` where it
+  exists and spells out the iPhone Share → **Add to Home Screen** path where it
+  does not. Permission is asked on a press, never on load: **iOS only delivers
+  Web Push to an installed app**, so asking on load wastes the one prompt the
+  student gets. A denial is explained rather than hidden.
+- **Offline keeps the work.** `src/lib/cgmOutbox.ts` holds a safe-to-repeat write
+  on the device *before* the request is attempted, replays it in order when the
+  connection returns (or on the next load), treats a 4xx as final, and refuses to
+  queue the same action twice. Leader topic/agenda and group messages go through
+  it, so a dropped signal no longer eats the typing. `OfflineBanner` replaced the
+  old connection banner everywhere and states exactly what is waiting, with a
+  **Send now** press.
+- **The trail is now readable.** `GET /api/cgm/classes/:id/audit` (same
+  `generate_reports` permission the audit CSV needed) returns entries with area
+  grouping, search and backwards paging; runs of the same action by the same
+  actor are counted once (`3× in a row`) rather than repeated. The **Activity
+  Trail** screen shows only rows the server actually stored.
+- **Keyboard and screen readers.** A skip link first in the tab order lands focus
+  in a named, focusable `<main>`; drawer toggles now announce what they will do
+  and which panel they open; results use `aria-live`/`aria-atomic`; the unnamed
+  fields were named; focus rings are explicit inside `main`/`nav`; reduced motion
+  is honoured.
+- **One logo everywhere:** `/CODE%20RX11.png`, including manifest icons and the
+  notification icon/badge.
