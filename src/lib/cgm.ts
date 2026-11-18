@@ -715,6 +715,16 @@ export const cgm = {
   phantomClassDetail: (classId: number) => memberCall(`/api/cgm/phantom/classes/${classId}`),
   phantomClassAction: (classId: number, action: 'approve' | 'reject' | 'correction' | 'suspend' | 'reinstate' | 'archive', reason?: string) =>
     memberCall(`/api/cgm/phantom/classes/${classId}/${action}`, { method: 'POST', body: { reason } }),
+  /** The class-wide organizer audit view (filterable, grouped, paged). */
+  classAudit: (classId: number, options: { area?: string; q?: string; before?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (options.area) params.set('area', options.area);
+    if (options.q) params.set('q', options.q);
+    if (options.before) params.set('before', String(options.before));
+    if (options.limit) params.set('limit', String(options.limit));
+    const query = params.toString();
+    return memberCall(`/api/cgm/classes/${classId}/audit${query ? `?${query}` : ''}`);
+  },
   phantomAudit: (classId?: number, action?: string) => {
     const params = new URLSearchParams();
     if (classId) params.set('classId', String(classId));

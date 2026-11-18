@@ -153,7 +153,7 @@ export const LeaderConsole = ({ groupId, onBack, onChanged }: { groupId: number;
       </div>
 
       {message && (
-        <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800" data-testid="cgm-leader-message">{message}</div>
+        <div role="status" aria-live="polite" aria-atomic="true" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800" data-testid="cgm-leader-message">{message}</div>
       )}
 
       <div className="flex flex-wrap gap-1.5" data-testid="cgm-leader-tabs">

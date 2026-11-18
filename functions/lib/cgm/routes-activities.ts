@@ -4533,6 +4533,103 @@ export const registerCgmActivityRoutes = (app: CgmApp) => {
     },
   };
 
+  /**
+   * The class-wide organizer audit view.
+   *
+   * The audit trail already recorded everything; what was missing was a way to
+   * READ it without downloading a CSV. This is that view: one class, filtered
+   * and grouped by area, with each entry saying who did what to whom and — for
+   * the noisy families — how many similar entries sit right behind it, so a
+   * hundred "student logged in" rows do not bury the one membership approval
+   * the organizer is looking for.
+   *
+   * Nothing here is inferred: an entry is shown only if the audit row exists,
+   * and the human sentence is built from the stored action + entity + context.
+   */
+  app.get('/api/cgm/classes/:id/audit', async (c: any) => {
+    const member = await memberFromRequest(c);
+    if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);
+    const classId = Number(c.req.param('id'));
+    const guard = await requireClassPermission(c, member, classId, 'generate_reports' as ClassPermission);
+    if (!guard.ok) return guard.response;
+
+    const area = clean(c.req.query('area'), 40) || 'all';
+    const query = clean(c.req.query('q'), 80);
+    const limit = Math.max(1, Math.min(200, Number(c.req.query('limit') || 100)));
+    const before = c.req.query('before') ? Number(c.req.query('before')) : null;
+
+    const params: any[] = [classId];
+    let where = 'class_id = ?';
+    if (before) { where += ' AND id < ?'; params.push(before); }
+    if (query) { where += ' AND (action LIKE ? OR actor_label LIKE ? OR entity_type LIKE ?)'; params.push(`%${query}%`, `%${query}%`, `%${query}%`); }
+    const rows = await asRows<any>(c.env.DB.prepare(
+      `SELECT id, actor_type, actor_label, action, entity_type, entity_id, activity_id, context_json, created_at
+       FROM cgm_audit WHERE ${where} ORDER BY id DESC LIMIT ?`
+    ).bind(...params, area === 'all' ? limit : limit * 4));
+
+    // Areas group the action families into the words an organizer uses.
+    const AREA_OF = (action: string): string => {
+      if (/^cgm\.student\./.test(action)) return 'signins';
+      if (/^cgm\.(registration|membership)\./.test(action)) return 'members';
+      if (/^cgm\.roster\./.test(action)) return 'roster';
+      if (/^cgm\.(assignment|group_move|force_get|rechoose)\./.test(action)) return 'grouping';
+      if (/^cgm\.(leader|leadership|delegation)\./.test(action)) return 'leadership';
+      if (/^cgm\.election\.|^cgm\.candidate\./.test(action)) return 'elections';
+      if (/^cgm\.attendance\./.test(action)) return 'attendance';
+      if (/^cgm\.(announcement|group\.notified)\./.test(action)) return 'announcements';
+      if (/^cgm\.(class|team|permissions|invitation|template)\./.test(action)) return 'setup';
+      if (/^cgm\.(report|recycle|archives?)\./.test(action)) return 'reports';
+      return 'other';
+    };
+
+    const entries = rows.map((row) => {
+      let context: any = {};
+      try { context = JSON.parse(row.context_json || '{}'); } catch { /* keep {} */ }
+      const entity = row.entity_id ? `${String(row.entity_type || 'record')} #${row.entity_id}` : String(row.entity_type || '');
+      return {
+        id: Number(row.id),
+        actorType: row.actor_type,
+        actor: row.actor_label,
+        action: row.action,
+        area: AREA_OF(row.action),
+        entity,
+        activityId: row.activity_id ? Number(row.activity_id) : null,
+        // The class & group families already store a human sentence; reuse it
+        // rather than inventing a second vocabulary.
+        detail: context?.detail || context?.reason || context?.message || context?.title || null,
+        context,
+        createdAt: row.created_at,
+      };
+    });
+
+    const filtered = area === 'all' ? entries : entries.filter((entry) => entry.area === area);
+    // Collapse a run of the same action by the same actor into one line with a
+    // count — the trail stays complete, the screen stays readable.
+    const shaped: any[] = [];
+    for (const entry of filtered.slice(0, limit)) {
+      const previous = shaped[shaped.length - 1];
+      if (previous && previous.action === entry.action && previous.actor === entry.actor) {
+        previous.count += 1;
+        previous.firstAt = previous.firstAt || previous.createdAt;
+        previous.ids.push(entry.id);
+      } else {
+        shaped.push({ ...entry, count: 1, firstAt: entry.createdAt, ids: [entry.id] });
+      }
+    }
+
+    const counts: Record<string, number> = {};
+    for (const entry of entries) counts[entry.area] = (counts[entry.area] || 0) + 1;
+    return c.json({
+      success: true,
+      data: {
+        entries: shaped,
+        areas: counts,
+        nextBefore: rows.length >= limit ? Number(rows[rows.length - 1]?.id || 0) : null,
+        hasMore: rows.length >= limit,
+      },
+    });
+  });
+
   app.get('/api/cgm/classes/:id/reports/:kind', async (c: any) => {
     const member = await memberFromRequest(c);
     if (!member) return c.json({ success: false, error: 'Sign in first.' }, 401);

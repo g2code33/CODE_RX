@@ -35,6 +35,7 @@ const pwaCards = src('src/components/ClassGroups/PwaCards.tsx');
 const offlineBanner = src('src/components/ClassGroups/OfflineBanner.tsx');
 const pushLib = src('functions/lib/cgm/push.ts');
 const manifestSrc = src('public/manifest.webmanifest');
+const reportsPanel = src('src/components/ClassGroups/ReportsArea.tsx');
 const serviceWorker = src('public/sw.js');
 const leaderRoutesSrc = src('functions/lib/cgm/routes-leader.ts');
 const leaderCoreSrc = src('functions/lib/cgm/leader.ts');
@@ -160,7 +161,7 @@ check('the student session is remembered in localStorage (an old sessionStorage 
 check('roster import posts multipart form data', /FormData/.test(client));
 check('report downloads exist for the nine report kinds',
   ['roster', 'assignments', 'movements', 'leadership', 'elections', 'turnout', 'attendance', 'pending', 'organizer-actions']
-    .every((kind) => workspace.includes(`'${kind}'`)) && /downloadReport/.test(client));
+    .every((kind) => reportsPanel.includes(`'${kind}'`)) && /downloadReport/.test(client));
 check('the client exposes the PHANTOM oversight namespace',
   /phantomOverview/.test(client) && /phantomDecideApplication|phantomOrganizerAction/.test(client)
   && /phantomGrantDelegation/.test(client) && /phantomDecideSensitiveChange/.test(client));
@@ -199,7 +200,7 @@ check('approvals cover registrations, memberships and profile changes',
   /approveRegistration/.test(workspace) && /reviewMembership/.test(workspace) && /reviewProfileChange/.test(workspace));
 check('team permissions are granular, not a single toggle',
   /view_sensitive_profiles/.test(workspace) && /approve_registrations/.test(workspace) && /manage_whatsapp/.test(workspace));
-check('reports are downloads, not on-page fabrication', /downloadReport/.test(workspace));
+check('reports are downloads, not on-page fabrication', /downloadReport/.test(reportsPanel));
 check('activity templates copy configuration only',
   /Templates \(configuration only/.test(workspace) || /never students, votes or attendance/.test(workspace));
 check('succession is triggered by ending an appointment, with history kept',
@@ -320,7 +321,7 @@ check('the group cards carry NO WhatsApp editor — the group workspace owns it'
 
 // Reports in three formats (spec §16)
 check('reports download as CSV, Excel or PDF from one control',
-  /downloadReport/.test(client) && /\['csv', 'xlsx', 'pdf'\]/.test(workspace) && existsSync(path.join(ROOT, 'functions/lib/cgm/pdf.ts')));
+  /downloadReport/.test(client) && /\['csv', 'xlsx', 'pdf'\]/.test(reportsPanel) && existsSync(path.join(ROOT, 'functions/lib/cgm/pdf.ts')));
 check('the PDF writer produces a real PDF 1.4 header without dependencies',
   /%PDF-1\.4/.test(pdfWriter) && /buildReportPdf/.test(pdfWriter));
 check('the xlsx export goes through the same ESM build the roster import uses',
@@ -379,7 +380,7 @@ check('published activities refuse structural config changes server-side',
 check('deadline extensions stay open while the structure is frozen',
   /selfDeadline/.test(backend) && !/STRUCTURE_FIELDS = \['method', 'groupCount', 'targetGroupSize', 'capacity', 'genderRule', 'overflow', 'selfDeadline'\]/.test(backend));
 check('the reports list includes the activities overview',
-  /\['activities', 'Activities overview'\]/.test(workspace) && /Active leaders/.test(backend));
+  /\['activities', 'Activities overview'\]/.test(reportsPanel) && /Active leaders/.test(backend));
 check('the class field-visibility gate runs in the student payload path',
   /sanitizeClassSettings/.test(src('functions/lib/cgm/routes-student.ts')) && /studentVisibleFields\.includes\('phone'\)/.test(src('functions/lib/cgm/routes-student.ts')));
 
@@ -2034,6 +2035,66 @@ check('the banner says exactly what is waiting and sends it on reconnect',
   && /saved on this device/.test(offlineBanner)
   // Both shells mount it (the testid lives in the component itself).
   && /<OfflineBanner \/>/.test(studentPortal) && /<OfflineBanner \/>/.test(workspace));
+
+// ===========================================================================
+section('43. The organizer can read the trail on screen');
+// ===========================================================================
+const auditArea = src('src/components/ClassGroups/AuditArea.tsx');
+check('the trail is a real screen: filter by area, search, page back',
+  /cgm-audit-area/.test(auditArea) && /cgm-audit-areas/.test(auditArea)
+  && /cgm-audit-search/.test(auditArea) && /cgm-audit-more/.test(auditArea)
+  && /classAudit/.test(client));
+check('a run of the same action is counted, never silently dropped',
+  /count: 1, firstAt: entry\.createdAt, ids: \[entry\.id\]/.test(src('functions/lib/cgm/routes-activities.ts'))
+  && /in a row/.test(auditArea));
+check('it is reachable only with the permission that already allows the audit export',
+  /case 'audit': return can\('generate_reports'\)/.test(workspace)
+  && /area === 'audit' && <AuditArea/.test(workspace)
+  && /app\.get\('\/api\/cgm\/classes\/:id\/audit'[\s\S]{0,400}?requireClassPermission\(c, member, classId, 'generate_reports' as ClassPermission\)/.test(src('functions/lib/cgm/routes-activities.ts')));
+check('the screen never invents an entry the server did not store',
+  /Nothing has been recorded in this class yet\./.test(auditArea)
+  && /nothing here is generated/i.test(auditArea));
+
+// ===========================================================================
+section('44. Accessibility: reach the page, know what changed, hear the result');
+// ===========================================================================
+const skipLink = src('src/components/ClassGroups/SkipLink.tsx');
+check('the keyboard can jump straight past the navigation into the page',
+  /cgm-skip-link/.test(skipLink) && /node\.focus\(\)/.test(skipLink)
+  && /<SkipLink \/>/.test(studentPortal) && /<SkipLink \/>/.test(workspace)
+  && /id="cgm-main-content" tabIndex=\{-1\}/.test(studentPortal)
+  && /id="cgm-main-content" tabIndex=\{-1\}/.test(workspace)
+  && /transform: translateY\(-160%\)/.test(src('src/index.css')));
+check('both navigation drawers announce their state and say which panel they open',
+  /aria-controls="cgm-portal-nav"/.test(studentPortal) && /id="cgm-portal-nav"/.test(studentPortal)
+  && /aria-controls="cgm-workspace-nav"/.test(workspace) && /id="cgm-workspace-nav"/.test(workspace)
+  && /Hide the portal navigation/.test(studentPortal));
+check('results are announced politely, not shouted',
+  /role="status" aria-live="polite" aria-atomic="true"/.test(studentPortal)
+  && /aria-live="polite"/.test(leaderConsole)
+  && /aria-live="polite"/.test(offlineBanner));
+check('no screen-reader-only field is left unnamed in the flow it belongs to',
+  /aria-label="Your candidate statement \(optional\)"/.test(studentPortal)
+  && /aria-label="Why you want to move \(optional\)"/.test(studentPortal)
+  && /aria-label="Election title \(optional\)"/.test(workspace));
+check('focus is always visible inside the module, and motion can be turned off',
+  /\.cgm-main :focus-visible/.test(src('src/index.css'))
+  && /outline: 2px solid #059669/.test(src('src/index.css'))
+  && /prefers-reduced-motion: reduce[\s\S]{0,120}\.cgm-skip-link/.test(src('src/index.css')));
+
+// ===========================================================================
+section('45. The workspace file stays workable');
+// ===========================================================================
+const workspaceLines = workspace.split('\n').length;
+check('panels with no shared state live in their own files, not in the 5,000-line workspace',
+  workspaceLines < 5000 && /export const ReportsArea/.test(reportsPanel)
+  && /from '.\/ReportsArea'/.test(workspace) && /from '.\/tokens'/.test(workspace)
+  && !/const card = 'rounded-2xl border border-emerald-100/.test(workspace),
+  `workspace is ${workspaceLines} lines`);
+check('the shared panel styles have exactly one definition',
+  /export const card =/.test(src('src/components/ClassGroups/tokens.ts'))
+  && /export const label =/.test(src('src/components/ClassGroups/tokens.ts'))
+  && /export const inputClass =/.test(src('src/components/ClassGroups/tokens.ts')));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

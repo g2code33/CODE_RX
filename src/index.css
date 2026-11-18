@@ -2342,6 +2342,43 @@ h3.vault-rich-text {
   max-width: 72rem;
 }
 
+/* Keyboard only: the way past the navigation column into the page itself.
+   Hidden until focused, then a real, high-contrast target. */
+.cgm-skip-link {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 120;
+  transform: translateY(-160%);
+  border-radius: 0.75rem;
+  background: #065f46;
+  padding: 0.6rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 900;
+  color: #fff;
+  box-shadow: 0 10px 25px rgba(2, 44, 34, 0.35);
+  transition: transform 140ms ease;
+}
+
+.cgm-skip-link:focus,
+.cgm-skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 3px solid #fbbf24;
+  outline-offset: 2px;
+}
+
+/* A focused control must always be visible: the module uses emerald rings, and
+   this catches anything that relied on the browser default being enough. */
+.cgm-main :focus-visible,
+.cgm-sidenav :focus-visible {
+  outline: 2px solid #059669;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cgm-skip-link { transition: none; }
+}
+
 .cgm-nav-toggle {
   display: inline-flex;
   align-items: center;

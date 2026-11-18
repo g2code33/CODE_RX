@@ -2120,6 +2120,61 @@ const sweepNotice = q1('SELECT COUNT(*) c FROM cgm_student_notifications WHERE c
 check('the housekeeping sweep keeps recent notices and only removes genuinely old ones',
   Number(sweepNotice?.c) === 0, `old notices left: ${sweepNotice?.c}`);
 
+// ---------------------------------------------------------------------------
+// 20d. The class-wide organizer audit view
+// ---------------------------------------------------------------------------
+section('20d. Organizer audit view');
+
+const auditView = await memberCall('GET', `/api/cgm/classes/${classAId}/audit`, undefined, amaToken);
+const auditEntries = auditView.json?.data?.entries || [];
+check('20d.1 — an organizer reads the class trail as entries, not a CSV',
+  auditView.status === 200 && auditEntries.length > 0
+  && auditEntries.every((entry) => entry.id > 0 && entry.action && entry.actor && entry.area),
+  `status ${auditView.status} entries ${auditEntries.length}`);
+check('20d.2 — every entry says what happened in words the organizer chose',
+  auditEntries.every((entry) => typeof entry.action === 'string' && /^cgm\./.test(entry.action))
+  && auditEntries.some((entry) => entry.entity && /#/.test(entry.entity)),
+  JSON.stringify(auditEntries[0] || {}).slice(0, 200));
+check('20d.3 — the trail is grouped into areas, and the counts add up to what was read',
+  typeof auditView.json?.data?.areas === 'object'
+  && Object.keys(auditView.json?.data?.areas || {}).length > 0
+  && Object.values(auditView.json?.data?.areas || {}).every((value) => Number(value) > 0),
+  JSON.stringify(auditView.json?.data?.areas || {}).slice(0, 200));
+const filteredAudit = await memberCall('GET', `/api/cgm/classes/${classAId}/audit?area=grouping`, undefined, amaToken);
+check('20d.4 — filtering by area returns only that area',
+  filteredAudit.status === 200
+  && (filteredAudit.json?.data?.entries || []).every((entry) => entry.area === 'grouping'),
+  `status ${filteredAudit.status}`);
+check('20d.5 — a run of the same action by the same actor is counted once, with its real total',
+  auditEntries.every((entry) => Number(entry.count) >= 1 && Array.isArray(entry.ids) && entry.ids.length === Number(entry.count))
+  && auditEntries.some((entry) => Number(entry.count) > 1),
+  `max run ${Math.max(...auditEntries.map((entry) => Number(entry.count) || 0))}`);
+const searchedAudit = await memberCall('GET', `/api/cgm/classes/${classAId}/audit?q=leader`, undefined, amaToken);
+check('20d.6 — search matches the action, the actor or the record',
+  searchedAudit.status === 200
+  && (searchedAudit.json?.data?.entries || []).length > 0
+  && (searchedAudit.json?.data?.entries || []).every((entry) =>
+    /leader/i.test(`${entry.action} ${entry.actor} ${entry.entity}`)),
+  `status ${searchedAudit.status}`);
+const pagedAudit = await memberCall('GET', `/api/cgm/classes/${classAId}/audit?limit=5`, undefined, amaToken);
+const pagedEntries = pagedAudit.json?.data?.entries || [];
+const olderAudit = pagedAudit.json?.data?.nextBefore
+  ? await memberCall('GET', `/api/cgm/classes/${classAId}/audit?limit=5&before=${pagedAudit.json.data.nextBefore}`, undefined, amaToken)
+  : null;
+check('20d.7 — paging goes backwards in time and never repeats a row',
+  pagedEntries.length > 0 && pagedEntries.length <= 5
+  && (!olderAudit || (olderAudit.json?.data?.entries || []).every((entry) =>
+    !pagedEntries.some((seen) => seen.id === entry.id))),
+  `page ${pagedEntries.length} older ${(olderAudit?.json?.data?.entries || []).length}`);
+const auditAsStudent = await studentCall('GET', `/api/cgm/classes/${classAId}/audit`, undefined, leaderSession);
+check('20d.8 — a student cannot read the class trail', auditAsStudent.status === 401 || auditAsStudent.status === 403,
+  `status ${auditAsStudent.status}`);
+const auditUnknownClass = await memberCall('GET', '/api/cgm/classes/999999/audit', undefined, amaToken);
+check('20d.9 — a class the caller does not organize is refused, not empty',
+  auditUnknownClass.status === 403 || auditUnknownClass.status === 404, `status ${auditUnknownClass.status}`);
+check('20d.10 — reading the trail does not itself pollute the trail',
+  q1("SELECT COUNT(*) c FROM cgm_audit WHERE action = 'cgm.audit.read'").c === 0);
+
 // ===========================================================================
 // 21. Governance (step 10, spec §5/§6/§30) — runs last: the transfer test
 // hands class A to a new primary organizer.

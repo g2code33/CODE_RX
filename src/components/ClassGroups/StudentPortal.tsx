@@ -10,6 +10,7 @@ import {
 } from '../../lib/cgmRemember';
 import { RandomGroupReveal } from './RandomGroupReveal';
 import { OfflineBanner } from './OfflineBanner';
+import { SkipLink } from './SkipLink';
 import { InstallAppCard, NotifyCard } from './PwaCards';
 import { isPushEnabled, showSystemNotification, subscribeToPush } from '../../lib/cgmNotify';
 import { QrBlock } from './ClassGroupsWorkspace';
@@ -428,7 +429,7 @@ const PasskeyResetPanel = ({ onBack, onDone }: { onBack: () => void; onDone: (id
         </div>
       )}
 
-      {info && <p role="status" className="rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold text-emerald-700">{info}</p>}
+      {info && <p role="status" aria-live="polite" aria-atomic="true" className="rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold text-emerald-700">{info}</p>}
       {error && <p role="alert" className="rounded-xl bg-red-50 px-4 py-3 text-xs font-semibold text-red-600" data-testid="cgm-passkey-reset-error">{error}</p>}
     </div>
   );
@@ -618,7 +619,7 @@ const AuthScreen = ({ inviteCode, onAuthenticated }: { inviteCode: string | null
         </div>
 
         {error && <p role="alert" className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-600">{error}</p>}
-        {message && <p role="status" className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">{message}</p>}
+        {message && <p role="status" aria-live="polite" aria-atomic="true" className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">{message}</p>}
 
         {resetOpen && (
           <PasskeyResetPanel
@@ -1149,7 +1150,15 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
       <OfflineBanner />
       <header className="cgm-topbar">
         <div className="flex items-center gap-3">
-          <button type="button" className="cgm-nav-toggle" onClick={() => setNavOpen((open) => !open)} aria-expanded={navOpen} aria-label="Toggle navigation">
+          <button
+            type="button"
+            className="cgm-nav-toggle"
+            data-testid="cgm-portal-nav-toggle"
+            onClick={() => setNavOpen((open) => !open)}
+            aria-expanded={navOpen}
+            aria-controls="cgm-portal-nav"
+            aria-label={navOpen ? 'Hide the portal navigation' : 'Show the portal navigation'}
+          >
             <Users className="h-4 w-4" />
           </button>
           <img src="/CGP.jpg" alt="Classes & Groups" className="h-9 w-9 rounded-xl object-cover object-[50%_38%] shadow-sm ring-1 ring-emerald-900/20" loading="lazy" decoding="async" />
@@ -1184,8 +1193,9 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
       )}
 
 
+      <SkipLink />
       <div className="cgm-body">
-        <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''}`} aria-label="Student navigation">
+        <nav id="cgm-portal-nav" className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''}`} aria-label="Student navigation">
           {SECTIONS.filter(([key]) => key !== 'leader' || Number(leaderSeatCount || 0) > 0).map(([key, text, Icon]) => (
             <button
               key={key}
@@ -1203,7 +1213,7 @@ export const StudentPortal = ({ inviteCode, voteTarget, leaderTarget, onExit }: 
           ))}
         </nav>
 
-        <main className="cgm-main">
+        <main className="cgm-main" id="cgm-main-content" tabIndex={-1} aria-label="Your Class & Groups portal">
           {loading && <p className="text-sm font-semibold text-slate-400">Loading your portal…</p>}
           {!loading && section === 'home' && (
             <StudentHome
@@ -2088,7 +2098,7 @@ const MoveRequestCard = ({ groups, busy, onSubmit }: { groups: any[]; busy: bool
         <option value="">Choose a group…</option>
         {groups.map((group: any) => <option key={group.id} value={group.id}>{group.name}{group.full ? ' (full)' : ` · ${group.size}${group.capacity ? `/${group.capacity}` : ''}`}</option>)}
       </select>
-      <textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why do you want to move? (optional)" className={`${inputClass} min-h-16`} />
+      <textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why do you want to move? (optional)" aria-label="Why you want to move (optional)" className={`${inputClass} min-h-16`} />
       <button type="submit" disabled={busy || !target} className="mini-button">Send request</button>
     </form>
   );
@@ -2125,7 +2135,7 @@ const ElectionRow = ({ election, candidates, voted, busy, onContest, onVote, onR
 
       {contesting && (
         <form className="mt-3 space-y-2" onSubmit={async (event) => { event.preventDefault(); await onContest(statement || undefined); setContesting(false); setStatement(''); onRefresh(); }}>
-          <textarea value={statement} onChange={(event) => setStatement(event.target.value)} placeholder="Short candidate statement (optional)" className={`${inputClass} min-h-16`} />
+          <textarea value={statement} onChange={(event) => setStatement(event.target.value)} placeholder="Short candidate statement (optional)" aria-label="Your candidate statement (optional)" className={`${inputClass} min-h-16`} />
           <div className="flex gap-2">
             <button type="submit" disabled={busy} className="cgm-primary-button">Submit candidacy</button>
             <button type="button" className="mini-button" onClick={() => setContesting(false)}>Cancel</button>

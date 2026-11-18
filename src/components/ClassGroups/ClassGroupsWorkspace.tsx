@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { encodeQr } from '../../lib/qr';
 import {
-  cgm, downloadReport, downloadRosterTemplate, importRosterFile, previewRosterFile,
+  cgm, downloadRosterTemplate, importRosterFile, previewRosterFile,
 } from '../../lib/cgm';
 import { downloadGroupSheetPdf, downloadGroupSheetPng, printGroupSheet } from '../../lib/groupSheet';
 import { downloadPrintPdf, downloadPrintPng, printPrintDoc } from '../../lib/cgmPrint';
@@ -18,6 +18,10 @@ import { RecentItems } from '../RecentItems';
 import { useOutsideDismiss } from '../../lib/useOutsideDismiss';
 import { auth as memberAuth } from '../../lib/cloudflare';
 import { OfflineBanner } from './OfflineBanner';
+import { SkipLink } from './SkipLink';
+import { AuditArea } from './AuditArea';
+import { ReportsArea } from './ReportsArea';
+import { TemplatesArea } from './TemplatesArea';
 import { ForceGetWorkspace } from './ForceGetWorkspace';
 
 /**
@@ -31,7 +35,7 @@ import { ForceGetWorkspace } from './ForceGetWorkspace';
 type Area =
   | 'overview' | 'classes' | 'students' | 'invitations' | 'activities' | 'groups' | 'elections'
   | 'leadership' | 'attendance' | 'calendar' | 'announcements' | 'notifications' | 'reports'
-  | 'templates' | 'approvals' | 'permissions' | 'archives' | 'recycle' | 'settings' | 'passkeys';
+  | 'audit' | 'templates' | 'approvals' | 'permissions' | 'archives' | 'recycle' | 'settings' | 'passkeys';
 
 const AREAS: Array<[Area, string, any]> = [
   ['overview', 'Overview', Activity],
@@ -48,6 +52,7 @@ const AREAS: Array<[Area, string, any]> = [
   ['announcements', 'Announcements', Megaphone],
   ['notifications', 'Notifications', Bell],
   ['reports', 'Reports', FileText],
+  ['audit', 'Activity Trail', Activity],
   ['templates', 'Templates', Layers],
   ['approvals', 'Approvals', ListChecks],
   ['permissions', 'Permissions', ShieldCheck],
@@ -56,9 +61,7 @@ const AREAS: Array<[Area, string, any]> = [
   ['settings', 'Settings', Settings],
 ];
 
-const card = 'rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm shadow-emerald-950/5';
-const label = 'text-[10px] font-black uppercase tracking-[0.16em] text-slate-400';
-const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 focus:border-emerald-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-100';
+import { card, inputClass, label } from './tokens';
 
 const formatDate = (value: unknown) => {
   if (!value) return '—';
@@ -193,6 +196,9 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
       case 'calendar': return true;
       case 'announcements': return can('manage_announcements');
       case 'reports': return can('generate_reports') || can('view_roster');
+      // The trail follows the same permission the audit CSV export needs, so a
+      // delegated organizer sees only what they may already download.
+      case 'audit': return can('generate_reports');
       case 'approvals': return canApprovals;
       case 'permissions': return can('manage_class_settings');
       case 'archives': return can('archive_activities') || can('view_roster');
@@ -223,7 +229,8 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
               else setNavCollapsed((collapsed) => !collapsed);
             }}
             aria-expanded={navOpen || !navCollapsed}
-            aria-label="Toggle navigation"
+            aria-controls="cgm-workspace-nav"
+            aria-label={navOpen || !navCollapsed ? 'Hide the workspace navigation' : 'Show the workspace navigation'}
           >
             <Users className="h-4 w-4" />
           </button>
@@ -287,8 +294,9 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
         </div>
       </header>
 
+      <SkipLink />
       <div className="cgm-body">
-        <nav className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''} ${navCollapsed ? 'cgm-sidenav--collapsed' : ''}`} aria-label="Workspace navigation">
+        <nav id="cgm-workspace-nav" className={`cgm-sidenav ${navOpen ? 'cgm-sidenav--open' : ''} ${navCollapsed ? 'cgm-sidenav--collapsed' : ''}`} aria-label="Workspace navigation">
           {visibleAreas.map(([key, text, Icon]) => (
             <button
               key={key}
@@ -324,7 +332,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           ) : null}
         </nav>
 
-        <main className="cgm-main">
+        <main className="cgm-main" id="cgm-main-content" tabIndex={-1} aria-label="Class & Group workspace">
           {/* Refreshing remounts the open tab so it re-reads the server, while the
               tab, the class and the chosen activity stay exactly where they were. */}
           <div key={`${area}-${activeClassId ?? 0}-${refreshNonce}`} data-testid="cgm-area-body" data-refresh-nonce={refreshNonce}>
@@ -371,6 +379,7 @@ export const ClassGroupsWorkspace = ({ onExit }: { onExit: () => void }) => {
           {activeClass && area === 'announcements' && can('manage_announcements') && <AnnouncementsArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'notifications' && <NotificationsArea classId={activeClass.id} />}
           {activeClass && area === 'reports' && <ReportsArea classId={activeClass.id} />}
+          {activeClass && area === 'audit' && <AuditArea classId={Number(activeClass.id)} />}
           {activeClass && area === 'templates' && <TemplatesArea classId={activeClass.id} onChanged={() => void refresh()} />}
           {activeClass && area === 'approvals' && <ApprovalsArea classId={Number(activeClass.id)} canRegistrations={can('approve_registrations') || delegated} canMemberships={can('approve_memberships')} canProfiles={can('review_profile_changes')} delegated={delegated} onChanged={() => void refresh()} />}
           {activeClass && area === 'permissions' && <PermissionsArea classId={activeClass.id} onChanged={() => void refresh()} />}
@@ -3049,7 +3058,7 @@ const ElectionsArea = ({ classId, onChanged, docContext, initialActivityId, onAc
               <input id="cgm-vote-open" name="votingOpenAt" type="datetime-local" className={inputClass} aria-label="Voting opens" /></div>
             <div><label className="text-[10px] font-black uppercase tracking-wider text-slate-400" htmlFor="cgm-vote-close">Voting closes</label>
               <input id="cgm-vote-close" name="votingCloseAt" type="datetime-local" className={inputClass} aria-label="Voting closes" /></div>
-            <input name="title" className={inputClass} placeholder="Title (optional)" />
+            <input name="title" className={inputClass} placeholder="Title (optional)" aria-label="Election title (optional)" />
             <button type="submit" disabled={busy} className="cgm-primary-button">CREATE AN ELECTION</button>
           </form>
         </div>
@@ -3979,66 +3988,6 @@ const formatWhen = (value: unknown) => {
 };
 
 const NotificationsArea = ({ classId }: { classId: number }) => <ApprovalsArea classId={classId} canRegistrations={false} canMemberships={false} canProfiles={false} onChanged={() => {}} compact />;
-
-const ReportsArea = ({ classId }: { classId: number }) => {
-  const [format, setFormat] = useState<'csv' | 'xlsx' | 'pdf'>('csv');
-  const reports: Array<[string, string]> = [
-    ['roster', 'Class roster'], ['activities', 'Activities overview'], ['assignments', 'Group assignments'], ['movements', 'Group movements'],
-    ['leadership', 'Leadership appointments'], ['elections', 'Elections'], ['turnout', 'Election turnout'],
-    ['attendance', 'Attendance'], ['pending', 'Pending requests'], ['organizer-actions', 'Organizer actions'],
-  ];
-  return (
-    <div className={card}>
-      <p className={label}>Reports &amp; exports</p>
-      <p className="mt-1 text-xs font-medium text-slate-500">Downloads respect your permissions — sensitive columns only appear with the sensitive-data permission.</p>
-      <div className="mt-3 flex gap-1.5" role="radiogroup" aria-label="Export format">
-        {(['csv', 'xlsx', 'pdf'] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            role="radio"
-            aria-checked={format === key}
-            onClick={() => setFormat(key)}
-            className={`rounded-full px-3.5 py-1.5 text-[10px] font-black uppercase tracking-wider transition ${format === key ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}
-          >
-            {key === 'xlsx' ? 'Excel' : key.toUpperCase()}
-          </button>
-        ))}
-      </div>
-      <div className="mt-4 grid gap-2 sm:grid-cols-3">
-        {reports.map(([kind, text]) => (
-          <button key={kind} type="button" className="mini-button justify-start" onClick={() => void downloadReport(classId, kind, format).catch(() => {})}>
-            <FileText className="mr-1.5 inline h-3.5 w-3.5" /> {text}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-};
-
-const TemplatesArea = ({ classId, onChanged }: { classId: number; onChanged: () => void }) => {
-  const [templates, setTemplates] = useState<any[]>([]);
-  const load = useCallback(async () => { setTemplates(await cgm.templates(classId).catch(() => [])); }, [classId]);
-  useEffect(() => { void load(); }, [load]);
-  return (
-    <div className={card}>
-      <p className={label}>Activity templates</p>
-      <p className="mt-1 text-xs font-medium text-slate-500">Save an activity&apos;s configuration from its row in Grouping Activities. Templates copy settings only — never students, votes or attendance.</p>
-      <ul className="mt-3 space-y-2">
-        {templates.map((template) => (
-          <li key={template.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-2.5 text-sm">
-            <div>
-              <p className="font-bold text-slate-700">{template.name}</p>
-              <p className="text-[11px] text-slate-400">{template.config.method} · groups of {template.config.targetGroupSize || template.config.groupCount || '—'} · {template.config.genderRule}</p>
-            </div>
-            <button type="button" className="mini-button text-red-600" onClick={async () => { await cgm.deleteTemplate(Number(template.id)); await load(); onChanged(); }}>Delete</button>
-          </li>
-        ))}
-        {!templates.length && <li className="py-4 text-center text-xs font-medium text-slate-400">No templates saved yet.</li>}
-      </ul>
-    </div>
-  );
-};
 
 const ApprovalsArea = ({ classId, canRegistrations, canMemberships, canProfiles, onChanged, compact, delegated }: { classId: number; canRegistrations: boolean; canMemberships: boolean; canProfiles: boolean; onChanged: () => void; compact?: boolean; delegated?: boolean }) => {
   const [registrations, setRegistrations] = useState<any[]>([]);

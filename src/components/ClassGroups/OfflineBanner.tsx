@@ -61,6 +61,8 @@ export const OfflineBanner = () => {
   return (
     <div
       role="status"
+      aria-live="polite"
+      aria-atomic="true"
       data-testid="cgm-offline-banner"
       className={`fixed inset-x-0 top-0 z-50 px-4 py-2 text-xs font-bold ${
         !online ? 'bg-amber-500 text-amber-950' : waiting ? 'bg-sky-600 text-white' : 'bg-emerald-600 text-white'

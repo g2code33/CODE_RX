@@ -546,7 +546,9 @@ let savedPasskey = '';
     await page.waitForFor('Open an activity', 20_000), page.body().slice(0, 160));
 
   // 5. Mobile navigation: the toggle opens the sidebar.
-  const toggle = page.window.document.querySelector('[aria-label="Toggle navigation"]');
+  // The label now says what the press will DO ("Show/Hide the … navigation"),
+  // so find the control by its test id instead of one fixed string.
+  const toggle = page.window.document.querySelector('[data-testid="cgm-portal-nav-toggle"]');
   const before = toggle?.getAttribute('aria-expanded');
   toggle && toggle.click();
   await page.wait(400);
