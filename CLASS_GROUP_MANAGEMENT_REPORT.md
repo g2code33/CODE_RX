@@ -497,9 +497,22 @@ was added anywhere.
   - `GET  /api/cgm/student/push/public-key` → `{ publicKey, enabled }`
   - `POST /api/cgm/student/push/subscribe` (throttle 20/h, https endpoint only,
     upsert on `endpoint`) and `…/unsubscribe`
-  - **Production setup:** `node scripts/generate-vapid-keys.mjs`, then set
-    `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` as Pages secrets.
-    The pair in the local `.dev.vars` is for development only.
+  - **Where the keys come from: nowhere — they are generated.** VAPID is not a
+    service you sign up to and nobody issues the pair. Two commands:
+
+    ```bash
+    npm run vapid:generate     # prints a fresh pair
+    npm run vapid:set <PUBLIC_KEY> <PRIVATE_KEY>
+    ```
+
+    `vapid:set` writes all three secrets to the Pages project through
+    `wrangler pages secret put` on stdin, so the private key never sits in a
+    file, a commit or a chat log. Then redeploy and press **Turn on
+    notifications** once on a phone (iOS: after Add to Home Screen).
+  - **Generate it once and keep it.** Changing the pair later invalidates every
+    subscription already stored — every student has to opt in again. The pair in
+    the local `.dev.vars` is for development only and must not be the production
+    one.
 - **Installable, on both phones.** `public/manifest.webmanifest` (standalone,
   one logo, maskable, shortcuts into the portal / leader console / notifications)
   and an `InstallAppCard` that uses the real `beforeinstallprompt` where it

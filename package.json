@@ -18,7 +18,9 @@
     "test:sampling": "node --experimental-sqlite scripts/sampling-tests.mjs",
     "test:sampling-ui": "node scripts/sampling-ui-tests.mjs",
     "test:sampling-browser": "node scripts/sampling-browser-check.mjs",
-    "test:sampling-all": "npm run test:sampling && npm run test:sampling-ui"
+    "test:sampling-all": "npm run test:sampling && npm run test:sampling-ui",
+    "vapid:generate": "node scripts/generate-vapid-keys.mjs",
+    "vapid:set": "node scripts/set-vapid-secrets.mjs"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",

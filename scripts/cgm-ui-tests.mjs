@@ -35,6 +35,7 @@ const pwaCards = src('src/components/ClassGroups/PwaCards.tsx');
 const offlineBanner = src('src/components/ClassGroups/OfflineBanner.tsx');
 const pushLib = src('functions/lib/cgm/push.ts');
 const manifestSrc = src('public/manifest.webmanifest');
+const pkg = src('package.json');
 const reportsPanel = src('src/components/ClassGroups/ReportsArea.tsx');
 const serviceWorker = src('public/sw.js');
 const leaderRoutesSrc = src('functions/lib/cgm/routes-leader.ts');
@@ -2095,6 +2096,28 @@ check('the shared panel styles have exactly one definition',
   /export const card =/.test(src('src/components/ClassGroups/tokens.ts'))
   && /export const label =/.test(src('src/components/ClassGroups/tokens.ts'))
   && /export const inputClass =/.test(src('src/components/ClassGroups/tokens.ts')));
+
+// ===========================================================================
+section('46. The push keys are generated, and the secret path is safe');
+// ===========================================================================
+const vapidGen = src('scripts/generate-vapid-keys.mjs');
+const vapidSet = src('scripts/set-vapid-secrets.mjs');
+check('the pair is generated locally, not fetched from a service',
+  /crypto\.subtle\.generateKey/.test(vapidGen) && /P-256/.test(vapidGen)
+  && !/fetch\(/.test(vapidGen) && /never reach the frontend|must NEVER reach/.test(vapidGen));
+check('the private key is never printed to the browser bundle or the client',
+  !/VAPID_PRIVATE_KEY/.test(src('src/lib/cgmNotify.ts'))
+  && !/VAPID_PRIVATE_KEY/.test(studentPortal)
+  && /VAPID_PRIVATE_KEY\?: string/.test(src('functions/env.d.ts')));
+check('setting the secrets goes through stdin, never a committed file or the shell history',
+  /'wrangler', 'pages', 'secret', 'put'/.test(vapidSet)
+  && /input: `\$\{value\}/.test(vapidSet) && /stdio: \['pipe'/.test(vapidSet)
+  && /Nothing else was changed/.test(vapidSet)
+  && /"vapid:generate"/.test(pkg) && /"vapid:set"/.test(pkg));
+check('a malformed key is refused before anything reaches Cloudflare',
+  /does not look like a base64url P-256 point/.test(vapidSet)
+  && /does not look like a base64url P-256 scalar/.test(vapidSet)
+  && /must be a mailto: or https:\/\//.test(vapidSet));
 
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
