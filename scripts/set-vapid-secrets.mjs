@@ -12,8 +12,27 @@
  * Get the pair from `node scripts/generate-vapid-keys.mjs` — it is generated,
  * not issued. Keep the same pair forever: changing it silently unsubscribes
  * every phone that already agreed to notifications.
+ *
+ * PROJECT NAME: the Pages project that serves the site — the same one CI
+ * deploys (`wrangler pages deploy … --project-name`). It is NOT the Workers
+ * name in wrangler.toml; setting the secret on the wrong project looks like
+ * success and changes nothing. Verify with `npm run vapid:status`.
  */
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+/** The Pages project, read from the one place CI already trusts: deploy.yml. */
+const pagesProject = (() => {
+  if (process.env.CLOUDFLARE_PAGES_PROJECT) return process.env.CLOUDFLARE_PAGES_PROJECT;
+  try {
+    const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
+    const match = workflow.match(/pages deploy \S+ --project-name (\S+)/);
+    if (match) return match[1];
+  } catch { /* no workflow to read */ }
+  // No guess: a wrong project name is the one way this silently does nothing.
+  console.error('Could not work out the Pages project name. Set CLOUDFLARE_PAGES_PROJECT and run again.');
+  process.exit(1);
+})();
 
 const [publicKey, privateKey, subject = 'mailto:coderxsociety@gmail.com'] = process.argv.slice(2);
 
@@ -40,7 +59,7 @@ if (!/^(mailto:|https:\/\/)/.test(subject)) {
 }
 
 const put = (name, value) => {
-  const result = spawnSync('npx', ['wrangler', 'pages', 'secret', 'put', name, '--project-name', 'coderxsociety-api'], {
+  const result = spawnSync('npx', ['wrangler', 'pages', 'secret', 'put', name, '--project-name', pagesProject], {
     input: `${value}\n`,
     stdio: ['pipe', 'inherit', 'inherit'],
     encoding: 'utf8',
@@ -52,8 +71,13 @@ const put = (name, value) => {
   console.log(`  ✓ ${name}`);
 };
 
-console.log('\nSetting the three secrets on the Pages project…\n');
+console.log(`\nSetting the three secrets on the Pages project "${pagesProject}"…\n`);
 put('VAPID_PUBLIC_KEY', publicKey);
 put('VAPID_PRIVATE_KEY', privateKey);
 put('VAPID_SUBJECT', subject);
-console.log(`\nDone. Redeploy for them to take effect, then visit the student portal → Notifications → “Turn on notifications” on a phone.\n`);
+console.log(`
+Done. Now:
+  1. redeploy (push to main, or Cloudflare will not see the new values)
+  2. npm run vapid:status      ← confirms the server can actually sign
+  3. on a phone: student portal → Notifications → Turn on notifications
+`);

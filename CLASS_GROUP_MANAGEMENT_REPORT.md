@@ -503,12 +503,20 @@ was added anywhere.
     ```bash
     npm run vapid:generate     # prints a fresh pair
     npm run vapid:set <PUBLIC_KEY> <PRIVATE_KEY>
+    npm run vapid:status       # proves the live server can actually sign
     ```
 
     `vapid:set` writes all three secrets to the Pages project through
     `wrangler pages secret put` on stdin, so the private key never sits in a
-    file, a commit or a chat log. Then redeploy and press **Turn on
-    notifications** once on a phone (iOS: after Add to Home Screen).
+    file, a commit or a chat log. It reads the project name from
+    `.github/workflows/deploy.yml` — the same project CI deploys — because
+    setting a secret on the wrong project reports success and changes nothing.
+    Then redeploy and press **Turn on notifications** once on a phone (iOS:
+    after Add to Home Screen).
+  - **Check it, do not assume it:** `npm run vapid:status` asks the live server
+    what the browser asks it. It fails loudly if the keys are missing, if the
+    manifest is not installable, or if the service worker cannot receive a push
+    — the three ways this feature dies silently.
   - **Generate it once and keep it.** Changing the pair later invalidates every
     subscription already stored — every student has to opt in again. The pair in
     the local `.dev.vars` is for development only and must not be the production

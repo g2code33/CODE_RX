@@ -2119,6 +2119,18 @@ check('a malformed key is refused before anything reaches Cloudflare',
   && /does not look like a base64url P-256 scalar/.test(vapidSet)
   && /must be a mailto: or https:\/\//.test(vapidSet));
 
+check('the secret goes to the project CI actually deploys, not the Workers name',
+  /deploy\.yml/.test(vapidSet) && /pages deploy \\S\+ --project-name/.test(vapidSet)
+  && /process\.env\.CLOUDFLARE_PAGES_PROJECT/.test(vapidSet)
+  && !/--project-name', 'coderxsociety-api'/.test(vapidSet)
+  && /wrangler pages deploy dist --project-name coderxsociety/.test(src('.github/workflows/deploy.yml')));
+check('there is a command that proves it, not just a command that hopes',
+  /api\/cgm\/student\/push\/public-key/.test(src('scripts/check-push-setup.mjs'))
+  && /push is NOT enabled/.test(src('scripts/check-push-setup.mjs'))
+  && /process\.exit\(1\)/.test(src('scripts/check-push-setup.mjs'))
+  && /"vapid:status"/.test(pkg)
+  && /The keys are missing, or were set on a different Pages project|different Pages project/.test(src('scripts/check-push-setup.mjs')));
+
 console.log(`\nCGM UI TESTS: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log('Failures:');
